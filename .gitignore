@@ -1,0 +1,37 @@
+# Environment and Python
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Runtime artifacts and sensitive source documents
+*.log
+*.xml
+*.pdf
+*.html
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated project data
+data/raw/*
+data/processed/*
+data/indexes/*
+evaluation/results/*
+
+# Keep directory structure and documentation
+!data/README.md
+!**/.gitkeep
+!tests/fixtures/.gitkeep
+!evaluation/results/.gitkeep

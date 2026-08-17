@@ -9,6 +9,7 @@ description = "DART disclosure AI agent project scaffold"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "beautifulsoup4>=4.15.0",
     "fastapi",
     "httpx",
     "lxml",

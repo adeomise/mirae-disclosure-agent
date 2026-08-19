@@ -25,9 +25,12 @@ class MetricConcept(StrEnum):
     """Metrics supported by the first vertical slices."""
 
     REVENUE = "revenue"
+    OPERATING_INCOME = "operating_income"
     CONTRACT_AMOUNT = "contract_amount"
     CONTRACT_START_DATE = "contract_start_date"
     CONTRACT_END_DATE = "contract_end_date"
+    HOLDING_SHARES = "holding_shares"
+    HOLDING_RATIO = "holding_ratio"
 
 
 class Intent(StrEnum):
@@ -90,3 +93,12 @@ class AnswerabilityStatus(StrEnum):
     PARTIALLY_ANSWERABLE = "PARTIALLY_ANSWERABLE"
     UNANSWERABLE = "UNANSWERABLE"
     UNRESOLVED = "UNRESOLVED"
+
+
+class AnswerabilityReason(StrEnum):
+    """Machine-readable reason for a non-fully-answerable response."""
+
+    INCOMPLETE_CHAIN = "incomplete_chain"
+    AMBIGUOUS_LINK = "ambiguous_link"
+    NOT_FOUND = "not_found"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"

@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from disclosure_agent.common.enums import (
+    AnswerabilityReason,
     AnswerabilityStatus,
     ChainPolicy,
     DocumentClass,
@@ -111,6 +112,7 @@ class EventLink(BaseModel):
     relation: EventLinkRelation
     raw_reference: RawReference
     resolved_doc_id: str | None = None
+    candidate_doc_ids: list[str] = Field(default_factory=list)
     resolution_status: EventLinkResolutionStatus
 
 
@@ -118,9 +120,12 @@ class FieldChange(BaseModel):
     """A named event attribute change between disclosures."""
 
     field_name: str
+    raw_field: str | None = None
     before: str | float | None = None
     after: str | float | None = None
     unit: str | None = None
+    before_evidence_id: str | None = None
+    after_evidence_id: str | None = None
 
 
 class EventHistory(BaseModel):
@@ -143,7 +148,9 @@ class AnswerResponse(BaseModel):
 
     answer: str
     status: AnswerabilityStatus
+    reason: AnswerabilityReason | None = None
     facts: list[Fact] = Field(default_factory=list)
     events: list[Event] = Field(default_factory=list)
+    event_links: list[EventLink] = Field(default_factory=list)
     event_histories: list[EventHistory] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)

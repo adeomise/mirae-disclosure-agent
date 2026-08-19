@@ -1,7 +1,24 @@
 """Validation tests for contract v0.1 vertical-slice objects."""
 
-from disclosure_agent.common.enums import EventType, FactAccountingScope, MetricConcept
-from disclosure_agent.common.schemas import Event, EventHistory, Fact, FieldChange
+from disclosure_agent.common.enums import (
+    AnswerabilityReason,
+    AnswerabilityStatus,
+    EventLinkRelation,
+    EventLinkResolutionStatus,
+    EventType,
+    FactAccountingScope,
+    MetricConcept,
+)
+from disclosure_agent.common.schemas import (
+    AnswerResponse,
+    Event,
+    EventHistory,
+    EventLink,
+    Fact,
+    FieldChange,
+    RawReference,
+)
+from disclosure_agent.event.identity import make_event_id
 
 
 def test_q01_dummy_fact_preserves_raw_and_normalized_values() -> None:
@@ -22,6 +39,23 @@ def test_q01_dummy_fact_preserves_raw_and_normalized_values() -> None:
     assert fact.raw_unit == "\uc5b5\uc6d0"
     assert fact.normalized_value == "dummy-normalized"
     assert fact.normalized_unit == "KRW"
+
+
+def test_additional_source_metric_concepts_validate_as_facts() -> None:
+    metrics = (
+        MetricConcept.OPERATING_INCOME,
+        MetricConcept.HOLDING_SHARES,
+        MetricConcept.HOLDING_RATIO,
+    )
+
+    for metric in metrics:
+        fact = Fact(
+            fact_id=f"fact_dummy_{metric.value}",
+            company="dummy-company",
+            metric=metric,
+            accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+        )
+        assert fact.metric is metric
 
 
 def test_q02_dummy_supply_contract_event() -> None:
@@ -60,3 +94,67 @@ def test_q13_dummy_event_history_tracks_named_field_change() -> None:
     assert history.changes[0].field_name == "contract_amount"
     assert history.changes[0].before == "dummy-before"
     assert history.changes[0].after == "dummy-after"
+
+
+def test_answer_response_preserves_reason_and_event_link() -> None:
+    link = EventLink(
+        link_id="link_dummy_correction",
+        source_doc_id="doc_dummy_correction",
+        relation=EventLinkRelation.CORRECTION_OF,
+        raw_reference=RawReference(original_filing_date="YYYY-MM-DD"),
+        resolved_doc_id="doc_dummy_original",
+        resolution_status=EventLinkResolutionStatus.RESOLVED,
+    )
+    partial = AnswerResponse(
+        answer="dummy partial answer",
+        status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        reason=AnswerabilityReason.INCOMPLETE_CHAIN,
+        event_links=[link],
+    )
+    unresolved = AnswerResponse(
+        answer="dummy unresolved answer",
+        status=AnswerabilityStatus.UNRESOLVED,
+        reason=AnswerabilityReason.AMBIGUOUS_LINK,
+    )
+
+    assert partial.reason is AnswerabilityReason.INCOMPLETE_CHAIN
+    assert partial.event_links == [link]
+    assert unresolved.reason is AnswerabilityReason.AMBIGUOUS_LINK
+
+
+def test_ambiguous_event_link_preserves_candidate_doc_ids() -> None:
+    link = EventLink(
+        link_id="link_dummy_ambiguous",
+        source_doc_id="doc_dummy_correction",
+        relation=EventLinkRelation.CORRECTION_OF,
+        raw_reference=RawReference(original_filing_date="YYYY-MM-DD"),
+        candidate_doc_ids=["doc_dummy_a", "doc_dummy_b"],
+        resolution_status=EventLinkResolutionStatus.AMBIGUOUS,
+    )
+
+    assert link.resolved_doc_id is None
+    assert link.candidate_doc_ids == ["doc_dummy_a", "doc_dummy_b"]
+
+
+def test_field_change_preserves_before_and_after_evidence_ids() -> None:
+    change = FieldChange(
+        field_name="contract_amount",
+        raw_field="\uacc4\uc57d\uae08\uc561(\uc6d0)",
+        before="dummy-before",
+        after="dummy-after",
+        before_evidence_id="evidence_dummy_before",
+        after_evidence_id="evidence_dummy_after",
+    )
+
+    assert change.raw_field == "\uacc4\uc57d\uae08\uc561(\uc6d0)"
+    assert change.before_evidence_id == "evidence_dummy_before"
+    assert change.after_evidence_id == "evidence_dummy_after"
+
+
+def test_event_id_is_deterministic_for_canonical_root_document() -> None:
+    first = make_event_id(EventType.SUPPLY_CONTRACT, "doc_root_a")
+    repeated = make_event_id(EventType.SUPPLY_CONTRACT, "doc_root_a")
+    different_root = make_event_id(EventType.SUPPLY_CONTRACT, "doc_root_b")
+
+    assert first == repeated
+    assert first != different_root

@@ -16,6 +16,7 @@ import pytest
 
 from disclosure_agent.agent import router
 from disclosure_agent.agent.answer_builder import STATUS_BLOCKED, STATUS_OK
+from disclosure_agent.agent.handlers.event_history import handle_event_history
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
 from disclosure_agent.agent.query_analyzer import (
     INTENT_CROSS_ENTITY_COMPARE,
@@ -65,8 +66,13 @@ def test_single_fact_intent_resolves_to_pattern_a_handler() -> None:
     assert router.resolve_handler(INTENT_SINGLE_FACT) is handle_single_fact
 
 
+def test_event_history_intent_resolves_to_pattern_e_handler() -> None:
+    assert router.resolve_handler(INTENT_EVENT_HISTORY) is handle_event_history
+
+
 def test_supported_intents_reports_only_registered_handlers() -> None:
-    assert router.supported_intents() == (INTENT_SINGLE_FACT,)
+    """Contract v0.1의 Intent 2개가 등록돼 있다."""
+    assert router.supported_intents() == (INTENT_EVENT_HISTORY, INTENT_SINGLE_FACT)
 
 
 def test_dispatch_passes_plan_and_context_to_handler(
@@ -109,7 +115,6 @@ def test_dispatch_passes_plan_and_context_to_handler(
         INTENT_DOCUMENT_SUMMARY,
         INTENT_TEMPORAL_COMPARE,
         INTENT_CROSS_ENTITY_COMPARE,
-        INTENT_EVENT_HISTORY,
         INTENT_UNANSWERABLE_CHECK,
     ],
 )
@@ -152,20 +157,21 @@ def test_blocked_route_does_not_invent_a_fact(single_fact_plan: QueryPlan) -> No
 
 def test_blocked_route_preserves_the_plan(single_fact_plan: QueryPlan) -> None:
     """어떤 계획이 거절됐는지 결과에서 확인할 수 있어야 한다."""
-    plan = dataclasses.replace(single_fact_plan, intent=INTENT_EVENT_HISTORY)
+    plan = dataclasses.replace(single_fact_plan, intent=INTENT_CROSS_ENTITY_COMPARE)
 
     result = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
-    assert result["query"]["intent"] == INTENT_EVENT_HISTORY
+    assert result["query"]["intent"] == INTENT_CROSS_ENTITY_COMPARE
     assert result["query"]["question"] == plan.question
 
 
 def test_blocked_detail_lists_currently_supported_intents(single_fact_plan: QueryPlan) -> None:
-    plan = dataclasses.replace(single_fact_plan, intent=INTENT_EVENT_HISTORY)
+    plan = dataclasses.replace(single_fact_plan, intent=INTENT_CROSS_ENTITY_COMPARE)
 
     result = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
     assert INTENT_SINGLE_FACT in result["blocked"]["detail"]
+    assert INTENT_EVENT_HISTORY in result["blocked"]["detail"]
 
 
 # --------------------------------------------------------------------------
@@ -197,4 +203,4 @@ def test_register_handler_makes_a_new_intent_routable(
 
 def test_registry_is_restored_between_tests() -> None:
     """isolated_registry가 실제로 되돌리는지 확인한다."""
-    assert router.supported_intents() == (INTENT_SINGLE_FACT,)
+    assert router.supported_intents() == (INTENT_EVENT_HISTORY, INTENT_SINGLE_FACT)

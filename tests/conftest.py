@@ -280,6 +280,7 @@ class EventFilingStub:
 
     receipt_no: str
     receipt_date: str | None
+    doc_id: str = ""
     corp_name: str = "테스트반도체(주)"
     document_subtype: str = EVENT_SUBTYPE_SUPPLY_CONTRACT
     is_correction: bool = False
@@ -293,6 +294,7 @@ def make_event_filing():
         receipt_no: str,
         receipt_date: str | None,
         *,
+        doc_id: str | None = None,
         corp_name: str = "테스트반도체(주)",
         document_subtype: str = EVENT_SUBTYPE_SUPPLY_CONTRACT,
         is_correction: bool = False,
@@ -300,6 +302,8 @@ def make_event_filing():
         return EventFilingStub(
             receipt_no=receipt_no,
             receipt_date=receipt_date,
+            # manifest의 doc_id 표기와 같은 형태로 만든다. Contract는 doc_id로 문서를 가리킨다.
+            doc_id=doc_id if doc_id is not None else f"exchange_{receipt_no}",
             corp_name=corp_name,
             document_subtype=document_subtype,
             is_correction=is_correction,

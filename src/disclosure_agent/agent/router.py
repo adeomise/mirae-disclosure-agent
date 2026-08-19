@@ -42,14 +42,15 @@ from disclosure_agent.agent.answer_builder import (
     STAGE_ROUTING,
     build_blocked_result,
 )
+from disclosure_agent.agent.handlers.event_history import handle_event_history
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
 from disclosure_agent.agent.query_analyzer import (
-    INTENT_SINGLE_FACT,
     KNOWN_INTENTS,
     QueryPlan,
     UnsupportedQuestionError,
     build_query_plan,
 )
+from disclosure_agent.common.enums import Intent
 from disclosure_agent.retrieval.metadata_filter import (
     FilingNotFoundError,
     list_company_names,
@@ -60,10 +61,14 @@ REASON_UNIMPLEMENTED_INTENT = "unimplemented_intent"
 REASON_UNKNOWN_INTENT = "unknown_intent"
 
 # intent -> handler. 등록된 것만 실행한다.
+#
+# key는 Contract v0.1의 Intent를 쓴다. StrEnum이라 문자열 key와 같은 항목이 되므로,
+# QueryPlan.intent가 문자열이어도 조회된다.
 Handler = Callable[..., dict[str, Any]]
 
 HANDLERS: dict[str, Handler] = {
-    INTENT_SINGLE_FACT: handle_single_fact,
+    Intent.SINGLE_FACT: handle_single_fact,
+    Intent.EVENT_HISTORY: handle_event_history,
 }
 
 

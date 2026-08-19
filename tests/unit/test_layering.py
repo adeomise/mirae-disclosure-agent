@@ -29,6 +29,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "src" / "disclosure_agent"
 
 FORBIDDEN_FOR_DOCUMENT_MODULES = ("disclosure_agent.agent", "disclosure_agent.retrieval")
 
+# common이 부를 수 있는 유일한 패키지. 자기 안에서 나누는 것까지 막을 이유는 없다.
+COMMON_PACKAGE = "disclosure_agent.common"
+
+
+def _is_within(module: str, package: str) -> bool:
+    """module이 package이거나 그 하위인가."""
+    return module == package or module.startswith(f"{package}.")
+
 
 def _imported_modules(source_path: Path) -> set[str]:
     """파일 하나가 import하는 모듈 이름을 모은다."""
@@ -107,20 +115,23 @@ def test_retrieval_does_not_import_agent(source_path: Path) -> None:
 
 
 @pytest.mark.parametrize("source_path", _python_files("common"), ids=lambda path: path.name)
-def test_common_does_not_import_the_package_it_serves(source_path: Path) -> None:
+def test_common_does_not_import_upper_layers(source_path: Path) -> None:
     """
     common은 최하위다.
 
-    여기서 위쪽 모듈을 부르면 어느 계층에서든 쓸 수 있다는 전제가 깨지고, event가
+    여기서 위쪽 계층을 부르면 어느 계층에서든 쓸 수 있다는 전제가 깨지고, event가
     retrieval을 우회해서 부르는 통로가 된다.
+
+    common 안에서 나누는 것은 막지 않는다. schemas가 enums를 부르는 것이 그 예이며,
+    계층을 거스르지 않는다.
     """
     violations = [
         module
         for module in _imported_modules(source_path)
-        if module.startswith("disclosure_agent")
+        if module.startswith("disclosure_agent") and not _is_within(module, COMMON_PACKAGE)
     ]
 
-    assert not violations, f"{source_path.name}이 상위 모듈을 import한다: {sorted(violations)}"
+    assert not violations, f"{source_path.name}이 상위 계층을 import한다: {sorted(violations)}"
 
 
 def test_importing_periodic_does_not_pull_in_agent() -> None:

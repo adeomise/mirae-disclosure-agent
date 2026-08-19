@@ -4,7 +4,8 @@ from pathlib import Path
 
 from disclosure_agent.common.enums import AnswerabilityStatus
 from disclosure_agent.common.schemas import AnswerResponse, QueryPlan
-from disclosure_agent.periodic.extractor import extract_q01_revenue
+from disclosure_agent.periodic.extractor import extract_financial_facts_with_evidence
+from disclosure_agent.periodic.selector import select_periodic_fact
 from disclosure_agent.retrieval.service import retrieve_periodic_documents
 
 
@@ -26,7 +27,8 @@ class PeriodicQ01Service:
             )
             return AnswerResponse(answer=reason, status=AnswerabilityStatus.UNRESOLVED)
 
-        result = extract_q01_revenue(parsed_documents[0], query_plan)
+        facts, evidence = extract_financial_facts_with_evidence(parsed_documents[0])
+        result = select_periodic_fact(query_plan, facts, evidence)
         if result is None:
             return AnswerResponse(
                 answer="The requested-year consolidated revenue fact was not resolved.",

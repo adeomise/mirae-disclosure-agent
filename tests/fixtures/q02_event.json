@@ -1,0 +1,12 @@
+{
+  "event_id": "event_dummy_q02",
+  "event_type": "supply_contract",
+  "company": "dummy-company",
+  "source_doc_id": "doc_dummy_q02_event",
+  "attributes": {
+    "contract_amount": "2000000",
+    "contract_start_date": "2099-01-01",
+    "contract_end_date": "2099-12-31"
+  },
+  "is_correction": false
+}

@@ -1,0 +1,17 @@
+{
+  "case_id": "Q13_INCOMPLETE_CHAIN",
+  "question": "한화오션의 2025년 양밍해운 공급계약 원공시 이후 정정된 변경 이력을 알려줘.",
+  "expected": {
+    "status": "PARTIALLY_ANSWERABLE",
+    "reason": "incomplete_chain",
+    "fact": null,
+    "event_type": "supply_contract",
+    "required_event_attributes": [],
+    "requires_event_history": true,
+    "chain_complete": false,
+    "requires_event_link": true,
+    "link_resolution_status": "resolved",
+    "changed_fields": ["contract_amount", "contract_end_date"],
+    "min_evidence_count": 4
+  }
+}

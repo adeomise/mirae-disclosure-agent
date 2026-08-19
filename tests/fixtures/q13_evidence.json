@@ -1,0 +1,11 @@
+{
+  "evidence_id": "evidence_dummy_q13",
+  "doc_id": "doc_dummy_q13_correction",
+  "location_type": "event_field",
+  "section_path": ["dummy-correction-details"],
+  "table_name": null,
+  "row_label": null,
+  "column_label": null,
+  "field_name": "contract_amount",
+  "raw_text": "dummy correction: 1000000 to 1200000"
+}

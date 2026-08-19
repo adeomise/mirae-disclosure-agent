@@ -30,6 +30,17 @@ from disclosure_agent.retrieval.metadata_filter import FilingRef
 STATUS_OK = "ok"
 STATUS_BLOCKED = "blocked"
 
+# 파이프라인이 막힐 수 있는 지점. blocked 결과의 stage 값으로 쓴다.
+#
+# 이전에는 periodic/service.py가 들고 있었지만, 막힌 단계를 결과에 적는 일은 결과를 조립하는
+# 쪽의 어휘다. Pattern이 늘어도 같은 목록을 공유해야 어느 단계에서 막혔는지 비교할 수 있다.
+STAGE_ROUTING = "routing"
+STAGE_QUERY_PLAN = "query_plan"
+STAGE_FILING_DISCOVERY = "filing_discovery"
+STAGE_PARSING = "parsing"
+STAGE_EXTRACTION = "extraction"
+STAGE_EVIDENCE = "evidence"
+
 
 def _filing_summary(filing: FilingRef | None) -> dict[str, Any] | None:
     if filing is None:
@@ -44,6 +55,9 @@ def _filing_summary(filing: FilingRef | None) -> dict[str, Any] | None:
         "receipt_no": filing.receipt_no,
         "receipt_date": filing.receipt_date,
         "document_class": filing.document_class,
+        # manifest 원 표기도 함께 남긴다. 설계 어휘와 manifest 표기가 다른 문서군이 있어
+        # 어느 레코드에서 왔는지 확인할 수 있어야 한다.
+        "doc_group": filing.doc_group,
         "document_subtype": filing.document_subtype,
         "base_year": filing.base_year,
         "base_month": filing.base_month,

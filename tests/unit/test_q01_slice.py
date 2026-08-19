@@ -23,6 +23,7 @@ from disclosure_agent.agent.answer_builder import (
     build_structured_result,
 )
 from disclosure_agent.agent.evidence import build_evidence
+from disclosure_agent.agent.handlers.single_fact import build_result_from_document
 from disclosure_agent.agent.query_analyzer import (
     METRIC_REVENUE,
     SCOPE_CONSOLIDATED,
@@ -43,7 +44,6 @@ from disclosure_agent.periodic.extractor import (
     parse_unit,
     table_class_priority,
 )
-from disclosure_agent.periodic.service import build_result_from_document
 from disclosure_agent.retrieval.metadata_filter import (
     FilingNotFoundError,
     filter_filings,
@@ -301,9 +301,12 @@ def test_locate_filing_end_to_end_resolves_path(
     )
 
     filing = locate_filing(
-        plan,
         manifest_path=synthetic_manifest_path,
         corpus_root=nfd_corpus_root,
+        company=plan.company,
+        document_class=plan.document_class,
+        document_subtype=plan.document_subtype,
+        year=plan.year,
     )
 
     assert filing.doc_id == "periodic_SYNTHETIC0001"
@@ -325,9 +328,12 @@ def test_locate_filing_raises_when_no_manifest_match(
 
     with pytest.raises(FilingNotFoundError) as error:
         locate_filing(
-            plan,
             manifest_path=synthetic_manifest_path,
             corpus_root=nfd_corpus_root,
+            company=plan.company,
+            document_class=plan.document_class,
+            document_subtype=plan.document_subtype,
+            year=plan.year,
         )
 
     assert error.value.reason == "no_matching_filing"
@@ -801,9 +807,12 @@ def resolved_filing(synthetic_manifest_path: Path, nfd_corpus_root: Path):
     )
 
     return plan, locate_filing(
-        plan,
         manifest_path=synthetic_manifest_path,
         corpus_root=nfd_corpus_root,
+        company=plan.company,
+        document_class=plan.document_class,
+        document_subtype=plan.document_subtype,
+        year=plan.year,
     )
 
 

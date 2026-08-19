@@ -24,18 +24,68 @@ TODO:
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+# 어휘는 그 값을 해석해야 하는 계층이 정의하고, 질의 해석 계층은 가져다 쓴다.
+#
+# - 지표·회계기준은 ACODE와 ACONTEXT 축 멤버에 대응하므로 추출 계층이 안다.
+# - 문서군은 manifest 표기(doc_group)와의 대응을 알아야 하므로 검색 계층이 안다.
+#
+# 기존 import 경로를 유지하기 위해 이 모듈에서도 같은 이름으로 노출한다.
+from disclosure_agent.periodic.extractor import (
+    METRIC_REVENUE,
+    SCOPE_CONSOLIDATED,
+    SCOPE_SEPARATE,
+)
+from disclosure_agent.retrieval.metadata_filter import (
+    DOCUMENT_CLASS_PERIODIC,
+    normalize_company_name,
+)
+
+__all__ = [
+    "DOCUMENT_CLASS_PERIODIC",
+    "DOCUMENT_SUBTYPE_ANNUAL",
+    "INTENT_CROSS_ENTITY_COMPARE",
+    "INTENT_DOCUMENT_SUMMARY",
+    "INTENT_EVENT_HISTORY",
+    "INTENT_SINGLE_FACT",
+    "INTENT_TEMPORAL_COMPARE",
+    "INTENT_UNANSWERABLE_CHECK",
+    "KNOWN_INTENTS",
+    "METRIC_REVENUE",
+    "SCOPE_CONSOLIDATED",
+    "SCOPE_SEPARATE",
+    "QueryPlan",
+    "UnsupportedQuestionError",
+    "build_query_plan",
+    "normalize_company_name",
+]
+
 # 이번 슬라이스가 다루는 고정 값. common/enums.py는 팀 합의 전이므로 여기서 국소 정의한다.
-DOCUMENT_CLASS_PERIODIC = "periodic"
+# doc_subtype은 manifest 표기와 값이 같아 대응표가 필요 없다.
 DOCUMENT_SUBTYPE_ANNUAL = "annual"
 
-SCOPE_CONSOLIDATED = "consolidated"
-SCOPE_SEPARATE = "separate"
+# 실행 Pattern을 가르는 질의 의도.
+#
+# 값은 docs/agent_design/query_plan.md의 `intent` 어휘를 그대로 따른다. 이번 슬라이스가
+# 실제로 만들어 내는 값은 single_fact 하나뿐이고, 나머지는 Router가 '지원하지 않는다'를
+# 구체적인 이유로 답하기 위해 이름만 정의해 둔다. 아직 만들 수 없는 계획을 만들지 않는다.
+INTENT_SINGLE_FACT = "single_fact"
+INTENT_DOCUMENT_SUMMARY = "document_summary"
+INTENT_TEMPORAL_COMPARE = "temporal_compare"
+INTENT_CROSS_ENTITY_COMPARE = "cross_entity_compare"
+INTENT_EVENT_HISTORY = "event_history"
+INTENT_UNANSWERABLE_CHECK = "unanswerable_check"
 
-METRIC_REVENUE = "revenue"
+KNOWN_INTENTS: tuple[str, ...] = (
+    INTENT_SINGLE_FACT,
+    INTENT_DOCUMENT_SUMMARY,
+    INTENT_TEMPORAL_COMPARE,
+    INTENT_CROSS_ENTITY_COMPARE,
+    INTENT_EVENT_HISTORY,
+    INTENT_UNANSWERABLE_CHECK,
+)
 
 # 인식 후보 기업명은 호출자가 넘긴다. service는 manifest에서 읽어 전달한다.
 # 특정 기업명을 코드에 넣어 두지 않는다. 그것도 결국 추측이고, 목록에 없는 기업을
@@ -52,13 +102,6 @@ SEPARATE_TOKENS = ("별도", "개별")
 
 REVENUE_TOKENS = ("매출액", "매출", "영업수익", "수익")
 
-# 법인격 표기는 회사명 비교 시 제거한다.
-LEGAL_SUFFIX_PATTERN = re.compile(
-    r"\((?:주|유|재|사|합)\)|주식회사|유한회사|유한책임회사|합자회사|합명회사"
-)
-
-NON_NAME_PATTERN = re.compile(r"[\s ·ㆍ・,\.\-_/]+")
-
 
 class UnsupportedQuestionError(ValueError):
     """이번 슬라이스가 결정론적으로 처리할 수 없는 질문."""
@@ -72,11 +115,20 @@ class UnsupportedQuestionError(ValueError):
 
 @dataclass(frozen=True)
 class QueryPlan:
-    """Q01 계열 단일 수치 조회를 위한 결정론적 실행 계획."""
+    """
+    Q01 계열 단일 수치 조회를 위한 결정론적 실행 계획.
+
+    intent는 Router가 handler를 고르는 유일한 기준이다. 기본값을 둔 이유는 기존 호출부와의
+    호환 때문이며, 이 슬라이스가 만드는 계획은 모두 single_fact다.
+
+    companies[]·periods[] 같은 다중 값 표현으로 넓히는 작업은 팀원 3의 Data Contract가
+    확인된 뒤에 한다. 지금 확인되지 않은 어휘로 구조를 바꾸면 되돌릴 비용만 커진다.
+    """
 
     question: str
     company: str
     year: int
+    intent: str = INTENT_SINGLE_FACT
     document_class: str = DOCUMENT_CLASS_PERIODIC
     document_subtype: str = DOCUMENT_SUBTYPE_ANNUAL
     accounting_scope: str = SCOPE_CONSOLIDATED
@@ -87,30 +139,6 @@ class QueryPlan:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-def normalize_company_name(name: str) -> str:
-    """
-    회사명을 비교 가능한 형태로 정규화한다.
-
-    - 유니코드 정규화(NFC)로 자모 분리/결합 표기를 통일한다.
-    - '(주)', '주식회사' 같은 법인격 표기를 제거한다.
-    - 공백과 구분 기호를 제거하고 소문자로 맞춘다.
-
-    예:
-        "한미반도체(주)"   -> "한미반도체"
-        "한미반도체 주식회사" -> "한미반도체"
-    """
-    if not name:
-        return ""
-
-    text = unicodedata.normalize("NFC", name)
-
-    text = LEGAL_SUFFIX_PATTERN.sub("", text)
-
-    text = NON_NAME_PATTERN.sub("", text)
-
-    return text.casefold()
 
 
 def _extract_year(question: str) -> int:
@@ -230,6 +258,7 @@ def build_query_plan(
         question=question.strip(),
         company=company,
         year=year,
+        intent=INTENT_SINGLE_FACT,
         document_class=DOCUMENT_CLASS_PERIODIC,
         document_subtype=DOCUMENT_SUBTYPE_ANNUAL,
         accounting_scope=accounting_scope,

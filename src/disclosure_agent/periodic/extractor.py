@@ -36,11 +36,16 @@ from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from disclosure_agent.agent.query_analyzer import (
-    METRIC_REVENUE,
-    SCOPE_CONSOLIDATED,
-    SCOPE_SEPARATE,
-)
+# 지표·회계기준 어휘는 이 모듈이 정의한다.
+#
+# 이전에는 agent.query_analyzer가 정의하고 여기서 가져왔지만, 그러면 periodic이 agent에
+# 의존하게 된다. 이 어휘는 ACODE와 ACONTEXT 축 멤버에 대응하는 추출 계층의 개념이므로
+# 정의 위치를 추출 계층으로 옮기고, 질의 해석 계층이 여기서 가져다 쓰게 한다.
+# common/enums.py는 팀 합의 전이므로 아직 쓰지 않는다.
+METRIC_REVENUE = "revenue"
+
+SCOPE_CONSOLIDATED = "consolidated"
+SCOPE_SEPARATE = "separate"
 
 # 매출액에 대응하는 DART/IFRS 항목 코드.
 REVENUE_ACODES: tuple[str, ...] = ("ifrs-full_Revenue",)

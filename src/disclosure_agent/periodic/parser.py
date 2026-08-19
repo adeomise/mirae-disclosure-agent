@@ -22,10 +22,99 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+
 from lxml import etree
 
 SECTION_PATTERN = re.compile(r"SECTION-(\d+)$")
 CELL_TAGS = {"TH", "TD", "TE", "TU"}
+VALID_XML_ENTITY_PATTERN = re.compile(
+    r"&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9A-Fa-f]+;)"
+)
+TAG_LIKE_PATTERN = re.compile(r"<([^<>]+)>")
+PROTECTED_XML_PATTERN = re.compile(
+    r"<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>",
+    re.DOTALL,
+)
+
+# 제공된 dart3/dart4 XML의 실제 구조 tag vocabulary다. 이 목록 밖의
+# ``<프로젝트>``/``<Connected Work>`` 같은 token은 원문 본문으로 보존한다.
+DART_STRUCTURAL_TAGS = {
+    "A",
+    "BODY",
+    "COL",
+    "COLGROUP",
+    "COMPANY-NAME",
+    "COVER",
+    "COVER-TITLE",
+    "DOCUMENT",
+    "DOCUMENT-NAME",
+    "EXTRACTION",
+    "FORMULA-VERSION",
+    "IMAGE",
+    "IMG",
+    "IMG-CAPTION",
+    "LIBRARY",
+    "P",
+    "PGBRK",
+    "SECTION-1",
+    "SECTION-2",
+    "SECTION-3",
+    "SPAN",
+    "SUMMARY",
+    "TABLE",
+    "TABLE-GROUP",
+    "TBODY",
+    "TD",
+    "TE",
+    "TH",
+    "THEAD",
+    "TITLE",
+    "TR",
+    "TU",
+}
+
+
+def sanitize_dart_xml_text(xml_text: str) -> str:
+    """DART 본문에 섞인 XML entity/pseudo-tag 오류만 보수적으로 교정한다.
+
+    정상 entity는 그대로 두며, 구조 tag allowlist 밖의 ``<...>``는 text로
+    escape한다. XML 선언, comment, CDATA, processing instruction은 변경하지 않는다.
+    """
+
+    def sanitize_fragment(fragment: str) -> str:
+        def escape_pseudo_tag(match: re.Match[str]) -> str:
+            inner = match.group(1)
+            stripped = inner.strip()
+            candidate = stripped[1:].lstrip() if stripped.startswith("/") else stripped
+            tag_name = re.split(r"[\s/]", candidate, maxsplit=1)[0]
+
+            if tag_name in DART_STRUCTURAL_TAGS or SECTION_PATTERN.fullmatch(tag_name):
+                return match.group(0)
+
+            return f"&lt;{inner}&gt;"
+
+        escaped_tags = TAG_LIKE_PATTERN.sub(escape_pseudo_tag, fragment)
+        return VALID_XML_ENTITY_PATTERN.sub("&amp;", escaped_tags)
+
+    parts: list[str] = []
+    previous_end = 0
+    for match in PROTECTED_XML_PATTERN.finditer(xml_text):
+        parts.append(sanitize_fragment(xml_text[previous_end : match.start()]))
+        parts.append(match.group(0))
+        previous_end = match.end()
+    parts.append(sanitize_fragment(xml_text[previous_end:]))
+    return "".join(parts)
+
+
+def parse_xml_root(xml_path: Path) -> etree._Element:
+    """전처리한 XML을 strict mode로 파싱해 손상된 복구 tree 사용을 막는다."""
+    try:
+        xml_text = xml_path.read_text(encoding="utf-8")
+        sanitized_text = sanitize_dart_xml_text(xml_text)
+        parser = etree.XMLParser(recover=False, huge_tree=True)
+        return etree.fromstring(sanitized_text.encode("utf-8"), parser)
+    except (OSError, UnicodeError, etree.XMLSyntaxError) as exc:
+        raise ValueError(f"XML 파싱에 실패했습니다: {xml_path}") from exc
 
 
 def clean_text(text: str | None) -> str:
@@ -86,6 +175,15 @@ def is_section(element: etree._Element) -> bool:
     return get_section_level(element.tag) is not None
 
 
+def iter_transparent_children(container: etree._Element):
+    """LIBRARY를 의미 없는 wrapper로 보고 직접 내용을 순서대로 펼친다."""
+    for child in container:
+        if child.tag == "LIBRARY":
+            yield from iter_transparent_children(child)
+        else:
+            yield child
+
+
 def extract_direct_paragraphs(section: etree._Element) -> list[str]:
     """
     현재 SECTION에 직접 포함된 P만 추출한다.
@@ -94,11 +192,11 @@ def extract_direct_paragraphs(section: etree._Element) -> list[str]:
     부모 section과 자식 section에서 동일 본문이 중복되므로
     직접 자식 P만 대상으로 한다.
 
-    단, LIBRARY 같은 wrapper 안의 P는 현재 MVP에서는 별도 처리하지 않는다.
+    LIBRARY는 투명 wrapper로 취급하되, 그 안의 자식 SECTION 본문은 포함하지 않는다.
     """
     paragraphs: list[str] = []
 
-    for child in section:
+    for child in iter_transparent_children(section):
         if child.tag != "P":
             continue
 
@@ -110,7 +208,15 @@ def extract_direct_paragraphs(section: etree._Element) -> list[str]:
     return paragraphs
 
 
-def extract_cell(cell: etree._Element) -> dict[str, Any]:
+def extract_cell(
+    cell: etree._Element,
+    *,
+    section_id: str,
+    table_group_id: str | None,
+    table_id: str,
+    row_index: int,
+    col_index: int,
+) -> dict[str, Any]:
     """
     표 셀 하나를 파싱한다.
 
@@ -120,10 +226,24 @@ def extract_cell(cell: etree._Element) -> dict[str, Any]:
     result: dict[str, Any] = {
         "type": cell.tag,
         "text": element_text(cell),
+        # 행과 열 번호는 원문의 셀 위치를 나타내는 0-based 값이다.
+        "provenance": {
+            "section_id": section_id,
+            "table_group_id": table_group_id,
+            "table_id": table_id,
+            "row_index": row_index,
+            "col_index": col_index,
+        },
     }
 
     if "ACODE" in cell.attrib:
         result["acode"] = cell.attrib["ACODE"]
+
+    if "ACONTEXT" in cell.attrib:
+        result["acontext"] = cell.attrib["ACONTEXT"]
+
+    if "ANEGATED" in cell.attrib:
+        result["anegated"] = cell.attrib["ANEGATED"]
 
     if "AUNIT" in cell.attrib:
         result["aunit"] = cell.attrib["AUNIT"]
@@ -140,18 +260,33 @@ def extract_cell(cell: etree._Element) -> dict[str, Any]:
     return result
 
 
-def extract_table_rows(table: etree._Element) -> list[list[dict[str, Any]]]:
+def extract_table_rows(
+    table: etree._Element,
+    *,
+    section_id: str,
+    table_group_id: str | None,
+    table_id: str,
+) -> list[list[dict[str, Any]]]:
     """
     TABLE 내부 TR을 찾아 행/셀 구조를 반환한다.
     """
     rows: list[list[dict[str, Any]]] = []
 
-    for row in table.iter("TR"):
+    for row_index, row in enumerate(table.iter("TR")):
         cells: list[dict[str, Any]] = []
 
-        for child in row:
-            if child.tag in CELL_TAGS:
-                cells.append(extract_cell(child))
+        cell_elements = [child for child in row if child.tag in CELL_TAGS]
+        for col_index, child in enumerate(cell_elements):
+            cells.append(
+                extract_cell(
+                    child,
+                    section_id=section_id,
+                    table_group_id=table_group_id,
+                    table_id=table_id,
+                    row_index=row_index,
+                    col_index=col_index,
+                )
+            )
 
         if cells:
             rows.append(cells)
@@ -166,7 +301,8 @@ def detect_table_unit(table: etree._Element) -> str | None:
     1차 MVP에서는 단순 탐색만 한다.
     정교한 단위 표준화는 normalizer 단계에서 담당한다.
     """
-    for element in table.iter():
+    # container 전체의 합성 text는 다른 표의 값까지 섞을 수 있으므로 자손만 본다.
+    for element in list(table.iter())[1:]:
         text = element_text(element)
 
         if "단위" in text and len(text) < 100:
@@ -175,11 +311,69 @@ def detect_table_unit(table: etree._Element) -> str | None:
     return None
 
 
+def direct_context_texts(container: etree._Element) -> list[str]:
+    """TABLE/TABLE-GROUP에서 안전하게 얻는 직접 P/TITLE 텍스트를 반환한다."""
+    texts: list[str] = []
+    for child in container:
+        if child.tag not in {"P", "TITLE"}:
+            continue
+        text = element_text(child)
+        if text:
+            texts.append(text)
+    return texts
+
+
+def parse_table(
+    table: etree._Element,
+    *,
+    section_id: str,
+    section_path: list[str],
+    table_group_id: str | None,
+    inherited_unit: str | None,
+    inherited_context: list[str],
+    table_counter: list[int],
+) -> dict[str, Any]:
+    """TABLE을 한 번 파싱하고 계층/flat lookup 양쪽에서 재사용한다."""
+    table_counter[0] += 1
+    table_id = f"table_{table_counter[0]:04d}"
+    title_element = get_direct_child(table, "TITLE")
+    title = element_text(title_element) if title_element is not None else None
+    own_unit = detect_table_unit(table)
+    context_parts = [*inherited_context]
+    if title:
+        context_parts.append(title)
+
+    return {
+        "table_id": table_id,
+        "title": title,
+        "unit": own_unit or inherited_unit,
+        # 상속된 group 단위와 표 자체의 단위를 구분할 수 있게 원문 탐지값도 보존한다.
+        "own_unit": own_unit,
+        "rows": extract_table_rows(
+            table,
+            section_id=section_id,
+            table_group_id=table_group_id,
+            table_id=table_id,
+        ),
+        "section_id": section_id,
+        "table_group_id": table_group_id,
+        "section_path": section_path.copy(),
+        "raw_context": "\n".join(dict.fromkeys(context_parts)),
+        "attributes": {
+            key.lower(): value
+            for key, value in table.attrib.items()
+            if key in {"ACLASS", "AFIXTABLE"}
+        },
+    }
+
+
 def extract_tables_from_container(
     container: etree._Element,
     section_id: str,
+    section_path: list[str],
     table_counter: list[int],
-) -> list[dict[str, Any]]:
+    table_group_counter: list[int],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
     현재 SECTION에 직접 속한 TABLE / TABLE-GROUP을 파싱한다.
 
@@ -187,60 +381,68 @@ def extract_tables_from_container(
     section 간 표 중복을 방지한다.
     """
     tables: list[dict[str, Any]] = []
+    table_groups: list[dict[str, Any]] = []
 
-    for child in container:
+    for child in iter_transparent_children(container):
         # 자식 section의 내용은 자식 parser가 담당한다.
         if is_section(child):
             continue
 
-        candidates: list[etree._Element] = []
-
         if child.tag == "TABLE":
-            candidates = [child]
+            tables.append(
+                parse_table(
+                    child,
+                    section_id=section_id,
+                    section_path=section_path,
+                    table_group_id=None,
+                    inherited_unit=None,
+                    inherited_context=section_path,
+                    table_counter=table_counter,
+                )
+            )
 
         elif child.tag == "TABLE-GROUP":
-            candidates = [
-                table
+            table_group_counter[0] += 1
+            group_id = f"table_group_{table_group_counter[0]:04d}"
+            title_element = get_direct_child(child, "TITLE")
+            title = element_text(title_element) if title_element is not None else None
+            group_unit = detect_table_unit(child)
+            context_parts = [*section_path, *direct_context_texts(child)]
+            aclass = child.attrib.get("ACLASS")
+            if aclass:
+                context_parts.append(aclass)
+            group_tables = [
+                parse_table(
+                    table,
+                    section_id=section_id,
+                    section_path=section_path,
+                    table_group_id=group_id,
+                    inherited_unit=group_unit,
+                    inherited_context=context_parts,
+                    table_counter=table_counter,
+                )
                 for table in child
                 if table.tag == "TABLE"
             ]
-
-        elif child.tag == "LIBRARY":
-            # LIBRARY가 단순 wrapper인 경우 내부 TABLE을 처리
-            candidates = [
-                element
-                for element in child
-                if element.tag == "TABLE"
-            ]
-
-        for table in candidates:
-            table_counter[0] += 1
-
-            table_id = f"table_{table_counter[0]:04d}"
-
-            table_title_element = get_direct_child(table, "TITLE")
-            table_title = (
-                element_text(table_title_element)
-                if table_title_element is not None
-                else None
-            )
-
-            tables.append(
+            table_groups.append(
                 {
-                    "table_id": table_id,
-                    "title": table_title,
-                    "unit": detect_table_unit(table),
-                    "rows": extract_table_rows(table),
+                    "table_group_id": group_id,
                     "section_id": section_id,
+                    "title": title,
+                    "aclass": aclass,
+                    "adeletetable": child.attrib.get("ADELETETABLE"),
                     "attributes": {
-                        key.lower(): value
-                        for key, value in table.attrib.items()
-                        if key in {"ACLASS", "AFIXTABLE"}
+                        key.lower(): value for key, value in child.attrib.items()
                     },
+                    "section_path": section_path.copy(),
+                    "raw_context": "\n".join(dict.fromkeys(context_parts)),
+                    "unit": group_unit,
+                    "tables": group_tables,
                 }
             )
+            tables.extend(group_tables)
 
-    return tables
+    return tables, table_groups
 
 
 def find_child_sections(container: etree._Element) -> list[etree._Element]:
@@ -252,14 +454,9 @@ def find_child_sections(container: etree._Element) -> list[etree._Element]:
     """
     sections: list[etree._Element] = []
 
-    for child in container:
+    for child in iter_transparent_children(container):
         if is_section(child):
             sections.append(child)
-
-        elif child.tag == "LIBRARY":
-            for library_child in child:
-                if is_section(library_child):
-                    sections.append(library_child)
 
     return sections
 
@@ -270,7 +467,9 @@ def parse_section(
     parent_path: list[str],
     section_counter: list[int],
     table_counter: list[int],
+    table_group_counter: list[int],
     all_tables: list[dict[str, Any]],
+    all_table_groups: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
     SECTION-n 하나와 하위 SECTION을 재귀적으로 파싱한다.
@@ -308,13 +507,16 @@ def parse_section(
 
     results = [section_result]
 
-    section_tables = extract_tables_from_container(
+    section_tables, section_table_groups = extract_tables_from_container(
         container=section,
         section_id=section_id,
+        section_path=current_path,
         table_counter=table_counter,
+        table_group_counter=table_group_counter,
     )
 
     all_tables.extend(section_tables)
+    all_table_groups.extend(section_table_groups)
 
     child_sections = find_child_sections(section)
 
@@ -325,7 +527,9 @@ def parse_section(
             parent_path=current_path,
             section_counter=section_counter,
             table_counter=table_counter,
+            table_group_counter=table_group_counter,
             all_tables=all_tables,
+            all_table_groups=all_table_groups,
         )
 
         results.extend(child_results)
@@ -379,6 +583,7 @@ def parse_periodic_xml(xml_path: str | Path) -> dict[str, Any]:
         {
             "metadata": {...},
             "sections": [...],
+            "table_groups": [...],
             "tables": [...]
         }
     """
@@ -389,24 +594,7 @@ def parse_periodic_xml(xml_path: str | Path) -> dict[str, Any]:
             f"XML 파일을 찾을 수 없습니다: {xml_path}"
         )
 
-    try:
-        parser = etree.XMLParser(
-            recover=True,
-            encoding="utf-8",
-            huge_tree=True,
-        )
-
-        tree = etree.parse(
-            str(xml_path),
-            parser,
-        )
-
-    except etree.XMLSyntaxError as exc:
-        raise ValueError(
-            f"XML 파싱에 실패했습니다: {xml_path}"
-        ) from exc
-
-    root = tree.getroot()
+    root = parse_xml_root(xml_path)
 
     metadata = extract_metadata(
         root=root,
@@ -422,9 +610,11 @@ def parse_periodic_xml(xml_path: str | Path) -> dict[str, Any]:
 
     section_counter = [0]
     table_counter = [0]
+    table_group_counter = [0]
 
     sections: list[dict[str, Any]] = []
     tables: list[dict[str, Any]] = []
+    table_groups: list[dict[str, Any]] = []
 
     top_sections = find_child_sections(body)
 
@@ -435,7 +625,9 @@ def parse_periodic_xml(xml_path: str | Path) -> dict[str, Any]:
             parent_path=[],
             section_counter=section_counter,
             table_counter=table_counter,
+            table_group_counter=table_group_counter,
             all_tables=tables,
+            all_table_groups=table_groups,
         )
 
         sections.extend(parsed_sections)
@@ -443,6 +635,7 @@ def parse_periodic_xml(xml_path: str | Path) -> dict[str, Any]:
     return {
         "metadata": metadata,
         "sections": sections,
+        "table_groups": table_groups,
         "tables": tables,
     }
 

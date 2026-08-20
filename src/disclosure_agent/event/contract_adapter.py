@@ -11,8 +11,11 @@
     하나만 바뀐다.
 
 conversion_gaps에 대하여:
-    Contract v0.1은 원문 필드명, ambiguous 후보 목록, 변경의 출처 문서를 담을 자리가 없다.
+    Contract v0.1은 원문 필드명과 변경의 출처 문서를 담을 자리가 없다.
     이들을 그냥 버리면 "정보가 없다"와 "형식에 못 담았다"가 구분되지 않는다.
+
+    ambiguous 후보 목록은 EventLink.candidate_doc_ids로 Contract에 흡수되었으므로 더 이상
+    gap으로 남기지 않는다.
 
     그래서 변환 결과를 Contract 객체 하나가 아니라 (객체, conversion_gaps) 쌍으로 돌려준다.
     gap에는 그 항목을 되살리는 데 필요한 값을 전부 담아, Contract가 보완되면 다시 연결할 수
@@ -73,8 +76,9 @@ TARGET_CONTRACT_VERSION = "0.1"
 # --------------------------------------------------------------------------
 
 # Contract v0.1에 자리가 없어 못 싣는 것. 다음 개정에서 흡수될 예정이다.
+#
+# ambiguous 후보 목록은 EventLink.candidate_doc_ids가 흡수했으므로 목록에서 뺐다.
 GAP_RAW_FIELD_NAME = "raw_field_name"
-GAP_AMBIGUOUS_CANDIDATES = "ambiguous_candidates"
 GAP_CHANGE_SOURCE_DOCUMENT = "change_source_document"
 
 # 팀 결정이 있어야 변환할 수 있는 것. Contract 구조는 이미 있다.
@@ -89,7 +93,6 @@ GAP_UNRESOLVED_LINKS = "unresolved_links"
 # 이 표에 있는 gap은 임시 호환 항목이며 영구 정책이 아니다.
 PLANNED_CONTRACT_FIELDS: dict[str, str] = {
     GAP_RAW_FIELD_NAME: "FieldChange.raw_field",
-    GAP_AMBIGUOUS_CANDIDATES: "EventLink.candidate_doc_ids",
     GAP_CHANGE_SOURCE_DOCUMENT: "FieldChange.before_evidence_id / after_evidence_id",
 }
 
@@ -243,10 +246,11 @@ def to_event_link(
         incomplete_chain / missing_link_field를 어느 Contract 상태로 보낼지 정한 호출자만
         넘긴다. 넘기지 않으면 변환하지 않고(link=None) 결정 대기로 남긴다.
         adapter가 not_found와 out_of_corpus 중 하나를 임의로 고르지 않는다.
+
+    후보가 여럿이면 candidate_doc_ids에 전부 싣는다. 어느 문서들 사이에서 모호한지를
+    Contract만 보고도 알 수 있어야 하기 때문이다. 여기서 하나로 좁히지 않는다.
     """
     source_doc_id = _doc_id(correction)
-
-    gaps: list[ContractGap] = []
 
     status = RESOLUTION_STATUS_BY_LINK_STATUS.get(result.status)
 
@@ -275,26 +279,13 @@ def to_event_link(
 
         status = undecided_status
 
-    if result.status == LINK_STATUS_AMBIGUOUS_LINK and result.candidates:
-        gaps.append(
-            ContractGap(
-                kind=GAP_AMBIGUOUS_CANDIDATES,
-                subject=source_doc_id,
-                dropped={
-                    "candidate_doc_ids": [
-                        _doc_id(candidate) for candidate in result.candidates
-                    ],
-                    "candidate_receipt_nos": [
-                        candidate.receipt_no for candidate in result.candidates
-                    ],
-                },
-                detail=(
-                    f"후보 {len(result.candidates)}건을 EventLink에 담을 자리가 없습니다. "
-                    "후보를 병기하지 못하면 사용자가 어느 문서들 사이에서 모호한지 알 수 "
-                    "없습니다."
-                ),
-            )
-        )
+    # 후보 목록의 순서는 linker가 정한다(find_original_candidates가 정렬해 돌려준다).
+    # 여기서 다시 정렬하지 않으므로 입력 순서가 바뀌어도 결과는 같다.
+    candidate_doc_ids = (
+        [_doc_id(candidate) for candidate in result.candidates]
+        if result.status == LINK_STATUS_AMBIGUOUS_LINK
+        else []
+    )
 
     link = EventLink(
         link_id=build_link_id(source_doc_id, relation),
@@ -302,10 +293,11 @@ def to_event_link(
         relation=relation,
         raw_reference=to_raw_reference(document),
         resolved_doc_id=_doc_id(result.original) if result.original else None,
+        candidate_doc_ids=candidate_doc_ids,
         resolution_status=status,
     )
 
-    return EventLinkConversion(link=link, conversion_gaps=tuple(gaps))
+    return EventLinkConversion(link=link)
 
 
 # --------------------------------------------------------------------------

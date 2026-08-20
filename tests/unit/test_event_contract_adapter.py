@@ -19,7 +19,6 @@ from disclosure_agent.common.enums import (
     EventType,
 )
 from disclosure_agent.event.contract_adapter import (
-    GAP_AMBIGUOUS_CANDIDATES,
     GAP_CHANGE_SOURCE_DOCUMENT,
     GAP_PENDING_EVENT_ID,
     GAP_PENDING_RESOLUTION_STATUS,
@@ -170,11 +169,17 @@ def test_ambiguous_link_becomes_ambiguous_status(
     assert conversion.link.resolved_doc_id is None
 
 
-def test_ambiguous_candidates_survive_in_gaps(
+def test_ambiguous_candidates_are_preserved_in_contract(
     make_event_filing,
     make_exchange_document,
 ) -> None:
-    """Contract에 후보 자리가 없다. 버리지 않고 gap에 남긴다."""
+    """
+    후보 목록은 EventLink.candidate_doc_ids에 그대로 실린다.
+
+    이전에는 Contract에 자리가 없어 gap으로만 남겼다. 필드가 생겼으므로 gap을 만들지 않고
+    Contract 안에서 보존한다. 후보를 병기하지 못하면 사용자가 어느 문서들 사이에서 모호한지
+    알 수 없다.
+    """
     correction = make_event_filing("A0003", "20251008", is_correction=True)
 
     document = make_exchange_document(
@@ -194,21 +199,71 @@ def test_ambiguous_candidates_survive_in_gaps(
 
     conversion = to_event_link(result, correction=correction, document=document)
 
-    gaps = _gaps_of(GAP_AMBIGUOUS_CANDIDATES, conversion.conversion_gaps)
+    assert conversion.link.resolution_status is EventLinkResolutionStatus.AMBIGUOUS
+    assert conversion.link.candidate_doc_ids == ["exchange_A0001", "exchange_A0002"]
 
-    assert len(gaps) == 1
-    assert gaps[0].dropped["candidate_doc_ids"] == ["exchange_A0001", "exchange_A0002"]
+    # 후보를 하나로 좁히지 않는다.
+    assert conversion.link.resolved_doc_id is None
 
-    # Contract 객체에는 흔적이 없다.
-    assert "candidate" not in str(conversion.link.model_dump())
+    # 더 이상 gap으로 남기지 않는다.
+    assert conversion.conversion_gaps == ()
+
+    # model_dump()에도 그대로 실린다.
+    assert conversion.link.model_dump()["candidate_doc_ids"] == [
+        "exchange_A0001",
+        "exchange_A0002",
+    ]
 
 
-def test_ambiguous_candidate_gap_is_temporary(
+def test_ambiguous_candidates_are_independent_of_input_order(
     make_event_filing,
     make_exchange_document,
 ) -> None:
-    """다음 Contract 개정에서 EventLink.candidate_doc_ids가 흡수한다."""
+    """후보 입력 순서가 결과를 바꾸면 안 된다. 접수번호나 문서 순서로 고르지 않는 원칙과 같다."""
     correction = make_event_filing("A0003", "20251008", is_correction=True)
+
+    document = make_exchange_document(
+        original_filing_date="2025-08-30",
+        correction_date="2025-10-08",
+    )
+
+    def convert(candidates):
+        result = link_correction(
+            correction,
+            document=document,
+            candidates=candidates,
+        )
+
+        return to_event_link(result, correction=correction, document=document).link
+
+    forward = convert(
+        [
+            make_event_filing("A0001", "20250830"),
+            make_event_filing("A0002", "20250830"),
+            correction,
+        ]
+    )
+
+    reversed_order = convert(
+        [
+            correction,
+            make_event_filing("A0002", "20250830"),
+            make_event_filing("A0001", "20250830"),
+        ]
+    )
+
+    assert forward.candidate_doc_ids == reversed_order.candidate_doc_ids
+    assert forward.model_dump() == reversed_order.model_dump()
+
+
+def test_resolved_link_has_no_candidates(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """모호하지 않게 연결된 경우 후보 목록은 비어 있다."""
+    original = make_event_filing("A0001", "20250830")
+
+    correction = make_event_filing("A0002", "20251008", is_correction=True)
 
     document = make_exchange_document(
         original_filing_date="2025-08-30",
@@ -218,20 +273,14 @@ def test_ambiguous_candidate_gap_is_temporary(
     result = link_correction(
         correction,
         document=document,
-        candidates=[
-            make_event_filing("A0001", "20250830"),
-            make_event_filing("A0002", "20250830"),
-            correction,
-        ],
+        candidates=[original, correction],
     )
 
-    gap = to_event_link(
-        result, correction=correction, document=document
-    ).conversion_gaps[0]
+    conversion = to_event_link(result, correction=correction, document=document)
 
-    assert gap.is_temporary is True
-    assert gap.planned_contract_field == "EventLink.candidate_doc_ids"
-    assert gap.pending_decision is False
+    assert conversion.link.resolution_status is EventLinkResolutionStatus.RESOLVED
+    assert conversion.link.resolved_doc_id == "exchange_A0001"
+    assert conversion.link.candidate_doc_ids == []
 
 
 @pytest.mark.parametrize(

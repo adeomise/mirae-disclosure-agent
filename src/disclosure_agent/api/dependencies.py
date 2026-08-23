@@ -1,15 +1,36 @@
-"""FastAPI 의존성 구성 예정 모듈.
+"""FastAPI dependency providers."""
 
-역할:
-- 설정, 서비스, 외부 클라이언트의 생성 및 주입 경계를 정의한다.
+import os
+from functools import lru_cache
+from pathlib import Path
 
-예정 입력:
-- 애플리케이션 설정과 요청 수명주기 정보
+from disclosure_agent.agent.router import (
+    Q01VerticalSliceRouter,
+    Q02VerticalSliceRouter,
+    Q13VerticalSliceRouter,
+)
+from disclosure_agent.api.mock_service import DevelopmentFixtureAskService
+from disclosure_agent.event.service import EventQ02Service, EventQ13Service
+from disclosure_agent.periodic.service import PeriodicQ01Service
 
-예정 출력:
-- API Route가 사용할 의존성 객체
+DEFAULT_PERIODIC_CORPUS_DIR = Path(__file__).resolve().parents[3] / "data" / "raw"
+DEFAULT_EVENT_CORPUS_DIR = DEFAULT_PERIODIC_CORPUS_DIR / "event"
 
-TODO:
-- 서비스 인터페이스 확정 후 의존성 공급자 구현
-- 외부 클라이언트 수명주기와 테스트 대체 정책 정의
-"""
+
+@lru_cache
+def get_development_fixture_ask_service() -> DevelopmentFixtureAskService:
+    """Provide the implemented Q01/Q02/Q13 vertical slices."""
+    periodic_corpus_dir = Path(
+        os.getenv("DISCLOSURE_PERIODIC_DATA_DIR", str(DEFAULT_PERIODIC_CORPUS_DIR))
+    )
+    event_corpus_dir = Path(
+        os.getenv("DISCLOSURE_EVENT_DATA_DIR", str(DEFAULT_EVENT_CORPUS_DIR))
+    )
+    q01_router = Q01VerticalSliceRouter(PeriodicQ01Service(periodic_corpus_dir))
+    q02_router = Q02VerticalSliceRouter(EventQ02Service(event_corpus_dir))
+    q13_router = Q13VerticalSliceRouter(EventQ13Service(event_corpus_dir))
+    return DevelopmentFixtureAskService(
+        q01_router=q01_router,
+        q02_router=q02_router,
+        q13_router=q13_router,
+    )

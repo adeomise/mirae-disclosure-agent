@@ -1,0 +1,24 @@
+{
+  "case_id": "Q02",
+  "question": "한화오션이 2025년 9월에 양밍해운이랑 맺은 공급계약, 금액이랑 계약기간 알려줘.",
+  "expected": {
+    "status": "ANSWERABLE",
+    "reason": null,
+    "fact": {
+      "metric": "contract_amount",
+      "accounting_scope": "not_applicable"
+    },
+    "event_type": "supply_contract",
+    "required_event_attributes": [
+      "contract_amount",
+      "contract_start_date",
+      "contract_end_date"
+    ],
+    "requires_event_history": false,
+    "chain_complete": null,
+    "requires_event_link": false,
+    "link_resolution_status": null,
+    "changed_fields": [],
+    "min_evidence_count": 1
+  }
+}

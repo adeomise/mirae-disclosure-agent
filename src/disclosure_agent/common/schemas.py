@@ -155,6 +155,19 @@ class CalculationResult(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
 
+class ConversionGap(BaseModel):
+    """Structured information that cannot yet be represented by the contract."""
+
+    kind: str
+    subject: str
+    dropped: dict[str, Any] = Field(default_factory=dict)
+    detail: str = ""
+    pending_decision: bool = False
+    planned_contract_field: str | None = None
+    is_temporary: bool = False
+    contract_version: str = "0.1"
+
+
 class AgentExecutionResult(BaseModel):
     """Structured Agent output before natural-language answer construction.
 
@@ -174,7 +187,7 @@ class AgentExecutionResult(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     calculations: list[CalculationResult] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    conversion_gaps: list[str] = Field(default_factory=list)
+    conversion_gaps: list[ConversionGap] = Field(default_factory=list)
 
 
 class AskRequest(BaseModel):

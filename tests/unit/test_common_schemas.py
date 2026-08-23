@@ -15,6 +15,7 @@ from disclosure_agent.common.schemas import (
     AgentExecutionResult,
     AnswerResponse,
     CalculationResult,
+    ConversionGap,
     Event,
     EventHistory,
     EventLink,
@@ -237,7 +238,12 @@ def test_execution_result_default_lists_are_not_shared() -> None:
         assert getattr(first, field_name) is not getattr(second, field_name)
 
     first.warnings.append("first-only")
+    first.conversion_gaps.append(
+        ConversionGap(kind="dummy-gap", subject="dummy-subject")
+    )
+
     assert second.warnings == []
+    assert second.conversion_gaps == []
 
 
 def test_execution_result_accepts_existing_common_contract_objects() -> None:
@@ -277,7 +283,41 @@ def test_execution_result_accepts_existing_common_contract_objects() -> None:
     assert result.evidence == [evidence]
 
 
+def test_conversion_gap_preserves_contract_gap_serialization_fields() -> None:
+    gap = ConversionGap(
+        kind="raw_field_name",
+        subject="contract_end_date",
+        dropped={"raw_field": "raw contract end date"},
+        detail="The source field name is not represented by the contract.",
+        pending_decision=False,
+        planned_contract_field="FieldChange.raw_field",
+        is_temporary=True,
+        contract_version="0.1",
+    )
+
+    assert gap.model_dump() == {
+        "kind": "raw_field_name",
+        "subject": "contract_end_date",
+        "dropped": {"raw_field": "raw contract end date"},
+        "detail": "The source field name is not represented by the contract.",
+        "pending_decision": False,
+        "planned_contract_field": "FieldChange.raw_field",
+        "is_temporary": True,
+        "contract_version": "0.1",
+    }
+
+
 def test_execution_result_serializes_to_json_compatible_contract() -> None:
+    gap = ConversionGap(
+        kind="change_source_document",
+        subject="contract_amount",
+        dropped={"source_doc_id": "doc_dummy_correction"},
+        detail="Change provenance is not represented by the contract.",
+        planned_contract_field=(
+            "FieldChange.before_evidence_id / after_evidence_id"
+        ),
+        is_temporary=True,
+    )
     result = AgentExecutionResult(
         execution_status=ExecutionStatus.COMPLETED,
         answerability_status=AnswerabilityStatus.ANSWERABLE,
@@ -290,7 +330,7 @@ def test_execution_result_serializes_to_json_compatible_contract() -> None:
             )
         ],
         warnings=["dummy-warning"],
-        conversion_gaps=["dummy-gap"],
+        conversion_gaps=[gap],
     )
 
     dumped = result.model_dump(mode="json")
@@ -306,5 +346,18 @@ def test_execution_result_serializes_to_json_compatible_contract() -> None:
         }
     ]
     assert dumped["warnings"] == ["dummy-warning"]
-    assert dumped["conversion_gaps"] == ["dummy-gap"]
+    assert dumped["conversion_gaps"] == [
+        {
+            "kind": "change_source_document",
+            "subject": "contract_amount",
+            "dropped": {"source_doc_id": "doc_dummy_correction"},
+            "detail": "Change provenance is not represented by the contract.",
+            "pending_decision": False,
+            "planned_contract_field": (
+                "FieldChange.before_evidence_id / after_evidence_id"
+            ),
+            "is_temporary": True,
+            "contract_version": "0.1",
+        }
+    ]
     assert "answer" not in dumped

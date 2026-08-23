@@ -1,0 +1,3 @@
+{"case_id":"synthetic_q01_contract","question":"[SYNTHETIC] What was Synthetic Company's 2025 consolidated revenue?","synthetic":true,"evaluation_mode":"contract"}
+{"case_id":"synthetic_unanswerable_contract","question":"[SYNTHETIC] Find a disclosure that is intentionally absent.","synthetic":true,"evaluation_mode":"contract"}
+{"case_id":"synthetic_event_history_contract","question":"[SYNTHETIC] Show the correction history for a synthetic supply contract.","synthetic":true,"evaluation_mode":"contract"}

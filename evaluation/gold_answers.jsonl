@@ -1,0 +1,3 @@
+{"case_id":"synthetic_q01_contract","status":"ANSWERABLE","reason":null,"fact":{"company":"Synthetic Company","metric":"revenue","fiscal_year":2025,"fiscal_period":"FY","accounting_scope":"consolidated","raw_value":"1000","raw_unit":"synthetic-currency"},"min_evidence_count":1,"event_history":null}
+{"case_id":"synthetic_unanswerable_contract","status":"UNANSWERABLE","reason":"not_found","fact":null,"min_evidence_count":0,"event_history":null}
+{"case_id":"synthetic_event_history_contract","status":"ANSWERABLE","reason":null,"fact":null,"min_evidence_count":2,"event_history":{"link_resolution":"resolved","chain_complete":true}}

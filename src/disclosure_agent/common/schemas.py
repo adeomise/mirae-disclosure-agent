@@ -13,6 +13,7 @@ from disclosure_agent.common.enums import (
     EventLinkResolutionStatus,
     EventType,
     EvidenceLocationType,
+    ExecutionStatus,
     FactAccountingScope,
     Intent,
     MetricConcept,
@@ -135,6 +136,45 @@ class EventHistory(BaseModel):
     document_ids: list[str] = Field(default_factory=list)
     changes: list[FieldChange] = Field(default_factory=list)
     chain_complete: bool
+
+
+class ExecutionIssue(BaseModel):
+    """A reason the Agent execution was blocked or failed."""
+
+    stage: str
+    reason: str
+    detail: str
+
+
+class CalculationResult(BaseModel):
+    """A minimal deterministic calculation with its evidence linkage."""
+
+    operation: str
+    value: float | str | None = None
+    unit: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class AgentExecutionResult(BaseModel):
+    """Structured Agent output before natural-language answer construction.
+
+    Execution status is independent from answerability: a completed execution
+    may still determine that the available evidence cannot answer the question.
+    Blocked and failed executions use execution_issue for diagnostics.
+    """
+
+    execution_status: ExecutionStatus
+    answerability_status: AnswerabilityStatus | None = None
+    answerability_reason: AnswerabilityReason | None = None
+    execution_issue: ExecutionIssue | None = None
+    facts: list[Fact] = Field(default_factory=list)
+    events: list[Event] = Field(default_factory=list)
+    event_links: list[EventLink] = Field(default_factory=list)
+    event_histories: list[EventHistory] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(default_factory=list)
+    calculations: list[CalculationResult] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    conversion_gaps: list[str] = Field(default_factory=list)
 
 
 class AskRequest(BaseModel):

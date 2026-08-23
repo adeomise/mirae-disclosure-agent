@@ -1,8 +1,16 @@
-"""FastAPI application entry point."""
+"""FastAPI 애플리케이션 진입점 예정 모듈.
 
-from fastapi import FastAPI
+역할:
+- 향후 애플리케이션 생성, Route 등록, 수명주기 설정의 조립 위치를 제공한다.
 
-from disclosure_agent.api.routes import router
+예정 입력:
+- 애플리케이션 설정
 
-app = FastAPI(title="Disclosure Agent", version="0.1.0")
-app.include_router(router)
+예정 출력:
+- 구성된 FastAPI 애플리케이션
+
+TODO:
+- API 계약 확정 후 애플리케이션 팩토리 구현
+- Route와 오류 처리기 등록
+- 운영 설정과 상태 확인 정책 정의
+"""

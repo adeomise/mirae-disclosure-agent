@@ -4,7 +4,7 @@
 - Parser, Extractor, Chunker의 호출 순서와 결과 전달 경계를 관리한다.
 
 현재 구현 범위:
-- 정기공시 문서 하나를 읽어 Fact를 만드는 구간만 담당한다.
+- 정기공시 문서 하나를 읽어 targeted FinancialFact를 만드는 구간을 담당한다.
 
     본문 XML 경로
       -> ParsedDocument   (periodic.parser)
@@ -42,9 +42,19 @@ Parser 경계에 대한 메모:
 - 본문 XML 경로 또는 이미 파싱된 document dict
 
 출력:
-- ParsedDocument dict, FinancialFact
+- ParsedDocument dict
+- FinancialFact (Pattern A 내부 추출 표현)
+
+Integration boundary:
+- FinancialFact는 periodic 내부 표현으로 사용한다.
+- Retrieval / Agent / API / Evaluation으로 전달되는 공통 출력은
+  Contract의 Fact + Evidence를 기준으로 한다.
+- FinancialFact -> Fact/Evidence 변환은 별도 adapter에서 담당한다.
 
 TODO:
+- FinancialFact -> Contract Fact/Evidence adapter 연결
+- targeted source unit 귀속 연결
+- ACLASS 기반 본표/주석 판정 연결
 - Chunker 연결
 - 다중 Fact 추출 흐름 확장
 """

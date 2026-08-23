@@ -1,24 +1,6 @@
 """이벤트공시 XML Parser 모듈.
 
 역할:
-- 공급계약과 신규시설투자 공시의 구조 및 필드 후보를 보존한다.
-
-예정 입력:
-- XML 파일 경로
-- DocumentMetadata
-
-예정 출력:
-- ParsedDocument와 Event 후보
-
-TODO:
-- Pilot XML별 태그와 표 구조 분석
-- 이벤트 유형별 필드 매핑 구현
-- 값, 단위, 날짜의 원문 표현 보존
-"""
-
-"""이벤트공시 XML Parser 모듈.
-
-역할:
 - 공급계약과 신규시설투자 등 거래소공시의 표 구조를 보존한다.
 - 정정공시의 정정일자, 정정사유, 정정 전/후 값을 보존한다.
 """
@@ -30,8 +12,23 @@ from typing import Any
 
 from bs4 import BeautifulSoup, Tag
 
-
 UNIT_PATTERN = re.compile(r"^(.*)\(([^()]*)\)$")
+
+
+def extract_table_id(table: Tag, table_index: int) -> str:
+    """원문 ID를 우선 사용하고 없을 때만 문서 내 안정적인 local ID를 만든다."""
+    original_id = table.get("id")
+    return str(original_id) if original_id else f"table_{table_index + 1:04d}"
+
+
+def indexed_cell_texts(row: Tag) -> list[tuple[int, str]]:
+    """직접 TD의 원래 cell index와 non-empty text를 함께 보존한다."""
+    indexed_texts: list[tuple[int, str]] = []
+    for cell_index, cell in enumerate(row.find_all("td", recursive=False)):
+        text = element_text(cell)
+        if text:
+            indexed_texts.append((cell_index, text))
+    return indexed_texts
 
 
 def clean_text(text: str | None) -> str:
@@ -130,22 +127,21 @@ def parse_normal_rows(root: BeautifulSoup) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     current_group: str | None = None
 
-    for table in root.find_all("table"):
-        table_id = table.get("id", "")
+    for table_index, table in enumerate(root.find_all("table")):
+        original_table_id = str(table.get("id", ""))
+        table_id = extract_table_id(table, table_index)
 
         # 정정 정보 전용 표 제외
-        if "XFormD8" in table_id:
+        if "XFormD8" in original_table_id:
             continue
 
-        for tr in table.find_all("tr"):
-            # 중첩 table의 td까지 가져오지 않도록 현재 tr의 직접 자식만
-            cells = tr.find_all("td", recursive=False)
-
-            if len(cells) < 2:
+        for row_index, tr in enumerate(table.find_all("tr")):
+            # 중첩 table의 row가 바깥 table에 다시 포함되지 않도록 한다.
+            if tr.find_parent("table") is not table:
                 continue
 
-            texts = [element_text(cell) for cell in cells]
-            texts = [text for text in texts if text]
+            indexed_texts = indexed_cell_texts(tr)
+            texts = [text for _, text in indexed_texts]
 
             if len(texts) < 2:
                 continue
@@ -156,6 +152,8 @@ def parse_normal_rows(root: BeautifulSoup) -> list[dict[str, Any]]:
                 possible_group = strip_number_prefix(texts[0])
                 raw_field = texts[-2]
                 value = texts[-1]
+                field_cell_index = indexed_texts[-2][0]
+                value_cell_index = indexed_texts[-1][0]
 
                 current_group = possible_group
 
@@ -166,6 +164,8 @@ def parse_normal_rows(root: BeautifulSoup) -> list[dict[str, Any]]:
             else:
                 raw_field = texts[0]
                 value = texts[1]
+                field_cell_index = indexed_texts[0][0]
+                value_cell_index = indexed_texts[1][0]
 
                 if re.match(r"^\d+\.", raw_field.strip()):
                     current_group = strip_number_prefix(raw_field)
@@ -181,6 +181,10 @@ def parse_normal_rows(root: BeautifulSoup) -> list[dict[str, Any]]:
                     "raw_field": raw_field,
                     "value": value,
                     "unit": unit,
+                    "table_id": table_id,
+                    "row_index": row_index,
+                    "field_cell_index": field_cell_index,
+                    "value_cell_index": value_cell_index,
                 }
             )
 
@@ -194,21 +198,24 @@ def parse_correction(root: BeautifulSoup) -> dict[str, Any] | None:
         return None
 
     correction_date = None
+    original_report_name = None
     original_filing_date = None
     reason = None
     changes: list[dict[str, Any]] = []
 
-    for table in root.find_all("table"):
-        table_id = table.get("id", "")
+    for table_index, table in enumerate(root.find_all("table")):
+        original_table_id = str(table.get("id", ""))
+        table_id = extract_table_id(table, table_index)
 
-        if "XFormD8" not in table_id:
+        if "XFormD8" not in original_table_id:
             continue
 
-        for tr in table.find_all("tr"):
-            cells = tr.find_all("td", recursive=False)
+        for row_index, tr in enumerate(table.find_all("tr")):
+            if tr.find_parent("table") is not table:
+                continue
 
-            texts = [element_text(cell) for cell in cells]
-            texts = [text for text in texts if text]
+            indexed_texts = indexed_cell_texts(tr)
+            texts = [text for _, text in indexed_texts]
 
             if not texts:
                 continue
@@ -216,6 +223,11 @@ def parse_correction(root: BeautifulSoup) -> dict[str, Any] | None:
             # 정정일자
             if "정정일자" in texts[0] and len(texts) >= 2:
                 correction_date = texts[-1]
+                continue
+
+            # 원공시 보고서명은 linker가 사용할 raw reference로만 보존한다.
+            if "정정관련 공시서류" in texts[0] and "제출일" not in texts[0] and len(texts) >= 2:
+                original_report_name = texts[-1]
                 continue
 
             # 원본 제출일
@@ -265,15 +277,40 @@ def parse_correction(root: BeautifulSoup) -> dict[str, Any] | None:
                         "field": strip_number_prefix(raw_field),
                         "before": before,
                         "after": after,
+                        "table_id": table_id,
+                        "row_index": row_index,
+                        "field_cell_index": indexed_texts[0][0],
+                        "before_cell_index": indexed_texts[1][0],
+                        "after_cell_index": indexed_texts[2][0],
                     }
                 )
 
     return {
         "correction_date": correction_date,
+        "original_report_name": original_report_name,
         "original_filing_date": original_filing_date,
         "reason": reason,
         "changes": changes,
     }
+
+
+def extract_related_disclosures(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """linker 판단 없이 관련공시 row의 raw value와 위치만 별도로 노출한다."""
+    related: list[dict[str, Any]] = []
+    for row in rows:
+        if "관련공시" not in row["raw_field"]:
+            continue
+        related.append(
+            {
+                "raw_field": row["raw_field"],
+                "value": row["value"],
+                "table_id": row["table_id"],
+                "row_index": row["row_index"],
+                "field_cell_index": row["field_cell_index"],
+                "value_cell_index": row["value_cell_index"],
+            }
+        )
+    return related
 
 
 def parse_exchange_document(
@@ -292,6 +329,7 @@ def parse_exchange_document(
     receipt_no = xml_path.stem
 
     correction = parse_correction(root)
+    rows = parse_normal_rows(root)
 
     return {
         "metadata": {
@@ -304,7 +342,8 @@ def parse_exchange_document(
             "is_correction": correction is not None,
         },
         "title": find_main_title(root),
-        "rows": parse_normal_rows(root),
+        "rows": rows,
+        "related_disclosures": extract_related_disclosures(rows),
         "correction": correction,
     }
 

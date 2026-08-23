@@ -102,3 +102,11 @@ class AnswerabilityReason(StrEnum):
     AMBIGUOUS_LINK = "ambiguous_link"
     NOT_FOUND = "not_found"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+
+
+class ExecutionStatus(StrEnum):
+    """Whether the Agent execution itself completed normally."""
+
+    COMPLETED = "COMPLETED"
+    BLOCKED = "BLOCKED"
+    FAILED = "FAILED"

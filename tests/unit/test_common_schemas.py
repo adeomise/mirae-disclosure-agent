@@ -6,14 +6,21 @@ from disclosure_agent.common.enums import (
     EventLinkRelation,
     EventLinkResolutionStatus,
     EventType,
+    EvidenceLocationType,
+    ExecutionStatus,
     FactAccountingScope,
     MetricConcept,
 )
 from disclosure_agent.common.schemas import (
+    AgentExecutionResult,
     AnswerResponse,
+    CalculationResult,
+    ConversionGap,
     Event,
     EventHistory,
     EventLink,
+    Evidence,
+    ExecutionIssue,
     Fact,
     FieldChange,
     RawReference,
@@ -158,3 +165,199 @@ def test_event_id_is_deterministic_for_canonical_root_document() -> None:
 
     assert first == repeated
     assert first != different_root
+
+
+def test_completed_answerable_execution_result() -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert result.execution_issue is None
+
+
+def test_completed_unanswerable_execution_result_with_reason() -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=AnswerabilityReason.INSUFFICIENT_EVIDENCE,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.INSUFFICIENT_EVIDENCE
+
+
+def test_blocked_execution_result_with_issue() -> None:
+    issue = ExecutionIssue(
+        stage="retrieval",
+        reason="unsupported_scope",
+        detail="The requested scope is not supported.",
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.BLOCKED,
+        execution_issue=issue,
+    )
+
+    assert result.answerability_status is None
+    assert result.execution_issue == issue
+
+
+def test_failed_execution_result_with_issue() -> None:
+    issue = ExecutionIssue(
+        stage="execution",
+        reason="unexpected_failure",
+        detail="An unexpected technical failure occurred.",
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.FAILED,
+        execution_issue=issue,
+    )
+
+    assert result.answerability_status is None
+    assert result.execution_issue == issue
+
+
+def test_execution_result_default_lists_are_not_shared() -> None:
+    first = AgentExecutionResult(execution_status=ExecutionStatus.COMPLETED)
+    second = AgentExecutionResult(execution_status=ExecutionStatus.COMPLETED)
+    collection_fields = (
+        "facts",
+        "events",
+        "event_links",
+        "event_histories",
+        "evidence",
+        "calculations",
+        "warnings",
+        "conversion_gaps",
+    )
+
+    for field_name in collection_fields:
+        assert getattr(first, field_name) is not getattr(second, field_name)
+
+    first.warnings.append("first-only")
+    first.conversion_gaps.append(
+        ConversionGap(kind="dummy-gap", subject="dummy-subject")
+    )
+
+    assert second.warnings == []
+    assert second.conversion_gaps == []
+
+
+def test_execution_result_accepts_existing_common_contract_objects() -> None:
+    evidence = Evidence(
+        evidence_id="evidence_dummy_revenue",
+        doc_id="doc_dummy_periodic",
+        location_type=EvidenceLocationType.TABLE,
+        table_name="dummy-table",
+        row_label="revenue",
+        column_label="2025",
+    )
+    fact = Fact(
+        fact_id="fact_dummy_revenue",
+        company="dummy-company",
+        metric=MetricConcept.REVENUE,
+        fiscal_year=2025,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+        raw_value="dummy",
+        raw_unit="dummy-unit",
+        evidence_ids=[evidence.evidence_id],
+    )
+    history = EventHistory(
+        event_id="event_dummy_supply_contract",
+        document_ids=["doc_dummy_original"],
+        chain_complete=True,
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=[fact],
+        event_histories=[history],
+        evidence=[evidence],
+    )
+
+    assert result.facts == [fact]
+    assert result.event_histories == [history]
+    assert result.evidence == [evidence]
+
+
+def test_conversion_gap_preserves_contract_gap_serialization_fields() -> None:
+    gap = ConversionGap(
+        kind="raw_field_name",
+        subject="contract_end_date",
+        dropped={"raw_field": "raw contract end date"},
+        detail="The source field name is not represented by the contract.",
+        pending_decision=False,
+        planned_contract_field="FieldChange.raw_field",
+        is_temporary=True,
+        contract_version="0.1",
+    )
+
+    assert gap.model_dump() == {
+        "kind": "raw_field_name",
+        "subject": "contract_end_date",
+        "dropped": {"raw_field": "raw contract end date"},
+        "detail": "The source field name is not represented by the contract.",
+        "pending_decision": False,
+        "planned_contract_field": "FieldChange.raw_field",
+        "is_temporary": True,
+        "contract_version": "0.1",
+    }
+
+
+def test_execution_result_serializes_to_json_compatible_contract() -> None:
+    gap = ConversionGap(
+        kind="change_source_document",
+        subject="contract_amount",
+        dropped={"source_doc_id": "doc_dummy_correction"},
+        detail="Change provenance is not represented by the contract.",
+        planned_contract_field=(
+            "FieldChange.before_evidence_id / after_evidence_id"
+        ),
+        is_temporary=True,
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        calculations=[
+            CalculationResult(
+                operation="identity",
+                value="dummy",
+                unit="dummy-unit",
+                evidence_ids=["evidence_dummy"],
+            )
+        ],
+        warnings=["dummy-warning"],
+        conversion_gaps=[gap],
+    )
+
+    dumped = result.model_dump(mode="json")
+
+    assert dumped["execution_status"] == "COMPLETED"
+    assert dumped["answerability_status"] == "ANSWERABLE"
+    assert dumped["calculations"] == [
+        {
+            "operation": "identity",
+            "value": "dummy",
+            "unit": "dummy-unit",
+            "evidence_ids": ["evidence_dummy"],
+        }
+    ]
+    assert dumped["warnings"] == ["dummy-warning"]
+    assert dumped["conversion_gaps"] == [
+        {
+            "kind": "change_source_document",
+            "subject": "contract_amount",
+            "dropped": {"source_doc_id": "doc_dummy_correction"},
+            "detail": "Change provenance is not represented by the contract.",
+            "pending_decision": False,
+            "planned_contract_field": (
+                "FieldChange.before_evidence_id / after_evidence_id"
+            ),
+            "is_temporary": True,
+            "contract_version": "0.1",
+        }
+    ]
+    assert "answer" not in dumped

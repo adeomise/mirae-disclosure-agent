@@ -12,15 +12,24 @@
         ExtractionBlockedError를 올려 상위 단계가 BLOCKED로 보고하게 한다.
         Q01(Pattern A)이 이 경로를 쓴다.
 
+        FinancialFact는 Pattern A 내부의 추출 표현으로 사용한다.
+        Retrieval / Agent / API / Evaluation으로 전달되는 최종 Integration output은
+        공통 Contract의 Fact + Evidence를 사용하며, FinancialFact를 Fact/Evidence로
+        변환하는 책임은 별도 adapter에서 담당한다.
+
     extract_financial_facts_with_evidence(parsed_document)
         -> (list[Fact], list[Evidence])
         문서 전체에서 Fact를 모은다(bulk). 항목은 한글 라벨로, 연도는 표 머리글로
         찾고 Contract v0.1의 Fact/Evidence를 만든다. 조건에 맞지 않는 셀은 막지
         않고 건너뛴다.
 
-    두 경로는 아직 신호를 공유하지 않는다. targeted는 XBRL 속성(ACODE/ACONTEXT)에,
-    bulk는 표의 한글 텍스트에 의존한다. 통합은 Fact가 판정 근거를 실을 수 있게 된
-    뒤로 미룬다.
+    두 경로는 현재 서로 다른 추출 신호를 사용한다.
+    targeted는 XBRL 속성(ACODE/ACONTEXT)에, bulk는 표의 한글 텍스트와 머리글에
+    주로 의존한다.
+
+    두 진입점의 내부 구현을 즉시 하나로 합치지는 않는다. targeted의 FinancialFact는
+    Pattern A 내부 표현으로 유지하고, 시스템 Integration boundary에서는
+    공통 Contract의 Fact + Evidence를 사용한다.
 
 입력 계약(Parser에 대한 요구사항):
     이 모듈은 ParsedDocument dict만 입력으로 받으며 원문 XML을 다시 열지 않는다.
@@ -34,23 +43,33 @@
         cell                     : text, acode, acontext, anegated, provenance,
                                    rowspan, colspan
 
-    parser가 cell.acontext와 표 단위를 제공하므로 조사 보고서의 D-2 / D-3 전제는
-    해소되었다. 다만 아직 남은 간극이 두 가지 있고 이번 병합에서는 손대지 않는다.
+    parser는 cell.acontext와 표 단위, TABLE-GROUP의 ACLASS 등 추출에 필요한
+    원문 정보를 보존한다. 따라서 조사 보고서의 D-2 / D-3 전제는 해소되었다.
 
-    - table["unit"]은 표 본문의 행을 단위 선언으로 잘못 집어올 수 있다. parse_unit이
-      trusted=False로 표시해 막지만 올바른 단위를 다시 고르지는 않는다. 그 일을 하는
-      resolve_source_unit은 아직 targeted 경로에 배선되어 있지 않다.
-    - 표 분류(본표/주석) 근거는 table_groups[].aclass에 있으나 classify_table은 아직
-      그 값을 읽지 않는다. 어떤 ACLASS 표기를 본표로 볼지는 팀 합의 사항이다(D-4).
+    다만 parser가 제공하는 정보를 targeted 경로에서 완전히 소비하지 못하는
+    두 가지 간극이 남아 있으며 이번 병합에서는 손대지 않는다.
+
+    - table["unit"]은 표 본문의 행을 단위 선언으로 잘못 집어올 수 있다.
+      parse_unit이 trusted=False로 표시해 사용을 막지만 올바른 source unit을
+      다시 선택하지는 않는다. 이를 처리하는 resolve_source_unit은 아직
+      targeted 경로에 연결되어 있지 않다.
+
+    - 표 분류(본표/주석)의 원문 근거는 table_groups[].aclass에 보존되어 있으나
+      classify_table은 아직 해당 값을 직접 사용하지 않는다.
+      어떤 ACLASS 표기를 본표/주석으로 해석할지는 팀 합의가 필요한 사항이다(D-4).
 
 출력:
-- FinancialFact와 원문 위치 참조 (targeted)
+- FinancialFact와 원문 위치 참조 (targeted, Pattern A 내부 표현)
 - Contract v0.1 Fact / Evidence (bulk)
+- 시스템 Integration boundary의 공통 출력은 Fact + Evidence를 기준으로 한다.
 
 TODO:
+- targeted FinancialFact -> Contract Fact/Evidence adapter 연결
+- targeted 경로의 source unit 귀속 연결
+- ACLASS 기반 본표/주석 판정 연결
 - 영업이익·당기순이익 등 지표 확장
 - 분기·반기 컨텍스트(dQTR 등) 지원
-- 두 진입점의 신호 통합
+- targeted / bulk 추출 신호의 공통화 검토
 """
 
 from __future__ import annotations

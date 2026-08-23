@@ -20,9 +20,23 @@
 
 Parser 경계에 대한 메모:
 - 이 모듈은 periodic.parser를 호출하기만 하고 수정하지 않는다.
-- extractor가 필요로 하는 cell.acontext, 표 단위 귀속, 본표/주석 구분은 현재 parser가
-  제공하지 않는다. 그 경우 예외를 삼키거나 원문 XML을 다시 읽어 우회하지 않고 그대로
-  ExtractionBlockedError를 올려 상위 단계가 BLOCKED로 보고하게 한다.
+- parser는 cell.acontext와 표 단위를 제공한다. 그래서 extractor는 연도와 연결/별도 기준을
+  ACONTEXT로 결정론적으로 판정할 수 있다. 남은 간극은 두 가지이며 둘 다 extractor 쪽에서
+  다룬다.
+
+    표 단위 선택
+        parser의 table["unit"]은 표 본문의 행을 단위 선언으로 잘못 집어올 수 있다.
+        extractor의 parse_unit이 그런 문자열을 trusted=False로 표시해 막지만, 올바른
+        단위를 대신 고르지는 않는다. 그 일을 하는 resolve_source_unit이 아직 이 경로에
+        배선되어 있지 않다.
+
+    본표/주석 구분
+        근거는 table_groups[].aclass에 있으나 classify_table이 아직 그 값을 읽지 않는다.
+        어떤 ACLASS 표기를 본표로 볼지는 팀 합의 사항이다.
+
+- 어느 쪽이든 값을 추측해 메우지 않는다. 예외를 삼키거나 원문 XML을 다시 읽어 우회하지 않고
+  그대로 ExtractionBlockedError를 올려 상위 단계가 BLOCKED로 보고하게 한다.
+
 
 입력:
 - 본문 XML 경로 또는 이미 파싱된 document dict

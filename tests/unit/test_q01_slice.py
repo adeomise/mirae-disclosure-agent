@@ -37,11 +37,13 @@ from disclosure_agent.periodic.extractor import (
     TABLE_CLASS_NOTE,
     TABLE_CLASS_PRIMARY_STATEMENT,
     ExtractionBlockedError,
+    build_table_group_index,
     classify_table,
     extract_revenue_fact,
     parse_accounting_context,
     parse_numeric_value,
     parse_unit,
+    resolve_table_unit,
     table_class_priority,
 )
 from disclosure_agent.retrieval.metadata_filter import (
@@ -792,6 +794,260 @@ def test_service_reports_ambiguous_candidates_as_blocked(
     assert result["blocked"]["reason"] == "ambiguous_candidates"
     assert result["fact"] is None
     assert result["evidence"] == []
+
+
+# --------------------------------------------------------------------------
+# 8-c. 단위 귀속 (실제 사업보고서에서 발견)
+#
+# parser의 detect_table_unit은 표 자손 전체에서 '단위'가 든 문자열을 찾는다. 그래서
+# 손익계산서의 '기본주당이익 (단위 : 원) ...' 행을 표 단위로 집어오고, 그 값이
+# table["unit"]에 들어가 TABLE-GROUP이 선언한 '(단위 : 백만원)'을 가린다.
+#
+# 실측: 2024 연결 매출액 기준 45개 문서 전부가 table 단위는 신뢰 불가, group 단위는
+# 신뢰 가능한 상태였다. 값을 추측하지 않고 그룹 선언까지 따라가면 해소된다.
+# --------------------------------------------------------------------------
+
+EPS_ROW_TEXT = "기본주당이익 (단위 : 원) 4,950 2,131 8,057"
+
+
+def _group_tables(
+    document: dict[str, Any],
+    *,
+    group_unit: str | None,
+    aclass: str | None = None,
+    group_id: str = "table_group_0001",
+) -> dict[str, Any]:
+    """flat tables를 TABLE-GROUP 하나로 묶은 parser output 형태로 만든다."""
+    for table in document["tables"]:
+        table["table_group_id"] = group_id
+
+    document["table_groups"] = [
+        {
+            "table_group_id": group_id,
+            "aclass": aclass,
+            "unit": group_unit,
+            "tables": document["tables"],
+        }
+    ]
+
+    return document
+
+
+def test_targeted_extractor_uses_table_group_unit_when_table_declares_none(
+    synthetic_document: dict[str, Any],
+) -> None:
+    """표에 선언이 없으면 TABLE-GROUP이 선언한 단위를 쓴다."""
+    for table in synthetic_document["tables"]:
+        table["unit"] = None
+        table["own_unit"] = None
+
+    _group_tables(synthetic_document, group_unit="(단위 : 백만원)")
+
+    fact = extract_revenue_fact(synthetic_document, fiscal_year=2025)
+
+    assert fact.unit_token == "백만원"
+    assert fact.unit_multiplier == 1_000_000
+
+
+def test_targeted_extractor_prefers_group_unit_over_contaminated_table_unit(
+    synthetic_document: dict[str, Any],
+) -> None:
+    """
+    표 본문에서 잘못 수집된 단위 문자열보다 TABLE-GROUP 선언을 쓴다.
+
+    오염된 값을 쓰면 x1(원)이 되어 백만 배 작은 값이 나온다. 자릿수까지 확인한다.
+    """
+    for table in synthetic_document["tables"]:
+        table["own_unit"] = EPS_ROW_TEXT
+        table["unit"] = EPS_ROW_TEXT
+
+    _group_tables(synthetic_document, group_unit="(단위 : 백만원)")
+
+    fact = extract_revenue_fact(synthetic_document, fiscal_year=2025)
+
+    assert fact.unit_text == "(단위 : 백만원)"
+    assert fact.unit_token == "백만원"
+    assert fact.value_in_base_unit == fact.value * 1_000_000
+
+
+def test_targeted_extractor_still_blocks_when_every_unit_source_is_untrusted(
+    synthetic_document: dict[str, Any],
+) -> None:
+    """그룹 선언도 오염됐으면 신뢰 검사를 우회하지 않고 그대로 막는다."""
+    for table in synthetic_document["tables"]:
+        table["own_unit"] = EPS_ROW_TEXT
+        table["unit"] = EPS_ROW_TEXT
+
+    _group_tables(synthetic_document, group_unit=EPS_ROW_TEXT)
+
+    with pytest.raises(ExtractionBlockedError) as error:
+        extract_revenue_fact(synthetic_document, fiscal_year=2025)
+
+    assert error.value.reason == "untrusted_table_unit"
+
+
+def test_targeted_extractor_blocks_when_no_unit_source_exists(
+    synthetic_document: dict[str, Any],
+) -> None:
+    """선언이 아예 없는 경우는 '오염'이 아니라 '없음'으로 구분해 보고한다."""
+    for table in synthetic_document["tables"]:
+        table["own_unit"] = None
+        table["unit"] = None
+
+    _group_tables(synthetic_document, group_unit=None)
+
+    with pytest.raises(ExtractionBlockedError) as error:
+        extract_revenue_fact(synthetic_document, fiscal_year=2025)
+
+    assert error.value.reason == "missing_table_unit"
+
+
+def test_resolve_table_unit_reports_skipped_untrusted_sources() -> None:
+    """건너뛴 선언을 함께 돌려줘야 호출자가 '없음'과 '신뢰 불가'를 구분할 수 있다."""
+    table = {"table_id": "table_0001", "own_unit": EPS_ROW_TEXT, "unit": EPS_ROW_TEXT}
+
+    unit, rejected = resolve_table_unit(table, {"unit": "(단위 : 백만원)"})
+
+    assert unit is not None
+    assert unit.token == "백만원"
+    assert [spec.text for spec in rejected] == [EPS_ROW_TEXT]
+
+
+def test_resolve_table_unit_does_not_read_rows_or_sentences() -> None:
+    """숫자 셀이나 본문 문장에서 단위를 유추하지 않는다."""
+    table = {
+        "table_id": "table_0001",
+        "own_unit": None,
+        "unit": None,
+        "rows": [[{"text": "매출액"}, {"text": "1,000"}]],
+        "raw_context": "금액 단위는 백만원입니다.",
+    }
+
+    unit, rejected = resolve_table_unit(table, None)
+
+    assert unit is None
+    assert rejected == ()
+
+
+def test_build_table_group_index_links_flat_tables_to_their_group(
+    synthetic_document: dict[str, Any],
+) -> None:
+    _group_tables(synthetic_document, group_unit="(단위 : 백만원)", aclass="{XBRL}IS_C1")
+
+    index = build_table_group_index(synthetic_document)
+
+    for table in synthetic_document["tables"]:
+        assert index[table["table_id"]]["aclass"] == "{XBRL}IS_C1"
+
+
+# --------------------------------------------------------------------------
+# 8-d. ACLASS 기반 본표/주석 판정
+#
+# 실측 corpus(annual 47종)의 TABLE-GROUP ACLASS는 {XBRL} 이름공간에서 173종이었으나
+# 접두 토큰은 다섯 개뿐이었다: IS(6) BS(2) CF(2) EF(2) NT(161).
+# 같은 문서에 DART 서식 고유 ACLASS도 89종 함께 있어 이름공간으로 걸러야 한다.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "aclass",
+    ["{XBRL}IS_C1", "{XBRL}IS_S3", "{XBRL}BS_C", "{XBRL}CF_S", "{XBRL}EF_C"],
+)
+def test_primary_statement_aclass_is_classified_as_primary(aclass: str) -> None:
+    """손익계산서·재무상태표·현금흐름표·자본변동표는 본표다."""
+    assert classify_table({}, {"aclass": aclass}) == TABLE_CLASS_PRIMARY_STATEMENT
+
+
+@pytest.mark.parametrize("aclass", ["{XBRL}NT_C_D831150", "{XBRL}NT_S_U800405"])
+def test_note_aclass_is_classified_as_note(aclass: str) -> None:
+    assert classify_table({}, {"aclass": aclass}) == TABLE_CLASS_NOTE
+
+
+@pytest.mark.parametrize(
+    "aclass",
+    [
+        "{XBRL}ZZ_C1",  # 모르는 XBRL 표기
+        "INC_STAT",  # DART 서식 ACLASS. 이름이 손익계산서처럼 보여도 XBRL 본표가 아니다.
+        "SUB_BLC",
+        "IAM_TBL1",
+        "NORMAL",
+        "",
+    ],
+)
+def test_unknown_aclass_is_not_classified(aclass: str) -> None:
+    """모르는 표기를 본표로 넘겨짚지 않는다."""
+    assert classify_table({}, {"aclass": aclass}) is None
+
+
+def test_table_own_marking_wins_over_group_aclass() -> None:
+    """표에 직접 붙은 표기가 더 구체적인 선언이므로 우선한다."""
+    table = {"table_group_class": "note"}
+
+    assert classify_table(table, {"aclass": "{XBRL}IS_C1"}) == TABLE_CLASS_NOTE
+
+
+def test_classify_table_without_group_keeps_previous_behaviour() -> None:
+    """그룹을 넘기지 않으면 기존과 같이 표 표기만 본다."""
+    assert classify_table({"table_id": "table_0001"}) is None
+
+
+def test_extract_revenue_prefers_primary_statement_by_group_aclass(
+    ambiguous_document: dict[str, Any],
+) -> None:
+    """본표와 주석에 같은 후보가 있으면 그룹 ACLASS로 본표를 고른다."""
+    _strip_table_classification(ambiguous_document)
+
+    primary, note = ambiguous_document["tables"]
+
+    ambiguous_document["table_groups"] = [
+        {
+            "table_group_id": "table_group_0001",
+            "aclass": "{XBRL}IS_C1",
+            "unit": None,
+            "tables": [primary],
+        },
+        {
+            "table_group_id": "table_group_0002",
+            "aclass": "{XBRL}NT_C_D831150",
+            "unit": None,
+            "tables": [note],
+        },
+    ]
+
+    fact = extract_revenue_fact(ambiguous_document, fiscal_year=2025)
+
+    assert fact.location.table_id == "table_0101"
+    assert fact.raw_value == "2,222,222"
+    assert fact.unit_token == "백만원"
+
+
+def test_extract_revenue_blocks_when_both_group_aclasses_are_unknown(
+    ambiguous_document: dict[str, Any],
+) -> None:
+    """분류하지 못하는 ACLASS만 있으면 하나를 골라내지 않고 막는다."""
+    _strip_table_classification(ambiguous_document)
+
+    primary, note = ambiguous_document["tables"]
+
+    ambiguous_document["table_groups"] = [
+        {
+            "table_group_id": "table_group_0001",
+            "aclass": "INC_STAT",
+            "unit": None,
+            "tables": [primary],
+        },
+        {
+            "table_group_id": "table_group_0002",
+            "aclass": "{XBRL}ZZ_C1",
+            "unit": None,
+            "tables": [note],
+        },
+    ]
+
+    with pytest.raises(ExtractionBlockedError) as error:
+        extract_revenue_fact(ambiguous_document, fiscal_year=2025)
+
+    assert error.value.reason == "ambiguous_candidates"
 
 
 # --------------------------------------------------------------------------

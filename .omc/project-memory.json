@@ -1,0 +1,155 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1787479896379,
+  "projectRoot": "e:\\projects\\mirae-disclosure-agent",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "pyproject.toml"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "fastapi",
+        "version": null,
+        "category": "backend"
+      },
+      {
+        "name": "pytest",
+        "version": null,
+        "category": "testing"
+      }
+    ],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": "pytest",
+    "lintCommand": "ruff check",
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "scripts",
+      "src",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "data": {
+      "path": "data",
+      "purpose": "Data files",
+      "fileCount": 1,
+      "lastAccessed": 1787479896283,
+      "keyFiles": [
+        "README.md"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 8,
+      "lastAccessed": 1787479896284,
+      "keyFiles": [
+        "architecture.md",
+        "data_contracts.md",
+        "data_contracts_proposal.md",
+        "development_plan.md",
+        "git_workflow.md"
+      ]
+    },
+    "evaluation": {
+      "path": "evaluation",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1787479896286,
+      "keyFiles": [
+        "gold_answers.jsonl",
+        "questions.jsonl",
+        "README.md"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 6,
+      "lastAccessed": 1787479896287,
+      "keyFiles": [
+        "bootstrap.ps1",
+        "bootstrap.sh",
+        "run_api.ps1",
+        "run_api.sh",
+        "run_tests.ps1"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 0,
+      "lastAccessed": 1787479896288,
+      "keyFiles": []
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 2,
+      "lastAccessed": 1787479896288,
+      "keyFiles": [
+        "conftest.py",
+        "README.md"
+      ]
+    },
+    "tests\\fixtures": {
+      "path": "tests\\fixtures",
+      "purpose": "Test fixtures",
+      "fileCount": 3,
+      "lastAccessed": 1787479896297,
+      "keyFiles": [
+        "synthetic_ambiguous_document.json",
+        "synthetic_parsed_document.json"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/disclosure_agent/periodic/extractor.py",
+      "accessCount": 10,
+      "lastAccessed": 1787481554284,
+      "type": "file"
+    },
+    {
+      "path": "tests/unit/test_q01_slice.py",
+      "accessCount": 2,
+      "lastAccessed": 1787481900438,
+      "type": "file"
+    },
+    {
+      "path": "src/disclosure_agent/periodic/service.py",
+      "accessCount": 2,
+      "lastAccessed": 1787482373683,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

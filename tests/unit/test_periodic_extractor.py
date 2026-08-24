@@ -1,7 +1,13 @@
+from decimal import Decimal
+
 import pytest
 
 from disclosure_agent.common.enums import FactAccountingScope, MetricConcept
-from disclosure_agent.periodic.extractor import extract_financial_facts_with_evidence
+from disclosure_agent.periodic.extractor import (
+    ExtractionBlockedError,
+    extract_financial_fact,
+    extract_financial_facts_with_evidence,
+)
 
 
 def cell(
@@ -257,3 +263,132 @@ def test_operating_income_false_positives_are_rejected(
     )
 
     assert facts == []
+
+def test_targeted_operating_income_uses_primary_statement_fallback() -> None:
+    document = parsed_document(
+        financial_table(
+            label="영업이익 (주29)",
+            values=("20", "10"),
+        )
+    )
+
+    fact = extract_financial_fact(
+        document,
+        metric=MetricConcept.OPERATING_INCOME,
+        fiscal_year=2025,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+    )
+
+    assert fact.metric == MetricConcept.OPERATING_INCOME
+    assert fact.fiscal_year == 2025
+    assert (
+        fact.accounting_scope
+        == FactAccountingScope.CONSOLIDATED
+    )
+
+    assert fact.raw_value == "20"
+    assert fact.value == Decimal("20")
+
+    assert fact.unit_token == "백만원"
+    assert fact.unit_multiplier == 1_000_000
+    assert fact.value_in_base_unit == Decimal("20000000")
+
+    assert fact.acode is None
+    assert fact.acontext is None
+
+    assert fact.location.table_id == "table_0001"
+    assert fact.location.row_index == 1
+    assert fact.location.column_index == 1
+    assert fact.location.label_text == "영업이익 (주29)"
+
+def test_targeted_operating_income_prefers_primary_statement_over_note() -> None:
+    primary = financial_table(
+        table_id="table_primary",
+        label="영업이익",
+        values=("20",),
+    )
+
+    document = parsed_document(primary)
+
+    note = financial_table(
+        table_id="table_note",
+        label="영업이익",
+        values=("999",),
+    )
+    note["table_group_id"] = "table_group_note"
+
+    for row in note["rows"]:
+        for item in row:
+            item["provenance"]["table_group_id"] = "table_group_note"
+
+    note_group = {
+        "table_group_id": "table_group_note",
+        "section_id": "section_0001",
+        "title": "연결재무제표 주석",
+        "aclass": "{XBRL}NT_C_DUMMY",
+        "raw_context": "연결재무제표 주석",
+        "section_path": [
+            "III. 재무에 관한 사항",
+            "3. 연결재무제표 주석",
+        ],
+        "unit": "(단위 : 백만원)",
+        "tables": [note],
+    }
+
+    document["table_groups"].append(note_group)
+    document["tables"].append(note)
+
+    fact = extract_financial_fact(
+        document,
+        metric=MetricConcept.OPERATING_INCOME,
+        fiscal_year=2025,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+    )
+
+    assert fact.raw_value == "20"
+    assert fact.location.table_id == "table_primary"
+
+def test_targeted_operating_income_blocks_ambiguous_primary_statements() -> None:
+    first = financial_table(
+        table_id="table_first",
+        label="영업이익",
+        values=("20",),
+    )
+
+    document = parsed_document(first)
+
+    second = financial_table(
+        table_id="table_second",
+        label="영업이익",
+        values=("30",),
+    )
+    second["table_group_id"] = "table_group_second"
+
+    for row in second["rows"]:
+        for item in row:
+            item["provenance"]["table_group_id"] = "table_group_second"
+
+    document["table_groups"].append(
+        {
+            "table_group_id": "table_group_second",
+            "section_id": "section_0001",
+            "title": "연결재무제표",
+            "aclass": "{XBRL}IS_C2",
+            "raw_context": "연결재무제표",
+            "section_path": second["section_path"],
+            "unit": "(단위 : 백만원)",
+            "tables": [second],
+        }
+    )
+    document["tables"].append(second)
+
+    with pytest.raises(
+        ExtractionBlockedError,
+        match="본표 후보가 2개",
+    ):
+        extract_financial_fact(
+            document,
+            metric=MetricConcept.OPERATING_INCOME,
+            fiscal_year=2025,
+            accounting_scope=FactAccountingScope.CONSOLIDATED,
+        )

@@ -65,11 +65,12 @@
 
 TODO:
 - targeted FinancialFact -> Contract Fact/Evidence adapter 연결
-- ACODE가 없는 문서의 targeted 추출 경로(현재는 no_metric_acode로 막는다)
-- 영업이익·당기순이익 등 지표 확장
+- ACODE-less targeted fallback의 지원 지표 확장
+- 당기순이익 등 지표 확장
 - 분기·반기 컨텍스트(dQTR 등) 지원
 - targeted / bulk 추출 신호의 공통화 검토
 """
+
 
 from __future__ import annotations
 
@@ -109,6 +110,10 @@ REVENUE_ACODES: tuple[str, ...] = ("ifrs-full_Revenue",)
 
 METRIC_ACODES: dict[str, tuple[str, ...]] = {
     METRIC_REVENUE: REVENUE_ACODES,
+}
+
+LABEL_FALLBACK_METRICS = {
+    METRIC_OPERATING_INCOME,
 }
 
 # ACONTEXT 안에서 연결/별도를 구분하는 축 멤버.
@@ -279,7 +284,7 @@ class FinancialFact:
     """원문에서 추출한 단일 재무 수치."""
 
     metric: str
-    acode: str
+    acode: str | None
     accounting_scope: str
     fiscal_year: int
     raw_value: str
@@ -289,7 +294,7 @@ class FinancialFact:
     unit_multiplier: int
     value_in_base_unit: Decimal
     base_unit: str
-    acontext: str
+    acontext: str | None
     location: FactLocation
 
     def to_dict(self) -> dict[str, Any]:
@@ -752,18 +757,27 @@ def extract_financial_fact(
     5. 남은 후보가 여럿이면 표 분류로 본표를 우선하고, 구분할 수 없으면 막는다.
     6. 단위는 표와 TABLE-GROUP의 선언에서만 고른다. 신뢰 가능한 선언이 없으면 막는다.
     """
-    acodes = METRIC_ACODES.get(metric)
-
-    if not acodes:
-        raise ExtractionBlockedError(
-            reason="unsupported_metric",
-            detail=f"지원하지 않는 지표입니다: {metric}",
-        )
 
     if accounting_scope not in SCOPE_MEMBERS:
         raise ExtractionBlockedError(
             reason="unsupported_accounting_scope",
             detail=f"지원하지 않는 회계 기준입니다: {accounting_scope}",
+        )
+
+    acodes = METRIC_ACODES.get(metric)
+
+    if acodes is None:
+        if metric in LABEL_FALLBACK_METRICS:
+            return _extract_financial_fact_from_label_fallback(
+                document,
+                metric=metric,
+                fiscal_year=fiscal_year,
+                accounting_scope=accounting_scope,
+            )
+
+        raise ExtractionBlockedError(
+            reason="unsupported_metric",
+            detail=f"지원하지 않는 지표입니다: {metric}",
         )
 
     candidates, acode_hits = _collect_candidates(document, acodes)
@@ -1395,6 +1409,200 @@ def extract_financial_facts_with_evidence(
                 )
 
     return facts, evidence
+
+def _extract_financial_fact_from_label_fallback(
+    document: dict[str, Any],
+    *,
+    metric: str,
+    fiscal_year: int,
+    accounting_scope: str,
+) -> FinancialFact:
+    """
+    ACODE/ACONTEXT가 없는 지표를 bulk Fact/Evidence 결과에서 보수적으로 선택한다.
+
+    fallback은 공통 Contract까지 검증된 bulk 신호를 재사용한다.
+
+    선택 조건:
+    - metric 일치
+    - fiscal_year 일치
+    - accounting_scope 일치
+    - Evidence가 primary statement로 분류된 값
+
+    하나만 남을 때만 반환하며, 0개 또는 여러 개면 추측하지 않는다.
+    """
+    try:
+        metric_concept = MetricConcept(metric)
+    except ValueError as exc:
+        raise ExtractionBlockedError(
+            reason="unsupported_metric",
+            detail=f"지원하지 않는 지표입니다: {metric}",
+        ) from exc
+
+    try:
+        scope = FactAccountingScope(accounting_scope)
+    except ValueError as exc:
+        raise ExtractionBlockedError(
+            reason="unsupported_accounting_scope",
+            detail=f"지원하지 않는 회계 기준입니다: {accounting_scope}",
+        ) from exc
+
+    facts, evidence = extract_financial_facts_with_evidence(document)
+
+    evidence_by_id = {
+        item.evidence_id: item
+        for item in evidence
+    }
+
+    candidates: list[tuple[Fact, Evidence]] = []
+
+    for fact in facts:
+        if fact.metric is not metric_concept:
+            continue
+
+        if fact.fiscal_year != fiscal_year:
+            continue
+
+        if fact.accounting_scope is not scope:
+            continue
+
+        if len(fact.evidence_ids) != 1:
+            continue
+
+        item = evidence_by_id.get(fact.evidence_ids[0])
+
+        if item is None or item.provenance is None:
+            continue
+
+        if (
+            item.provenance.table_classification
+            != TABLE_CLASS_PRIMARY_STATEMENT
+        ):
+            continue
+
+        aclass = item.provenance.aclass or ""
+
+        if not aclass.startswith("{XBRL}IS"):
+            continue
+
+        candidates.append((fact, item))
+
+    if not candidates:
+        raise ExtractionBlockedError(
+            reason="no_matching_label_fallback",
+            detail=(
+                f"{fiscal_year} 회계연도 / {accounting_scope} 기준 "
+                f"{metric} 본표 후보를 찾지 못했습니다."
+            ),
+        )
+
+    if len(candidates) > 1:
+        locations = [
+            (
+                f"{item.provenance.table_id}"
+                f"[r{item.provenance.row_index}"
+                f",c{item.provenance.column_index}]"
+            )
+            for _, item in candidates
+            if item.provenance is not None
+        ]
+
+        raise ExtractionBlockedError(
+            reason="ambiguous_label_fallback",
+            detail=(
+                f"{fiscal_year} 회계연도 / {accounting_scope} 기준 "
+                f"{metric} 본표 후보가 {len(candidates)}개 남았습니다. "
+                "하나를 고를 추가 근거가 없어 추출을 중단합니다. "
+                f"후보: {' | '.join(locations)}"
+            ),
+        )
+
+    fact, item = candidates[0]
+
+    provenance = item.provenance
+
+    if provenance is None:
+        raise ExtractionBlockedError(
+            reason="missing_fallback_provenance",
+            detail="label fallback 후보에 provenance가 없습니다.",
+        )
+
+    raw_value = fact.raw_value
+
+    if raw_value is None:
+        raise ExtractionBlockedError(
+            reason="missing_raw_value",
+            detail="label fallback 후보에 raw_value가 없습니다.",
+        )
+
+    value = parse_numeric_value(raw_value)
+
+    if value is None:
+        raise ExtractionBlockedError(
+            reason="unparsable_value",
+            detail=f"셀 값을 수치로 변환하지 못했습니다: {raw_value!r}",
+        )
+
+    raw_unit = fact.raw_unit
+
+    if raw_unit is None:
+        raise ExtractionBlockedError(
+            reason="missing_table_unit",
+            detail="label fallback 후보에 단위가 없습니다.",
+        )
+
+    multiplier = provenance.unit_multiplier
+
+    if multiplier is None:
+        raise ExtractionBlockedError(
+            reason="missing_unit_multiplier",
+            detail="label fallback 후보의 단위 배수를 확인할 수 없습니다.",
+        )
+
+    if provenance.unit_trusted is not True:
+        raise ExtractionBlockedError(
+            reason="untrusted_table_unit",
+            detail="label fallback 후보의 단위 선언을 신뢰할 수 없습니다.",
+        )
+
+    table_id = provenance.table_id
+    row_index = provenance.row_index
+    column_index = provenance.column_index
+
+    if (
+        table_id is None
+        or row_index is None
+        or column_index is None
+    ):
+        raise ExtractionBlockedError(
+            reason="missing_fallback_location",
+            detail="label fallback 후보의 셀 위치가 불완전합니다.",
+        )
+
+    return FinancialFact(
+        metric=metric,
+        acode=provenance.acode,
+        accounting_scope=accounting_scope,
+        fiscal_year=fiscal_year,
+        raw_value=raw_value,
+        value=value,
+        unit_text=(
+            provenance.unit_declaration
+            or raw_unit
+        ),
+        unit_token=raw_unit,
+        unit_multiplier=int(multiplier),
+        value_in_base_unit=value * int(multiplier),
+        base_unit=BASE_CURRENCY_UNIT,
+        acontext=provenance.acontext,
+        location=FactLocation(
+            section_id=None,
+            section_path=tuple(item.section_path),
+            table_id=table_id,
+            row_index=row_index,
+            column_index=column_index,
+            label_text=item.row_label or "",
+        ),
+    )
 
 def extract_financial_facts(parsed_document: dict[str, Any]) -> list[Fact]:
     """기존 진입점을 유지하면서 Contract v0.1 Fact 목록을 반환한다."""

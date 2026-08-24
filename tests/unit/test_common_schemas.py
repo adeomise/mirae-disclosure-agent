@@ -1,5 +1,7 @@
 """Validation tests for contract v0.1 vertical-slice objects."""
 
+from decimal import Decimal
+
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
@@ -13,6 +15,7 @@ from disclosure_agent.common.enums import (
 )
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
+    AnswerabilityDetail,
     AnswerResponse,
     CalculationResult,
     ConversionGap,
@@ -20,6 +23,7 @@ from disclosure_agent.common.schemas import (
     EventHistory,
     EventLink,
     Evidence,
+    EvidenceProvenance,
     ExecutionIssue,
     Fact,
     FieldChange,
@@ -190,6 +194,37 @@ def test_completed_unanswerable_execution_result_with_reason() -> None:
     assert result.answerability_reason is AnswerabilityReason.INSUFFICIENT_EVIDENCE
 
 
+def test_unresolved_ambiguous_match_preserves_answerability_detail() -> None:
+    detail = AnswerabilityDetail(
+        stage="fact_selection",
+        reason="ambiguous_candidates",
+        detail="Multiple source cells satisfy the same conditions.",
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNRESOLVED,
+        answerability_reason=AnswerabilityReason.AMBIGUOUS_MATCH,
+        answerability_detail=detail,
+    )
+
+    assert AnswerabilityReason.AMBIGUOUS_MATCH.value == "ambiguous_match"
+    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
+    assert result.answerability_reason is AnswerabilityReason.AMBIGUOUS_MATCH
+    assert result.answerability_detail == detail
+    assert result.model_dump(mode="json")["answerability_detail"] == {
+        "stage": "fact_selection",
+        "reason": "ambiguous_candidates",
+        "detail": "Multiple source cells satisfy the same conditions.",
+    }
+
+
+def test_answerability_detail_accepts_optional_diagnostic_fields() -> None:
+    detail = AnswerabilityDetail(reason="ambiguous_candidates")
+
+    assert detail.stage is None
+    assert detail.detail is None
+
+
 def test_blocked_execution_result_with_issue() -> None:
     issue = ExecutionIssue(
         stage="retrieval",
@@ -281,6 +316,53 @@ def test_execution_result_accepts_existing_common_contract_objects() -> None:
     assert result.facts == [fact]
     assert result.event_histories == [history]
     assert result.evidence == [evidence]
+
+
+def test_evidence_preserves_structured_provenance() -> None:
+    provenance = EvidenceProvenance(
+        table_id="table_0002",
+        row_index=2,
+        column_index=1,
+        acode="ifrs-full_Revenue",
+        acontext="CFY2025dFY_ConsolidatedMember",
+        unit_declaration="(unit: KRW millions)",
+        unit_source="table_group",
+        unit_multiplier=1_000_000,
+        unit_trusted=True,
+        aclass="{XBRL}IS_C1",
+        table_classification="financial_statement",
+    )
+    evidence = Evidence(
+        evidence_id="evidence_dummy_revenue",
+        doc_id="doc_dummy_periodic",
+        location_type=EvidenceLocationType.TABLE,
+        provenance=provenance,
+    )
+
+    assert evidence.provenance == provenance
+    assert provenance.unit_multiplier == 1_000_000
+    assert provenance.unit_trusted is True
+    assert provenance.unit_source == "table_group"
+    assert provenance.table_id == "table_0002"
+    assert provenance.row_index == 2
+    assert provenance.column_index == 1
+    assert provenance.acode == "ifrs-full_Revenue"
+    assert provenance.acontext == "CFY2025dFY_ConsolidatedMember"
+    assert provenance.aclass == "{XBRL}IS_C1"
+    assert provenance.table_classification == "financial_statement"
+    assert evidence.model_dump()["provenance"] == provenance.model_dump()
+
+
+def test_evidence_provenance_accepts_partial_fields_and_decimal_multiplier() -> None:
+    provenance = EvidenceProvenance(
+        table_id="table_0002",
+        unit_multiplier=Decimal("1000000"),
+    )
+
+    assert provenance.table_id == "table_0002"
+    assert provenance.unit_multiplier == Decimal("1000000")
+    assert provenance.row_index is None
+    assert provenance.unit_trusted is None
 
 
 def test_conversion_gap_preserves_contract_gap_serialization_fields() -> None:

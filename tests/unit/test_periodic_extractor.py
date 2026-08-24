@@ -108,6 +108,25 @@ def test_revenue_facts_link_period_unit_scope_and_provenance() -> None:
     )
     assert evidence[0].raw_text == "1,234"
 
+    assert evidence[0].provenance is not None
+
+    provenance = evidence[0].provenance
+
+    assert provenance.table_id == "table_0001"
+    assert provenance.row_index == 1
+    assert provenance.column_index == 1
+
+    assert provenance.acode is None
+    assert provenance.acontext is None
+
+    assert provenance.unit_declaration == "(단위 : 백만원)"
+    assert provenance.unit_source == "table_group"
+    assert provenance.unit_multiplier == 1_000_000
+    assert provenance.unit_trusted is True
+
+    assert provenance.aclass == "{XBRL}IS_C1"
+    assert provenance.table_classification == "primary_statement"
+
 
 @pytest.mark.parametrize("label", ["매출원가", "매출채권", "매출총이익"])
 def test_revenue_false_positives_are_rejected(label: str) -> None:
@@ -162,7 +181,7 @@ def test_group_units_do_not_leak_and_flat_view_is_deduplicated() -> None:
     )
     document["tables"].append(second)
 
-    facts, _ = extract_financial_facts_with_evidence(document)
+    facts, evidence = extract_financial_facts_with_evidence(document)
 
     assert len(facts) == 2
     assert [(fact.raw_unit, fact.normalized_value) for fact in facts] == [
@@ -170,9 +189,71 @@ def test_group_units_do_not_leak_and_flat_view_is_deduplicated() -> None:
         ("원", "200"),
     ]
 
+    assert evidence[0].provenance is not None
+    assert evidence[0].provenance.unit_source == "table_group"
+    assert evidence[0].provenance.unit_declaration == "(단위 : 백만원)"
+    assert evidence[0].provenance.unit_multiplier == 1_000_000
+    assert evidence[0].provenance.unit_trusted is True
 
-def test_operating_income_is_not_emitted_without_contract_concept() -> None:
-    facts, _ = extract_financial_facts_with_evidence(
-        parsed_document(financial_table(label="영업이익", values=("20",)))
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "영업이익",
+        "영업이익(손실)",
+    ],
+)
+def test_operating_income_facts_are_emitted(label: str) -> None:
+    document = parsed_document(
+        financial_table(
+            label=label,
+            values=("20",),
+        )
     )
+
+    facts, evidence = extract_financial_facts_with_evidence(document)
+
+    assert len(facts) == 1
+    assert len(evidence) == 1
+
+    fact = facts[0]
+
+    assert fact.metric is MetricConcept.OPERATING_INCOME
+    assert fact.raw_value == "20"
+    assert fact.raw_unit == "백만원"
+    assert fact.normalized_value == "20000000"
+    assert fact.normalized_unit == "KRW"
+    assert fact.fiscal_year == 2025
+    assert fact.fiscal_period == "annual"
+    assert (
+        fact.accounting_scope
+        is FactAccountingScope.CONSOLIDATED
+    )
+    assert fact.evidence_ids == [evidence[0].evidence_id]
+
+    assert evidence[0].row_label == label
+    assert evidence[0].raw_text == "20"
+
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "영업이익률",
+        "영업이익증가율",
+        "영업외이익",
+    ],
+)
+def test_operating_income_false_positives_are_rejected(
+    label: str,
+) -> None:
+    facts, _ = extract_financial_facts_with_evidence(
+        parsed_document(
+            financial_table(
+                label=label,
+                values=("20",),
+            )
+        )
+    )
+
     assert facts == []

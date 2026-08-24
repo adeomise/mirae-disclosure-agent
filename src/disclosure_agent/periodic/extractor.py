@@ -85,7 +85,7 @@ from disclosure_agent.common.enums import (
     FactAccountingScope,
     MetricConcept,
 )
-from disclosure_agent.common.schemas import Evidence, Fact
+from disclosure_agent.common.schemas import Evidence, EvidenceProvenance, Fact
 
 # 지표·회계기준 어휘는 Contract v0.1의 enum을 그대로 쓴다.
 #
@@ -94,6 +94,7 @@ from disclosure_agent.common.schemas import Evidence, Fact
 # dict key 사용은 문자열일 때와 동일하고, query_analyzer 등 기존 import 경로도 그대로
 # 유지된다.
 METRIC_REVENUE = MetricConcept.REVENUE
+METRIC_OPERATING_INCOME = MetricConcept.OPERATING_INCOME
 
 SCOPE_CONSOLIDATED = FactAccountingScope.CONSOLIDATED
 SCOPE_SEPARATE = FactAccountingScope.SEPARATE
@@ -908,7 +909,12 @@ METRIC_ALIASES: dict[MetricConcept, set[str]] = {
         "수익(매출액)",
         "영업수익",
     },
+    MetricConcept.OPERATING_INCOME: {
+        "영업이익",
+        "영업이익(손실)",
+    },
 }
+
 NOTE_PATTERN = re.compile(r"\s*\(주\s*\d[^)]*\)\s*$")
 NUMBER_PATTERN = re.compile(r"^-?\d+(?:\.\d+)?$")
 FISCAL_YEAR_PATTERN = re.compile(
@@ -983,21 +989,95 @@ def extract_raw_unit(unit_context: str | None) -> str | None:
     match = UNIT_PATTERN.search(unit_context)
     return match.group(1).strip() if match else unit_context.strip()
 
+@dataclass(frozen=True)
+class SourceUnitResolution:
+    raw_unit: str | None
+    declaration: str | None
+    source: str | None
+    multiplier: int | Decimal | None
+    trusted: bool | None
+
+def _build_source_unit_resolution(
+    declaration: str | None,
+    source: str,
+) -> SourceUnitResolution:
+    if not declaration:
+        return SourceUnitResolution(
+            raw_unit=None,
+            declaration=None,
+            source=None,
+            multiplier=None,
+            trusted=None,
+        )
+
+    raw_unit = extract_raw_unit(declaration)
+
+    if raw_unit is None:
+        return SourceUnitResolution(
+            raw_unit=None,
+            declaration=declaration,
+            source=source,
+            multiplier=None,
+            trusted=None,
+        )
+
+    # 기존 targeted 경로의 신뢰도 판정이 가능한 통화 단위라면
+    # 동일한 판정 기준을 재사용한다.
+    parsed_unit = parse_unit(declaration)
+
+    if parsed_unit is not None:
+        multiplier: int | Decimal | None = parsed_unit.multiplier
+        trusted: bool | None = parsed_unit.trusted
+    else:
+        multiplier = UNIT_MULTIPLIERS.get(raw_unit)
+        trusted = None
+
+    return SourceUnitResolution(
+        raw_unit=raw_unit,
+        declaration=declaration,
+        source=source,
+        multiplier=multiplier,
+        trusted=trusted,
+    )
+
+def resolve_source_unit_details(
+    table: dict[str, Any],
+    table_group: dict[str, Any] | None,
+) -> SourceUnitResolution:
+    """bulk 단위와 그 단위를 선택한 provenance를 함께 반환한다."""
+
+    for row in table.get("rows", []):
+        if len(row) != 1:
+            break
+
+        text = cell_text(row[0])
+
+        if "단위" in text:
+            return _build_source_unit_resolution(
+                text,
+                "table_row",
+            )
+
+    if table_group is not None:
+        return _build_source_unit_resolution(
+            table_group.get("unit"),
+            "table_group",
+        )
+
+    return _build_source_unit_resolution(
+        table.get("unit"),
+        "table",
+    )
 
 def resolve_source_unit(
     table: dict[str, Any],
     table_group: dict[str, Any] | None,
 ) -> str | None:
     """행별 단위 문구를 표 전체 단위로 오인하지 않고 같은 source 안에서 결정한다."""
-    for row in table.get("rows", []):
-        if len(row) != 1:
-            break
-        text = cell_text(row[0])
-        if "단위" in text:
-            return extract_raw_unit(text)
-    if table_group is not None:
-        return extract_raw_unit(table_group.get("unit"))
-    return extract_raw_unit(table.get("unit"))
+    return resolve_source_unit_details(
+        table,
+        table_group,
+    ).raw_unit
 
 
 def normalize_value_and_unit(
@@ -1190,8 +1270,28 @@ def extract_financial_facts_with_evidence(
         rows = table.get("rows", [])
         logical_rows = build_logical_rows(rows)
         term_years = fiscal_term_years(table_group)
-        raw_unit = resolve_source_unit(table, table_group)
-        accounting_scope = infer_accounting_scope(table, table_group)
+        unit_resolution = resolve_source_unit_details(
+            table,
+            table_group,
+        )
+        raw_unit = unit_resolution.raw_unit
+
+        accounting_scope = infer_accounting_scope(
+            table,
+            table_group,
+        )
+
+        group = table_group or {}
+
+        aclass = (
+            group.get("aclass")
+            or table.get("attributes", {}).get("aclass")
+        )
+
+        table_classification = classify_table(
+            table,
+            table_group,
+        )
 
         for row_index, (row, logical_row) in enumerate(zip(rows, logical_rows, strict=True)):
             if not row:
@@ -1263,6 +1363,19 @@ def extract_financial_facts_with_evidence(
                             f"anegated={value_cell.get('anegated')}"
                         ),
                         raw_text=raw_value,
+                        provenance=EvidenceProvenance(
+                            table_id=table_id,
+                            row_index=source_row,
+                            column_index=source_column,
+                            acode=value_cell.get("acode"),
+                            acontext=value_cell.get("acontext"),
+                            unit_declaration=unit_resolution.declaration,
+                            unit_source=unit_resolution.source,
+                            unit_multiplier=unit_resolution.multiplier,
+                            unit_trusted=unit_resolution.trusted,
+                            aclass=str(aclass) if aclass else None,
+                            table_classification=table_classification,
+                        ),
                     )
                 )
                 facts.append(
@@ -1282,7 +1395,6 @@ def extract_financial_facts_with_evidence(
                 )
 
     return facts, evidence
-
 
 def extract_financial_facts(parsed_document: dict[str, Any]) -> list[Fact]:
     """기존 진입점을 유지하면서 Contract v0.1 Fact 목록을 반환한다."""

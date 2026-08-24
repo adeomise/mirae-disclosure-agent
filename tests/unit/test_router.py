@@ -15,7 +15,6 @@ from typing import Any
 import pytest
 
 from disclosure_agent.agent import router
-from disclosure_agent.agent.answer_builder import STATUS_BLOCKED, STATUS_OK
 from disclosure_agent.agent.handlers.event_history import handle_event_history
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
 from disclosure_agent.agent.query_analyzer import (
@@ -28,6 +27,8 @@ from disclosure_agent.agent.query_analyzer import (
     QueryPlan,
     build_query_plan,
 )
+from disclosure_agent.common.enums import ExecutionStatus
+from disclosure_agent.common.schemas import AgentExecutionResult
 
 SYNTHETIC_QUESTION = "테스트반도체 2025년 연결 기준 매출액이 얼마야?"
 
@@ -82,11 +83,13 @@ def test_dispatch_passes_plan_and_context_to_handler(
     """Router는 결과를 가공하지 않고 handler에 그대로 넘긴다."""
     received: dict[str, Any] = {}
 
-    def fake_handler(plan: QueryPlan, **context: Any) -> dict[str, Any]:
+    handled = AgentExecutionResult(execution_status=ExecutionStatus.COMPLETED)
+
+    def fake_handler(plan: QueryPlan, **context: Any) -> AgentExecutionResult:
         received["plan"] = plan
         received["context"] = context
 
-        return {"status": STATUS_OK}
+        return handled
 
     isolated_registry[INTENT_SINGLE_FACT] = fake_handler
 
@@ -96,7 +99,7 @@ def test_dispatch_passes_plan_and_context_to_handler(
         manifest_path="manifest_path_placeholder",
     )
 
-    assert result == {"status": STATUS_OK}
+    assert result is handled
     assert received["plan"] is single_fact_plan
     assert received["context"] == {
         "corpus_root": "corpus_root_placeholder",
@@ -127,10 +130,10 @@ def test_known_but_unimplemented_intent_is_blocked(
 
     result = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
-    assert result["status"] == STATUS_BLOCKED
-    assert result["blocked"]["stage"] == "routing"
-    assert result["blocked"]["reason"] == router.REASON_UNIMPLEMENTED_INTENT
-    assert intent in result["blocked"]["detail"]
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "routing"
+    assert result.execution_issue.reason == router.REASON_UNIMPLEMENTED_INTENT
+    assert intent in result.execution_issue.detail
 
 
 def test_unknown_intent_is_blocked_with_distinct_reason(single_fact_plan: QueryPlan) -> None:
@@ -139,9 +142,9 @@ def test_unknown_intent_is_blocked_with_distinct_reason(single_fact_plan: QueryP
 
     result = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
-    assert result["status"] == STATUS_BLOCKED
-    assert result["blocked"]["stage"] == "routing"
-    assert result["blocked"]["reason"] == router.REASON_UNKNOWN_INTENT
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "routing"
+    assert result.execution_issue.reason == router.REASON_UNKNOWN_INTENT
 
 
 def test_blocked_route_does_not_invent_a_fact(single_fact_plan: QueryPlan) -> None:
@@ -150,19 +153,23 @@ def test_blocked_route_does_not_invent_a_fact(single_fact_plan: QueryPlan) -> No
 
     result = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
-    assert result["fact"] is None
-    assert result["evidence"] == []
-    assert result["calculations"] == []
+    assert result.facts == []
+    assert result.evidence == []
+    assert result.calculations == []
 
 
-def test_blocked_route_preserves_the_plan(single_fact_plan: QueryPlan) -> None:
-    """어떤 계획이 거절됐는지 결과에서 확인할 수 있어야 한다."""
+def test_blocked_route_does_not_judge_answerability(single_fact_plan: QueryPlan) -> None:
+    """
+    코퍼스를 보지 않았으므로 답할 수 있는지 없는지도 알지 못한다.
+
+    UNANSWERABLE로 채우면 '코퍼스에 답이 없다'는 확정 진술이 되어 사실과 달라진다.
+    """
     plan = dataclasses.replace(single_fact_plan, intent=INTENT_CROSS_ENTITY_COMPARE)
 
     result = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
-    assert result["query"]["intent"] == INTENT_CROSS_ENTITY_COMPARE
-    assert result["query"]["question"] == plan.question
+    assert result.answerability_status is None
+    assert result.answerability_reason is None
 
 
 def test_blocked_detail_lists_currently_supported_intents(single_fact_plan: QueryPlan) -> None:
@@ -170,8 +177,8 @@ def test_blocked_detail_lists_currently_supported_intents(single_fact_plan: Quer
 
     result = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
-    assert INTENT_SINGLE_FACT in result["blocked"]["detail"]
-    assert INTENT_EVENT_HISTORY in result["blocked"]["detail"]
+    assert INTENT_SINGLE_FACT in result.execution_issue.detail
+    assert INTENT_EVENT_HISTORY in result.execution_issue.detail
 
 
 # --------------------------------------------------------------------------
@@ -183,22 +190,25 @@ def test_register_handler_makes_a_new_intent_routable(
     single_fact_plan: QueryPlan,
     isolated_registry: dict[str, Any],
 ) -> None:
-    """Pattern C/E는 handler 등록만으로 붙을 수 있어야 한다."""
+    """Pattern C는 handler 등록만으로 붙을 수 있어야 한다."""
     plan = dataclasses.replace(single_fact_plan, intent=INTENT_TEMPORAL_COMPARE)
 
     before = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
-    assert before["status"] == STATUS_BLOCKED
+    assert before.execution_status is ExecutionStatus.BLOCKED
 
     router.register_handler(
         INTENT_TEMPORAL_COMPARE,
-        lambda plan, **context: {"status": STATUS_OK, "routed_intent": plan.intent},
+        lambda plan, **context: AgentExecutionResult(
+            execution_status=ExecutionStatus.COMPLETED,
+            warnings=[plan.intent],
+        ),
     )
 
     after = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
-    assert after["status"] == STATUS_OK
-    assert after["routed_intent"] == INTENT_TEMPORAL_COMPARE
+    assert after.execution_status is ExecutionStatus.COMPLETED
+    assert after.warnings == [INTENT_TEMPORAL_COMPARE]
 
 
 def test_registry_is_restored_between_tests() -> None:

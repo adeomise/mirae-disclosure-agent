@@ -13,6 +13,7 @@ Parser 경계에 대한 메모:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import unicodedata
 from pathlib import Path
@@ -27,17 +28,25 @@ from disclosure_agent.agent.handlers.event_history import (
     REASON_NO_ORIGINAL_FILING,
     build_event_history_result,
     filing_date_window,
+    handle_event_history,
+)
+from disclosure_agent.agent.normalization import (
+    GAP_ROOT_CANDIDATE_DOC_IDS,
+    normalize_event_history_result,
 )
 from disclosure_agent.agent.query_analyzer import (
     INTENT_EVENT_HISTORY,
     build_query_plan,
 )
 from disclosure_agent.common.enums import (
+    AnswerabilityReason,
     AnswerabilityStatus,
     ChainPolicy,
     EventLinkResolutionStatus,
     EvidenceLocationType,
+    ExecutionStatus,
 )
+from disclosure_agent.common.schemas import AgentExecutionResult
 from disclosure_agent.event.contract_adapter import GAP_UNRESOLVED_LINKS, gap_kinds
 from disclosure_agent.event.diff import FIELD_CONTRACT_AMOUNT, FIELD_CONTRACT_END_DATE
 
@@ -530,7 +539,314 @@ def test_partial_chain_reports_what_it_could_not_link(
 
 
 # --------------------------------------------------------------------------
-# 5. Router 연결
+# 5. 공통 실행 Contract 정규화
+#
+# 이미 Contract 타입인 EventHistory / EventLink / Evidence는 다시 만들지 않는다. 재변환하면
+# event.contract_adapter가 이미 내린 판정을 두 번 내리게 된다.
+# --------------------------------------------------------------------------
+
+
+def test_complete_chain_normalizes_to_answerable(complete_chain) -> None:
+    manifest_path, corpus_root = complete_chain
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    internal = build_event_history_result(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    result = normalize_event_history_result(internal)
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert result.answerability_reason is None
+    assert result.execution_issue is None
+
+
+def test_normalization_keeps_the_contract_objects_untouched(complete_chain) -> None:
+    """같은 객체를 그대로 싣는다. 값을 다시 만들면 판정이 두 벌이 된다."""
+    manifest_path, corpus_root = complete_chain
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    internal = build_event_history_result(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    result = normalize_event_history_result(internal)
+
+    assert result.event_histories == [internal.history]
+    assert result.event_links == list(internal.links)
+    assert result.evidence == list(internal.evidence)
+
+
+def test_incomplete_chain_keeps_its_partial_meaning(
+    make_event_corpus,
+    stub_parser,
+) -> None:
+    """
+    확보한 구간은 답하고 미해결분을 밝힌다는 기존 의미를 유지한다.
+
+    chain_complete=False를 기계가 읽을 수 있는 사유로 옮길 뿐, 새로 판정하지 않는다.
+    """
+    manifest_path, corpus_root = make_event_corpus(
+        [
+            _record("E0001", "20250601", is_correction=False),
+            _record("E0002", "20251008", is_correction=True),
+            _record("E0003", "20251008", is_correction=True),
+            _record("E0004", "20251218", is_correction=True),
+        ]
+    )
+
+    stub_parser(
+        {
+            "E0001": {},
+            "E0002": {
+                "original_filing_date": "2025-06-01",
+                "correction_date": "2025-10-08",
+            },
+            "E0003": {
+                "original_filing_date": "2025-06-01",
+                "correction_date": "2025-10-08",
+            },
+            "E0004": {
+                "original_filing_date": "2025-10-08",
+                "correction_date": "2025-12-18",
+            },
+        }
+    )
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.INCOMPLETE_CHAIN
+    assert result.event_histories[0].chain_complete is False
+
+    # 멈춘 지점이 없는 판정이다. 없는 진단을 지어내지 않는다.
+    assert result.answerability_detail is None
+
+
+def test_conversion_gaps_stay_structured(
+    make_event_corpus,
+    stub_parser,
+) -> None:
+    """
+    gap은 문자열로 합치지 않는다.
+
+    dropped에 담긴 원본 값이 gap의 존재 이유다. 요약하면 남길 이유가 없어진다.
+    """
+    manifest_path, corpus_root = make_event_corpus(
+        [
+            _record("E0001", "20250601", is_correction=False),
+            _record("E0002", "20251008", is_correction=True),
+            _record("E0003", "20251008", is_correction=True),
+            _record("E0004", "20251218", is_correction=True),
+        ]
+    )
+
+    stub_parser(
+        {
+            "E0001": {},
+            "E0002": {
+                "original_filing_date": "2025-06-01",
+                "correction_date": "2025-10-08",
+                "changes": [("계약기간 종료일", "2026-01-31", "2026-06-30")],
+            },
+            "E0003": {
+                "original_filing_date": "2025-06-01",
+                "correction_date": "2025-10-08",
+            },
+            "E0004": {
+                "original_filing_date": "2025-10-08",
+                "correction_date": "2025-12-18",
+            },
+        }
+    )
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    internal = build_event_history_result(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    result = normalize_event_history_result(internal)
+
+    assert [gap.kind for gap in result.conversion_gaps] == [
+        gap.kind for gap in internal.conversion_gaps
+    ]
+    assert [gap.dropped for gap in result.conversion_gaps] == [
+        dict(gap.dropped) for gap in internal.conversion_gaps
+    ]
+    assert any(gap.kind == GAP_UNRESOLVED_LINKS for gap in result.conversion_gaps)
+
+    unresolved = next(
+        gap for gap in result.conversion_gaps if gap.kind == GAP_UNRESOLVED_LINKS
+    )
+
+    assert unresolved.dropped["unresolved_correction_receipt_nos"] == ["E0004"]
+
+
+def test_no_original_filing_normalizes_to_not_found(
+    make_event_corpus,
+    stub_parser,
+) -> None:
+    """manifest 전체와 대조한 결과다. 실행은 끝났고 답할 것이 없을 뿐이다."""
+    manifest_path, corpus_root = make_event_corpus(
+        [_record("E0001", "20250301", is_correction=False)]
+    )
+
+    stub_parser({"E0001": {}})
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.NOT_FOUND
+    assert result.execution_issue is None
+
+    # NOT_FOUND만으로는 no_matching_filing과 구분되지 않는다. 원문 진단이 그 구분을 남긴다.
+    assert result.answerability_detail.reason == REASON_NO_ORIGINAL_FILING
+
+
+def test_ambiguous_root_normalizes_to_ambiguous_match(
+    make_event_corpus,
+    stub_parser,
+) -> None:
+    """
+    후보를 모두 찾았고 하나로 좁힐 근거가 없다고 판정했다. 판정 자체는 끝났다.
+
+    AMBIGUOUS_LINK가 아니다. 그 값은 문서 사이의 '연결'이 모호하다는 뜻이고 event.linker가
+    내리는 판정인데, 여기에는 EventLink가 하나도 없다. 모호한 것은 질문이 가리키는 대상
+    문서이므로 AMBIGUOUS_MATCH다.
+    """
+    manifest_path, corpus_root = make_event_corpus(
+        [
+            _record("E0001", "20250601", is_correction=False),
+            _record("E0002", "20250612", is_correction=False),
+        ]
+    )
+
+    stub_parser({"E0001": {}, "E0002": {}})
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
+    assert result.answerability_reason is AnswerabilityReason.AMBIGUOUS_MATCH
+    assert result.answerability_reason is not AnswerabilityReason.AMBIGUOUS_LINK
+    assert result.execution_issue is None
+    assert result.event_histories == []
+    assert result.event_links == []
+
+    assert result.answerability_detail.stage == "filing_discovery"
+    assert result.answerability_detail.reason == REASON_AMBIGUOUS_ROOT
+
+
+def test_ambiguous_root_keeps_the_candidate_documents(
+    make_event_corpus,
+    stub_parser,
+) -> None:
+    """
+    후보를 병기할 자리가 없으면 gap에 남긴다. 하나를 골라 답하지 않는다.
+
+    canonical reason과 그 진단은 어느 후보들 사이에서 모호했는지를 담지 못한다.
+    """
+    manifest_path, corpus_root = make_event_corpus(
+        [
+            _record("E0001", "20250601", is_correction=False),
+            _record("E0002", "20250612", is_correction=False),
+        ]
+    )
+
+    stub_parser({"E0001": {}, "E0002": {}})
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    candidates = next(
+        gap for gap in result.conversion_gaps if gap.kind == GAP_ROOT_CANDIDATE_DOC_IDS
+    )
+
+    assert set(candidates.dropped["root_candidate_doc_ids"]) == {
+        "exchange_E0001",
+        "exchange_E0002",
+    }
+
+    # 판정 근거는 손실이 아니므로 gap에는 남기지 않는다. 남는 gap은 담을 자리가 없는
+    # 정보뿐이다.
+    assert [gap.kind for gap in result.conversion_gaps] == [
+        GAP_ROOT_CANDIDATE_DOC_IDS
+    ]
+
+
+def test_parse_failure_is_blocked_not_unanswerable(
+    monkeypatch: pytest.MonkeyPatch,
+    make_event_corpus,
+) -> None:
+    """문서를 열지 못했으면 답이 없는지조차 알지 못한다."""
+    manifest_path, corpus_root = make_event_corpus(
+        [_record("E0001", "20250601", is_correction=False)]
+    )
+
+    def _fail(path):
+        raise ValueError("본문을 해석하지 못했습니다.")
+
+    monkeypatch.setattr(event_history, "parse_exchange_document", _fail)
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.answerability_status is None
+    assert result.answerability_reason is None
+    assert result.answerability_detail is None
+    assert result.execution_issue.stage == "parsing"
+    assert result.execution_issue.reason == "parse_failed"
+    assert "해석하지 못했습니다" in result.execution_issue.detail
+
+
+def test_plan_warnings_are_preserved(complete_chain) -> None:
+    """
+    질의 해석 단계의 경고가 실행 결과까지 남아야 한다.
+
+    기존 to_dict는 plan.warnings를 담지 않았다. 의미를 바꾸는 것이 아니라 누락된 진단
+    정보를 보존하는 것이다.
+    """
+    manifest_path, corpus_root = complete_chain
+
+    plan = dataclasses.replace(
+        build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES),
+        warnings=("합성 경고",),
+    )
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    assert result.warnings == ["합성 경고"]
+
+
+# --------------------------------------------------------------------------
+# 6. Router 연결
 # --------------------------------------------------------------------------
 
 
@@ -541,9 +857,9 @@ def test_router_dispatches_q13_question_to_pattern_e(complete_chain) -> None:
         QUESTION, corpus_root=corpus_root, manifest_path=manifest_path
     )
 
-    assert result["intent"] == INTENT_EVENT_HISTORY
-    assert result["status"] == "ANSWERABLE"
-    assert result["event_history"]["chain_complete"] is True
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert result.event_histories[0].chain_complete is True
 
 
 def test_router_still_dispatches_q01_question_to_pattern_a(
@@ -557,9 +873,43 @@ def test_router_still_dispatches_q01_question_to_pattern_a(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result["query"]["intent"] == "single_fact"
-    assert result["status"] == "blocked"
-    assert result["blocked"]["stage"] == "parsing"
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "parsing"
+
+
+def test_router_returns_one_contract_for_both_patterns(complete_chain) -> None:
+    """
+    Pattern이 달라도 공통 Contract 하나로 답한다.
+
+    받는 쪽이 어느 Pattern이 실행됐는지 알아야 결과를 읽을 수 있으면, Pattern이 늘 때마다
+    호출부가 함께 바뀐다.
+
+    같은 코퍼스에 정기공시가 없으므로 Pattern A는 답할 것을 찾지 못한다. 결과가 달라도
+    타입과 직렬화 경로는 같아야 한다.
+    """
+    manifest_path, corpus_root = complete_chain
+
+    pattern_e = router.answer_question(
+        QUESTION, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    pattern_a = router.answer_question(
+        "테스트반도체 2025년 연결 기준 매출액이 얼마야?",
+        corpus_root=corpus_root,
+        manifest_path=manifest_path,
+    )
+
+    assert isinstance(pattern_e, AgentExecutionResult)
+    assert isinstance(pattern_a, AgentExecutionResult)
+
+    assert pattern_e.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert pattern_a.answerability_status is AnswerabilityStatus.UNANSWERABLE
+
+    # 직렬화 경로도 Pattern에 관계없이 같아야 한다.
+    for result in (pattern_a, pattern_e):
+        dumped = result.model_dump(mode="json")
+
+        assert json.loads(json.dumps(dumped, ensure_ascii=False)) == dumped
 
 
 def test_router_reports_missing_manifest_for_pattern_e(tmp_path: Path) -> None:
@@ -569,4 +919,5 @@ def test_router_reports_missing_manifest_for_pattern_e(tmp_path: Path) -> None:
         manifest_path=tmp_path / "does_not_exist.jsonl",
     )
 
-    assert result["blocked"]["reason"] == "manifest_missing"
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.reason == "manifest_missing"

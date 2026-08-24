@@ -787,7 +787,9 @@ def test_service_reports_ambiguous_candidates_as_blocked(
 
     _strip_table_classification(ambiguous_document)
 
-    result = build_result_from_document(ambiguous_document, plan=plan, filing=filing)
+    result = build_result_from_document(
+        ambiguous_document, plan=plan, filing=filing
+    ).to_dict()
 
     assert result["status"] == STATUS_BLOCKED
     assert result["blocked"]["stage"] == "extraction"
@@ -1147,7 +1149,9 @@ def test_service_orchestration_returns_ok_on_synthetic_document(
 ) -> None:
     plan, filing = resolved_filing
 
-    result = build_result_from_document(synthetic_document, plan=plan, filing=filing)
+    result = build_result_from_document(
+        synthetic_document, plan=plan, filing=filing
+    ).to_dict()
 
     assert result["status"] == STATUS_OK
     assert result["fact"]["accounting_scope"] == SCOPE_CONSOLIDATED
@@ -1167,7 +1171,9 @@ def test_service_orchestration_reports_blocked_without_acontext(
             for cell in row:
                 cell.pop("acontext", None)
 
-    result = build_result_from_document(synthetic_document, plan=plan, filing=filing)
+    result = build_result_from_document(
+        synthetic_document, plan=plan, filing=filing
+    ).to_dict()
 
     assert result["status"] == STATUS_BLOCKED
     assert result["blocked"]["stage"] == "extraction"
@@ -1185,6 +1191,8 @@ def test_service_result_is_json_serializable(
 
     plan, filing = resolved_filing
 
-    result = build_result_from_document(synthetic_document, plan=plan, filing=filing)
+    result = build_result_from_document(
+        synthetic_document, plan=plan, filing=filing
+    ).to_dict()
 
     assert json.loads(json.dumps(result, ensure_ascii=False))["status"] == STATUS_OK

@@ -1,12 +1,17 @@
 """Pattern A (Single Fact Lookup) 통합 테스트.
 
-질문 문자열에서 결과 dict까지의 흐름을 본다. 합성 manifest와 합성 corpus만 사용하며
-실제 공시 XML, 실제 기업명, 실제 수치는 쓰지 않는다.
+질문 문자열에서 공통 실행 Contract(AgentExecutionResult)까지의 흐름을 본다. 합성 manifest와
+합성 corpus만 사용하며 실제 공시 XML, 실제 기업명, 실제 수치는 쓰지 않는다.
 
 Parser 경계에 대한 메모:
     현재 periodic parser는 cell.acontext를 보존하지 않는다. 실제 corpus에서는 이 흐름이
     extraction 단계에서 막히는 것이 정상이며, 그 상태를 우회하지 않는다. 여기서는 parser가
     보완된 뒤의 입력을 합성 fixture로 대신해 downstream을 검증한다.
+
+실행 상태와 답변 가능성을 나눠 보는 이유:
+    "실행이 끝났는가"와 "답할 수 있는가"는 다른 질문이다. 공시를 찾지 못한 것은 실행이 끝난
+    뒤의 판정이고, 문서를 열지 못한 것은 판정에 이르지 못한 것이다. 두 경우가 같은 상태로
+    보이면 검색 실패와 파이프라인 고장을 구분할 수 없다.
 """
 
 from __future__ import annotations
@@ -20,12 +25,20 @@ import pytest
 from disclosure_agent.agent import router
 from disclosure_agent.agent.answer_builder import STATUS_BLOCKED, STATUS_OK
 from disclosure_agent.agent.handlers import single_fact
-from disclosure_agent.agent.handlers.single_fact import handle_single_fact
+from disclosure_agent.agent.handlers.single_fact import (
+    build_single_fact_result,
+    handle_single_fact,
+)
 from disclosure_agent.agent.query_analyzer import (
-    INTENT_SINGLE_FACT,
     SCOPE_CONSOLIDATED,
     QueryPlan,
     build_query_plan,
+)
+from disclosure_agent.common.enums import (
+    AnswerabilityReason,
+    AnswerabilityStatus,
+    ExecutionStatus,
+    FactAccountingScope,
 )
 
 SYNTHETIC_QUESTION = "테스트반도체 2025년 연결 기준 매출액이 얼마야?"
@@ -77,11 +90,49 @@ def test_handle_single_fact_returns_ok_with_evidence(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result["status"] == STATUS_OK
-    assert result["fact"]["accounting_scope"] == SCOPE_CONSOLIDATED
-    assert result["fact"]["fiscal_year"] == 2025
-    assert result["filing"]["doc_id"] == "periodic_SYNTHETIC0001"
-    assert len(result["evidence"]) == 1
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert result.answerability_reason is None
+    assert result.execution_issue is None
+
+    assert len(result.facts) == 1
+    assert len(result.evidence) == 1
+
+    fact = result.facts[0]
+
+    assert fact.accounting_scope is FactAccountingScope.CONSOLIDATED
+    assert fact.fiscal_year == 2025
+    assert result.evidence[0].doc_id == "periodic_SYNTHETIC0001"
+
+    # Fact와 Evidence가 서로를 가리켜야 근거 추적이 끊기지 않는다.
+    assert fact.evidence_ids == [result.evidence[0].evidence_id]
+
+
+def test_single_fact_result_keeps_the_internal_view(
+    plan: QueryPlan,
+    synthetic_document: dict[str, Any],
+    synthetic_manifest_path: Path,
+    nfd_corpus_root: Path,
+    parsed_document_stub,
+) -> None:
+    """
+    공통 Contract로 옮기기 전의 내부 결과는 그대로 남아 있다.
+
+    공시 메타데이터처럼 Contract에 자리가 없는 값을 대조할 경로가 필요하다.
+    """
+    parsed_document_stub(synthetic_document)
+
+    internal = build_single_fact_result(
+        plan,
+        corpus_root=nfd_corpus_root,
+        manifest_path=synthetic_manifest_path,
+    ).to_dict()
+
+    assert internal["status"] == STATUS_OK
+    assert internal["fact"]["accounting_scope"] == SCOPE_CONSOLIDATED
+    assert internal["fact"]["fiscal_year"] == 2025
+    assert internal["filing"]["doc_id"] == "periodic_SYNTHETIC0001"
+    assert len(internal["evidence"]) == 1
 
 
 def test_handle_single_fact_propagates_extraction_blocked(
@@ -91,7 +142,12 @@ def test_handle_single_fact_propagates_extraction_blocked(
     nfd_corpus_root: Path,
     parsed_document_stub,
 ) -> None:
-    """추출 단계에서 막히면 값을 지어내지 않고 그대로 올라온다."""
+    """
+    추출 단계에서 막히면 값을 지어내지 않고 그대로 올라온다.
+
+    missing_acontext는 값이 없는 것이 아니라 parser가 판정 근거를 주지 않은 것이다.
+    UNANSWERABLE로 보내면 '코퍼스에 답이 없다'가 되어 사실과 달라진다.
+    """
     for table in synthetic_document["tables"]:
         for row in table["rows"]:
             for cell in row:
@@ -105,11 +161,12 @@ def test_handle_single_fact_propagates_extraction_blocked(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result["status"] == STATUS_BLOCKED
-    assert result["blocked"]["stage"] == "extraction"
-    assert result["blocked"]["reason"] == "missing_acontext"
-    assert result["fact"] is None
-    assert result["evidence"] == []
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.answerability_status is None
+    assert result.execution_issue.stage == "extraction"
+    assert result.execution_issue.reason == "missing_acontext"
+    assert result.facts == []
+    assert result.evidence == []
 
 
 def test_handle_single_fact_reports_parse_failure_without_swallowing(
@@ -128,17 +185,31 @@ def test_handle_single_fact_reports_parse_failure_without_swallowing(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result["status"] == STATUS_BLOCKED
-    assert result["blocked"]["stage"] == "parsing"
-    assert result["blocked"]["reason"] == "parse_failed"
-    assert result["filing"]["doc_id"] == "periodic_SYNTHETIC0001"
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.answerability_status is None
+    assert result.answerability_reason is None
+    assert result.execution_issue.stage == "parsing"
+    assert result.execution_issue.reason == "parse_failed"
+
+    internal = build_single_fact_result(
+        plan,
+        corpus_root=nfd_corpus_root,
+        manifest_path=synthetic_manifest_path,
+    ).to_dict()
+
+    assert internal["status"] == STATUS_BLOCKED
+    assert internal["filing"]["doc_id"] == "periodic_SYNTHETIC0001"
 
 
 def test_handle_single_fact_blocks_when_no_filing_matches(
     synthetic_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
-    """manifest에 없는 연도는 다른 연도로 대체하지 않는다."""
+    """
+    manifest에 없는 연도는 다른 연도로 대체하지 않는다.
+
+    manifest 전체와 대조한 결과이므로 실행은 끝난 것이다. 답할 수 없다는 판정만 남는다.
+    """
     plan = build_query_plan(
         "테스트반도체 2019년 연결 기준 매출액이 얼마야?",
         known_companies=SYNTHETIC_COMPANIES,
@@ -150,10 +221,20 @@ def test_handle_single_fact_blocks_when_no_filing_matches(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result["status"] == STATUS_BLOCKED
-    assert result["blocked"]["stage"] == "filing_discovery"
-    assert result["blocked"]["reason"] == "no_matching_filing"
-    assert result["fact"] is None
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.NOT_FOUND
+    assert result.execution_issue is None
+    assert result.facts == []
+
+    # canonical reason은 서로 다른 정지 사유를 한 값으로 묶는다.
+    # 어느 단계에서 무엇을 보고 판정했는지는 answerability_detail에 남는다.
+    assert result.answerability_detail.stage == "filing_discovery"
+    assert result.answerability_detail.reason == "no_matching_filing"
+    assert result.answerability_detail.detail
+
+    # 판정 근거는 손실이 아니므로 conversion_gaps에 남기지 않는다.
+    assert result.conversion_gaps == []
 
 
 # --------------------------------------------------------------------------
@@ -176,9 +257,12 @@ def test_answer_question_routes_through_pattern_a(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result["status"] == STATUS_OK
-    assert result["query"]["intent"] == INTENT_SINGLE_FACT
-    assert result["evidence"][0]["table_id"] == "table_0002"
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert result.facts[0].metric.value == "revenue"
+
+    # 표 위치는 Contract Evidence의 field_name에 남는다.
+    assert "table_id=table_0002" in result.evidence[0].field_name
 
 
 def test_answer_question_reads_company_universe_from_manifest(
@@ -200,8 +284,8 @@ def test_answer_question_reads_company_universe_from_manifest(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result["status"] == STATUS_OK
-    assert result["query"]["company"] == "테스트반도체(주)"
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.facts[0].company == "테스트반도체(주)"
 
 
 def test_answer_question_blocks_unknown_company_before_reading_documents(
@@ -215,11 +299,11 @@ def test_answer_question_blocks_unknown_company_before_reading_documents(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result["status"] == STATUS_BLOCKED
-    assert result["blocked"]["stage"] == "query_plan"
-    assert result["blocked"]["reason"] == "unknown_company"
-    assert result["query"] is None
-    assert result["filing"] is None
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "query_plan"
+    assert result.execution_issue.reason == "unknown_company"
+    assert result.facts == []
+    assert result.evidence == []
 
 
 def test_answer_question_blocks_when_manifest_is_missing(
@@ -232,9 +316,9 @@ def test_answer_question_blocks_when_manifest_is_missing(
         manifest_path=tmp_path / "does_not_exist.jsonl",
     )
 
-    assert result["status"] == STATUS_BLOCKED
-    assert result["blocked"]["stage"] == "filing_discovery"
-    assert result["blocked"]["reason"] == "manifest_missing"
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "filing_discovery"
+    assert result.execution_issue.reason == "manifest_missing"
 
 
 def test_answer_question_rejects_out_of_scope_period(
@@ -248,9 +332,9 @@ def test_answer_question_rejects_out_of_scope_period(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result["status"] == STATUS_BLOCKED
-    assert result["blocked"]["stage"] == "query_plan"
-    assert result["blocked"]["reason"] == "unsupported_period"
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "query_plan"
+    assert result.execution_issue.reason == "unsupported_period"
 
 
 def test_answer_question_result_is_json_serializable(
@@ -267,4 +351,8 @@ def test_answer_question_result_is_json_serializable(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert json.loads(json.dumps(result, ensure_ascii=False))["status"] == STATUS_OK
+    dumped = result.model_dump(mode="json")
+
+    assert json.loads(json.dumps(dumped, ensure_ascii=False)) == dumped
+    assert dumped["execution_status"] == "COMPLETED"
+    assert dumped["answerability_status"] == "ANSWERABLE"

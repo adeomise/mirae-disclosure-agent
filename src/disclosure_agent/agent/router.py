@@ -19,14 +19,21 @@ Pattern 추가 방법:
 - agent/handlers/에 모듈을 만들고 아래 HANDLERS에 한 줄 등록한다.
 - 테스트에서 임시로 붙이려면 register_handler를 쓴다.
 
+공통 출력 Contract:
+- Pattern이 무엇이든 answer_question은 AgentExecutionResult 하나를 돌려준다. Pattern마다
+  결과 모양이 다르면 받는 쪽이 Pattern을 알아야 하고, Pattern이 늘 때마다 호출부가 바뀐다.
+- Pattern 내부 표현으로 옮기는 변환은 agent.normalization이 맡고, Router는 그 결과를
+  가공하지 않는다.
+- QueryPlan은 이 Contract에 싣지 않는다. 실행 결과가 아니라 질문 해석 결과이기 때문이다.
+
 입력:
 - QueryPlan, corpus 루트, manifest 경로
 
 출력:
-- 각 handler가 만든 결과 dict, 또는 라우팅 단계의 blocked 결과
+- AgentExecutionResult. 라우팅 단계에서 막힌 경우도 같은 타입으로 답한다.
 
 TODO:
-- Pattern C(temporal_compare), Pattern E(event_history) 등록
+- Pattern C(temporal_compare) 등록
 - 복합 질문의 처리 순서 정의
 """
 
@@ -34,16 +41,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 from disclosure_agent.agent.answer_builder import (
     STAGE_FILING_DISCOVERY,
     STAGE_QUERY_PLAN,
     STAGE_ROUTING,
-    build_blocked_result,
 )
 from disclosure_agent.agent.handlers.event_history import handle_event_history
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
+from disclosure_agent.agent.normalization import blocked_execution
 from disclosure_agent.agent.query_analyzer import (
     KNOWN_INTENTS,
     QueryPlan,
@@ -51,6 +57,7 @@ from disclosure_agent.agent.query_analyzer import (
     build_query_plan,
 )
 from disclosure_agent.common.enums import Intent
+from disclosure_agent.common.schemas import AgentExecutionResult
 from disclosure_agent.retrieval.metadata_filter import (
     FilingNotFoundError,
     list_company_names,
@@ -64,7 +71,7 @@ REASON_UNKNOWN_INTENT = "unknown_intent"
 #
 # key는 Contract v0.1의 Intent를 쓴다. StrEnum이라 문자열 key와 같은 항목이 되므로,
 # QueryPlan.intent가 문자열이어도 조회된다.
-Handler = Callable[..., dict[str, Any]]
+Handler = Callable[..., AgentExecutionResult]
 
 HANDLERS: dict[str, Handler] = {
     Intent.SINGLE_FACT: handle_single_fact,
@@ -92,34 +99,37 @@ def supported_intents() -> tuple[str, ...]:
     return tuple(sorted(HANDLERS))
 
 
-def _blocked_route(plan: QueryPlan) -> dict[str, Any]:
+def _blocked_route(plan: QueryPlan) -> AgentExecutionResult:
     """
     handler가 없는 intent에 대한 blocked 결과를 만든다.
 
     어휘에 있는데 아직 구현되지 않은 경우와, 어휘 자체에 없는 경우를 구분한다.
     전자는 구현 대기이고 후자는 QueryPlan을 만든 쪽의 문제다.
+
+    두 경우 모두 답변 가능성을 판정하지 않는다. 코퍼스를 보지 않았으므로 답이 있는지 없는지
+    알지 못한다.
     """
     supported = ", ".join(supported_intents())
 
     if plan.intent in KNOWN_INTENTS:
-        return build_blocked_result(
-            plan,
-            stage=STAGE_ROUTING,
-            reason=REASON_UNIMPLEMENTED_INTENT,
-            detail=(
+        return blocked_execution(
+            STAGE_ROUTING,
+            REASON_UNIMPLEMENTED_INTENT,
+            (
                 f"intent '{plan.intent}'는 설계에는 있으나 아직 구현된 handler가 없습니다. "
                 f"현재 실행 가능한 intent: {supported}"
             ),
+            warnings=plan.warnings,
         )
 
-    return build_blocked_result(
-        plan,
-        stage=STAGE_ROUTING,
-        reason=REASON_UNKNOWN_INTENT,
-        detail=(
+    return blocked_execution(
+        STAGE_ROUTING,
+        REASON_UNKNOWN_INTENT,
+        (
             f"알 수 없는 intent입니다: '{plan.intent}'. "
             f"현재 실행 가능한 intent: {supported}"
         ),
+        warnings=plan.warnings,
     )
 
 
@@ -128,7 +138,7 @@ def dispatch(
     *,
     corpus_root: str | Path,
     manifest_path: str | Path | None = None,
-) -> dict[str, Any]:
+) -> AgentExecutionResult:
     """
     QueryPlan을 담당 handler로 넘긴다.
 
@@ -147,14 +157,18 @@ def answer_question(
     *,
     corpus_root: str | Path,
     manifest_path: str | Path | None = None,
-) -> dict[str, Any]:
+) -> AgentExecutionResult:
     """
     질문 문자열 하나를 처음부터 끝까지 처리한다.
 
-    질문 -> QueryPlan -> handler 순서로, 각 단계의 실패를 해당 stage의 blocked 결과로 남긴다.
+    질문 -> QueryPlan -> handler 순서로, 각 단계의 실패를 해당 stage의 실행 결과로 남긴다.
+    Pattern에 관계없이 AgentExecutionResult 하나를 돌려준다.
 
     인식할 기업명은 manifest에서 읽어 넘긴다. query_analyzer가 기업명을 추측하지 않게 하기
     위해서이며, 목록을 만들지 못하면 질문 해석 이전에 막힌다.
+
+    예상하지 못한 예외는 여기서 삼키지 않는다. 실행 실패(ExecutionStatus.FAILED)의 경계는
+    API/Runtime 통합에서 정할 사항이며, 넓은 except로 앞질러 정하면 원인이 사라진다.
     """
     corpus_root = Path(corpus_root)
 
@@ -166,22 +180,12 @@ def answer_question(
         known_companies = list_company_names(load_manifest(resolved_manifest))
 
     except FilingNotFoundError as error:
-        return build_blocked_result(
-            None,
-            stage=STAGE_FILING_DISCOVERY,
-            reason=error.reason,
-            detail=error.detail,
-        )
+        return blocked_execution(STAGE_FILING_DISCOVERY, error.reason, error.detail)
 
     try:
         plan = build_query_plan(question, known_companies=known_companies)
 
     except UnsupportedQuestionError as error:
-        return build_blocked_result(
-            None,
-            stage=STAGE_QUERY_PLAN,
-            reason=error.reason,
-            detail=error.detail,
-        )
+        return blocked_execution(STAGE_QUERY_PLAN, error.reason, error.detail)
 
     return dispatch(plan, corpus_root=corpus_root, manifest_path=resolved_manifest)

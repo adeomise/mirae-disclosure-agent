@@ -123,7 +123,7 @@ class Answerability:
 #     no_matching_filing / no_original_filing
 #         manifest 전체와 대조한 결과다. 문서 목록은 완전한 집합이므로 "없다"를 확정할 수
 #         있다.
-#     no_metric_acode / no_matching_context
+#     no_metric_acode / no_matching_label_fallback / no_matching_context
 #         문서를 끝까지 읽었고 요청한 지표·기간·기준에 해당하는 셀이 없었다. 값이 없는
 #         것이지 파이프라인이 멈춘 것이 아니다.
 #     ambiguous_candidates / ambiguous_root
@@ -154,6 +154,10 @@ ANSWERABILITY_BY_STOP: dict[tuple[str, str], Answerability] = {
         AnswerabilityReason.AMBIGUOUS_MATCH,
     ),
     (STAGE_EXTRACTION, REASON_NO_METRIC_ACODE): Answerability(
+        AnswerabilityStatus.UNANSWERABLE,
+        AnswerabilityReason.INSUFFICIENT_EVIDENCE,
+    ),
+    (STAGE_EXTRACTION, "no_matching_label_fallback"): Answerability(
         AnswerabilityStatus.UNANSWERABLE,
         AnswerabilityReason.INSUFFICIENT_EVIDENCE,
     ),

@@ -28,7 +28,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-
 EVENT_SUPPLY_CONTRACT = "supply_contract"
 EVENT_FACILITY_INVESTMENT = "facility_investment"
 

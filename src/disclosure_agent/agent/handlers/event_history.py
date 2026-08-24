@@ -14,6 +14,7 @@
       -> 필드 변경 정리          (event.diff)
       -> Contract 타입 변환       (event.contract_adapter)
       -> EventHistoryResult
+      -> AgentExecutionResult    (agent.normalization)
 
 기간을 두 번 나눠 조회하는 이유:
     질문의 기간("2024년 8월")은 **원공시를 지목하는 조건**이지 체인의 범위가 아니다. 그 창으로
@@ -29,7 +30,8 @@
 - QueryPlan, corpus 루트, manifest 경로
 
 출력:
-- EventHistoryResult. 실패해도 예외를 올리지 않는다.
+- AgentExecutionResult. 실패해도 예외를 올리지 않는다.
+  Pattern 내부 표현(EventHistoryResult)이 필요하면 build_event_history_result를 직접 쓴다.
 
 TODO:
 - 후속·해지 방향 연결(본문 '관련공시')로 Q14 확장
@@ -39,42 +41,42 @@ TODO:
 from __future__ import annotations
 
 import calendar
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from disclosure_agent.agent.answer_builder import STAGE_FILING_DISCOVERY, STAGE_PARSING
+from disclosure_agent.agent.answer_builder import (
+    REASON_AMBIGUOUS_ROOT,
+    REASON_NO_MATCHING_FILING,
+    REASON_NO_ORIGINAL_FILING,
+    REASON_PARSE_FAILED,
+    STAGE_FILING_DISCOVERY,
+    STAGE_PARSING,
+    BlockedInfo,
+)
+from disclosure_agent.agent.normalization import normalize_event_history_result
 from disclosure_agent.agent.query_analyzer import QueryPlan
 from disclosure_agent.common.enums import (
     AnswerabilityStatus,
     EventType,
     EvidenceLocationType,
 )
-from disclosure_agent.common.schemas import EventHistory, EventLink, Evidence
+from disclosure_agent.common.schemas import (
+    AgentExecutionResult,
+    EventHistory,
+    EventLink,
+    Evidence,
+)
 from disclosure_agent.event.contract_adapter import ContractGap, to_event_history
 from disclosure_agent.event.linker import FilingChain, FilingLike, build_filing_chain
 from disclosure_agent.event.parser import parse_exchange_document
 from disclosure_agent.retrieval.metadata_filter import FilingNotFoundError, list_event_filings
 
+# 정지 사유와 BlockedInfo는 answer_builder가 어휘를 들고 있다. Pattern마다 같은 사유를 다른
+# 문자열로 쓰면 정규화 대응표와 대조할 수 없다.
+
 # 이번 슬라이스가 다루는 이벤트 유형.
 EVENT_TYPE = EventType.SUPPLY_CONTRACT
-
-REASON_NO_MATCHING_FILING = "no_matching_filing"
-REASON_NO_ORIGINAL_FILING = "no_original_filing"
-REASON_AMBIGUOUS_ROOT = "ambiguous_root"
-REASON_PARSE_FAILED = "parse_failed"
-
-
-@dataclass(frozen=True)
-class BlockedInfo:
-    """파이프라인이 진행되지 못한 지점."""
-
-    stage: str
-    reason: str
-    detail: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -339,15 +341,17 @@ def handle_event_history(
     *,
     corpus_root: str | Path,
     manifest_path: str | Path | None = None,
-) -> dict[str, Any]:
+) -> AgentExecutionResult:
     """
     Router가 부르는 진입점.
 
-    직렬화 가능한 dict를 돌려준다. 타입이 필요한 호출자(이후 answer-builder)는
+    공통 Contract인 AgentExecutionResult를 돌려준다. Pattern 내부 표현이 필요한 호출자는
     build_event_history_result를 직접 쓴다.
     """
-    return build_event_history_result(
-        plan,
-        corpus_root=corpus_root,
-        manifest_path=manifest_path,
-    ).to_dict()
+    return normalize_event_history_result(
+        build_event_history_result(
+            plan,
+            corpus_root=corpus_root,
+            manifest_path=manifest_path,
+        )
+    )

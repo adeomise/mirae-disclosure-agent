@@ -20,6 +20,7 @@ TODO:
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from disclosure_agent.agent.evidence import Evidence
@@ -40,6 +41,50 @@ STAGE_FILING_DISCOVERY = "filing_discovery"
 STAGE_PARSING = "parsing"
 STAGE_EXTRACTION = "extraction"
 STAGE_EVIDENCE = "evidence"
+
+# 내부 결과를 공통 Contract 타입으로 옮기는 단계.
+#
+# 다른 stage와 달리 원문을 더 읽지 않는다. 확정된 값을 옮기지 못한 경우이므로 값을 추측해
+# 채우지 않고 여기서 막혔다고 남긴다.
+STAGE_CONTRACT_ADAPTATION = "contract_adaptation"
+
+# 파이프라인이 멈춘 사유. stage와 짝을 이뤄 하나의 정지 지점을 가리킨다.
+#
+# 사유 문자열 자체는 그 판정을 내리는 계층이 만든다(retrieval, periodic.extractor, event).
+# 여기 모아 두는 것은 agent 계층이 그 값을 다시 해석해야 하기 때문이다. 어느 사유를 "실행
+# 중단"으로 보고 어느 사유를 "실행은 끝났고 답을 못 찾음"으로 볼지는 agent.normalization의
+# 대응표가 정하며, 그 표의 key가 흩어진 문자열 리터럴이면 대조할 수 없다.
+REASON_NO_MATCHING_FILING = "no_matching_filing"
+REASON_PARSE_FAILED = "parse_failed"
+
+# periodic.extractor가 올리는 ExtractionBlockedError.reason 중 agent가 다시 해석하는 것.
+REASON_NO_METRIC_ACODE = "no_metric_acode"
+REASON_NO_MATCHING_CONTEXT = "no_matching_context"
+REASON_AMBIGUOUS_CANDIDATES = "ambiguous_candidates"
+
+# Pattern E가 자체 판정으로 만드는 사유.
+REASON_NO_ORIGINAL_FILING = "no_original_filing"
+REASON_AMBIGUOUS_ROOT = "ambiguous_root"
+
+# 확정된 내부 값을 공통 Contract 타입으로 옮기지 못한 경우.
+REASON_UNCONVERTIBLE_FACT = "unconvertible_fact"
+
+
+@dataclass(frozen=True)
+class BlockedInfo:
+    """
+    파이프라인이 진행되지 못한 지점.
+
+    "여기서 멈췄다"만 말한다. 그것이 실행 실패인지 정상 실행 뒤의 답변 불가 판정인지는
+    여기서 정하지 않는다. 그 해석은 agent.normalization의 대응표가 맡는다.
+    """
+
+    stage: str
+    reason: str
+    detail: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def _filing_summary(filing: FilingRef | None) -> dict[str, Any] | None:

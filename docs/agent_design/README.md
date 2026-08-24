@@ -21,6 +21,7 @@
 | [agent_patterns.md](agent_patterns.md) | 6개 실행 Pattern과 필요한 Capability. **Capability 이름의 정본** |
 | [retrieval_strategy.md](retrieval_strategy.md) | 메타데이터 필터에서 구조 탐색, 검색으로 이어지는 질문 유형별 전략 |
 | [evidence_and_answerability.md](evidence_and_answerability.md) | Fact와 Evidence의 책임 구분, 답변 가능성 판정 체계 |
+| [execution_result_mapping.md](execution_result_mapping.md) | Pattern 내부 결과를 공통 `AgentExecutionResult`로 옮기는 대응표와 그 근거 |
 | [open_decisions.md](open_decisions.md) | 구현 전 팀 합의가 필요한 항목과 Data Contract Draft 차이 추적 |
 
 ## 공통 용어

@@ -372,18 +372,18 @@ def save_parsed_document(
 
 if __name__ == "__main__":
     input_path = Path(
-        "data/raw/exchange/20230317800146.xml"
+        "data/raw/exchange/20250731800028.xml"
     )
 
     output_path = Path(
-        "data/processed/exchange_20230317800146_parsed.json"
+        "data/processed/exchange_20250731800028_parsed.json"
     )
 
     document = parse_exchange_document(
         input_path,
-        corp_name="삼성바이오로직스",
-        report_name="신규시설투자등",
-        receipt_date="2023-03-17",
+        corp_name="삼성전자",
+        report_name="단일판매ㆍ공급계약 체결(정정)",
+        receipt_date="2025-07-31",
     )
 
     save_parsed_document(

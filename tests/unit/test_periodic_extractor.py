@@ -202,6 +202,17 @@ def test_group_units_do_not_leak_and_flat_view_is_deduplicated() -> None:
     assert evidence[0].provenance.unit_trusted is True
 
 
+def test_bulk_skips_table_with_only_untrusted_unit_declaration() -> None:
+    contaminated_unit = "기본주당순이익(단위: 원) 6,661 5,007 110,854"
+    table = financial_table(values=("9,670,644",), unit=contaminated_unit)
+    document = parsed_document(table, unit=contaminated_unit)
+
+    facts, evidence = extract_financial_facts_with_evidence(document)
+
+    assert facts == []
+    assert evidence == []
+
+
 @pytest.mark.parametrize(
     "label",
     [

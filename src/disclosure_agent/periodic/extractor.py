@@ -1060,6 +1060,8 @@ def resolve_source_unit_details(
 ) -> SourceUnitResolution:
     """bulk 단위와 그 단위를 선택한 provenance를 함께 반환한다."""
 
+    fallback_resolution: SourceUnitResolution | None = None
+
     for row in table.get("rows", []):
         if len(row) != 1:
             break
@@ -1067,21 +1069,35 @@ def resolve_source_unit_details(
         text = cell_text(row[0])
 
         if "단위" in text:
-            return _build_source_unit_resolution(
+            resolution = _build_source_unit_resolution(
                 text,
                 "table_row",
             )
+            if resolution.trusted is True:
+                return resolution
+            if resolution.raw_unit is not None:
+                fallback_resolution = resolution
 
     if table_group is not None:
-        return _build_source_unit_resolution(
+        resolution = _build_source_unit_resolution(
             table_group.get("unit"),
             "table_group",
         )
+        if resolution.trusted is True:
+            return resolution
+        if fallback_resolution is None and resolution.raw_unit is not None:
+            fallback_resolution = resolution
 
-    return _build_source_unit_resolution(
+    resolution = _build_source_unit_resolution(
         table.get("unit"),
         "table",
     )
+    if resolution.trusted is True:
+        return resolution
+    if fallback_resolution is None and resolution.raw_unit is not None:
+        fallback_resolution = resolution
+
+    return fallback_resolution or resolution
 
 def resolve_source_unit(
     table: dict[str, Any],
@@ -1288,6 +1304,8 @@ def extract_financial_facts_with_evidence(
             table,
             table_group,
         )
+        if unit_resolution.trusted is not True:
+            continue
         raw_unit = unit_resolution.raw_unit
 
         accounting_scope = infer_accounting_scope(

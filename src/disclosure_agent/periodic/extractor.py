@@ -46,17 +46,17 @@
     parser는 cell.acontext와 표 단위, TABLE-GROUP의 ACLASS 등 추출에 필요한
     원문 정보를 보존한다. 따라서 조사 보고서의 D-2 / D-3 전제는 해소되었다.
 
-    다만 parser가 제공하는 정보를 targeted 경로에서 완전히 소비하지 못하는
-    두 가지 간극이 남아 있으며 이번 병합에서는 손대지 않는다.
+    targeted 경로는 그 정보를 TABLE-GROUP까지 따라가 소비한다.
 
-    - table["unit"]은 표 본문의 행을 단위 선언으로 잘못 집어올 수 있다.
-      parse_unit이 trusted=False로 표시해 사용을 막지만 올바른 source unit을
-      다시 선택하지는 않는다. 이를 처리하는 resolve_source_unit은 아직
-      targeted 경로에 연결되어 있지 않다.
+    - 단위: table["unit"]은 표 본문의 행을 단위 선언으로 잘못 집어올 수 있다.
+      resolve_table_unit이 표 자신의 선언 -> TABLE-GROUP 선언 -> 표 상속 단위
+      순서로 신뢰 가능한 선언을 고른다. parse_unit의 trusted 검사는 그대로 두며,
+      모든 위치가 신뢰 불가능하면 값을 만들지 않고 막는다.
 
-    - 표 분류(본표/주석)의 원문 근거는 table_groups[].aclass에 보존되어 있으나
-      classify_table은 아직 해당 값을 직접 사용하지 않는다.
-      어떤 ACLASS 표기를 본표/주석으로 해석할지는 팀 합의가 필요한 사항이다(D-4).
+    - 표 분류: 본표/주석의 원문 근거는 table_groups[].aclass에 있다.
+      classify_table이 표에 직접 붙은 표기를 먼저 보고 없으면 그룹 ACLASS를 읽는다.
+      {XBRL} 이름공간의 접두 토큰만 해석하며(IS/BS/CF/EF -> 본표, NT -> 주석),
+      모르는 표기는 분류하지 않는다.
 
 출력:
 - FinancialFact와 원문 위치 참조 (targeted, Pattern A 내부 표현)
@@ -65,8 +65,7 @@
 
 TODO:
 - targeted FinancialFact -> Contract Fact/Evidence adapter 연결
-- targeted 경로의 source unit 귀속 연결
-- ACLASS 기반 본표/주석 판정 연결
+- ACODE가 없는 문서의 targeted 추출 경로(현재는 no_metric_acode로 막는다)
 - 영업이익·당기순이익 등 지표 확장
 - 분기·반기 컨텍스트(dQTR 등) 지원
 - targeted / bulk 추출 신호의 공통화 검토
@@ -133,19 +132,47 @@ TABLE_CLASS_PRIORITY: dict[str, int] = {
 
 # Parser output에서 표 분류를 읽을 위치 후보.
 #
-# parser는 TABLE-GROUP의 ACLASS를 table_groups[].aclass로 보존한다. 다만 그 값은
-# 표 자체가 아니라 그룹에 있고, 어떤 표기를 본표로 볼지도 아직 합의되지 않았다.
-# 그래서 이번 병합에서는 연결 지점만 한 곳에 모아 둔 상태를 유지한다.
+# parser는 TABLE-GROUP의 ACLASS를 table_groups[].aclass로 보존한다. 그 값은 표 자체가
+# 아니라 그룹에 있으므로, 표에서 직접 읽는 경로와 그룹에서 읽는 경로를 모두 둔다.
 TABLE_CLASS_FIELDS: tuple[str, ...] = ("table_group_class",)
+
+# TABLE-GROUP의 ACLASS를 읽을 위치 후보.
+TABLE_GROUP_CLASS_FIELDS: tuple[str, ...] = ("aclass",)
 
 # Parser 표기를 내부 분류로 옮기는 잠정 대응표. 최종 Data Contract가 아니다.
 # 여기에 없는 표기는 분류하지 않는다. 모르는 값을 본표로 간주하지 않기 위해서다.
-# 원문 TABLE-GROUP의 ACLASS 문자열을 그대로 정답으로 박아 두지 않는 것도 같은 이유다.
 TABLE_CLASS_ALIASES: dict[str, str] = {
     "financial_statement": TABLE_CLASS_PRIMARY_STATEMENT,
     "primary_statement": TABLE_CLASS_PRIMARY_STATEMENT,
     "note": TABLE_CLASS_NOTE,
     "footnote": TABLE_CLASS_NOTE,
+}
+
+# 원문 TABLE-GROUP ACLASS의 XBRL 이름공간 표기. 예: "{XBRL}IS_C1", "{XBRL}NT_C_D831150"
+#
+# 이 접두사를 요구하는 이유:
+#     같은 문서에 DART 서식 고유의 ACLASS(INC_STAT, SUB_BLC, IAM_TBL1 등)가 함께 있다.
+#     그것들은 XBRL 재무제표 표가 아니므로 재무제표 어휘로 읽으면 안 된다. 실측 corpus
+#     annual 47종에서 XBRL 아닌 ACLASS만 89종이었고 INC_STAT처럼 재무제표로 오인하기
+#     쉬운 표기도 있었다. 이름공간을 확인해 그 경로를 아예 열지 않는다.
+XBRL_ACLASS_PREFIX = "{XBRL}"
+
+# ACLASS 접두 토큰(첫 '_' 앞)이 표의 성격을 가른다. 실측 corpus의 {XBRL} ACLASS는
+# 173종이었지만 접두 토큰은 다섯 개뿐이었다: IS(6) BS(2) CF(2) EF(2) NT(161).
+#
+#     IS 손익계산서 / BS 재무상태표 / CF 현금흐름표 / EF 자본변동표 -> 본표
+#     NT 주석                                                    -> 주석
+#
+# 접미부(_C1, _S2, _C_D831150 등)는 연결/별도와 서식 변형을 나타낼 뿐이라 읽지 않는다.
+# 여기에 없는 접두 토큰은 분류하지 않는다. 새 표기를 본표로 넘겨짚지 않기 위해서다.
+XBRL_ACLASS_TOKEN_PATTERN = re.compile(r"^([A-Za-z]+)")
+
+XBRL_ACLASS_CLASSES: dict[str, str] = {
+    "IS": TABLE_CLASS_PRIMARY_STATEMENT,
+    "BS": TABLE_CLASS_PRIMARY_STATEMENT,
+    "CF": TABLE_CLASS_PRIMARY_STATEMENT,
+    "EF": TABLE_CLASS_PRIMARY_STATEMENT,
+    "NT": TABLE_CLASS_NOTE,
 }
 
 # 예: "CFY2025dFY" + "_" + "<...>Axis_<...>ConsolidatedMember"
@@ -412,15 +439,52 @@ def _row_label(row: list[dict[str, Any]]) -> str:
     return ""
 
 
-def classify_table(table: dict[str, Any]) -> str | None:
+def normalize_table_class(raw: str | None) -> str | None:
+    """
+    Parser 표기 하나를 내부 분류(본표/주석)로 바꾼다.
+
+    두 표기를 받는다.
+
+        잠정 별칭      "financial_statement", "note" 등. synthetic fixture가 쓴다.
+        원문 ACLASS    "{XBRL}IS_C1", "{XBRL}NT_C_D831150" 등. 실제 parser output이 쓴다.
+
+    모르는 표기이면 None이다. None은 '주석이 아니다'가 아니라 '판단하지 않는다'는 뜻이다.
+    """
+    if not raw:
+        return None
+
+    text = str(raw).strip()
+
+    alias = TABLE_CLASS_ALIASES.get(text.casefold())
+
+    if alias is not None:
+        return alias
+
+    if not text.startswith(XBRL_ACLASS_PREFIX):
+        # XBRL 이름공간이 아니면 재무제표 어휘로 읽지 않는다.
+        return None
+
+    token = XBRL_ACLASS_TOKEN_PATTERN.match(text[len(XBRL_ACLASS_PREFIX) :])
+
+    if token is None:
+        return None
+
+    return XBRL_ACLASS_CLASSES.get(token.group(1).upper())
+
+
+def classify_table(
+    table: dict[str, Any],
+    table_group: dict[str, Any] | None = None,
+) -> str | None:
     """
     Parser가 준 표 metadata를 내부 분류(본표/주석)로 바꾼다.
 
+    표 자체의 표기를 먼저 보고, 없으면 표가 속한 TABLE-GROUP의 ACLASS를 본다. 실제
+    parser output에서 근거는 그룹에만 있으므로 그룹을 넘겨야 판정이 선다. 표에 직접 붙은
+    표기를 우선하는 이유는 그쪽이 더 구체적인 선언이기 때문이다.
+
     근거가 없거나 모르는 표기이면 None을 돌려준다.
     None은 '주석이 아니다'가 아니라 '판단하지 않는다'는 뜻이다.
-
-    연결 지점을 이 함수 하나로 제한해 두고, 어떤 ACLASS 표기를 본표로 볼지 합의되면
-    TABLE_CLASS_FIELDS와 TABLE_CLASS_ALIASES만 바꾼다.
 
     section 제목이나 문서 순서로 본표 여부를 유추하지 않는다.
     """
@@ -429,10 +493,19 @@ def classify_table(table: dict[str, Any]) -> str | None:
     for field_name in TABLE_CLASS_FIELDS:
         raw = table.get(field_name) or attributes.get(field_name)
 
-        if not raw:
-            continue
+        if raw:
+            return normalize_table_class(raw)
 
-        return TABLE_CLASS_ALIASES.get(str(raw).strip().casefold())
+    if table_group is None:
+        return None
+
+    group_attributes = table_group.get("attributes") or {}
+
+    for field_name in TABLE_GROUP_CLASS_FIELDS:
+        raw = table_group.get(field_name) or group_attributes.get(field_name)
+
+        if raw:
+            return normalize_table_class(raw)
 
     return None
 
@@ -445,6 +518,86 @@ def table_class_priority(table_class: str | None) -> int | None:
     return TABLE_CLASS_PRIORITY.get(table_class)
 
 
+def build_table_group_index(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """
+    table_id로 그 표가 속한 TABLE-GROUP을 찾을 수 있게 한다.
+
+    parser는 같은 표 dict을 table_groups[].tables와 flat tables 양쪽에 넣는다. 그래서
+    flat tables를 순회하는 쪽도 이 색인으로 그룹 metadata(단위, ACLASS)에 닿을 수 있다.
+    """
+    index: dict[str, dict[str, Any]] = {}
+
+    for table_group in document.get("table_groups") or []:
+        for table in table_group.get("tables") or []:
+            table_id = table.get("table_id")
+
+            if table_id and table_id not in index:
+                index[str(table_id)] = table_group
+
+    return index
+
+
+def unit_declaration_sources(
+    table: dict[str, Any],
+    table_group: dict[str, Any] | None,
+) -> tuple[str | None, ...]:
+    """
+    단위 선언이 있을 수 있는 위치를 우선순위대로 돌려준다.
+
+    구조적으로 '단위 선언'인 자리만 본다. 숫자 셀이나 본문 문장에서 단위를 유추하지 않는다.
+
+        table["own_unit"]     표 자신이 선언한 단위. 가장 구체적이다.
+        table_group["unit"]   표가 속한 그룹이 선언한 단위. 본표 묶음이 여기에 선언한다.
+        table["unit"]         own_unit or inherited_unit. 그룹이 없는 독립 표를 위한 자리.
+
+    own_unit을 table["unit"]보다 먼저 보는 이유는 둘이 다른 값일 수 없어서가 아니라,
+    table["unit"]이 own_unit을 이미 흡수해 그룹 단위를 가리기 때문이다. parser의
+    detect_table_unit은 표 자손 전체에서 '단위'가 든 문자열을 찾으므로, 손익계산서의
+    '기본주당이익 (단위 : 원) ...' 행을 표 단위로 잘못 집어온다. 그 값이 table["unit"]에
+    들어가면 그룹이 선언한 '(단위 : 백만원)'을 덮는다. 순서를 이렇게 두면 오염된 값이
+    trusted 검사에서 걸러진 뒤 그룹 선언으로 넘어간다.
+    """
+    sources: list[str | None] = [table.get("own_unit")]
+
+    if table_group is not None:
+        sources.append(table_group.get("unit"))
+
+    sources.append(table.get("unit"))
+
+    return tuple(sources)
+
+
+def resolve_table_unit(
+    table: dict[str, Any],
+    table_group: dict[str, Any] | None = None,
+) -> tuple[UnitSpec | None, tuple[UnitSpec, ...]]:
+    """
+    표에 적용할 신뢰 가능한 단위를 고른다.
+
+    반환:
+        (신뢰 가능한 UnitSpec 또는 None, 신뢰할 수 없어 건너뛴 UnitSpec 목록)
+
+    신뢰 검사(UnitSpec.trusted)는 그대로 둔다. 오염된 문자열을 대신 쓰지 않고 다음
+    선언 위치로 넘어갈 뿐이며, 모든 위치가 비었거나 신뢰할 수 없으면 None을 돌려준다.
+    호출자는 그때 막는다. 건너뛴 목록을 함께 돌려주는 이유는 '단위 선언이 아예 없었다'와
+    '있었지만 신뢰할 수 없었다'를 호출자가 구분해 보고하기 위해서다.
+    """
+    rejected: list[UnitSpec] = []
+
+    for raw in unit_declaration_sources(table, table_group):
+        unit = parse_unit(raw)
+
+        if unit is None:
+            continue
+
+        if unit.trusted:
+            return unit, tuple(rejected)
+
+        rejected.append(unit)
+
+    return None, tuple(rejected)
+
+
 @dataclass(frozen=True)
 class _Candidate:
     table: dict[str, Any]
@@ -453,6 +606,12 @@ class _Candidate:
     cell: dict[str, Any]
     context: AccountingContext
     label: str
+    # 표가 속한 TABLE-GROUP. 단위 선언과 ACLASS가 여기에 있다. 독립 표이면 None.
+    table_group: dict[str, Any] | None = None
+
+    @property
+    def table_class(self) -> str | None:
+        return classify_table(self.table, self.table_group)
 
 
 def _collect_candidates(
@@ -467,9 +626,13 @@ def _collect_candidates(
     """
     candidates: list[_Candidate] = []
 
+    group_index = build_table_group_index(document)
+
     acode_hits = 0
 
     for table in document.get("tables", []):
+        table_group = group_index.get(str(table.get("table_id")))
+
         rows = table.get("rows") or []
 
         for row_index, row in enumerate(rows):
@@ -494,6 +657,7 @@ def _collect_candidates(
                         cell=cell,
                         context=context,
                         label=label,
+                        table_group=table_group,
                     )
                 )
 
@@ -508,7 +672,7 @@ def _describe_candidate(document: dict[str, Any], candidate: _Candidate) -> str:
 
     path_text = " > ".join(section_path) if section_path else "section 경로 없음"
 
-    table_class = classify_table(candidate.table) or "unclassified"
+    table_class = candidate.table_class or "unclassified"
 
     return f"{candidate.table.get('table_id')}[{table_class}] {section_id}({path_text})"
 
@@ -541,7 +705,7 @@ def _select_candidate(
     if len(shortlist) == 1:
         return shortlist[0]
 
-    priorities = [table_class_priority(classify_table(c.table)) for c in shortlist]
+    priorities = [table_class_priority(c.table_class) for c in shortlist]
 
     if all(priority is not None for priority in priorities):
         best = min(priority for priority in priorities if priority is not None)
@@ -585,6 +749,7 @@ def extract_financial_fact(
     3. 연간 기간(dFY) 컨텍스트만 쓴다.
     4. 부가 축이 가장 적은(가장 집계된) 후보만 남긴다.
     5. 남은 후보가 여럿이면 표 분류로 본표를 우선하고, 구분할 수 없으면 막는다.
+    6. 단위는 표와 TABLE-GROUP의 선언에서만 고른다. 신뢰 가능한 선언이 없으면 막는다.
     """
     acodes = METRIC_ACODES.get(metric)
 
@@ -645,24 +810,26 @@ def extract_financial_fact(
         accounting_scope=accounting_scope,
     )
 
-    unit = parse_unit(selected.table.get("unit"))
+    unit, rejected_units = resolve_table_unit(selected.table, selected.table_group)
+
+    if unit is None and rejected_units:
+        raise ExtractionBlockedError(
+            reason="untrusted_table_unit",
+            detail=(
+                f"표 {selected.table.get('table_id')}에 신뢰할 수 있는 단위 선언이 "
+                "없습니다. 표 본문에서 잘못 수집된 것으로 보이는 문자열만 있고 표나 "
+                "TABLE-GROUP에 정상 선언이 없습니다: "
+                f"{[spec.text for spec in rejected_units]}. 그대로 쓰면 자릿수 오류가 "
+                "발생합니다."
+            ),
+        )
 
     if unit is None:
         raise ExtractionBlockedError(
             reason="missing_table_unit",
             detail=(
                 f"표 {selected.table.get('table_id')}에 해석 가능한 단위가 없습니다. "
-                "Parser가 표 단위를 표 단위로 귀속해 제공해야 합니다."
-            ),
-        )
-
-    if not unit.trusted:
-        raise ExtractionBlockedError(
-            reason="untrusted_table_unit",
-            detail=(
-                f"표 {selected.table.get('table_id')}의 단위 문자열이 단위 선언 형태가 "
-                f"아닙니다: {unit.text!r}. 표 본문에서 잘못 수집된 값으로 보이며 "
-                "그대로 쓰면 자릿수 오류가 발생합니다."
+                "Parser가 표 단위를 표 또는 TABLE-GROUP 단위로 귀속해 제공해야 합니다."
             ),
         )
 

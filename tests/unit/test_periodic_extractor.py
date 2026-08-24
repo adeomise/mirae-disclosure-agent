@@ -213,6 +213,59 @@ def test_bulk_skips_table_with_only_untrusted_unit_declaration() -> None:
     assert evidence == []
 
 
+def test_targeted_revenue_uses_label_fallback_when_acode_is_absent() -> None:
+    document = parsed_document(
+        financial_table(
+            label="매출액",
+            values=("1,234",),
+        )
+    )
+
+    fact = extract_financial_fact(
+        document,
+        metric=MetricConcept.REVENUE,
+        fiscal_year=2025,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+    )
+
+    assert fact.metric == MetricConcept.REVENUE
+    assert fact.fiscal_year == 2025
+    assert fact.accounting_scope is FactAccountingScope.CONSOLIDATED
+    assert fact.raw_value == "1,234"
+    assert fact.value == Decimal("1234")
+    assert fact.value_in_base_unit == Decimal("1234000000")
+    assert fact.location.table_id == "table_0001"
+    assert fact.location.row_index == 1
+    assert fact.location.column_index == 1
+    assert fact.acode is None
+
+
+def test_targeted_revenue_prefers_existing_acode_path() -> None:
+    table = financial_table(
+        label="매출채권",
+        values=("1,234",),
+    )
+    value_cell = table["rows"][1][1]
+    value_cell["acode"] = "ifrs-full_Revenue"
+    value_cell["acontext"] = (
+        "CFY2025dFY_"
+        "ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_"
+        "ifrs-full_ConsolidatedMember"
+    )
+    document = parsed_document(table)
+
+    fact = extract_financial_fact(
+        document,
+        metric=MetricConcept.REVENUE,
+        fiscal_year=2025,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+    )
+
+    assert fact.raw_value == "1,234"
+    assert fact.acode == "ifrs-full_Revenue"
+    assert fact.acontext == value_cell["acontext"]
+
+
 @pytest.mark.parametrize(
     "label",
     [

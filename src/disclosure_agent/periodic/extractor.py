@@ -113,6 +113,7 @@ METRIC_ACODES: dict[str, tuple[str, ...]] = {
 }
 
 LABEL_FALLBACK_METRICS = {
+    METRIC_REVENUE,
     METRIC_OPERATING_INCOME,
 }
 
@@ -783,6 +784,14 @@ def extract_financial_fact(
     candidates, acode_hits = _collect_candidates(document, acodes)
 
     if acode_hits == 0:
+        if metric in LABEL_FALLBACK_METRICS:
+            return _extract_financial_fact_from_label_fallback(
+                document,
+                metric=metric,
+                fiscal_year=fiscal_year,
+                accounting_scope=accounting_scope,
+            )
+
         raise ExtractionBlockedError(
             reason="no_metric_acode",
             detail=(

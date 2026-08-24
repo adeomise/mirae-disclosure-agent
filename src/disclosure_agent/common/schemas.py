@@ -1,5 +1,6 @@
 """Pydantic models for the Disclosure Agent contract v0.1."""
 
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -54,6 +55,22 @@ class QueryPlan(BaseModel):
     chain_policy: ChainPolicy | None = None
 
 
+class EvidenceProvenance(BaseModel):
+    """Source table and cell metadata used to produce evidence."""
+
+    table_id: str | None = None
+    row_index: int | None = None
+    column_index: int | None = None
+    acode: str | None = None
+    acontext: str | None = None
+    unit_declaration: str | None = None
+    unit_source: str | None = None
+    unit_multiplier: int | Decimal | None = None
+    unit_trusted: bool | None = None
+    aclass: str | None = None
+    table_classification: str | None = None
+
+
 class Evidence(BaseModel):
     """A traceable location in a source disclosure."""
 
@@ -66,6 +83,7 @@ class Evidence(BaseModel):
     column_label: str | None = None
     field_name: str | None = None
     raw_text: str | None = None
+    provenance: EvidenceProvenance | None = None
 
 
 class Fact(BaseModel):
@@ -146,6 +164,14 @@ class ExecutionIssue(BaseModel):
     detail: str
 
 
+class AnswerabilityDetail(BaseModel):
+    """Original Agent diagnosis behind a canonical answerability reason."""
+
+    stage: str | None = None
+    reason: str
+    detail: str | None = None
+
+
 class CalculationResult(BaseModel):
     """A minimal deterministic calculation with its evidence linkage."""
 
@@ -179,6 +205,7 @@ class AgentExecutionResult(BaseModel):
     execution_status: ExecutionStatus
     answerability_status: AnswerabilityStatus | None = None
     answerability_reason: AnswerabilityReason | None = None
+    answerability_detail: AnswerabilityDetail | None = None
     execution_issue: ExecutionIssue | None = None
     facts: list[Fact] = Field(default_factory=list)
     events: list[Event] = Field(default_factory=list)

@@ -100,6 +100,7 @@ class AnswerabilityReason(StrEnum):
 
     INCOMPLETE_CHAIN = "incomplete_chain"
     AMBIGUOUS_LINK = "ambiguous_link"
+    AMBIGUOUS_MATCH = "ambiguous_match"
     NOT_FOUND = "not_found"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
 

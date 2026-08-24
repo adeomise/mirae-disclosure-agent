@@ -86,6 +86,19 @@ def test_q02_dummy_supply_contract_event() -> None:
     assert event.is_correction is False
 
 
+def test_facility_investment_event_type_validates_and_serializes() -> None:
+    event = Event(
+        event_id="event_dummy_facility_investment",
+        event_type=EventType.FACILITY_INVESTMENT,
+        company="dummy-company",
+        source_doc_id="doc_dummy_event",
+    )
+
+    assert EventType.FACILITY_INVESTMENT.value == "facility_investment"
+    assert event.event_type is EventType.FACILITY_INVESTMENT
+    assert event.model_dump(mode="json")["event_type"] == "facility_investment"
+
+
 def test_q13_dummy_event_history_tracks_named_field_change() -> None:
     history = EventHistory(
         event_id="event_dummy_supply_contract",

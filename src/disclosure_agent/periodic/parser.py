@@ -668,7 +668,7 @@ def save_parsed_json(
 
 def main() -> None:
     input_path = Path(
-        "data/raw/20240312000736.xml"
+        "data/raw/periodic/20240312000736.xml"
     )
 
     output_path = Path(

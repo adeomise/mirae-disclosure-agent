@@ -22,6 +22,9 @@
 TODO:
 - 계산형/비교형 질의 의도 추가
 - 분기·반기 보고서 대상 기간 표현 확장
+- Pattern D 구현 시 '비교 의도'와 '단순 다중 기업 언급'을 구분한다. 지금은 안전을 위해
+  기업이 둘 이상 매치되면 비교 의도인지 보지 않고 cross_entity_compare로 분류한다.
+  막는 쪽에서는 이 구분이 없어도 되지만, 실제로 답하기 시작하면 필요해진다.
 """
 
 from __future__ import annotations
@@ -431,6 +434,17 @@ def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> Quer
 
 
 def _reject_out_of_scope_period(question: str) -> None:
+    """
+    이번 범위 밖 기간 표현을 거절한다.
+
+    질문에 쓰인 기간 표현만 보며 어떤 intent인지는 보지 않는다. 그래서 의도 분기보다 앞의
+    공통 경로에서 실행한다. 의도별 builder 안에서 부르면 Pattern을 추가할 때마다 같은 검사를
+    다시 붙여야 하고, 한 번 빠뜨리면 그 Pattern만 조용히 검사를 건너뛴다.
+
+    연도 범위는 여기서 보지 않는다. 코퍼스 보유 기간 밖 연도(예: 2022, 2027)는 문서 조회
+    단계에서 걸러져 `COMPLETED`/`UNANSWERABLE`로 답한다. 그 판정은 코퍼스를 실제로 본 뒤에야
+    할 수 있으므로 질문 해석 단계에서 앞질러 정하지 않는다.
+    """
     lowered = question.casefold()
 
     for token in QUARTER_TOKENS:
@@ -469,7 +483,14 @@ def build_query_plan(
 
     companies = _extract_companies(question, company_universe)
 
-    # 기업이 둘 이상이면 Pattern D다. 이 판정을 다른 의도 분기보다 먼저 한다.
+    # 의도와 무관한 기간 규칙은 의도 분기보다 먼저 본다.
+    #
+    # 의도별 builder 안으로 들여보내면 Pattern이 늘 때마다 같은 검사를 다시 붙여야 하고,
+    # 한 번 빠뜨린 Pattern만 조용히 검사를 건너뛴다. 지금은 Pattern D handler가 없어
+    # routing에서 막히지만, handler가 생기는 순간 그 경로가 기간 규칙을 우회하게 된다.
+    _reject_out_of_scope_period(question)
+
+    # 기업이 둘 이상이면 Pattern D다. 이 판정을 나머지 의도 분기보다 먼저 한다.
     #
     # 뒤로 미루면 단일 기업 흐름(Pattern A·E)이 먼저 기업 하나를 골라 버린다. 그러면 두
     # 기업을 물은 질문에 한 기업의 Fact만 근거까지 갖춰 COMPLETED/ANSWERABLE로 돌아가고,
@@ -477,11 +498,9 @@ def build_query_plan(
     if len(companies) > 1:
         return _build_cross_entity_compare_plan(question, companies)
 
-    # 의도를 먼저 가른다. 이후 단계는 의도마다 요구하는 것이 다르다.
+    # 남은 의도를 가른다. 이후 단계는 의도마다 요구하는 것이 다르다.
     if _looks_like_event_history(question):
         return _build_event_history_plan(question, companies)
-
-    _reject_out_of_scope_period(question)
 
     year = _extract_year(question)
 

@@ -301,3 +301,101 @@ def test_query_plan_rejects_a_bare_company_string() -> None:
 def test_query_plan_rejects_an_empty_company_set() -> None:
     with pytest.raises(ValueError):
         QueryPlan(question="합성", companies=(), year=2025)
+
+
+# --------------------------------------------------------------------------
+# 5. 의도와 무관한 기간 규칙이 다중 기업 분기보다 먼저 실행된다
+#
+# 지금은 Pattern D handler가 없어 어느 쪽이든 막힌다. 그래서 순서가 틀려도 겉으로 드러나지
+# 않는다. handler가 생기는 순간 드러나므로 지금 고정한다.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "2026년 1분기 HD현대중공업이랑 삼성중공업 매출 비교해줘",
+        "2025년 상반기 HD현대중공업이랑 삼성중공업 매출 비교해줘",
+    ],
+)
+def test_out_of_scope_period_is_checked_before_the_multi_company_branch(
+    question: str,
+) -> None:
+    """
+    분기·반기 표현은 기업이 몇 곳이든 먼저 걸러야 한다.
+
+    이 검사를 다중 기업 분기 뒤에 두면 Pattern D 경로만 기간 규칙을 건너뛰게 된다.
+    지금은 handler가 없어 routing에서 막히므로 차이가 보이지 않지만, handler가 생기면
+    미지원 기간을 그대로 통과시키는 경로가 된다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(question, known_companies=REAL_COMPANIES)
+
+    assert error.value.reason == "unsupported_period"
+
+
+def test_single_company_out_of_scope_period_is_unchanged() -> None:
+    """대조군. 기간 규칙의 기존 단일 기업 동작이 그대로여야 한다."""
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(
+            "한미반도체 2025년 1분기 연결 매출액",
+            known_companies=REAL_COMPANIES,
+        )
+
+    assert error.value.reason == "unsupported_period"
+
+
+# 코퍼스 보유 기간은 정기공시 2023~2025 + 2026년 1분기다(코퍼스 data_filter.md [3] 시계열).
+# 2022는 그 이전이고 2027은 이후다. 두 연도 모두 기존 fixture가 이미 쓰고 있다
+# (GUARD-OUT-OF-RANGE-PAST, pattern_f_safety_cases.json F1-02/F1-03).
+OUT_OF_RANGE_YEARS = (2022, 2027)
+
+
+@pytest.mark.parametrize("year", OUT_OF_RANGE_YEARS)
+def test_multi_company_out_of_range_year_fails_closed(
+    year: int,
+    synthetic_manifest_path: Path,
+    nfd_corpus_root: Path,
+) -> None:
+    """
+    코퍼스 보유 기간 밖 연도를 묻는 다중 기업 질문도 값을 만들어 내지 않는다.
+
+    연도 범위는 질문 해석 단계에서 보지 않는다. 코퍼스를 실제로 봐야 알 수 있는 판정이기
+    때문이다. 그래서 여기서 막는 것은 기간 규칙이 아니라 '기업이 둘'이라는 사실이고, 결과는
+    routing에서 BLOCKED다. 어느 쪽이든 Fact가 만들어지지 않는다는 점이 이 검사의 요지다.
+
+    단일 기업 같은 질문은 COMPLETED/UNANSWERABLE로 답한다(F1-02·F1-03). 다중 기업은
+    그 판정에 이르기 전에 막히므로 답변 가능성을 비운다.
+    """
+    question = f"{year}년 테스트반도체랑 테스트전자 매출 비교해줘"
+
+    result = answer_question(
+        question,
+        corpus_root=nfd_corpus_root,
+        manifest_path=synthetic_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.facts == []
+    assert result.evidence == []
+    assert result.answerability_status is None
+
+    issue = result.execution_issue
+
+    assert issue is not None
+    assert issue.stage == STAGE_ROUTING
+    assert issue.reason == REASON_UNIMPLEMENTED_INTENT
+
+
+@pytest.mark.parametrize("year", OUT_OF_RANGE_YEARS)
+def test_multi_company_out_of_range_year_is_still_cross_entity_compare(
+    year: int,
+) -> None:
+    """연도가 범위 밖이어도 의도 분류 자체는 달라지지 않는다."""
+    plan = build_query_plan(
+        f"{year}년 HD현대중공업이랑 삼성중공업 매출 비교해줘",
+        known_companies=REAL_COMPANIES,
+    )
+
+    assert plan.intent == INTENT_CROSS_ENTITY_COMPARE
+    assert plan.year == year

@@ -67,6 +67,7 @@ class EventType(StrEnum):
     """Supported event disclosure types."""
 
     SUPPLY_CONTRACT = "supply_contract"
+    FACILITY_INVESTMENT = "facility_investment"
 
 
 class EventLinkRelation(StrEnum):

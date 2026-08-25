@@ -425,7 +425,7 @@ def test_every_mapped_stop_completes_execution(stage: str, reason: str) -> None:
 
     result = normalize_single_fact_result(
         SingleFactResult(
-            plan=QueryPlan(question="합성", company="합성", year=2025),
+            plan=QueryPlan(question="합성", companies=("합성",), year=2025),
             blocked=BlockedInfo(stage=stage, reason=reason, detail="합성 사유"),
         )
     )

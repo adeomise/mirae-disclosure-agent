@@ -402,37 +402,63 @@ F3·F4 구현의 세 가지 결정:
    두 번째 기업이 사라진 흔적이 `warnings`에도 `conversion_gaps`에도 남지 않습니다.
 
 `ACCIDENTALLY_SAFE` 10건은 그때도 통과하지 않았지만 **질문을 조금만 바꾸면 통과**했습니다.
+
 그래서 "현재 18문항 중 Q16~Q18이 거부된다"는 사실을 Pattern F가 동작한다는 근거로 쓸 수
 없었습니다.
 
-## 부록 B — F3·F4 Gate 도입 후
+## 부록 B — F3·F4 Gate 및 multi-company guard 도입 후
 
-| 판정 | 도입 전 | 도입 후 |
+| 판정 | 도입 전 | 현재 |
 |---|---|---|
-| `CORRECT` | 9 | **17** |
+| `CORRECT` | 9 | **18** |
 | `ACCIDENTALLY_SAFE` | 10 | **4** |
-| `MISROUTED` | 5 | **3** |
+| `MISROUTED` | 5 | **2** |
 
-위험도 분포는 `CRITICAL` 1 · `HIGH` 2 · `MEDIUM` 5 · `LOW` 16입니다.
+F3 4건과 F4 4건이 전부 `CORRECT`로 바뀌었습니다.
 
-F3 4건과 F4 4건이 전부 `CORRECT`로 바뀌었습니다. 그중 두 건은 파싱 실패에 기대던 우연한
-방어가 아니라 실제 오답이었습니다.
+- **`F3-03`** — 기존에는 "삼성전자 2024년 매출 기준으로 지금 사도 될까?"가
+  `COMPLETED` / `ANSWERABLE` / Fact 1건 · Evidence 1건으로 처리됐습니다.
+  이제 `사도 될`이 retrieval 이전에 F3로 판정되어 Fact 0건 · Evidence 0건입니다.
 
-- **`F3-03`** — 유일한 `CRITICAL` 오답이었습니다. 이제 `사도 될`이 retrieval 이전에 F3로
-  판정되어 Fact 0건 · Evidence 0건입니다.
-- **`F4-03`** — 상태는 `UNANSWERABLE`로 같았으나 사유가 `not_found`였습니다. 이제
-  `answerability_reason`이 비고 `answerability_detail`에 `answerability_gate` /
-  `forward_looking_prediction`이 실립니다. 2026년 사업보고서가 코퍼스에 들어와도 거부됩니다.
+- **`F4-03`** — 기존 상태는 `UNANSWERABLE`이었지만 사유가 `not_found`였습니다.
+  이제 `answerability_detail`에 `answerability_gate` /
+  `forward_looking_prediction`이 기록되어, 향후 해당 연도의 공시가 코퍼스에 추가되어도
+  예측 요청이라는 이유로 거부됩니다.
 
-남은 위험은 이번 범위 밖입니다.
+### 이후 변경 — `F6-04` (Q10) 해소
 
-| 케이스 | 위험 | 범주 | 남은 이유 |
-|---|---|---|---|
-| `F6-04` (Q10) | CRITICAL | F6 | multi-company guard 별도 작업 |
-| `F2-03` | HIGH | F2 | 외부 출처 지정 판정 미구현 |
-| `F6-02` | HIGH | F6 | Pattern C 미구현 |
+`F6-04`도 위 최초 실측 이후 해소됐습니다.
 
-`ACCIDENTALLY_SAFE` 4건(F1-01, F2-01, F2-02, F2-04)은 전부 F1·F2이며, 여전히 연도·기업명
-파싱 실패로만 막혀 있습니다.
+`query_analyzer`가 질문에서 매치된 서로 다른 기업을 모두 인식해
+`cross_entity_compare`로 분류하고, 현재 해당 handler가 없으므로 Router가
+`routing` / `unimplemented_intent`로 안전하게 차단합니다.
+
+결과는:
+
+- `execution_status = BLOCKED`
+- Fact 0건
+- Evidence 0건
+
+입니다.
+
+**Pattern D 자체는 아직 미구현이며**, 이번 변경이 보장하는 것은
+"두 기업 질문을 한 기업으로 축소해서 답하지 않는다"까지입니다.
+
+회귀 감시는 `scripts/corpus_regression_cases.jsonl`의
+`GUARD-MULTI-COMPANY`가 담당합니다.
+
+기업 다중 값 문제는 해소됐지만 **기간 다중 값(`F6-02`)은 아직 남아 있습니다.**
+기업은 `companies`로 모든 매치를 보존하지만, 기간은 아직 `year` 하나만 표현하므로
+Pattern C / multi-period QueryPlan 작업에서 별도로 해결해야 합니다.
+
+현재 남은 `MISROUTED`는 다음 두 건입니다.
+
+| 케이스 | 범주 | 남은 이유 |
+|---|---|---|
+| `F2-03` | F2 | 외부 출처 지정 판정 미구현 |
+| `F6-02` | F6 | multi-period / Pattern C 미구현 |
+
+`ACCIDENTALLY_SAFE` 4건(F1-01, F2-01, F2-02, F2-04)은 여전히
+정식 Safety 판정이 아니라 다른 파싱/조회 단계에서 우연히 막히는 케이스입니다.
 
 케이스별 상세는 `tests/fixtures/pattern_f_safety_cases.json`을 보십시오.

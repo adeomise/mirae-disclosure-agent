@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="질문으로 DART 공시의 핵심 수치와 근거 위치를 확인하는 기초 UI" />
+    <title>공시한눈 | DART 공시 AI Agent</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="공시한눈 홈">
+        <span class="brand-mark" aria-hidden="true">공</span>
+        <span>공시한눈</span>
+      </a>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="eyebrow">공시 AI</div>
+        <h1 id="hero-title">요즘 어떤 기업이 궁금한가요?</h1>
+        <p class="hero-copy">
+          궁금한 기업의 공시를 자유롭게 질문해보세요.<br />
+          필요한 숫자와 근거까지 한눈에 찾아드려요.
+        </p>
+
+        <form class="search-form" id="question-form">
+          <label class="sr-only" for="question">공시 질문</label>
+          <div class="search-box">
+            <span class="search-icon" aria-hidden="true"></span>
+            <input id="question" name="question" type="text" autocomplete="off"
+              placeholder="예: 미래전자 2025년 매출액을 알려줘" required />
+            <button type="submit">질문하기</button>
+          </div>
+          <p class="form-message" id="form-message" aria-live="polite"></p>
+        </form>
+
+        <div class="suggestions" aria-label="추천 질문">
+          <span class="suggestions-label">추천 질문</span>
+          <button type="button" data-question="미래전자 2025년 매출액을 알려줘">매출액 비교</button>
+          <button type="button" data-question="미래전자 2025년 영업이익을 알려줘">영업이익 조회</button>
+          <button type="button" data-question="최근 공급계약 변경 내용을 알려줘">공급계약 분석</button>
+          <button type="button" data-question="정정공시에서 바뀐 내용을 알려줘">정정공시 추적</button>
+        </div>
+      </section>
+
+      <section class="results" id="results" aria-labelledby="results-title" hidden>
+        <div class="section-heading">
+          <h2 id="results-title">공시 분석 결과</h2>
+        </div>
+
+        <div class="state-card" id="state-card" role="status" aria-live="polite">
+          <span class="state-icon" aria-hidden="true">?</span>
+          <div>
+            <h3 id="state-title">질문을 입력해 주세요</h3>
+            <p id="state-description">Agent가 연결되면 분석 결과와 근거가 여기에 표시됩니다.</p>
+            <button class="sample-button" id="sample-button" type="button" hidden>
+              샘플 결과 보기
+            </button>
+          </div>
+        </div>
+
+        <article class="result-card" aria-live="polite" aria-busy="false" data-mode="none" hidden>
+          <div class="result-topline">
+            <div class="result-identity">
+              <div>
+                <p class="company" id="company">미래전자</p>
+                <p class="report-meta" id="report-meta">2025 사업보고서 · 연결</p>
+              </div>
+              <span class="demo-label" id="data-mode" hidden></span>
+            </div>
+            <span class="status-badge" id="status-badge" hidden></span>
+          </div>
+
+          <div class="metric-block">
+            <p class="metric-label" id="metric-label">매출액</p>
+            <p class="metric-value" id="metric-value">300.8조 원</p>
+            <p class="metric-change" id="metric-change"><span aria-hidden="true">↗</span> 전년 대비 +12.4%</p>
+          </div>
+
+          <p class="answer-summary" id="answer-summary">
+            질문 흐름을 확인하기 위한 가상 결과입니다. 실제 Agent가 연결되면 같은 카드에
+            검증된 응답이 표시됩니다.
+          </p>
+
+          <div class="evidence-panel">
+            <div class="evidence-heading">
+              <div>
+                <span class="evidence-icon" aria-hidden="true">✓</span>
+                <div>
+                  <p class="evidence-title">이 답변의 근거</p>
+                  <p>결과를 뒷받침하는 원문 위치입니다.</p>
+                </div>
+              </div>
+              <span class="evidence-count" id="evidence-count">1개 근거</span>
+            </div>
+
+            <div id="evidence-list">
+              <article class="evidence-item">
+                <div class="document-icon" aria-hidden="true"></div>
+                <div class="evidence-content">
+                  <p class="document-name">사업보고서 2025 <span>샘플 문서</span></p>
+                  <p class="document-path">III. 재무에 관한 사항 › 연결 재무제표</p>
+                  <dl>
+                    <div><dt>위치</dt><dd>매출액 · 2025</dd></div>
+                    <div><dt>단위</dt><dd>조원</dd></div>
+                  </dl>
+                </div>
+                <button class="source-button" type="button" disabled>원문 보기</button>
+              </article>
+            </div>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <footer><p>표시된 샘플은 UI 확인용 가상 데이터이며 실제 투자 판단의 근거가 아닙니다.</p></footer>
+  </body>
+</html>

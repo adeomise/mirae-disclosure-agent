@@ -249,6 +249,46 @@ def blocked_execution(
     )
 
 
+def refused_execution(
+    stage: str,
+    reason: str,
+    detail: str,
+    *,
+    warnings: Sequence[str] = (),
+) -> AgentExecutionResult:
+    """
+    정책 판정으로 답하지 않기로 한 실행 결과를 만든다.
+
+    blocked_execution과 나누는 이유:
+        blocked는 "판정에 이르지 못하고 멈췄다"이고, 이쪽은 "판정을 끝냈고 답하지 않기로
+        했다"이다. Gate는 질문만 보고 결론을 냈으므로 실행은 정상적으로 끝났다. 그래서
+        COMPLETED + UNANSWERABLE이며, BLOCKED가 아니다
+        (docs/agent_design/pattern_f_safety.md §4).
+
+    answerability_reason을 비우는 이유:
+        Contract v0.1의 AnswerabilityReason에는 정책 거부에 대응하는 값이 없다. 제안된
+        OUT_OF_SCOPE_POLICY는 아직 미확정이고(F-D1), 있는 값으로 근사하지 않는다.
+        NOT_FOUND는 "문서는 있는데 찾지 못했다"(미확정)이고 INSUFFICIENT_EVIDENCE는
+        "코퍼스를 읽었는데 근거가 모자랐다"인데, Gate는 코퍼스를 아예 읽지 않았다. 어느
+        쪽을 써도 사실과 다른 진술이 되고, 평가에서 정책 거부와 검색 실패가 한 지표로
+        묶인다.
+
+        그래서 ANSWERABILITY_BY_STOP과 같은 규약을 쓴다. 대응 값이 없으면 reason을 비우고
+        판정 근거는 answerability_detail에 원문 그대로 남긴다. Contract에 값이 생기면
+        이 함수의 인자 하나만 바뀐다.
+
+    facts와 evidence는 채우지 않는다. 거부 응답에 근거를 붙이면 부분 답변으로 읽힌다
+    (evidence_and_answerability.md 원칙 7).
+    """
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=None,
+        answerability_detail=AnswerabilityDetail(stage=stage, reason=reason, detail=detail),
+        warnings=list(warnings),
+    )
+
+
 def _answerability_detail(blocked: BlockedInfo) -> AnswerabilityDetail:
     """
     canonical reason 뒤에 있던 Agent 내부 진단을 그대로 옮긴다.

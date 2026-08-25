@@ -101,8 +101,6 @@ class GoldAnswer(BaseModel):
             AnswerabilityStatus.ANSWERABLE,
             AnswerabilityStatus.PARTIALLY_ANSWERABLE,
         }
-        if self.status in answerable and self.min_evidence_count < 1:
-            raise ValueError("answerable cases must require evidence")
         if self.status is AnswerabilityStatus.ANSWERABLE and self.reason is not None:
             raise ValueError("ANSWERABLE cases must not define a failure reason")
         if self.status not in answerable and self.reason is None:
@@ -111,13 +109,6 @@ class GoldAnswer(BaseModel):
             self.fact is not None or self.facts
         ):
             raise ValueError("UNANSWERABLE cases must not contain a supported fact")
-        if (
-            self.status is AnswerabilityStatus.ANSWERABLE
-            and self.fact is None
-            and not self.facts
-            and self.event_history is None
-        ):
-            raise ValueError("ANSWERABLE cases need a fact or event-history expectation")
         if self.fact is not None and self.facts is not None:
             raise ValueError("use either legacy fact or facts, not both")
         if self.answerability_detail_reason == "forward_looking":
@@ -173,6 +164,38 @@ def _index_unique(records, *, label: str):
     return indexed
 
 
+def _validate_paired_gold(question: QuestionCase, gold: GoldAnswer) -> None:
+    """Apply lifecycle-aware rules after a question and its gold are paired."""
+    if gold.status is not AnswerabilityStatus.ANSWERABLE:
+        return
+
+    has_semantic_expectation = bool(gold.expected_facts()) or gold.event_history is not None
+    has_counts = (
+        gold.counts is not None
+        and bool(gold.counts.model_dump(exclude_none=True))
+    )
+    is_future_regression = (
+        question.evaluation_mode == "regression" and question.lifecycle == "future"
+    )
+
+    if is_future_regression:
+        if not (
+            has_semantic_expectation
+            or has_counts
+            or gold.min_evidence_count > 0
+        ):
+            raise ValueError(
+                f"{question.case_id}: future ANSWERABLE cases need a semantic or "
+                "structural expectation"
+            )
+        return
+
+    if gold.min_evidence_count < 1:
+        raise ValueError("answerable cases must require evidence")
+    if not has_semantic_expectation:
+        raise ValueError("ANSWERABLE cases need a fact or event-history expectation")
+
+
 def load_dataset(
     questions_path: Path = DEFAULT_QUESTIONS_PATH,
     gold_path: Path = DEFAULT_GOLD_PATH,
@@ -193,6 +216,8 @@ def load_dataset(
             "unpaired evaluation cases: "
             f"missing_gold={missing_gold}, missing_questions={missing_questions}"
         )
+    for question in questions:
+        _validate_paired_gold(question, gold_index[question.case_id])
     ordered_gold = tuple(gold_index[item.case_id] for item in questions)
     return EvaluationDataset(questions=questions, gold_answers=ordered_gold)
 

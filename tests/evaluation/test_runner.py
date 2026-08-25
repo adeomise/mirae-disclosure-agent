@@ -22,6 +22,7 @@ PredictionCase = runner.PredictionCase
 QuestionCase = runner.QuestionCase
 compare_prediction = runner.compare_prediction
 evaluate_predictions = runner.evaluate_predictions
+load_dataset = runner.load_dataset
 load_predictions = runner.load_predictions
 
 
@@ -174,6 +175,78 @@ def dataset(*pairs: tuple[QuestionCase, GoldAnswer]) -> EvaluationDataset:
         questions=tuple(item[0] for item in pairs),
         gold_answers=tuple(item[1] for item in pairs),
     )
+
+
+def load_single_case(
+    tmp_path: Path,
+    *,
+    lifecycle: str,
+    gold: dict,
+) -> EvaluationDataset:
+    questions_path = tmp_path / "questions.jsonl"
+    gold_path = tmp_path / "gold.jsonl"
+    questions_path.write_text(
+        json.dumps(
+            {
+                "case_id": "case",
+                "question": "[SYNTHETIC] lifecycle validation",
+                "synthetic": True,
+                "evaluation_mode": "regression",
+                "lifecycle": lifecycle,
+            }
+        ),
+        encoding="utf-8",
+    )
+    gold_path.write_text(
+        json.dumps({"case_id": "case", "status": "ANSWERABLE", **gold}),
+        encoding="utf-8",
+    )
+    return load_dataset(questions_path, gold_path)
+
+
+def test_active_answerable_without_semantic_expectation_fails(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValueError, match="ANSWERABLE cases need a fact or event-history expectation"
+    ):
+        load_single_case(
+            tmp_path,
+            lifecycle="active",
+            gold={"min_evidence_count": 1},
+        )
+
+
+def test_future_answerable_with_counts_only_passes(tmp_path: Path) -> None:
+    loaded = load_single_case(
+        tmp_path,
+        lifecycle="future",
+        gold={"min_evidence_count": 0, "counts": {"events": 1}},
+    )
+
+    assert loaded.gold_answers[0].counts.events == 1
+
+
+def test_future_answerable_with_minimum_evidence_only_passes(tmp_path: Path) -> None:
+    loaded = load_single_case(
+        tmp_path,
+        lifecycle="future",
+        gold={"min_evidence_count": 1},
+    )
+
+    assert loaded.gold_answers[0].min_evidence_count == 1
+
+
+def test_future_answerable_without_any_expectation_fails(tmp_path: Path) -> None:
+    with pytest.raises(
+        ValueError,
+        match="future ANSWERABLE cases need a semantic or structural expectation",
+    ):
+        load_single_case(
+            tmp_path,
+            lifecycle="future",
+            gold={"min_evidence_count": 0},
+        )
 
 
 def test_active_prediction_passes_and_future_is_excluded_from_denominator() -> None:

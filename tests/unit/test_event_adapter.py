@@ -163,9 +163,100 @@ def test_adapt_supply_contract_correction() -> None:
     )
 
 
-def test_adapter_rejects_unsupported_event_type() -> None:
+def test_adapt_facility_investment_event() -> None:
+    # facility_investment는 Contract에 추가됐지만 어댑터를 통과하는지는 어디서도
+    # 확인하지 않고 있었다. 미지원 표본으로만 쓰이다가 지원 대상이 되면서, 거부도
+    # 수용도 검증되지 않는 구간이 생겼다.
     extracted = {
+        "event_id": "event_doc_facility",
         "event_type": "facility_investment",
+        "doc_id": "doc_facility",
+        "company": "dummy-company",
+        "is_correction": False,
+        "fields": {
+            "investment_amount": {
+                "raw_group": "투자내역",
+                "raw_field": "투자금액(원)",
+                "raw_value": "2,000",
+                "raw_unit": "원",
+                "normalized_value": 2000,
+                "normalized_unit": "KRW",
+                "provenance": {
+                    "table_id": "table_facility",
+                    "row_index": 0,
+                    "field_cell_index": 1,
+                    "value_cell_index": 2,
+                },
+            },
+            "investment_start_date": {
+                "raw_group": "투자기간",
+                "raw_field": "시작일",
+                "raw_value": "2025-03-01",
+                "raw_unit": None,
+                "normalized_value": "2025-03-01",
+                "normalized_unit": None,
+                "provenance": {
+                    "table_id": "table_facility",
+                    "row_index": 1,
+                    "field_cell_index": 1,
+                    "value_cell_index": 2,
+                },
+            },
+        },
+        "correction": None,
+    }
+
+    result = adapt_extracted_event(extracted)
+
+    assert (
+        result.event.event_type
+        is EventType.FACILITY_INVESTMENT
+    )
+    assert result.event.source_doc_id == "doc_facility"
+    assert result.event.is_correction is False
+
+    assert (
+        result.event.attributes["investment_amount"]
+        == 2000
+    )
+    assert (
+        result.event.attributes["investment_amount_unit"]
+        == "KRW"
+    )
+
+    amount_evidence = next(
+        evidence
+        for evidence in result.evidence
+        if evidence.field_name == "investment_amount"
+    )
+
+    assert (
+        amount_evidence.location_type
+        is EvidenceLocationType.EVENT_FIELD
+    )
+    assert amount_evidence.raw_text == "2,000"
+    assert amount_evidence.provenance is not None
+    assert (
+        amount_evidence.provenance.table_id
+        == "table_facility"
+    )
+
+
+def test_adapter_rejects_unsupported_event_type() -> None:
+    # Contract에 실재하는 값을 미지원 표본으로 쓰면, 그 값이 나중에 지원 대상이 되는 순간
+    # 이 테스트는 "거부하지 않는다"가 아니라 "표본이 낡았다"로 실패한다. 실제로
+    # facility_investment가 EventType에 추가되면서 한 번 그렇게 깨졌다. 그래서 표본은
+    # Contract 밖의 값으로 두고, 아래 가드가 그 전제를 매번 다시 확인한다.
+    unsupported_event_type = "not_a_contract_event_type"
+
+    assert unsupported_event_type not in set(EventType), (
+        "미지원 표본이 EventType에 추가됐다. 이 테스트가 검증하려는 것은 Contract 밖의 "
+        "event_type을 어댑터가 거부하는지이므로, 표본을 여전히 Contract 밖인 값으로 "
+        "바꿔야 한다."
+    )
+
+    extracted = {
+        "event_type": unsupported_event_type,
         "doc_id": "doc_dummy",
         "company": "dummy-company",
         "fields": {},

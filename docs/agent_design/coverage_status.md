@@ -44,7 +44,7 @@
 | Q07 | C | `NOT_IMPLEMENTED` | – | `temporal_compare` 미분류·미등록. 상대 기간("작년") 해석 없어 `query_plan/missing_year`로 BLOCKED. **상대 기간 해석을 넣는 순간 F4("내년 매출") 질문이 통과함** | Pattern C 착수. 미래 방향 차단(Pattern F)과 같은 PR로 묶어야 함 |
 | Q08 | C | `NOT_IMPLEMENTED` | – | 영업이익률 파생지표 미지원. `query_plan/unsupported_metric`으로 BLOCKED(사유는 정확) | `operating_income` 추출 + `agent/calculator` 연결 |
 | Q09 | C | `NOT_IMPLEMENTED` | – | 서술 비교(C14) 없음. `query_plan/unsupported_metric`으로 BLOCKED | Pattern B/C 이후 |
-| Q10 | D | `NOT_IMPLEMENTED` **+ 오라우팅** | – | **`COMPLETED`/`ANSWERABLE`로 Fact 1건을 돌려줌.** 두 기업 비교 질문인데 `_extract_company`가 가장 긴 이름 하나만 골라 한 기업 값만 답하고, 나머지 기업이 사라진 흔적이 `warnings`·`conversion_gaps` 어디에도 없음 | **즉시 조치 대상.** `cross_entity_compare`로 분류해 `routing/unimplemented_intent`로 막기 |
+| Q10 | D | `NOT_IMPLEMENTED` | – | 오라우팅 해소됨. analyzer가 매치된 서로 다른 기업을 모두 인식해 `cross_entity_compare`로 분류하고, handler가 없으므로 `routing/unimplemented_intent`로 BLOCKED(Fact 0 · Evidence 0). 이전에는 `_extract_company`가 가장 긴 이름 하나만 골라 `COMPLETED`/`ANSWERABLE`로 한 기업 값만 답했음 | Pattern D handler 착수. 차단 동작은 회귀 fixture에 고정 완료(`GUARD-MULTI-COMPANY`) |
 | Q11 | D | `NOT_IMPLEMENTED` | – | 영업이익률 미지원으로 `query_plan/unsupported_metric` BLOCKED. Q10과 달리 지표에서 먼저 걸려 오라우팅되지 않음 | Q08과 함께 |
 | Q12 | D | `NOT_IMPLEMENTED` | – | 신규시설투자 subtype 미지원 + 집계 경로 없음. `query_plan/unsupported_metric`으로 BLOCKED | D1 확정 후. Q15 선행 |
 | Q13 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 2 · Evidence 9, `chain_complete=True` | 회귀 fixture에 고정 완료(`Q13`) |
@@ -90,7 +90,7 @@
 | A 단일 사실 | Q01 Q02 Q03 | 1/3 실측 통과. 정기공시 매출만 |
 | B 문서 요약 | Q04 Q05 Q06 | 0/3. handler 없음 |
 | C 시계열 비교 | Q07 Q08 Q09 | 0/3. **상대 기간 해석과 Pattern F가 충돌** |
-| D 기업 간 비교 | Q10 Q11 Q12 | 0/3. **Q10은 오라우팅으로 잘못된 답을 만듦** |
+| D 기업 간 비교 | Q10 Q11 Q12 | 0/3. handler 없음. Q10 오라우팅은 해소되어 `routing`에서 BLOCKED |
 | E 정정·후속 추적 | Q13 Q14 Q15 | 1/3 실측 통과. 공급계약 + 연/월 지정 형태만 |
 | F 답변 불가 | Q16 Q17 Q18 | 0/3 정상 판정. 3건 모두 우연히 거부됨 |
 
@@ -127,8 +127,10 @@
    `scripts/run_corpus_regression.py`입니다.
 2. **`PARTIAL` 3건을 "Pattern F가 동작한다"의 근거로 쓰지 않습니다.** 거부 사유가 전부
    무관한 파싱 실패입니다. 자세한 내용은 [pattern_f_safety.md](pattern_f_safety.md) 부록.
-3. **오라우팅 항목(Q10)은 미구현보다 나쁩니다.** 미구현은 답을 안 하지만, 오라우팅은 근거를
-   붙인 틀린 답을 합니다.
+3. **오라우팅은 미구현보다 나쁩니다.** 미구현은 답을 안 하지만, 오라우팅은 근거를 붙인 틀린
+   답을 합니다. Q10(기업 다중 값)은 해소됐고, 같은 성격의 `F6-02`(Q07 계열 기간 다중 값)는
+   남아 있습니다. "삼성전자 2024년 매출과 2025년 매출을 비교해줘"가 여전히 첫 연도만
+   `ANSWERABLE`로 답합니다.
 
 ## 관련 문서
 

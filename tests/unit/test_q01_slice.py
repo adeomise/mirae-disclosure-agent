@@ -324,7 +324,7 @@ def test_locate_filing_raises_when_no_manifest_match(
 ) -> None:
     plan = QueryPlan(
         question="테스트반도체 2019년 연결 매출액",
-        company="테스트반도체",
+        companies=("테스트반도체",),
         year=2019,
     )
 

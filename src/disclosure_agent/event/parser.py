@@ -14,6 +14,10 @@ from bs4 import BeautifulSoup, Tag
 
 UNIT_PATTERN = re.compile(r"^(.*)\(([^()]*)\)$")
 
+EVENT_UNITS = {
+    "원",
+    "%",
+}
 
 def extract_table_id(table: Tag, table_index: int) -> str:
     """원문 ID를 우선 사용하고 없을 때만 문서 내 안정적인 local ID를 만든다."""
@@ -63,16 +67,23 @@ def strip_number_prefix(text: str) -> str:
 
 def split_unit(field_text: str) -> tuple[str, str | None]:
     """
+    필드명 끝의 괄호가 실제 지원 단위일 때만 분리한다.
+
     '계약금액(원)' -> ('계약금액', '원')
     '매출액대비(%)' -> ('매출액대비', '%')
+    '이사회결의일(결정일)' -> ('이사회결의일(결정일)', None)
     """
-    match = UNIT_PATTERN.match(field_text.strip())
+    text = field_text.strip()
+    match = UNIT_PATTERN.match(text)
 
     if not match:
-        return field_text.strip(), None
+        return text, None
 
     field = match.group(1).strip()
     unit = match.group(2).strip()
+
+    if unit not in EVENT_UNITS:
+        return text, None
 
     return field, unit
 

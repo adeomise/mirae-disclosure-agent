@@ -49,13 +49,18 @@ from disclosure_agent.agent.answer_builder import (
 )
 from disclosure_agent.agent.handlers.event_history import handle_event_history
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
-from disclosure_agent.agent.normalization import blocked_execution
+from disclosure_agent.agent.normalization import (
+    answerability_reason_for_policy_category,
+    blocked_execution,
+    refused_execution,
+)
 from disclosure_agent.agent.query_analyzer import (
     KNOWN_INTENTS,
     QueryPlan,
     UnsupportedQuestionError,
     build_query_plan,
 )
+from disclosure_agent.agent.safety import STAGE_ANSWERABILITY_GATE, screen_question
 from disclosure_agent.common.enums import Intent
 from disclosure_agent.common.schemas import AgentExecutionResult
 from disclosure_agent.retrieval.metadata_filter import (
@@ -169,7 +174,30 @@ def answer_question(
 
     예상하지 못한 예외는 여기서 삼키지 않는다. 실행 실패(ExecutionStatus.FAILED)의 경계는
     API/Runtime 통합에서 정할 사항이며, 넓은 except로 앞질러 정하면 원인이 사라진다.
+
+    맨 앞에 안전 정책 판정이 있다. manifest를 읽기도 전이며, 이 순서가 규약이다. Gate가
+    거부한 질문에는 manifest 조회·문서 파싱·값 추출이 한 번도 일어나지 않으므로 Fact도
+    Evidence도 만들어지지 않는다. "만들었다가 마지막에 지웠다"와는 다르다.
     """
+    decision = screen_question(question)
+
+    if not decision.allowed:
+        # 판정 근거는 answerability_detail에 남는다. execution_issue는 채우지 않는다.
+        # 막힌 것이 아니라 답하지 않기로 한 것이기 때문이다.
+        #
+        # canonical reason은 범주가 정한다. safety.py는 Contract 타입을 만들지 않는 순수
+        # 함수로 두고, 범주를 Contract 어휘로 옮기는 일은 normalization의 대응표가 맡는다.
+        # 여기서 값을 고르지 않으므로, F1·F2 판정이 붙어도 이 자리는 그대로다.
+        #
+        # 대응표에 없는 범주면 예외로 멈춘다. OUT_OF_SCOPE_POLICY로 덮으면 새 범주가 조용히
+        # 정책 거부로 집계된다.
+        return refused_execution(
+            STAGE_ANSWERABILITY_GATE,
+            decision.reason or "",
+            decision.detail,
+            answerability_reason=answerability_reason_for_policy_category(decision.category),
+        )
+
     corpus_root = Path(corpus_root)
 
     resolved_manifest = (

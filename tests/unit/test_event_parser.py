@@ -96,7 +96,35 @@ def test_facility_investment_keeps_existing_row_shape_with_fallback_table_id(
     assert investment["group"] == "투자내역"
     assert investment["field"] == "투자금액"
     assert investment["raw_field"] == "투자금액(원)"
+    assert investment["unit"] == "원"
     assert investment["value"] == "2,000"
     assert investment["unit"] == "원"
     assert investment["table_id"] == "table_0001"
     assert investment["row_index"] == 0
+
+def test_parser_does_not_treat_parenthetical_label_as_unit(
+    tmp_path: Path,
+) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <span>신규 시설투자 등</span>
+        <table>
+          <tr>
+            <td>이사회결의일(결정일)</td>
+            <td>2025-03-01</td>
+          </tr>
+        </table>
+        """,
+    )
+
+    row = next(
+        row
+        for row in document["rows"]
+        if row["raw_field"] == "이사회결의일(결정일)"
+    )
+
+    assert row["raw_field"] == "이사회결의일(결정일)"
+    assert row["field"] == "이사회결의일(결정일)"
+    assert row["unit"] is None
+    assert row["value"] == "2025-03-01"

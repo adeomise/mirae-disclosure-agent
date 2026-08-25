@@ -266,6 +266,8 @@ def parse_correction(root: BeautifulSoup) -> dict[str, Any] | None:
             # 실제 변경 행
             if len(texts) >= 3:
                 raw_field = texts[0]
+                field_text = strip_number_prefix(raw_field)
+                field, raw_unit = split_unit(field_text)
                 before = texts[1]
                 after = texts[2]
 
@@ -285,7 +287,13 @@ def parse_correction(root: BeautifulSoup) -> dict[str, Any] | None:
                 changes.append(
                     {
                         "raw_field": raw_field,
-                        "field": strip_number_prefix(raw_field),
+                        "raw_group": (
+                            field
+                            if re.match(r"^\d+\.", raw_field.strip())
+                            else None
+                        ),
+                        "field": field,
+                        "raw_unit": raw_unit,
                         "before": before,
                         "after": after,
                         "table_id": table_id,

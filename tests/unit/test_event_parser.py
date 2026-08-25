@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from disclosure_agent.event.extractor import extract_event
 from disclosure_agent.event.parser import parse_exchange_document
 
 
@@ -69,7 +70,9 @@ def test_correction_preserves_raw_reference_changes_and_provenance(tmp_path: Pat
     assert correction["changes"] == [
         {
             "raw_field": "3. 계약상대",
+            "raw_group": "계약상대",
             "field": "계약상대",
+            "raw_unit": None,
             "before": "정정 전 값",
             "after": "정정 후 값",
             "table_id": "XFormD8_Form0_RepeatTable0",
@@ -79,6 +82,11 @@ def test_correction_preserves_raw_reference_changes_and_provenance(tmp_path: Pat
             "after_cell_index": 2,
         }
     ]
+
+    extracted_change = extract_event(document)["correction"]["changes"][0]
+    assert extracted_change["raw_group"] == "계약상대"
+    assert extracted_change["raw_field"] == "3. 계약상대"
+    assert extracted_change["raw_unit"] is None
 
 
 def test_facility_investment_keeps_existing_row_shape_with_fallback_table_id(

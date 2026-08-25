@@ -451,6 +451,7 @@ def extract_correction(
         changes.append(
             {
                 "canonical_field": canonical_field,
+                "raw_group": change.get("raw_group"),
                 "raw_field": raw_field,
 
                 # 여기서는 절대 before/after를 덮어쓰거나

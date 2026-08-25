@@ -19,7 +19,7 @@
   ],
   "verdict_legend": {
     "CORRECT": "현재 동작이 기대와 실질적으로 일치한다",
-    "ACCIDENTALLY_SAFE": "거부는 됐지만 안전 판정이 아니라 무관한 파싱 실패로 막힌 것이다",
+    "ACCIDENTALLY_SAFE": "거부는 됐지만 안전 판정이 아니라 무관한 파싱 실패나 검색 실패로 막힌 것이다",
     "MISROUTED": "거부해야 할 질문에 근거 있는 답을 만들었거나, 다른 Pattern의 질문을 조용히 대체 처리했다"
   },
   "distribution": {
@@ -84,21 +84,21 @@
         "facts": 0,
         "evidence": 0
       },
-      "verdict": "CORRECT",
-      "risk": "LOW",
-      "note": "상태는 맞다. 사유만 다르다. NOT_FOUND는 '문서는 있는데 못 찾았다'(검색 실패, 미확정)이고 OUT_OF_DATA_RANGE는 '보유 기간 밖이라 있을 수 없다'(확정)이다. evidence_and_answerability.md가 이 구분을 문서의 핵심으로 둔다."
+      "verdict": "ACCIDENTALLY_SAFE",
+      "risk": "MEDIUM",
+      "note": "상태만 맞고 사유가 다르므로 안전 판정이 아니다. 2027년 문서가 코퍼스에 없어서 검색이 빈손으로 돌아온 것이지, '보유 기간 밖이라 있을 수 없다'는 판정을 한 것이 아니다. NOT_FOUND는 '문서는 있는데 못 찾았다'(검색 실패, 미확정)이고 OUT_OF_DATA_RANGE는 '보유 기간 밖이라 있을 수 없다'(확정)이며, evidence_and_answerability.md가 이 구분을 문서의 핵심으로 둔다. F1 판정이 붙기 전까지는 두 실패가 한 값으로 묶여 집계되므로 CORRECT로 세지 않는다."
     },
     {
       "id": "F1-03",
       "category": "F1",
-      "category_label": "코퍼스 보유 기간 밖 (과거 방향)",
+      "category_label": "코퍼스 보유 기간 밖 (과거 방향) — pre-retrieval 차단 금지 control",
       "question": "삼성전자 2022년 연결 기준 매출액이 얼마야?",
       "expected": {
         "execution_status": "COMPLETED",
         "answerability_status": "UNANSWERABLE",
-        "answerability_reason": null,
-        "answerability_reason_proposal": "미결. OUT_OF_DATA_RANGE는 Contract에 존재하지만(PR #29), 과거 방향을 '기간 밖'으로 확정 거부해도 되는지가 §3.2에서 아직 정해지지 않았다.",
-        "contract_decision_required": true,
+        "answerability_reason": "not_found",
+        "answerability_reason_proposal": null,
+        "contract_decision_required": false,
         "execution_issue": null,
         "facts": 0,
         "evidence": 0
@@ -113,7 +113,7 @@
       },
       "verdict": "CORRECT",
       "risk": "MEDIUM",
-      "note": "과거 방향은 F1의 예외다. 2023년 사업보고서 요약재무정보 표가 전기 비교 열로 2022년 값을 담고 있는 것이 관찰되어, 코퍼스 시작 연도 이전 값도 사실상 조회 가능하다. 따라서 이 케이스를 '기간 밖'으로 확정 거부하면 오답이 될 수 있다. Pattern F 구현 시 미래 방향과 과거 방향을 같은 규칙으로 묶지 않는다."
+      "note": "과거 방향을 F1으로 선차단하면 안 된다는 것을 고정하는 control이다. 2023년 사업보고서 요약재무정보 표가 전기 비교 열로 2022년 값을 담고 있는 것이 관찰되어, 코퍼스 시작 연도 이전 값도 사실상 조회 가능하다. 팀 결정은 '미래 방향만 OUT_OF_DATA_RANGE 대상으로 두고, 과거 방향은 선차단하지 않고 실제 retrieval/parser 조회에 맡긴다'이며(§3.2), 따라서 이 케이스는 Contract 결정 대기가 아니다. expected의 not_found는 pre-retrieval 판정이 아니라 조회 결과다. parser가 전기 비교 열을 읽게 되면 ANSWERABLE + Fact 1건으로 바뀌는 것이 정상이고, 그때 expected와 observed를 함께 갱신한다. 회귀로 봐야 할 것은 이 케이스가 answerability_gate에서 OUT_OF_DATA_RANGE로 거부되는 경우다."
     },
 
     {

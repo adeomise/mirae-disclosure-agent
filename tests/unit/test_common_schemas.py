@@ -207,6 +207,51 @@ def test_completed_unanswerable_execution_result_with_reason() -> None:
     assert result.answerability_reason is AnswerabilityReason.INSUFFICIENT_EVIDENCE
 
 
+def test_answerability_reason_values_include_pattern_f_contract_extensions() -> None:
+    assert {
+        reason.name: reason.value
+        for reason in AnswerabilityReason
+    } == {
+        "INCOMPLETE_CHAIN": "incomplete_chain",
+        "AMBIGUOUS_LINK": "ambiguous_link",
+        "AMBIGUOUS_MATCH": "ambiguous_match",
+        "NOT_FOUND": "not_found",
+        "INSUFFICIENT_EVIDENCE": "insufficient_evidence",
+        "OUT_OF_DATA_RANGE": "out_of_data_range",
+        "OUT_OF_SCOPE_DATA": "out_of_scope_data",
+        "OUT_OF_SCOPE_POLICY": "out_of_scope_policy",
+    }
+
+
+def test_completed_unanswerable_execution_result_accepts_pattern_f_reasons() -> None:
+    cases = (
+        (AnswerabilityReason.OUT_OF_DATA_RANGE, None),
+        (AnswerabilityReason.OUT_OF_SCOPE_DATA, None),
+        (AnswerabilityReason.OUT_OF_SCOPE_POLICY, "investment_advice"),
+        (AnswerabilityReason.OUT_OF_SCOPE_POLICY, "forward_looking_prediction"),
+    )
+
+    for reason, detail_reason in cases:
+        detail = (
+            AnswerabilityDetail(reason=detail_reason)
+            if detail_reason is not None
+            else None
+        )
+        result = AgentExecutionResult(
+            execution_status=ExecutionStatus.COMPLETED,
+            answerability_status=AnswerabilityStatus.UNANSWERABLE,
+            answerability_reason=reason,
+            answerability_detail=detail,
+        )
+
+        serialized = result.model_dump(mode="json")
+        assert serialized["execution_status"] == "COMPLETED"
+        assert serialized["answerability_status"] == "UNANSWERABLE"
+        assert serialized["answerability_reason"] == reason.value
+        if detail_reason is not None:
+            assert serialized["answerability_detail"]["reason"] == detail_reason
+
+
 def test_unresolved_ambiguous_match_preserves_answerability_detail() -> None:
     detail = AnswerabilityDetail(
         stage="fact_selection",

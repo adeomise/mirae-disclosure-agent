@@ -43,13 +43,83 @@ def test_default_dataset_reports_deterministic_metrics() -> None:
     assert json.loads(completed.stdout) == {
         "mode": "case_validation",
         "real_agent_execution": "BLOCKED",
-        "case_count": 3,
+        "case_count": 21,
         "synthetic_case_count": 3,
-        "paired_case_count": 3,
-        "answerable_cases_requiring_evidence": 2,
-        "unanswerable_cases_without_fact": 1,
-        "event_history_case_count": 1,
+        "paired_case_count": 21,
+        "answerable_cases_requiring_evidence": 17,
+        "unanswerable_cases_without_fact": 4,
+        "event_history_case_count": 4,
     }
+
+
+def test_default_dataset_registers_q01_through_q18_once() -> None:
+    loaded = load_dataset()
+    representative = [
+        question
+        for question in loaded.questions
+        if question.representative_question_id is not None
+    ]
+
+    assert [question.representative_question_id for question in representative] == [
+        f"Q{number:02d}" for number in range(1, 19)
+    ]
+    assert len({question.representative_question_id for question in representative}) == 18
+    assert {question.case_id for question in loaded.questions} == {
+        gold.case_id for gold in loaded.gold_answers
+    }
+    assert {question.case_id for question in representative if question.lifecycle == "active"} == {
+        "q01",
+        "q13",
+        "q18",
+    }
+    assert sum(question.lifecycle == "future" for question in representative) == 15
+
+
+def test_default_dataset_preserves_synthetic_contract_cases() -> None:
+    loaded = load_dataset()
+    synthetic = [question for question in loaded.questions if question.synthetic]
+
+    assert [question.case_id for question in synthetic] == [
+        "synthetic_q01_contract",
+        "synthetic_unanswerable_contract",
+        "synthetic_event_history_contract",
+    ]
+    assert all(question.evaluation_mode == "contract" for question in synthetic)
+
+
+def test_representative_gold_has_no_source_identifiers_or_corpus_values() -> None:
+    records = [
+        json.loads(line)
+        for line in runner.DEFAULT_GOLD_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    representative = [record for record in records if record["case_id"].startswith("q")]
+    serialized = json.dumps(representative, ensure_ascii=False)
+
+    assert '"receipt_no"' not in serialized
+    assert '"doc_id"' not in serialized
+    assert '"raw_value"' not in serialized
+    assert '"normalized_value"' not in serialized
+    assert all(fact for record in representative for fact in record.get("facts", []))
+
+
+def test_future_representative_gold_is_not_empty() -> None:
+    loaded = load_dataset()
+    gold_by_id = {gold.case_id: gold for gold in loaded.gold_answers}
+
+    for question in loaded.questions:
+        if question.representative_question_id is None or question.lifecycle != "future":
+            continue
+        gold = gold_by_id[question.case_id]
+        has_counts = gold.counts is not None and bool(
+            gold.counts.model_dump(exclude_none=True)
+        )
+        assert (
+            gold.expected_facts()
+            or gold.event_history
+            or has_counts
+            or gold.min_evidence_count > 0
+        )
 
 
 def test_runner_rejects_answerable_case_without_evidence(tmp_path: Path) -> None:

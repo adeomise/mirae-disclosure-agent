@@ -1,16 +1,236 @@
-"""공통 Pydantic Schema 모듈.
+"""Pydantic models for the Disclosure Agent contract v0.1."""
 
-역할:
-- 문서, Chunk, Fact, Event, Evidence와 API 입출력 계약을 코드로 정의한다.
+from decimal import Decimal
+from typing import Any
 
-예정 입력:
-- docs/data_contracts.md에서 팀이 확정한 JSON 계약
+from pydantic import BaseModel, Field
 
-예정 출력:
-- 담당 영역 사이에서 검증되고 직렬화 가능한 Pydantic v2 모델
+from disclosure_agent.common.enums import (
+    AnswerabilityReason,
+    AnswerabilityStatus,
+    ChainPolicy,
+    DocumentClass,
+    EventLinkRelation,
+    EventLinkResolutionStatus,
+    EventType,
+    EvidenceLocationType,
+    ExecutionStatus,
+    FactAccountingScope,
+    Intent,
+    MetricConcept,
+    QueryAccountingScope,
+)
 
-TODO:
-- Pilot XML 검토 후 필드와 선택 여부 확정
-- 공통 Schema 변경에 대한 전원 합의
-- 계약 검증 테스트 작성
-"""
+
+class Entity(BaseModel):
+    """An entity mention and its resolved identity."""
+
+    surface: str
+    resolved_name: str
+    role: str
+
+
+class Period(BaseModel):
+    """A minimal temporal constraint extracted from a query."""
+
+    kind: str
+    year: int | None = None
+    period_type: str | None = None
+    range: str | None = None
+
+
+class QueryPlan(BaseModel):
+    """Structured interpretation of a user question."""
+
+    query_id: str
+    original_query: str
+    intent: Intent
+    entities: list[Entity] = Field(default_factory=list)
+    periods: list[Period] = Field(default_factory=list)
+    document_class: DocumentClass
+    document_subtype: str | None = None
+    accounting_scope: QueryAccountingScope
+    metrics: list[MetricConcept] = Field(default_factory=list)
+    operations: list[str] = Field(default_factory=list)
+    chain_policy: ChainPolicy | None = None
+
+
+class EvidenceProvenance(BaseModel):
+    """Source table and cell metadata used to produce evidence."""
+
+    table_id: str | None = None
+    row_index: int | None = None
+    column_index: int | None = None
+    acode: str | None = None
+    acontext: str | None = None
+    unit_declaration: str | None = None
+    unit_source: str | None = None
+    unit_multiplier: int | Decimal | None = None
+    unit_trusted: bool | None = None
+    aclass: str | None = None
+    table_classification: str | None = None
+
+
+class Evidence(BaseModel):
+    """A traceable location in a source disclosure."""
+
+    evidence_id: str
+    doc_id: str
+    location_type: EvidenceLocationType
+    section_path: list[str] = Field(default_factory=list)
+    table_name: str | None = None
+    row_label: str | None = None
+    column_label: str | None = None
+    field_name: str | None = None
+    raw_text: str | None = None
+    provenance: EvidenceProvenance | None = None
+
+
+class Fact(BaseModel):
+    """A source value with separate raw and normalized representations."""
+
+    fact_id: str
+    company: str
+    metric: MetricConcept
+    fiscal_year: int | None = None
+    fiscal_period: str | None = None
+    accounting_scope: FactAccountingScope
+    raw_value: str | None = None
+    raw_unit: str | None = None
+    normalized_value: float | str | None = None
+    normalized_unit: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class Event(BaseModel):
+    """A minimally structured event disclosure."""
+
+    event_id: str
+    event_type: EventType
+    company: str
+    source_doc_id: str
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    is_correction: bool = False
+
+
+class RawReference(BaseModel):
+    """Reference text preserved from a source disclosure before linking."""
+
+    document_title: str | None = None
+    original_filing_date: str | None = None
+    correction_filing_date: str | None = None
+    correction_reason: str | None = None
+    related_disclosures: list[dict[str, str]] = Field(default_factory=list)
+
+
+class EventLink(BaseModel):
+    """A resolved or unresolved relationship between disclosures."""
+
+    link_id: str
+    source_doc_id: str
+    relation: EventLinkRelation
+    raw_reference: RawReference
+    resolved_doc_id: str | None = None
+    candidate_doc_ids: list[str] = Field(default_factory=list)
+    resolution_status: EventLinkResolutionStatus
+
+
+class FieldChange(BaseModel):
+    """A named event attribute change between disclosures."""
+
+    field_name: str
+    raw_field: str | None = None
+    before: str | float | None = None
+    after: str | float | None = None
+    unit: str | None = None
+    before_evidence_id: str | None = None
+    after_evidence_id: str | None = None
+
+
+class EventHistory(BaseModel):
+    """Ordered documents and field changes for one event."""
+
+    event_id: str
+    document_ids: list[str] = Field(default_factory=list)
+    changes: list[FieldChange] = Field(default_factory=list)
+    chain_complete: bool
+
+
+class ExecutionIssue(BaseModel):
+    """A reason the Agent execution was blocked or failed."""
+
+    stage: str
+    reason: str
+    detail: str
+
+
+class AnswerabilityDetail(BaseModel):
+    """Original Agent diagnosis behind a canonical answerability reason."""
+
+    stage: str | None = None
+    reason: str
+    detail: str | None = None
+
+
+class CalculationResult(BaseModel):
+    """A minimal deterministic calculation with its evidence linkage."""
+
+    operation: str
+    value: float | str | None = None
+    unit: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ConversionGap(BaseModel):
+    """Structured information that cannot yet be represented by the contract."""
+
+    kind: str
+    subject: str
+    dropped: dict[str, Any] = Field(default_factory=dict)
+    detail: str = ""
+    pending_decision: bool = False
+    planned_contract_field: str | None = None
+    is_temporary: bool = False
+    contract_version: str = "0.1"
+
+
+class AgentExecutionResult(BaseModel):
+    """Structured Agent output before natural-language answer construction.
+
+    Execution status is independent from answerability: a completed execution
+    may still determine that the available evidence cannot answer the question.
+    Blocked and failed executions use execution_issue for diagnostics.
+    """
+
+    execution_status: ExecutionStatus
+    answerability_status: AnswerabilityStatus | None = None
+    answerability_reason: AnswerabilityReason | None = None
+    answerability_detail: AnswerabilityDetail | None = None
+    execution_issue: ExecutionIssue | None = None
+    facts: list[Fact] = Field(default_factory=list)
+    events: list[Event] = Field(default_factory=list)
+    event_links: list[EventLink] = Field(default_factory=list)
+    event_histories: list[EventHistory] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(default_factory=list)
+    calculations: list[CalculationResult] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    conversion_gaps: list[ConversionGap] = Field(default_factory=list)
+
+
+class AskRequest(BaseModel):
+    """API request contract for asking a disclosure question."""
+
+    question: str
+
+
+class AnswerResponse(BaseModel):
+    """Answer and all structured evidence-bearing results."""
+
+    answer: str
+    status: AnswerabilityStatus
+    reason: AnswerabilityReason | None = None
+    facts: list[Fact] = Field(default_factory=list)
+    events: list[Event] = Field(default_factory=list)
+    event_links: list[EventLink] = Field(default_factory=list)
+    event_histories: list[EventHistory] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(default_factory=list)

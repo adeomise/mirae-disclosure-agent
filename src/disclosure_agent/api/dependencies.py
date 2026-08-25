@@ -1,15 +1,13 @@
-"""FastAPI 의존성 구성 예정 모듈.
+"""FastAPI dependency providers."""
 
-역할:
-- 설정, 서비스, 외부 클라이언트의 생성 및 주입 경계를 정의한다.
+from fastapi import HTTPException, status
 
-예정 입력:
-- 애플리케이션 설정과 요청 수명주기 정보
+from disclosure_agent.api.service import AskService
 
-예정 출력:
-- API Route가 사용할 의존성 객체
 
-TODO:
-- 서비스 인터페이스 확정 후 의존성 공급자 구현
-- 외부 클라이언트 수명주기와 테스트 대체 정책 정의
-"""
+def get_ask_service() -> AskService:
+    """Provide the Agent service after its public result contract is normalized."""
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="The Agent does not yet expose the common AnswerResponse contract.",
+    )

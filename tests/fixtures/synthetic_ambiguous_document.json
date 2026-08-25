@@ -1,0 +1,100 @@
+{
+  "_fixture_note": [
+    "본표와 주석표에 같은 지표가 동시에 존재하는 상황을 재현한 합성 fixture다.",
+    "두 후보는 ACODE, ACONTEXT, axis_depth, row_index가 모두 같다.",
+    "따라서 (axis_depth, row_index) 정렬만으로는 구분되지 않으며 표 분류로만 갈린다.",
+    "table_group_class는 Parser의 최종 Data Contract가 아니라 임시 표기다.",
+    "Parser가 실제로 어떤 키/값으로 표 분류를 제공할지는 아직 정해지지 않았다.",
+    "실제 기업명, 실제 수치, 실제 접수번호는 사용하지 않는다.",
+    "두 값은 잘못 고른 경우를 알아볼 수 있도록 일부러 다르게 두었다."
+  ],
+  "metadata": {
+    "doc_id": "periodic_SYNTHETIC0001",
+    "corp_name": "테스트반도체(주)",
+    "report_name": "사업보고서",
+    "receipt_no": "SYNTHETIC0001",
+    "document_type": "periodic",
+    "source_path": "raw/periodic/테스트반도체/SYNTHETIC0001_annual_2025_12/SYNTHETIC0001.xml"
+  },
+  "sections": [
+    {
+      "section_id": "section_0001",
+      "title": "III. 재무에 관한 사항",
+      "level": 1,
+      "parent_section_id": null,
+      "section_path": ["III. 재무에 관한 사항"],
+      "paragraphs": [],
+      "text": ""
+    },
+    {
+      "section_id": "section_0002",
+      "title": "2. 연결재무제표",
+      "level": 2,
+      "parent_section_id": "section_0001",
+      "section_path": ["III. 재무에 관한 사항", "2. 연결재무제표"],
+      "paragraphs": [],
+      "text": ""
+    },
+    {
+      "section_id": "section_0003",
+      "title": "3. 연결재무제표 주석",
+      "level": 2,
+      "parent_section_id": "section_0001",
+      "section_path": ["III. 재무에 관한 사항", "3. 연결재무제표 주석"],
+      "paragraphs": [],
+      "text": ""
+    }
+  ],
+  "tables": [
+    {
+      "table_id": "table_0101",
+      "title": null,
+      "unit": "(단위 : 백만원)",
+      "section_id": "section_0002",
+      "table_group_class": "financial_statement",
+      "attributes": {"aclass": "NORMAL"},
+      "rows": [
+        [
+          {"type": "TH", "text": ""},
+          {"type": "TH", "text": "제 3 기"}
+        ],
+        [
+          {"type": "TE", "text": "수익(매출액)", "eng": "Revenue"},
+          {
+            "type": "TE",
+            "text": "2,222,222",
+            "acode": "ifrs-full_Revenue",
+            "acontext": "CFY2025dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember",
+            "adecimal": "0",
+            "anegated": "N"
+          }
+        ]
+      ]
+    },
+    {
+      "table_id": "table_0102",
+      "title": null,
+      "unit": "(단위 : 천원)",
+      "section_id": "section_0003",
+      "table_group_class": "note",
+      "attributes": {"aclass": "NORMAL"},
+      "rows": [
+        [
+          {"type": "TH", "text": ""},
+          {"type": "TH", "text": "지역 합계"}
+        ],
+        [
+          {"type": "TE", "text": "수익(매출액)", "eng": "Revenue"},
+          {
+            "type": "TE",
+            "text": "3,333,333",
+            "acode": "ifrs-full_Revenue",
+            "acontext": "CFY2025dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember",
+            "adecimal": "0",
+            "anegated": "N"
+          }
+        ]
+      ]
+    }
+  ]
+}

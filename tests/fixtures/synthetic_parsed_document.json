@@ -1,0 +1,180 @@
+{
+  "_fixture_note": [
+    "이 파일은 Parser의 최종 Data Contract가 아니다.",
+    "Q01 downstream 코드(extractor/evidence/answer_builder)가 동작하기 위해 필요한",
+    "'최소 입력 조건'만을 표현한 합성 fixture다.",
+    "필드 이름과 계층은 docs/data_contracts.md 확정 시 변경될 수 있다.",
+    "실제 기업 수치와 접수번호는 사용하지 않으며 모든 값은 가공된 예시다.",
+    "특히 cell.acontext와 table.unit은 현재 parser가 제공하지 않는 항목이며",
+    "Parser 측 요구사항(D-2 / D-3)이 반영된 뒤의 모습을 전제한 것이다."
+  ],
+  "metadata": {
+    "doc_id": "periodic_SYNTHETIC0001",
+    "corp_name": "테스트반도체(주)",
+    "report_name": "사업보고서",
+    "receipt_no": "SYNTHETIC0001",
+    "document_type": "periodic",
+    "source_path": "raw/periodic/테스트반도체/SYNTHETIC0001_annual_2025_12/SYNTHETIC0001.xml"
+  },
+  "sections": [
+    {
+      "section_id": "section_0001",
+      "title": "III. 재무에 관한 사항",
+      "level": 1,
+      "parent_section_id": null,
+      "section_path": ["III. 재무에 관한 사항"],
+      "paragraphs": [],
+      "text": ""
+    },
+    {
+      "section_id": "section_0002",
+      "title": "2. 연결재무제표",
+      "level": 2,
+      "parent_section_id": "section_0001",
+      "section_path": ["III. 재무에 관한 사항", "2. 연결재무제표"],
+      "paragraphs": [],
+      "text": ""
+    },
+    {
+      "section_id": "section_0003",
+      "title": "4. 재무제표",
+      "level": 2,
+      "parent_section_id": "section_0001",
+      "section_path": ["III. 재무에 관한 사항", "4. 재무제표"],
+      "paragraphs": [],
+      "text": ""
+    }
+  ],
+  "tables": [
+    {
+      "table_id": "table_0001",
+      "title": null,
+      "unit": "(단위 : 백만원)",
+      "section_id": "section_0002",
+      "attributes": {"aclass": "NORMAL"},
+      "rows": [
+        [
+          {"type": "TE", "text": "연결 포괄손익계산서"}
+        ],
+        [
+          {"type": "TE", "text": "제 3 기 2025.01.01 부터 2025.12.31 까지"}
+        ]
+      ]
+    },
+    {
+      "table_id": "table_0002",
+      "title": null,
+      "unit": "(단위 : 백만원)",
+      "section_id": "section_0002",
+      "attributes": {"aclass": "NORMAL"},
+      "rows": [
+        [
+          {"type": "TH", "text": ""},
+          {"type": "TH", "text": "제 3 기"},
+          {"type": "TH", "text": "제 2 기"}
+        ],
+        [
+          {"type": "TE", "text": "수익(매출액) - A부문", "eng": "Revenue"},
+          {
+            "type": "TE",
+            "text": "700,000",
+            "acode": "ifrs-full_Revenue",
+            "acontext": "CFY2025dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember_ifrs-full_OperatingSegmentsAxis_dart_SegmentAMember",
+            "adecimal": "0",
+            "anegated": "N"
+          },
+          {
+            "type": "TE",
+            "text": "600,000",
+            "acode": "ifrs-full_Revenue",
+            "acontext": "PFY2024dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember_ifrs-full_OperatingSegmentsAxis_dart_SegmentAMember",
+            "adecimal": "0",
+            "anegated": "N"
+          }
+        ],
+        [
+          {"type": "TE", "text": "수익(매출액)", "eng": "Revenue"},
+          {
+            "type": "TE",
+            "text": "1,234,567",
+            "acode": "ifrs-full_Revenue",
+            "acontext": "CFY2025dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember",
+            "adecimal": "0",
+            "anegated": "N"
+          },
+          {
+            "type": "TE",
+            "text": "1,000,000",
+            "acode": "ifrs-full_Revenue",
+            "acontext": "PFY2024dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember",
+            "adecimal": "0",
+            "anegated": "N"
+          }
+        ],
+        [
+          {"type": "TE", "text": "매출원가", "eng": "Cost of sales"},
+          {
+            "type": "TE",
+            "text": "800,000",
+            "acode": "ifrs-full_CostOfSales",
+            "acontext": "CFY2025dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember",
+            "adecimal": "0",
+            "anegated": "N"
+          },
+          {
+            "type": "TE",
+            "text": "700,000",
+            "acode": "ifrs-full_CostOfSales",
+            "acontext": "PFY2024dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember",
+            "adecimal": "0",
+            "anegated": "N"
+          }
+        ],
+        [
+          {"type": "TE", "text": "기말 자산총계 (시점 컨텍스트 예시)"},
+          {
+            "type": "TE",
+            "text": "9,999,999",
+            "acode": "ifrs-full_Revenue",
+            "acontext": "CFY2025eFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember",
+            "adecimal": "0",
+            "anegated": "N"
+          }
+        ]
+      ]
+    },
+    {
+      "table_id": "table_0003",
+      "title": null,
+      "unit": "(단위 : 백만원)",
+      "section_id": "section_0003",
+      "attributes": {"aclass": "NORMAL"},
+      "rows": [
+        [
+          {"type": "TH", "text": ""},
+          {"type": "TH", "text": "제 3 기"},
+          {"type": "TH", "text": "제 2 기"}
+        ],
+        [
+          {"type": "TE", "text": "수익(매출액)", "eng": "Revenue"},
+          {
+            "type": "TE",
+            "text": "1,111,111",
+            "acode": "ifrs-full_Revenue",
+            "acontext": "CFY2025dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_SeparateMember",
+            "adecimal": "0",
+            "anegated": "N"
+          },
+          {
+            "type": "TE",
+            "text": "900,000",
+            "acode": "ifrs-full_Revenue",
+            "acontext": "PFY2024dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_SeparateMember",
+            "adecimal": "0",
+            "anegated": "N"
+          }
+        ]
+      ]
+    }
+  ]
+}

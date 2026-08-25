@@ -35,6 +35,7 @@ from disclosure_agent.agent.safety import (
     screen_question,
 )
 from disclosure_agent.common.enums import (
+    AnswerabilityReason,
     AnswerabilityStatus,
     ExecutionStatus,
 )
@@ -286,16 +287,31 @@ def test_refusal_is_completed_not_blocked() -> None:
     assert result.execution_issue is None
 
 
-def test_refusal_leaves_the_canonical_reason_empty() -> None:
+def test_investment_advice_refusal_uses_the_policy_scope_reason() -> None:
     """
-    Contract v0.1에 정책 거부에 대응하는 AnswerabilityReason이 없다.
+    F3의 canonical reason은 OUT_OF_SCOPE_POLICY다(PR #29에서 추가, F-D1 해소).
 
-    NOT_FOUND나 INSUFFICIENT_EVIDENCE로 근사하면 '코퍼스를 봤는데 없었다'는 진술이 되는데
-    Gate는 코퍼스를 아예 읽지 않았다. pattern_f_safety.md §5.1의 규약을 따른다.
+    NOT_FOUND나 INSUFFICIENT_EVIDENCE로 근사하지 않는다는 규약은 그대로다. 그 둘은
+    '코퍼스를 봤는데 없었다'는 진술인데 Gate는 코퍼스를 아예 읽지 않았다. 대응 값이
+    생겼으므로 비워 두지도 않는다. 비워 두면 소비자가 'Contract에 값이 없다'로 읽는다
+    (pattern_f_safety.md §5.1).
     """
     result = router.answer_question("지금 한화오션 주식 사도 될까?", corpus_root=NONEXISTENT_CORPUS)
 
-    assert result.answerability_reason is None
+    assert result.answerability_reason is AnswerabilityReason.OUT_OF_SCOPE_POLICY
+
+
+def test_forward_looking_refusal_uses_the_policy_scope_reason() -> None:
+    """
+    F4도 같은 canonical reason을 쓴다.
+
+    F3와 F4를 가르는 것은 canonical reason이 아니라 answerability_detail.reason이다.
+    둘 다 '정책상 답하지 않는다'이므로 canonical 층에서는 같은 값이고, 무엇을 막았는지는
+    아래 test_prediction_refusal_uses_its_own_reason이 고정한다.
+    """
+    result = router.answer_question("삼성전자 내년 매출이 오를까?", corpus_root=NONEXISTENT_CORPUS)
+
+    assert result.answerability_reason is AnswerabilityReason.OUT_OF_SCOPE_POLICY
 
 
 def test_refusal_carries_its_verdict_in_answerability_detail() -> None:
@@ -464,14 +480,16 @@ def test_gated_cases_now_meet_their_expected_contract(case: dict[str, Any]) -> N
     assert result.execution_status.value == expected["execution_status"], case["id"]
     assert result.answerability_status is not None, case["id"]
     assert result.answerability_status.value == expected["answerability_status"], case["id"]
-    assert result.answerability_reason is None, case["id"]
+    assert result.answerability_reason is not None, case["id"]
+    assert result.answerability_reason.value == expected["answerability_reason"], case["id"]
     assert result.execution_issue is None, case["id"]
     assert len(result.facts) == expected["facts"], case["id"]
     assert len(result.evidence) == expected["evidence"], case["id"]
 
-    # 명세가 아직 Contract 결정 대기로 표시하고 있는지도 함께 고정한다. enum이 확정되면
-    # 이 단언이 깨지고, 그때 reason을 채우는 것이 정상 절차다.
-    assert expected["contract_decision_required"] is True, case["id"]
+    # F-D1이 해소됐으므로 명세에도 결정 대기가 남아 있으면 안 된다. 남아 있으면 fixture가
+    # 낡은 것이고, reason과 제안값이 동시에 채워진 모순 상태가 된다.
+    assert expected["contract_decision_required"] is False, case["id"]
+    assert expected["answerability_reason_proposal"] is None, case["id"]
 
 
 def test_allowed_question_still_reaches_manifest_lookup() -> None:
@@ -514,18 +532,20 @@ WIRE_F3_QUESTION = "삼성전자 2024년 매출 기준으로 지금 사도 될�
 WIRE_F4_QUESTION = "삼성전자 내년 매출이 오를까?"
 
 
-def _wire_answerability_detail(question: str) -> dict[str, Any]:
+def _wire_payload(question: str) -> dict[str, Any]:
     """
-    production entrypoint 결과를 직렬화한 뒤 answerability_detail만 꺼낸다.
+    production entrypoint 결과를 직렬화해 그대로 돌려준다.
 
     `model_dump_json`을 거치는 이유: 속성 접근은 파이썬 객체를 보지만 소비자가 받는 것은
     직렬화된 문서다. 필드 이름이 바뀌어도 속성 접근은 그대로 통과할 수 있다.
     """
     result = router.answer_question(question, corpus_root=NONEXISTENT_CORPUS)
 
-    payload = json.loads(result.model_dump_json())
+    return json.loads(result.model_dump_json())
 
-    detail = payload["answerability_detail"]
+
+def _wire_answerability_detail(question: str) -> dict[str, Any]:
+    detail = _wire_payload(question)["answerability_detail"]
 
     assert detail is not None, question
 
@@ -552,3 +572,15 @@ def test_forward_looking_wire_reason_is_stable() -> None:
 def test_gate_wire_stage_is_stable() -> None:
     """판정 단계 문자열. 대표 1건에서 값 자체를 고정한다."""
     assert _wire_answerability_detail(WIRE_F3_QUESTION)["stage"] == "answerability_gate"
+
+
+@pytest.mark.parametrize("question", [WIRE_F3_QUESTION, WIRE_F4_QUESTION])
+def test_gate_wire_canonical_reason_is_stable(question: str) -> None:
+    """
+    canonical reason 문자열. F3·F4 대표 1건씩 값 자체를 고정한다.
+
+    위 detail 회귀와 짝을 이룬다. 소비자가 집계에 쓰는 것은 이 값이고, 어느 정책에
+    걸렸는지는 detail이 말한다. 둘 중 하나만 고정하면 canonical 층을 다른 enum으로
+    바꾸거나(예: NOT_FOUND로 근사) 다시 비워도 detail 쪽 단언이 통과한다.
+    """
+    assert _wire_payload(question)["answerability_reason"] == "out_of_scope_policy"

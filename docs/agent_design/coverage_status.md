@@ -13,6 +13,9 @@
 - 현재 이 브랜치가 병합한 `develop` = `1f19a72`
   (PR #24 `feat/periodic-operating-income` 병합, 2026-08-25). 그 이후 반영분은 아래 표에
   재측정되지 않았습니다.
+- **Q16~Q18 재측정: 2026-08-25**, 브랜치 `feat/f3-f4-safety-gate`
+  (F3·F4 pre-retrieval Gate + PR #29 `AnswerabilityReason` 반영분). 나머지 문항은
+  재측정하지 않았습니다.
 
 본 문서에는 실제 공시 값·접수번호를 기재하지 않습니다. 상태와 건수만 기록합니다.
 
@@ -50,25 +53,29 @@
 | Q13 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 2 · Evidence 9, `chain_complete=True` | 회귀 fixture에 고정 완료(`Q13`) |
 | Q14 | E | `NOT_IMPLEMENTED` | Synthetic(능력 일부) | 질문이 연/월을 주지 않아 `query_plan/missing_year`로 BLOCKED. 계약상대방("포드")으로 루트를 좁히는 C3 없음. 체인 미완결 → `PARTIALLY_ANSWERABLE` 경로는 `tests/integration/test_pattern_e.py`에서 합성 검증됨 | 계약상대방 기반 루트 확정. 공시유보(`WITHHELD_IN_SOURCE`)는 Contract 미결정 |
 | Q15 | E | `NOT_IMPLEMENTED` | Synthetic(능력 일부) | 연도 없음 + 신규시설투자 subtype 미지원으로 BLOCKED. 다중 정정 정렬·필드별 궤적은 합성 fixture로 검증됨 | `EVENT_SUBTYPE_TOKENS`에 신규시설투자 추가. D1 확정 후 |
-| Q16 | F | `PARTIAL` | Actual | 거부되긴 하나 사유가 다름. `query_plan/unsupported_period`(분기·반기 미지원)로 BLOCKED이며 **기간 밖 판정이 아님**. 연 단위로 물으면(`2027년 매출액`) 방어가 사라짐 | Pattern F Gate. 사유 코드는 F-D1 미결정 |
-| Q17 | F | `PARTIAL` | Actual | `query_plan/unknown_company`로 BLOCKED. 기업명이 없어서 막힌 것이지 "시장 반응은 보유 문서군이 아니다"라는 판정이 아님 | 같음 |
-| Q18 | F | `PARTIAL` | Actual | `query_plan/missing_year`로 BLOCKED. 연도가 없어서 막힌 것이지 정책 판정이 아님. **`삼성전자 2024년 매출 기준으로 지금 사도 될까?`는 그대로 통과함** | 같음. 정책 판정은 문서 접근 이전 단계여야 함 |
+| Q16 | F | `PARTIAL` | Actual | 거부되긴 하나 사유가 다름. `query_plan/unsupported_period`(분기·반기 미지원)로 BLOCKED이며 **기간 밖 판정이 아님**. 연 단위로 물으면(`삼성전자 2027년 매출액이 얼마야?`) 이 차단이 사라지고 `COMPLETED`/`UNANSWERABLE`/`not_found`(`filing_discovery`/`no_matching_filing`)로 답합니다 — 검색 실패이지 기간 밖 판정이 아님 | F1 Gate 구현. 사유 코드는 확정됨(`OUT_OF_DATA_RANGE`, PR #29) |
+| Q17 | F | `PARTIAL` | Actual | `query_plan/unknown_company`로 BLOCKED. 기업명이 없어서 막힌 것이지 "시장 반응은 보유 문서군이 아니다"라는 판정이 아님 | F2 Gate 구현. 사유 코드는 확정됨(`OUT_OF_SCOPE_DATA`, PR #29) |
+| Q18 | F | `PASS_ACTUAL` | Actual | 없음. F3 Gate가 retrieval 이전에 판정. `COMPLETED`/`UNANSWERABLE`/`out_of_scope_policy`, `answerability_detail`=`answerability_gate`/`investment_advice`, Fact 0 · Evidence 0. 이전에는 `query_plan/missing_year`(연도 부재)로 막힌 우연한 방어였고 **`삼성전자 2024년 매출 기준으로 지금 사도 될까?`는 그대로 통과**했으나, 그 형태도 같은 결과로 거부됨 | 판정 동작은 `tests/unit/test_pattern_f_safety_gate.py`에 고정 완료 |
 
 ## 집계
 
 | 상태 | 문항 수 | 문항 |
 |---|---|---|
-| `PASS_ACTUAL` | 2 | Q01 Q13 |
-| `PARTIAL` | 3 | Q16 Q17 Q18 |
+| `PASS_ACTUAL` | 3 | Q01 Q13 Q18 |
+| `PARTIAL` | 2 | Q16 Q17 |
 | `NOT_IMPLEMENTED` | 13 | Q02~Q12 Q14 Q15 |
 | `PASS_SYNTHETIC_ONLY` | 0 | – |
 | `BLOCKED_BY_DATA` | 0 | – |
 | `BLOCKED_BY_CONTRACT` | 0 | – |
 
-`BLOCKED_BY_CONTRACT`가 0인 이유는, Contract 값이 없는 판정(F1~F4의 사유 코드)이 지금은
-**결과를 만들지 못하게 막는 것이 아니라 `answerability_reason`을 비우고 판정 근거를
-`answerability_detail`(stage/reason/detail)에 남기는 방식**으로 처리되고 있기 때문입니다.
-문항 단위로는 막혀 있지 않습니다.
+`BLOCKED_BY_CONTRACT`가 0입니다. F1~F4의 사유 코드는 PR #29에서
+`OUT_OF_DATA_RANGE` · `OUT_OF_SCOPE_DATA` · `OUT_OF_SCOPE_POLICY`가 추가되어 **Contract에
+자리가 있습니다.** Q18은 그 값(`out_of_scope_policy`)을 실제로 싣고 나오고, Q16·Q17이 아직
+`PARTIAL`인 것은 Contract 때문이 아니라 **판정 자체가 구현되지 않았기 때문**입니다.
+
+대응 값이 없는 판정(`WITHHELD_IN_SOURCE`, `NOT_COMPARABLE`)에는 여전히
+**`answerability_reason`을 비우고 판정 근거를 `answerability_detail`(stage/reason/detail)에
+남기는 방식**을 씁니다. 그것도 문항 단위로 막는 것은 아닙니다.
 
 `ambiguous` 판정은 여기 해당하지 않습니다. Contract v0.1에 대응 값이 있어 그대로 표현됩니다.
 
@@ -92,7 +99,7 @@
 | C 시계열 비교 | Q07 Q08 Q09 | 0/3. **상대 기간 해석과 Pattern F가 충돌** |
 | D 기업 간 비교 | Q10 Q11 Q12 | 0/3. handler 없음. Q10 오라우팅은 해소되어 `routing`에서 BLOCKED |
 | E 정정·후속 추적 | Q13 Q14 Q15 | 1/3 실측 통과. 공급계약 + 연/월 지정 형태만 |
-| F 답변 불가 | Q16 Q17 Q18 | 0/3 정상 판정. 3건 모두 우연히 거부됨 |
+| F 답변 불가 | Q16 Q17 Q18 | 1/3 정상 판정. Q18은 F3 Gate가 retrieval 이전에 판정. Q16·Q17은 여전히 우연히 거부됨(F1·F2 미구현) |
 
 ## Q01 계열 실측 스윕
 
@@ -125,8 +132,9 @@
    경로에서 실측 코퍼스를 쓰는 것은 `tests/unit/test_pattern_f_safety_cases.py`의
    현재 동작 대조 테스트뿐입니다(코퍼스가 없으면 건너뜁니다). 실측 검증의 정본은
    `scripts/run_corpus_regression.py`입니다.
-2. **`PARTIAL` 3건을 "Pattern F가 동작한다"의 근거로 쓰지 않습니다.** 거부 사유가 전부
-   무관한 파싱 실패입니다. 자세한 내용은 [pattern_f_safety.md](pattern_f_safety.md) 부록.
+2. **`PARTIAL` 2건(Q16·Q17)을 "Pattern F가 동작한다"의 근거로 쓰지 않습니다.** 거부 사유가
+   무관한 파싱 실패입니다. Pattern F에서 판정으로 거부되는 것은 Q18(F3)뿐입니다. 자세한
+   내용은 [pattern_f_safety.md](pattern_f_safety.md) 부록.
 3. **오라우팅은 미구현보다 나쁩니다.** 미구현은 답을 안 하지만, 오라우팅은 근거를 붙인 틀린
    답을 합니다. Q10(기업 다중 값)은 해소됐고, 같은 성격의 `F6-02`(Q07 계열 기간 다중 값)는
    남아 있습니다. "삼성전자 2024년 매출과 2025년 매출을 비교해줘"가 여전히 첫 연도만

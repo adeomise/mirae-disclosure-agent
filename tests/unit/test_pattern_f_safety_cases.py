@@ -1,10 +1,11 @@
 """Pattern F 테스트 명세(fixture)의 정합성 검사.
 
-이 파일은 Pattern F를 구현하지 않는다. 아직 production 코드가 없기 때문이다. 대신
-`tests/fixtures/pattern_f_safety_cases.json`이 **명세로서 성립하는지**를 검사한다.
+이 파일은 Pattern F 구현을 검증하지 않는다. `tests/fixtures/pattern_f_safety_cases.json`이
+**명세로서 성립하는지**를 검사한다. 구현 검증은 `test_pattern_f_safety_gate.py`가 맡는다
+(F3·F4는 production Gate가 있고, F1·F2는 아직 없다).
 
 왜 fixture를 테스트하는가:
-    Pattern F 명세의 값어치는 두 가지에서 나온다. 하나는 Contract v0.1에 없는
+    Pattern F 명세의 값어치는 두 가지에서 나온다. 하나는 Contract에 없는
     AnswerabilityReason을 임의로 만들어 쓰지 않았다는 것이고, 다른 하나는 F5(코퍼스에
     근거 없음)와 F6(Agent가 아직 못 함)을 같은 상태로 뭉개지 않았다는 것이다. 둘 다 사람이
     다시 읽어 확인할 것이 아니라 기계가 고정해 둘 수 있는 성질이다.
@@ -133,9 +134,10 @@ def test_expected_statuses_are_real_contract_values(cases: list[dict[str, Any]])
 
 def test_no_case_invents_an_answerability_reason(cases: list[dict[str, Any]]) -> None:
     """
-    Contract v0.1에 없는 사유 값을 명세에 미리 박아 두지 않았는지 본다.
+    Contract에 없는 사유 값을 명세에 미리 박아 두지 않았는지 본다.
 
-    팀원 3과 확정되기 전에 enum을 늘려 쓰면, 구현이 그 값을 전제로 진행된 뒤 되돌려야 한다.
+    확정되기 전에 enum을 늘려 쓰면, 구현이 그 값을 전제로 진행된 뒤 되돌려야 한다. 값이
+    실제로 추가되면(F1~F4의 세 값은 PR #29에서 추가됐다) 이 단언이 그대로 통과한다.
     """
     known = {item.value for item in AnswerabilityReason}
 
@@ -146,7 +148,13 @@ def test_no_case_invents_an_answerability_reason(cases: list[dict[str, Any]]) ->
 
 
 def test_pending_reasons_are_marked_as_contract_decisions(cases: list[dict[str, Any]]) -> None:
-    """대응 값이 없다고 판단한 케이스는 reason을 비우고 결정 필요로 표시해야 한다."""
+    """
+    어느 사유 값이 대응하는지 아직 정해지지 않은 케이스는 reason을 비우고 결정 필요로
+    표시해야 한다.
+
+    반대 방향도 함께 고정한다. 결정이 끝났다고 표시했으면 제안값이 남아 있으면 안 된다.
+    reason과 제안값이 동시에 채워지면 어느 쪽이 확정인지 읽는 사람이 알 수 없다.
+    """
     for case in cases:
         expected = case["expected"]
 

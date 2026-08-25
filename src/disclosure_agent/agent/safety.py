@@ -71,9 +71,10 @@ CATEGORY_FORWARD_LOOKING = "F4"
 
 # answerability_detail.reason에 실리는 사유 문자열.
 #
-# Contract의 AnswerabilityReason이 아니다. v0.1에는 이 두 판정에 대응하는 값이 없고
-# (제안된 OUT_OF_SCOPE_POLICY는 미확정), 없는 값을 임의로 만들거나 NOT_FOUND로 근사하지
-# 않는다는 것이 pattern_f_safety.md §5.1의 규약이다.
+# Contract의 AnswerabilityReason이 아니다. F3와 F4는 canonical reason으로는 둘 다
+# OUT_OF_SCOPE_POLICY 하나에 대응하며(PR #29에서 추가), 그 값 하나만으로는 투자 판단 요구와
+# 예측 요구를 구분할 수 없다. 두 판정을 나누는 것은 아래 두 문자열이고, 이 값들은
+# answerability_detail.reason에만 실린다(pattern_f_safety.md §5.1).
 REASON_INVESTMENT_ADVICE = "investment_advice"
 REASON_FORWARD_LOOKING_PREDICTION = "forward_looking_prediction"
 

@@ -57,7 +57,7 @@ from disclosure_agent.agent.query_analyzer import (
     build_query_plan,
 )
 from disclosure_agent.agent.safety import STAGE_ANSWERABILITY_GATE, screen_question
-from disclosure_agent.common.enums import Intent
+from disclosure_agent.common.enums import AnswerabilityReason, Intent
 from disclosure_agent.common.schemas import AgentExecutionResult
 from disclosure_agent.retrieval.metadata_filter import (
     FilingNotFoundError,
@@ -180,10 +180,17 @@ def answer_question(
     if not decision.allowed:
         # 판정 근거는 answerability_detail에 남는다. execution_issue는 채우지 않는다.
         # 막힌 것이 아니라 답하지 않기로 한 것이기 때문이다.
+        #
+        # canonical reason을 여기서 고르는 이유: safety.py는 Contract 타입을 만들지 않는
+        # 순수 함수로 두고, 판정을 Contract 어휘로 옮기는 일은 이 층이 맡는다. Gate가
+        # 판정하는 F3·F4는 둘 다 정책 범위 밖이므로 OUT_OF_SCOPE_POLICY 하나로 모인다.
+        # F3와 F4를 가르는 것은 answerability_detail.reason이다. F1(OUT_OF_DATA_RANGE)과
+        # F2(OUT_OF_SCOPE_DATA)는 아직 Gate에 없으므로 여기에도 나타나지 않는다.
         return refused_execution(
             STAGE_ANSWERABILITY_GATE,
             decision.reason or "",
             decision.detail,
+            answerability_reason=AnswerabilityReason.OUT_OF_SCOPE_POLICY,
         )
 
     corpus_root = Path(corpus_root)

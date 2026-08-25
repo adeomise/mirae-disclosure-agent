@@ -254,6 +254,7 @@ def refused_execution(
     reason: str,
     detail: str,
     *,
+    answerability_reason: AnswerabilityReason,
     warnings: Sequence[str] = (),
 ) -> AgentExecutionResult:
     """
@@ -265,17 +266,20 @@ def refused_execution(
         COMPLETED + UNANSWERABLE이며, BLOCKED가 아니다
         (docs/agent_design/pattern_f_safety.md §4).
 
-    answerability_reason을 비우는 이유:
-        Contract v0.1의 AnswerabilityReason에는 정책 거부에 대응하는 값이 없다. 제안된
-        OUT_OF_SCOPE_POLICY는 아직 미확정이고(F-D1), 있는 값으로 근사하지 않는다.
-        NOT_FOUND는 "문서는 있는데 찾지 못했다"(미확정)이고 INSUFFICIENT_EVIDENCE는
-        "코퍼스를 읽었는데 근거가 모자랐다"인데, Gate는 코퍼스를 아예 읽지 않았다. 어느
-        쪽을 써도 사실과 다른 진술이 되고, 평가에서 정책 거부와 검색 실패가 한 지표로
-        묶인다.
+    canonical reason을 인자로 받는 이유:
+        PR #29에서 OUT_OF_DATA_RANGE / OUT_OF_SCOPE_DATA / OUT_OF_SCOPE_POLICY가
+        AnswerabilityReason에 추가되어(F-D1 해소) Gate 판정에 대응하는 값이 생겼다.
+        어떤 값인지는 범주가 정한다. F3·F4는 정책 범위 밖이므로 OUT_OF_SCOPE_POLICY이고,
+        F1은 보유 기간 밖(OUT_OF_DATA_RANGE), F2는 데이터군 밖(OUT_OF_SCOPE_DATA)이다.
+        여기서 하나로 고정하면 세 판정이 한 값으로 묶여 평가에서 구분되지 않는다.
 
-        그래서 ANSWERABILITY_BY_STOP과 같은 규약을 쓴다. 대응 값이 없으면 reason을 비우고
-        판정 근거는 answerability_detail에 원문 그대로 남긴다. Contract에 값이 생기면
-        이 함수의 인자 하나만 바뀐다.
+        비워 두는 선택지는 남기지 않는다. 대응 값이 있는데 비우면 소비자가 "Contract에
+        값이 없다"로 읽는다. 인자를 필수 키워드로 두어, 새 범주를 붙이는 쪽이 어떤
+        canonical reason에 해당하는지 먼저 정하게 한다.
+
+    canonical reason은 서로 다른 판정을 한 값으로 묶으므로, 어느 규칙에 걸렸는지는
+    answerability_detail에 원문 그대로 남는다(F3의 investment_advice와 F4의
+    forward_looking_prediction은 둘 다 OUT_OF_SCOPE_POLICY다).
 
     facts와 evidence는 채우지 않는다. 거부 응답에 근거를 붙이면 부분 답변으로 읽힌다
     (evidence_and_answerability.md 원칙 7).
@@ -283,7 +287,7 @@ def refused_execution(
     return AgentExecutionResult(
         execution_status=ExecutionStatus.COMPLETED,
         answerability_status=AnswerabilityStatus.UNANSWERABLE,
-        answerability_reason=None,
+        answerability_reason=answerability_reason,
         answerability_detail=AnswerabilityDetail(stage=stage, reason=reason, detail=detail),
         warnings=list(warnings),
     )

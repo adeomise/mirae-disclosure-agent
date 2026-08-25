@@ -104,6 +104,9 @@ class AnswerabilityReason(StrEnum):
     AMBIGUOUS_MATCH = "ambiguous_match"
     NOT_FOUND = "not_found"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    OUT_OF_DATA_RANGE = "out_of_data_range"
+    OUT_OF_SCOPE_DATA = "out_of_scope_data"
+    OUT_OF_SCOPE_POLICY = "out_of_scope_policy"
 
 
 class ExecutionStatus(StrEnum):

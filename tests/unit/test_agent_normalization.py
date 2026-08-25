@@ -176,15 +176,21 @@ def test_plan_warnings_are_preserved(
 # --------------------------------------------------------------------------
 
 
-def test_no_metric_acode_is_insufficient_evidence(
+def test_no_metric_evidence_is_insufficient_evidence(
     synthetic_document: dict[str, Any],
     resolved_filing,
 ) -> None:
     """문서를 끝까지 읽었고 해당 지표의 셀이 없었다. 실행이 멈춘 것이 아니다."""
     for table in synthetic_document["tables"]:
         for row in table["rows"]:
+            has_revenue_acode = any(
+                cell.get("acode") == "ifrs-full_Revenue"
+                for cell in row
+            )
             for cell in row:
                 cell.pop("acode", None)
+            if has_revenue_acode:
+                row[0]["text"] = "기타항목"
 
     result = _normalized(synthetic_document, resolved_filing)
 
@@ -195,7 +201,7 @@ def test_no_metric_acode_is_insufficient_evidence(
     assert result.facts == []
 
     assert result.answerability_detail.stage == STAGE_EXTRACTION
-    assert result.answerability_detail.reason == "no_metric_acode"
+    assert result.answerability_detail.reason == "no_matching_label_fallback"
     assert result.answerability_detail.detail
 
 

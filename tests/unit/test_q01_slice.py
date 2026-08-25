@@ -588,13 +588,22 @@ def test_extract_revenue_blocks_when_table_unit_missing(
     assert error.value.reason == "missing_table_unit"
 
 
-def test_extract_revenue_blocks_when_acode_absent() -> None:
-    document = {"metadata": {}, "sections": [], "tables": []}
+def test_extract_revenue_blocks_when_no_metric_evidence_exists() -> None:
+    document = {
+        "metadata": {
+            "doc_id": "periodic_SAMPLE",
+            "corp_name": "테스트기업",
+            "report_name": "사업보고서",
+        },
+        "sections": [],
+        "table_groups": [],
+        "tables": [],
+    }
 
     with pytest.raises(ExtractionBlockedError) as error:
         extract_revenue_fact(document, fiscal_year=2025)
 
-    assert error.value.reason == "no_metric_acode"
+    assert error.value.reason == "no_matching_label_fallback"
 
 
 def test_extract_revenue_blocks_for_year_without_context(

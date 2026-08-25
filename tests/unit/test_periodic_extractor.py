@@ -1,7 +1,13 @@
+from decimal import Decimal
+
 import pytest
 
 from disclosure_agent.common.enums import FactAccountingScope, MetricConcept
-from disclosure_agent.periodic.extractor import extract_financial_facts_with_evidence
+from disclosure_agent.periodic.extractor import (
+    ExtractionBlockedError,
+    extract_financial_fact,
+    extract_financial_facts_with_evidence,
+)
 
 
 def cell(
@@ -108,6 +114,25 @@ def test_revenue_facts_link_period_unit_scope_and_provenance() -> None:
     )
     assert evidence[0].raw_text == "1,234"
 
+    assert evidence[0].provenance is not None
+
+    provenance = evidence[0].provenance
+
+    assert provenance.table_id == "table_0001"
+    assert provenance.row_index == 1
+    assert provenance.column_index == 1
+
+    assert provenance.acode is None
+    assert provenance.acontext is None
+
+    assert provenance.unit_declaration == "(단위 : 백만원)"
+    assert provenance.unit_source == "table_group"
+    assert provenance.unit_multiplier == 1_000_000
+    assert provenance.unit_trusted is True
+
+    assert provenance.aclass == "{XBRL}IS_C1"
+    assert provenance.table_classification == "primary_statement"
+
 
 @pytest.mark.parametrize("label", ["매출원가", "매출채권", "매출총이익"])
 def test_revenue_false_positives_are_rejected(label: str) -> None:
@@ -162,7 +187,7 @@ def test_group_units_do_not_leak_and_flat_view_is_deduplicated() -> None:
     )
     document["tables"].append(second)
 
-    facts, _ = extract_financial_facts_with_evidence(document)
+    facts, evidence = extract_financial_facts_with_evidence(document)
 
     assert len(facts) == 2
     assert [(fact.raw_unit, fact.normalized_value) for fact in facts] == [
@@ -170,9 +195,264 @@ def test_group_units_do_not_leak_and_flat_view_is_deduplicated() -> None:
         ("원", "200"),
     ]
 
+    assert evidence[0].provenance is not None
+    assert evidence[0].provenance.unit_source == "table_group"
+    assert evidence[0].provenance.unit_declaration == "(단위 : 백만원)"
+    assert evidence[0].provenance.unit_multiplier == 1_000_000
+    assert evidence[0].provenance.unit_trusted is True
 
-def test_operating_income_is_not_emitted_without_contract_concept() -> None:
-    facts, _ = extract_financial_facts_with_evidence(
-        parsed_document(financial_table(label="영업이익", values=("20",)))
-    )
+
+def test_bulk_skips_table_with_only_untrusted_unit_declaration() -> None:
+    contaminated_unit = "기본주당순이익(단위: 원) 6,661 5,007 110,854"
+    table = financial_table(values=("9,670,644",), unit=contaminated_unit)
+    document = parsed_document(table, unit=contaminated_unit)
+
+    facts, evidence = extract_financial_facts_with_evidence(document)
+
     assert facts == []
+    assert evidence == []
+
+
+def test_targeted_revenue_uses_label_fallback_when_acode_is_absent() -> None:
+    document = parsed_document(
+        financial_table(
+            label="매출액",
+            values=("1,234",),
+        )
+    )
+
+    fact = extract_financial_fact(
+        document,
+        metric=MetricConcept.REVENUE,
+        fiscal_year=2025,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+    )
+
+    assert fact.metric == MetricConcept.REVENUE
+    assert fact.fiscal_year == 2025
+    assert fact.accounting_scope is FactAccountingScope.CONSOLIDATED
+    assert fact.raw_value == "1,234"
+    assert fact.value == Decimal("1234")
+    assert fact.value_in_base_unit == Decimal("1234000000")
+    assert fact.location.table_id == "table_0001"
+    assert fact.location.row_index == 1
+    assert fact.location.column_index == 1
+    assert fact.acode is None
+
+
+def test_targeted_revenue_prefers_existing_acode_path() -> None:
+    table = financial_table(
+        label="매출채권",
+        values=("1,234",),
+    )
+    value_cell = table["rows"][1][1]
+    value_cell["acode"] = "ifrs-full_Revenue"
+    value_cell["acontext"] = (
+        "CFY2025dFY_"
+        "ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_"
+        "ifrs-full_ConsolidatedMember"
+    )
+    document = parsed_document(table)
+
+    fact = extract_financial_fact(
+        document,
+        metric=MetricConcept.REVENUE,
+        fiscal_year=2025,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+    )
+
+    assert fact.raw_value == "1,234"
+    assert fact.acode == "ifrs-full_Revenue"
+    assert fact.acontext == value_cell["acontext"]
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "영업이익",
+        "영업이익(손실)",
+    ],
+)
+def test_operating_income_facts_are_emitted(label: str) -> None:
+    document = parsed_document(
+        financial_table(
+            label=label,
+            values=("20",),
+        )
+    )
+
+    facts, evidence = extract_financial_facts_with_evidence(document)
+
+    assert len(facts) == 1
+    assert len(evidence) == 1
+
+    fact = facts[0]
+
+    assert fact.metric is MetricConcept.OPERATING_INCOME
+    assert fact.raw_value == "20"
+    assert fact.raw_unit == "백만원"
+    assert fact.normalized_value == "20000000"
+    assert fact.normalized_unit == "KRW"
+    assert fact.fiscal_year == 2025
+    assert fact.fiscal_period == "annual"
+    assert (
+        fact.accounting_scope
+        is FactAccountingScope.CONSOLIDATED
+    )
+    assert fact.evidence_ids == [evidence[0].evidence_id]
+
+    assert evidence[0].row_label == label
+    assert evidence[0].raw_text == "20"
+
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "영업이익률",
+        "영업이익증가율",
+        "영업외이익",
+    ],
+)
+def test_operating_income_false_positives_are_rejected(
+    label: str,
+) -> None:
+    facts, _ = extract_financial_facts_with_evidence(
+        parsed_document(
+            financial_table(
+                label=label,
+                values=("20",),
+            )
+        )
+    )
+
+    assert facts == []
+
+def test_targeted_operating_income_uses_primary_statement_fallback() -> None:
+    document = parsed_document(
+        financial_table(
+            label="영업이익 (주29)",
+            values=("20", "10"),
+        )
+    )
+
+    fact = extract_financial_fact(
+        document,
+        metric=MetricConcept.OPERATING_INCOME,
+        fiscal_year=2025,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+    )
+
+    assert fact.metric == MetricConcept.OPERATING_INCOME
+    assert fact.fiscal_year == 2025
+    assert (
+        fact.accounting_scope
+        == FactAccountingScope.CONSOLIDATED
+    )
+
+    assert fact.raw_value == "20"
+    assert fact.value == Decimal("20")
+
+    assert fact.unit_token == "백만원"
+    assert fact.unit_multiplier == 1_000_000
+    assert fact.value_in_base_unit == Decimal("20000000")
+
+    assert fact.acode is None
+    assert fact.acontext is None
+
+    assert fact.location.table_id == "table_0001"
+    assert fact.location.row_index == 1
+    assert fact.location.column_index == 1
+    assert fact.location.label_text == "영업이익 (주29)"
+
+def test_targeted_operating_income_prefers_primary_statement_over_note() -> None:
+    primary = financial_table(
+        table_id="table_primary",
+        label="영업이익",
+        values=("20",),
+    )
+
+    document = parsed_document(primary)
+
+    note = financial_table(
+        table_id="table_note",
+        label="영업이익",
+        values=("999",),
+    )
+    note["table_group_id"] = "table_group_note"
+
+    for row in note["rows"]:
+        for item in row:
+            item["provenance"]["table_group_id"] = "table_group_note"
+
+    note_group = {
+        "table_group_id": "table_group_note",
+        "section_id": "section_0001",
+        "title": "연결재무제표 주석",
+        "aclass": "{XBRL}NT_C_DUMMY",
+        "raw_context": "연결재무제표 주석",
+        "section_path": [
+            "III. 재무에 관한 사항",
+            "3. 연결재무제표 주석",
+        ],
+        "unit": "(단위 : 백만원)",
+        "tables": [note],
+    }
+
+    document["table_groups"].append(note_group)
+    document["tables"].append(note)
+
+    fact = extract_financial_fact(
+        document,
+        metric=MetricConcept.OPERATING_INCOME,
+        fiscal_year=2025,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+    )
+
+    assert fact.raw_value == "20"
+    assert fact.location.table_id == "table_primary"
+
+def test_targeted_operating_income_blocks_ambiguous_primary_statements() -> None:
+    first = financial_table(
+        table_id="table_first",
+        label="영업이익",
+        values=("20",),
+    )
+
+    document = parsed_document(first)
+
+    second = financial_table(
+        table_id="table_second",
+        label="영업이익",
+        values=("30",),
+    )
+    second["table_group_id"] = "table_group_second"
+
+    for row in second["rows"]:
+        for item in row:
+            item["provenance"]["table_group_id"] = "table_group_second"
+
+    document["table_groups"].append(
+        {
+            "table_group_id": "table_group_second",
+            "section_id": "section_0001",
+            "title": "연결재무제표",
+            "aclass": "{XBRL}IS_C2",
+            "raw_context": "연결재무제표",
+            "section_path": second["section_path"],
+            "unit": "(단위 : 백만원)",
+            "tables": [second],
+        }
+    )
+    document["tables"].append(second)
+
+    with pytest.raises(
+        ExtractionBlockedError,
+        match="본표 후보가 2개",
+    ):
+        extract_financial_fact(
+            document,
+            metric=MetricConcept.OPERATING_INCOME,
+            fiscal_year=2025,
+            accounting_scope=FactAccountingScope.CONSOLIDATED,
+        )

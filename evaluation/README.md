@@ -31,6 +31,11 @@ separately and excluded from the score denominator. Existing contract cases omit
 `lifecycle` and retain the backward-compatible `active` default, but contract cases
 are validation-only and are not regression-scored.
 
+Active and contract `ANSWERABLE` cases still require a supported semantic gold
+expectation (`fact`, `facts`, or `event_history`) and Evidence. A future regression
+case may instead use structural gold: at least one specified collection count or a
+positive `min_evidence_count`. Completely empty future gold is rejected.
+
 The comparator supports optional exact collection counts, multiple partial Fact
 expectations, canonical execution/answerability fields, and Fact/Calculation to
 Evidence reference integrity. Expected Fact fields that are omitted are not

@@ -7,7 +7,12 @@
 - 측정 방법: `disclosure_agent.agent.router.answer_question(질문, corpus_root=<실측 코퍼스>)`
   호출 후 `AgentExecutionResult` 확인
 - 재현: `python scripts/run_corpus_regression.py --corpus-root <path>`
-- 측정 대상 브랜치: `feat/agent-execution-normalization` (Pattern A/E 정규화 적용 후, 미커밋)
+- 측정 대상: PR 브랜치 `feat/safety-regression-harness` (base: `develop`)
+- 측정 기준선: 측정 시점의 `develop` = `1e7f1f0`
+  (PR #21 `feat/agent-execution-normalization` 병합. Pattern A/E 정규화 반영 후)
+- 현재 이 브랜치가 병합한 `develop` = `1f19a72`
+  (PR #24 `feat/periodic-operating-income` 병합, 2026-08-25). 그 이후 반영분은 아래 표에
+  재측정되지 않았습니다.
 
 본 문서에는 실제 공시 값·접수번호를 기재하지 않습니다. 상태와 건수만 기록합니다.
 
@@ -60,10 +65,23 @@
 | `BLOCKED_BY_DATA` | 0 | – |
 | `BLOCKED_BY_CONTRACT` | 0 | – |
 
-`BLOCKED_BY_CONTRACT`가 0인 이유는, Contract 값이 없는 판정(F1~F4의 사유 코드,
-`ambiguous` 판정)이 지금은 **결과를 만들지 못하게 막는 것이 아니라 `answerability_reason`을
-비우고 `conversion_gaps`에 남기는 방식**으로 처리되고 있기 때문입니다. 문항 단위로는 막혀
-있지 않습니다.
+`BLOCKED_BY_CONTRACT`가 0인 이유는, Contract 값이 없는 판정(F1~F4의 사유 코드)이 지금은
+**결과를 만들지 못하게 막는 것이 아니라 `answerability_reason`을 비우고 판정 근거를
+`answerability_detail`(stage/reason/detail)에 남기는 방식**으로 처리되고 있기 때문입니다.
+문항 단위로는 막혀 있지 않습니다.
+
+`ambiguous` 판정은 여기 해당하지 않습니다. Contract v0.1에 대응 값이 있어 그대로 표현됩니다.
+
+- `extraction` / `ambiguous_candidates`, `filing_discovery` / `ambiguous_root`
+  → `ExecutionStatus.COMPLETED` · `AnswerabilityStatus.UNRESOLVED` ·
+  `AnswerabilityReason.AMBIGUOUS_MATCH`
+- 진단 정보는 `answerability_detail`(stage/reason/detail)에 기록합니다.
+- `conversion_gaps`는 Contract에 실을 자리가 없어 손실되는 정보 전용이므로 판정 근거를
+  담지 않습니다.
+- 문서 사이의 **연결**이 모호한 경우는 그대로 `AMBIGUOUS_LINK`이며, `event.linker`가 판정해
+  `EventLink.resolution_status`로 실려 나갑니다.
+
+두 사유의 구분 근거는 [execution_result_mapping.md](execution_result_mapping.md) §4에 있습니다.
 
 ## Pattern별 요약
 

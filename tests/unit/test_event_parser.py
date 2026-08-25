@@ -96,7 +96,6 @@ def test_facility_investment_keeps_existing_row_shape_with_fallback_table_id(
     assert investment["group"] == "투자내역"
     assert investment["field"] == "투자금액"
     assert investment["raw_field"] == "투자금액(원)"
-    assert investment["unit"] == "원"
     assert investment["value"] == "2,000"
     assert investment["unit"] == "원"
     assert investment["table_id"] == "table_0001"

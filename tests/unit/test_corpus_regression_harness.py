@@ -73,7 +73,10 @@ harness = _load_script()
 # --------------------------------------------------------------------------
 
 
-def _single_fact_result() -> AgentExecutionResult:
+def _single_fact_result(
+    *,
+    accounting_scope: FactAccountingScope = FactAccountingScope.CONSOLIDATED,
+) -> AgentExecutionResult:
     evidence = Evidence(
         evidence_id="evidence_synthetic_0001",
         doc_id="periodic_synthetic_0001",
@@ -85,7 +88,7 @@ def _single_fact_result() -> AgentExecutionResult:
         company="테스트반도체",
         metric=MetricConcept.REVENUE,
         fiscal_year=2025,
-        accounting_scope=FactAccountingScope.CONSOLIDATED,
+        accounting_scope=accounting_scope,
         evidence_ids=[evidence.evidence_id],
     )
 
@@ -93,6 +96,34 @@ def _single_fact_result() -> AgentExecutionResult:
         execution_status=ExecutionStatus.COMPLETED,
         answerability_status=AnswerabilityStatus.ANSWERABLE,
         facts=[fact],
+        evidence=[evidence],
+    )
+
+
+def _multi_fact_result(*scopes: FactAccountingScope) -> AgentExecutionResult:
+    """회계 기준이 서로 다른 Fact 여러 건이 함께 돌아온 결과."""
+    evidence = Evidence(
+        evidence_id="evidence_synthetic_0001",
+        doc_id="periodic_synthetic_0001",
+        location_type=EvidenceLocationType.TABLE,
+    )
+
+    facts = [
+        Fact(
+            fact_id=f"fact_synthetic_{index:04d}",
+            company="테스트반도체",
+            metric=MetricConcept.REVENUE,
+            fiscal_year=2025,
+            accounting_scope=scope,
+            evidence_ids=[evidence.evidence_id],
+        )
+        for index, scope in enumerate(scopes, start=1)
+    ]
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=facts,
         evidence=[evidence],
     )
 
@@ -232,6 +263,22 @@ def test_unknown_expectation_key_is_rejected(tmp_path: Path) -> None:
     assert "exec_status" in str(error.value)
 
 
+def test_fact_accounting_scope_is_a_supported_expectation_key(tmp_path: Path) -> None:
+    """새 기대 항목이 검증기의 허용 목록에 실제로 들어 있어야 fixture에 쓸 수 있다."""
+    path = _write_cases(
+        tmp_path,
+        {
+            "id": "SYNTH-01",
+            "question": "질문",
+            "expect": {"facts": 1, "fact_accounting_scope": "separate"},
+        },
+    )
+
+    cases = harness.load_cases(path)
+
+    assert cases[0].expect["fact_accounting_scope"] == "separate"
+
+
 def test_duplicate_case_id_is_rejected(tmp_path: Path) -> None:
     path = _write_cases(tmp_path, VALID_CASE, VALID_CASE)
 
@@ -256,6 +303,20 @@ def test_shipped_fixture_is_valid() -> None:
 
     assert "Q01" in ids
     assert "Q13" in ids
+
+
+def test_shipped_q01_cases_pin_the_accounting_scope() -> None:
+    """
+    Q01 계열은 연결·별도를 각각 고정해야 한다.
+
+    scope 기대를 빼면 '별도 기준' 질문에 연결 Fact가 돌아와도 facts=1로 통과한다.
+    연결 케이스까지 함께 고정해야 '항상 연결을 고른다'는 회귀도 잡힌다.
+    """
+    by_id = {case.case_id: case for case in harness.load_cases(SHIPPED_CASES_PATH)}
+
+    assert by_id["Q01"].expect["fact_accounting_scope"] == "consolidated"
+    assert by_id["Q01-FY2024"].expect["fact_accounting_scope"] == "consolidated"
+    assert by_id["Q01-SEPARATE"].expect["fact_accounting_scope"] == "separate"
 
 
 # --------------------------------------------------------------------------
@@ -363,6 +424,81 @@ def test_issue_expectation_on_completed_result_fails() -> None:
 
 
 # --------------------------------------------------------------------------
+# 2-1. 회계 기준(연결 / 별도)
+# --------------------------------------------------------------------------
+
+
+def test_consolidated_expectation_matches_a_consolidated_fact() -> None:
+    failures = harness.check_expectations(
+        {"facts": 1, "fact_accounting_scope": "consolidated"},
+        _single_fact_result(accounting_scope=FactAccountingScope.CONSOLIDATED),
+    )
+
+    assert failures == []
+
+
+def test_separate_expectation_matches_a_separate_fact() -> None:
+    failures = harness.check_expectations(
+        {"facts": 1, "fact_accounting_scope": "separate"},
+        _single_fact_result(accounting_scope=FactAccountingScope.SEPARATE),
+    )
+
+    assert failures == []
+
+
+def test_separate_expectation_rejects_a_consolidated_fact() -> None:
+    """
+    Q01 계열의 주된 실패 모드다.
+
+    '별도 기준' 질문에 연결 Fact 1건이 돌아오면 건수 검사는 통과하므로, scope 검사가
+    없으면 이 회귀가 PASS로 지나간다.
+    """
+    result = _single_fact_result(accounting_scope=FactAccountingScope.CONSOLIDATED)
+
+    assert harness.check_expectations({"facts": 1}, result) == []
+
+    failures = harness.check_expectations(
+        {"facts": 1, "fact_accounting_scope": "separate"},
+        result,
+    )
+
+    assert failures
+    assert "fact_accounting_scope" in failures[0]
+    assert "'consolidated'" in failures[0]
+
+
+def test_scope_expectation_without_any_fact_fails() -> None:
+    failures = harness.check_expectations(
+        {"fact_accounting_scope": "separate"},
+        AgentExecutionResult(
+            execution_status=ExecutionStatus.COMPLETED,
+            answerability_status=AnswerabilityStatus.ANSWERABLE,
+        ),
+    )
+
+    assert failures and "got none" in failures[0]
+
+
+def test_every_fact_must_match_the_expected_scope() -> None:
+    """첫 Fact만 보면 뒤에 섞여 들어온 다른 기준을 놓친다."""
+    failures = harness.check_expectations(
+        {"fact_accounting_scope": "separate"},
+        _multi_fact_result(FactAccountingScope.SEPARATE, FactAccountingScope.CONSOLIDATED),
+    )
+
+    assert len(failures) == 1
+    assert "fact_synthetic_0002" in failures[0]
+
+
+def test_scope_is_compared_by_enum_value() -> None:
+    """결과의 StrEnum과 fixture의 소문자 문자열이 같은 값이면 통과해야 한다."""
+    result = _single_fact_result(accounting_scope=FactAccountingScope.SEPARATE)
+
+    assert result.facts[0].accounting_scope is FactAccountingScope.SEPARATE
+    assert harness.check_expectations({"fact_accounting_scope": "separate"}, result) == []
+
+
+# --------------------------------------------------------------------------
 # 3. Evidence 연결
 # --------------------------------------------------------------------------
 
@@ -423,6 +559,7 @@ def test_summary_is_json_serializable_and_holds_no_disclosure_values() -> None:
         "issue_stage",
         "issue_reason",
         "facts",
+        "fact_accounting_scope",
         "evidence",
         "event_links",
         "event_histories",
@@ -431,6 +568,36 @@ def test_summary_is_json_serializable_and_holds_no_disclosure_values() -> None:
         "conversion_gaps",
         "conversion_gaps_pending",
     }
+
+
+def test_summary_reports_the_selected_accounting_scope() -> None:
+    """FAIL을 볼 때 어떤 기준이 선택됐는지 결과만으로 알 수 있어야 한다."""
+    consolidated = harness.summarize_result(
+        _single_fact_result(accounting_scope=FactAccountingScope.CONSOLIDATED)
+    )
+    separate = harness.summarize_result(
+        _single_fact_result(accounting_scope=FactAccountingScope.SEPARATE)
+    )
+
+    assert consolidated["fact_accounting_scope"] == ["consolidated"]
+    assert separate["fact_accounting_scope"] == ["separate"]
+
+    mixed = harness.summarize_result(
+        _multi_fact_result(FactAccountingScope.SEPARATE, FactAccountingScope.CONSOLIDATED)
+    )
+
+    assert mixed["fact_accounting_scope"] == ["consolidated", "separate"]
+
+    # 분류만 담는다. 실제 공시 수치는 요약에 들어가지 않는다.
+    json.dumps(mixed)
+
+
+def test_summary_scope_is_empty_when_there_is_no_fact() -> None:
+    summary = harness.summarize_result(
+        AgentExecutionResult(execution_status=ExecutionStatus.BLOCKED)
+    )
+
+    assert summary["fact_accounting_scope"] == []
 
 
 def test_summary_reports_answerability_reason_value() -> None:

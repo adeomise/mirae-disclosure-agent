@@ -11,6 +11,12 @@
 
 실측 코퍼스가 있으면 기록된 현재 동작이 아직 유효한지도 확인한다. 코퍼스가 없으면 건너뛴다.
 `data/raw/`는 Git에 포함되지 않으므로 없는 환경이 정상이다.
+
+실측 코퍼스로 Agent를 실제 실행하는 테스트에는 `corpus` 마커를 단다. 코퍼스가 없으면 어차피
+건너뛰지만, 마커가 있어야 '무엇이 실측을 건드리는가'를 실행 전에 고를 수 있다.
+
+    python -m pytest                      # 코퍼스가 있으면 실측 검증까지 함께 돈다
+    python -m pytest -m "not corpus"      # 합성 fixture 검증만 돈다
 """
 
 from __future__ import annotations
@@ -236,6 +242,7 @@ def test_representative_question_sources_are_covered(cases: list[dict[str, Any]]
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.corpus
 @pytest.mark.parametrize(
     "case_id",
     [case["id"] for case in json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))["cases"]],

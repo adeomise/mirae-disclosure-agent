@@ -35,6 +35,9 @@ packages = ["src/disclosure_agent"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "--strict-markers"
+markers = [
+    "corpus: requires the local organizer disclosure corpus (skipped when absent)",
+]
 
 [tool.ruff]
 target-version = "py312"

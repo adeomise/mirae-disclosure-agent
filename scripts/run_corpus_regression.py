@@ -60,6 +60,7 @@ SUPPORTED_EXPECTATION_KEYS: frozenset[str] = frozenset(
         "issue_reason",
         "facts",
         "min_facts",
+        "fact_accounting_scope",
         "evidence",
         "min_evidence",
         "event_links",
@@ -213,6 +214,37 @@ def _check_exact_count(failures: list[str], label: str, expected: Any, actual: i
         failures.append(f"{label}: expected {expected}, got {actual}")
 
 
+def _check_fact_accounting_scope(
+    failures: list[str],
+    expected: Any,
+    result: AgentExecutionResult,
+) -> None:
+    """
+    돌아온 Fact 전부가 기대한 회계 기준인지 본다.
+
+    건수만 세는 검사로는 연결·별도 혼동을 잡지 못한다. '별도 기준' 질문에 연결 Fact 1건이
+    돌아와도 facts=1은 그대로 만족하기 때문이다. Q01 계열의 주된 실패 모드가 이것이므로
+    scope는 건수와 별개로 확인한다.
+
+    첫 Fact만 보지 않는다. 여러 건이 섞여 돌아오는 회귀에서 앞 하나만 맞으면 통과해
+    나머지가 다른 기준이라는 사실이 가려진다.
+    """
+    if not result.facts:
+        failures.append(
+            f"fact_accounting_scope: expected a fact with scope {expected!r}, got none"
+        )
+
+        return
+
+    for fact in result.facts:
+        _check_equal(
+            failures,
+            f"fact_accounting_scope[{fact.fact_id}]",
+            expected,
+            fact.accounting_scope,
+        )
+
+
 def _check_evidence_linkage(failures: list[str], result: AgentExecutionResult) -> None:
     """
     Fact와 FieldChange가 가리키는 Evidence가 실제로 결과 안에 있는지 본다.
@@ -295,6 +327,9 @@ def check_expectations(
     if "min_facts" in expect:
         _check_at_least(failures, "min_facts", expect["min_facts"], len(result.facts))
 
+    if "fact_accounting_scope" in expect:
+        _check_fact_accounting_scope(failures, expect["fact_accounting_scope"], result)
+
     if "evidence" in expect:
         _check_exact_count(failures, "evidence", expect["evidence"], len(result.evidence))
 
@@ -356,6 +391,11 @@ def summarize_result(result: AgentExecutionResult) -> dict[str, Any]:
         "issue_stage": issue.stage if issue else None,
         "issue_reason": issue.reason if issue else None,
         "facts": len(result.facts),
+        # 어떤 회계 기준이 선택됐는지만 남긴다. 값이 아니라 분류이므로 실제 공시 수치를
+        # 적지 않는다는 규칙과 어긋나지 않고, FAIL을 볼 때 무엇이 잘못 골렸는지 바로 보인다.
+        "fact_accounting_scope": sorted(
+            {_enum_value(fact.accounting_scope) for fact in result.facts}
+        ),
         "evidence": len(result.evidence),
         "event_links": len(result.event_links),
         "event_histories": len(result.event_histories),
@@ -498,7 +538,9 @@ def _render_text(summary: dict[str, Any]) -> str:
                 f"exec={actual['execution_status']} "
                 f"ans={actual['answerability_status']} "
                 f"reason={actual['answerability_reason']} "
-                f"facts={actual['facts']} evidence={actual['evidence']} "
+                f"facts={actual['facts']} "
+                f"scope={','.join(actual['fact_accounting_scope']) or '-'} "
+                f"evidence={actual['evidence']} "
                 f"links={actual['event_links']} histories={actual['event_histories']}"
             )
 

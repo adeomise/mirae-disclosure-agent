@@ -353,6 +353,20 @@ PR #18에서 `AnswerabilityDetail`이 추가되어 판정 근거를 실을 자�
    `_extract_company`가 가장 긴 이름 하나만 돌려주므로 두 기업 중 한 곳의 값만 답하고,
    두 번째 기업이 사라진 흔적이 `warnings`에도 `conversion_gaps`에도 남지 않습니다.
 
+### 이후 변경 — `F6-04` 해소
+
+`F6-04`는 위 실측 이후 해소됐습니다. `query_analyzer`가 매치된 서로 다른 기업을 모두 인식해
+`cross_entity_compare`로 분류하고, handler가 없으므로 Router가 `routing` /
+`unimplemented_intent`로 막습니다. Fact와 Evidence가 모두 0건입니다. **Pattern D 자체는
+여전히 미구현이며**, 이 변경이 고정한 것은 "축소해서 답하지 않는다"까지입니다. 회귀 감시는
+`scripts/corpus_regression_cases.jsonl`의 `GUARD-MULTI-COMPANY`가 맡습니다.
+
+따라서 위 표 기준 `MISROUTED`는 4건, `CRITICAL`은 1건으로 줄어듭니다. 나머지 4건은 그대로입니다.
+
+기업 다중 값은 막혔지만 **기간 다중 값(`F6-02`)은 남아 있습니다.** 두 결함은 원인이 같지
+않습니다. 기업은 `companies`로 모두 인식하게 됐고, 기간은 아직 `year` 하나만 담습니다.
+Pattern C 작업에서 같은 방식으로 다뤄야 합니다.
+
 `ACCIDENTALLY_SAFE` 9건은 지금 통과하지 않지만 **질문을 조금만 바꾸면 통과**합니다. 그래서
 "현재 18문항 중 Q16~Q18이 거부된다"는 사실을 Pattern F가 동작한다는 근거로 쓸 수 없습니다.
 

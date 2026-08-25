@@ -26,12 +26,20 @@ from typing import Any, NoReturn
 import pytest
 
 from disclosure_agent.agent import router
+from disclosure_agent.agent.normalization import (
+    ANSWERABILITY_REASON_BY_POLICY_CATEGORY,
+    UnmappedPolicyCategoryError,
+    answerability_reason_for_policy_category,
+)
 from disclosure_agent.agent.safety import (
+    CATEGORY_EXTERNAL_INFORMATION,
     CATEGORY_FORWARD_LOOKING,
     CATEGORY_INVESTMENT_ADVICE,
+    CATEGORY_OUT_OF_CORPUS_PERIOD,
     REASON_FORWARD_LOOKING_PREDICTION,
     REASON_INVESTMENT_ADVICE,
     STAGE_ANSWERABILITY_GATE,
+    PolicyDecision,
     screen_question,
 )
 from disclosure_agent.common.enums import (
@@ -201,6 +209,58 @@ def test_fixture_control_cases_pass_the_gate(question: str) -> None:
     decision = screen_question(question)
 
     assert decision.allowed, f"과차단: {question} ({decision.detail})"
+
+
+# 리뷰에서 실제로 과차단이 확인된 질문들.
+#
+# 세 건 모두 '매수'·'투자처'·'전망'을 담고 있지만 공시에 기재된 사실을 묻는다. 규칙이
+# 낱말이 아니라 문맥을 본다는 것을 이 목록이 고정한다. ALLOWED_QUESTIONS와 나눠 둔 이유는
+# 이쪽이 회귀 이력이 있는 형태이기 때문이다. 규칙을 넓히면 여기가 가장 먼저 깨진다.
+REGRESSION_NEGATIVE_CONTROLS = [
+    # F3 '매매 의견 요구'가 '매수 ... 시점'으로 잡던 형태. 장내매수는 지분공시의 거래
+    # 유형이고 시점은 그 기재 항목이다.
+    "장내매수 시점은 언제였어?",
+    "장내매도 수량이 얼마야?",
+    # F3 '투자 판단 요구'가 명사 '투자처' 하나로 잡던 형태. 자금의 투자처는 시설투자·
+    # 자금조달 공시의 기재 항목이다.
+    "신규시설투자의 투자처가 어디야?",
+    # F4 '전망 생성 요구'가 '전망이 어때'로 잡던 형태. 출처를 지목했으므로 문서에 적힌
+    # 전망을 읽어 달라는 요구다.
+    "사업보고서에 적힌 회사 전망이 어때?",
+    "공시에 기재된 향후 투자계획이 뭐야?",
+    "회사가 전망한 매출 목표가 얼마야?",
+    "회사가 제시한 매출 전망치는 얼마야?",
+]
+
+
+@pytest.mark.parametrize("question", REGRESSION_NEGATIVE_CONTROLS)
+def test_reported_fact_lookups_are_not_policy_violations(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.category is None, question
+    assert decision.matched_categories == (), question
+
+
+def test_source_reference_does_not_excuse_a_prediction_request() -> None:
+    """
+    출처를 언급했다고 예측 요구까지 통과하면 안 된다.
+
+    위 면제는 '문서에 적힌 전망을 읽어 달라'는 형태에만 적용된다. 결과를 물으면 출처를
+    앞에 붙여도 여전히 모델에게 미래를 만들어 달라는 요구다. 면제 범위를 규칙 전체로
+    넓히는 변경이 여기서 깨진다.
+    """
+    assert not screen_question("공시 기준으로 내년 매출 오를까?").allowed
+    assert not screen_question("공시에 적힌 실적 보고 다음 분기 예상해줘").allowed
+    assert not screen_question("사업보고서에 적힌 매출 기준으로 지금 사도 될까?").allowed
+
+
+def test_prediction_request_without_a_source_is_still_refused() -> None:
+    """출처 표현이 없으면 같은 문장이 그대로 걸린다. 면제가 무조건이 아니라는 뜻이다."""
+    decision = screen_question("삼성전자 전망이 어때?")
+
+    assert not decision.allowed
+    assert decision.category == CATEGORY_FORWARD_LOOKING
 
 
 @pytest.mark.parametrize(
@@ -492,6 +552,33 @@ def test_gated_cases_now_meet_their_expected_contract(case: dict[str, Any]) -> N
     assert expected["answerability_reason_proposal"] is None, case["id"]
 
 
+@pytest.mark.parametrize(
+    "question",
+    ["장내매수 시점은 언제였어?", "사업보고서에 적힌 회사 전망이 어때?"],
+)
+def test_negative_control_reaches_the_pipeline(question: str) -> None:
+    """
+    과차단 대조군이 production entrypoint에서도 Gate를 통과하는지 본다.
+
+    screen_question만 보면 "판정이 통과했다"까지만 알 수 있고, 실제로 다음 단계로
+    넘어갔는지는 모른다. 없는 코퍼스 경로를 쓰므로 최종 결과는 BLOCKED가 되지만, 막힌
+    자리가 Gate가 아니라 filing_discovery라는 점이 통과의 증거다.
+
+    downstream capability가 미지원이어서 막히는 것은 이 테스트의 관심사가 아니다.
+    사유가 answerability_gate가 아니라는 것만 본다.
+    """
+    result = router.answer_question(question, corpus_root=NONEXISTENT_CORPUS)
+
+    assert result.execution_issue is not None, question
+    assert result.execution_issue.stage != STAGE_ANSWERABILITY_GATE, question
+    assert result.execution_issue.reason != REASON_INVESTMENT_ADVICE, question
+    assert result.execution_issue.reason != REASON_FORWARD_LOOKING_PREDICTION, question
+
+    # 정책 거부였다면 execution_issue가 비고 answerability_detail이 채워진다. 반대 모양인지
+    # 함께 고정한다.
+    assert result.answerability_detail is None, question
+
+
 def test_allowed_question_still_reaches_manifest_lookup() -> None:
     """
     대조군. Gate가 통과시킨 질문은 기존 흐름을 그대로 탄다.
@@ -510,7 +597,76 @@ def test_allowed_question_still_reaches_manifest_lookup() -> None:
 
 
 # --------------------------------------------------------------------------
-# 7. Wire 값 회귀
+# 7. 정책 범주 → canonical reason 대응표
+#
+# router가 F3/F4라는 이유로 OUT_OF_SCOPE_POLICY를 직접 박고 있으면, F1/F2 판정을 붙이는
+# 쪽이 canonical reason을 즉석에서 고르게 된다. 세 판정이 한 값으로 새면 평가에서 구분되지
+# 않으므로, 대응표를 한 곳에 두고 빠진 범주에서 멈추는 것을 여기서 고정한다.
+# --------------------------------------------------------------------------
+
+
+def test_every_policy_category_maps_to_its_own_canonical_reason() -> None:
+    """F1~F4가 각각 어떤 값으로 나가는지 대응표 자체를 고정한다."""
+    assert ANSWERABILITY_REASON_BY_POLICY_CATEGORY == {
+        CATEGORY_OUT_OF_CORPUS_PERIOD: AnswerabilityReason.OUT_OF_DATA_RANGE,
+        CATEGORY_EXTERNAL_INFORMATION: AnswerabilityReason.OUT_OF_SCOPE_DATA,
+        CATEGORY_INVESTMENT_ADVICE: AnswerabilityReason.OUT_OF_SCOPE_POLICY,
+        CATEGORY_FORWARD_LOOKING: AnswerabilityReason.OUT_OF_SCOPE_POLICY,
+    }
+
+
+def test_data_scope_categories_do_not_collapse_into_the_policy_reason() -> None:
+    """
+    F1·F2가 F3·F4와 같은 값으로 새지 않는지 본다.
+
+    위 등식 테스트가 이미 잡지만, 무엇을 지키려는 것인지는 이 단언에만 드러난다. 세
+    판정이 한 값으로 묶이면 Q16·Q17·Q18이 같은 능력을 검증하게 된다.
+    """
+    policy = AnswerabilityReason.OUT_OF_SCOPE_POLICY
+
+    assert answerability_reason_for_policy_category(CATEGORY_OUT_OF_CORPUS_PERIOD) is not policy
+    assert answerability_reason_for_policy_category(CATEGORY_EXTERNAL_INFORMATION) is not policy
+
+
+@pytest.mark.parametrize("category", ["F9", "SYNTHETIC", "f3", "", None])
+def test_unmapped_policy_category_fails_loudly(category: str | None) -> None:
+    """
+    대응표에 없는 범주는 조용히 OUT_OF_SCOPE_POLICY가 되지 않는다.
+
+    기본값을 두면 새 범주가 정책 거부로 집계되고 그 사실이 어디에도 남지 않는다.
+    소문자 'f3'을 함께 보는 이유는 대응이 정확히 일치로만 이뤄지는지 확인하기 위해서다.
+    """
+    with pytest.raises(UnmappedPolicyCategoryError):
+        answerability_reason_for_policy_category(category)
+
+
+def test_gate_refusal_with_an_unmapped_category_does_not_reach_a_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    production entrypoint에서도 조용히 넘어가지 않는지 본다.
+
+    대응표를 거치지 않고 값을 박는 구현으로 되돌리면, 이 테스트만 AgentExecutionResult를
+    받아 들고 실패한다. 위 단위 테스트는 해석 함수만 보므로 그 회귀를 잡지 못한다.
+    """
+
+    def screen_with_unknown_category(question: str) -> PolicyDecision:
+        return PolicyDecision(
+            allowed=False,
+            category="F9",
+            reason="synthetic_category",
+            detail="대응표에 없는 범주",
+            matched_categories=("F9",),
+        )
+
+    monkeypatch.setattr(router, "screen_question", screen_with_unknown_category)
+
+    with pytest.raises(UnmappedPolicyCategoryError):
+        router.answer_question("아무 질문", corpus_root=NONEXISTENT_CORPUS)
+
+
+# --------------------------------------------------------------------------
+# 8. Wire 값 회귀
 #
 # 위 절들은 상수 심볼끼리 비교한다(`detail.reason == REASON_INVESTMENT_ADVICE`). 기대값이
 # 구현과 같은 상수를 참조하므로, 상수의 **값**을 바꾸면 기대값도 함께 움직여 전부 통과한다.

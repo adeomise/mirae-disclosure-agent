@@ -45,8 +45,10 @@ import re
 from dataclasses import dataclass
 
 __all__ = [
+    "CATEGORY_EXTERNAL_INFORMATION",
     "CATEGORY_FORWARD_LOOKING",
     "CATEGORY_INVESTMENT_ADVICE",
+    "CATEGORY_OUT_OF_CORPUS_PERIOD",
     "REASON_FORWARD_LOOKING_PREDICTION",
     "REASON_INVESTMENT_ADVICE",
     "STAGE_ANSWERABILITY_GATE",
@@ -68,6 +70,15 @@ STAGE_ANSWERABILITY_GATE = "answerability_gate"
 # 후속 작업과 평가 집계가 다르다.
 CATEGORY_INVESTMENT_ADVICE = "F3"
 CATEGORY_FORWARD_LOOKING = "F4"
+
+# 아직 screen_question이 만들지 않는 범주.
+#
+# 값만 여기 둔다. 판정 규칙은 없고, 이 모듈은 두 값을 반환하지 않는다. 그래도 ID를 두는
+# 이유는 범주 어휘의 출처를 한 곳으로 두기 위해서다. normalization의
+# ANSWERABILITY_REASON_BY_POLICY_CATEGORY가 이 값들을 canonical reason에 잇고 있으며,
+# 두 범주의 판정을 붙이는 쪽은 대응표가 아니라 규칙만 추가하면 된다.
+CATEGORY_OUT_OF_CORPUS_PERIOD = "F1"
+CATEGORY_EXTERNAL_INFORMATION = "F2"
 
 # answerability_detail.reason에 실리는 사유 문자열.
 #
@@ -126,18 +137,35 @@ _F3_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # "매수해도 될까?" / "매도하는 게 나아?"
     #
     # 매수·매도 뒤에 판단을 요구하는 어형이 붙은 경우만 본다.
+    #
+    # 앞에 거래 방식 표기가 오면 제외한다. 장내매수·장외매도·시간외매수는 지분공시에
+    # 기재된 거래 유형이며, 그 뒤에 오는 명사는 기재 항목이다("장내매수 시점은 언제였어?").
+    # 거래 유형을 지목한 질문은 이미 특정 거래를 가리키고 있으므로 의견 요구가 아니다.
+    #
+    # '시점'은 목록에서 뺐다. 매매 타이밍 문의로 읽힐 수도 있지만 공시에 기재된 거래
+    # 일시를 묻는 표현이기도 하고("매수 시점이 언제였어?"), 사실 조회를 막는 쪽이
+    # 정책 위반을 놓치는 쪽보다 낫다고 볼 근거가 없다. 판단을 요구하는 형태는
+    # '타이밍'·'추천'·'의견'과 아래 어미 규칙이 계속 잡는다.
     (
         "매매 의견 요구",
-        re.compile(r"(?:매수|매도)\s*(?:해도|해야|하는\s*게|할까|하면|타이밍|시점|추천|의견)"),
+        re.compile(
+            r"(?<!장내)(?<!장외)(?<!시간외)(?:매수|매도)"
+            r"\s*(?:해도|해야|하는\s*게|할까|하면|타이밍|추천|의견)"
+        ),
     ),
-    # "투자할 만해?" / "투자해도 될까?" / "어디에 투자하는 게 좋아?" / "투자처"
+    # "투자할 만해?" / "투자해도 될까?" / "어디에 투자하는 게 좋아?"
     #
-    # 투자처(?!분): '투자주식처분' 같은 계정 표기와 겹치지 않게 뒤에 '분'이 오면 제외한다.
+    # '투자처'는 방아쇠에서 뺐다. 명사 단독이라 이 목록의 '행위 + 판단 요구' 원칙을 스스로
+    # 어긴다. 자금조달·시설투자 공시가 자금의 투자처를 기재 항목으로 담고 있어
+    # "신규시설투자의 투자처가 어디야?"가 사실 조회인데도 걸렸다.
+    #
+    # 투자처를 고르라는 요구는 아래 '종목 선택 요구'가 계속 잡는다
+    # ("더 좋은 투자처야?", "어디에 투자하는 게 좋아?").
     (
         "투자 판단 요구",
         re.compile(
             r"투자\s*(?:할\s*만|해도\s*(?:될|돼|되)|하는\s*게|하기\s*(?:좋|괜찮)"
-            r"|처(?!분)|매력|의견|가치가\s*있)"
+            r"|매력|의견|가치가\s*있)"
         ),
     ),
     # "어떤 종목이 더 좋아?" / "어디에 투자?" / "어느 회사에 투자?"
@@ -179,6 +207,21 @@ _FUTURE_HORIZON = r"내년|다음\s*(?:해|분기|년|년도)|차기|향후|앞�
 # 결과를 추측해 달라는 어형.
 _SPECULATIVE_ENDING = r"될까|일까|할까|어떻게\s*될|어떨까|얼마나\s*될|예상|예측|전망"
 
+# 문서나 회사가 이미 내놓은 진술을 가리키는 표현.
+#
+# "사업보고서에 적힌 회사 전망이 어때?"는 예측 요구가 아니다. 전망을 만들어 달라는 것이
+# 아니라 문서에 기재된 전망을 읽어 달라는 것이다. 정기공시에는 회사가 제시한 전망·계획이
+# 기재 항목으로 실리고, 그것을 조회하는 것은 사실 조회다.
+#
+# 이 표현은 F4를 통째로 면제하지 않는다. 아래 _F4_REPORTED_STATEMENT_PATTERNS에만
+# 적용된다. "공시 기준으로 내년 매출 오를까?"처럼 출처를 언급하면서 결과를 물으면 여전히
+# 예측 요구이고, 그쪽은 _F4_PATTERNS가 잡는다.
+_SOURCE_BACKED = re.compile(
+    r"(?:공시|사업보고서|보고서|공시서류|문서|본문|원문)\s*(?:에|에서)"
+    r"\s*(?:적힌|적혀|기재된|기재돼|나온|실린|밝힌|제시한|공시된)"
+    r"|회사가\s*(?:밝힌|제시한|전망한|발표한|기재한|공시한)"
+)
+
 _F4_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # "주가 오를까?" / "실적이 좋아질까?" / "오를 것 같아?"
     #
@@ -192,12 +235,12 @@ _F4_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     # "예상해줘" / "예측해봐" / "전망 좀 해줘"
+    #
+    # 모델에게 내리는 명령형이다. 출처를 언급하더라도 생성 요구이므로 면제하지 않는다.
     (
         "전망 생성 요구",
         re.compile(r"(?:예상|예측|전망|추정)\s*(?:해\s*줘|해줘|해\s*봐|해봐|해\s*주|좀\s*해|해\s*볼)"),
     ),
-    # "전망이 어때?" / "예상은 어떻게 돼?"
-    ("전망 생성 요구", re.compile(r"(?:예상|예측|전망)\s*(?:이|은|는)?\s*(?:어때|어떻|어떠)")),
     # "내년 매출 얼마나 될까?" / "다음 분기 영업이익 예상"
     #
     # 미래 시점과 추측 어형이 모두 있어야 한다. 순서는 묻지 않는다.
@@ -205,6 +248,19 @@ _F4_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "미래 시점 추정 요구",
         re.compile(rf"(?:{_FUTURE_HORIZON})[\s\S]{{0,30}}?(?:{_SPECULATIVE_ENDING})"),
     ),
+)
+
+
+# 출처를 지목한 질문에서는 판정하지 않는 규칙.
+#
+# "전망이 어때?"는 두 가지로 읽힌다. 모델에게 전망을 만들어 달라는 요구이거나, 문서에
+# 적힌 전망을 읽어 달라는 요구다. 문장만으로는 갈리지 않고 출처 표현이 갈라 준다.
+#
+# 위 _F4_PATTERNS와 나눠 둔 이유가 여기 있다. 그쪽은 출처와 무관하게 결과를 묻는 형태라
+# 면제 대상이 아니다.
+_F4_REPORTED_STATEMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # "전망이 어때?" / "예상은 어떻게 돼?"
+    ("전망 생성 요구", re.compile(r"(?:예상|예측|전망)\s*(?:이|은|는)?\s*(?:어때|어떻|어떠)")),
 )
 
 
@@ -234,6 +290,11 @@ def screen_question(question: str) -> PolicyDecision:
     문서를 읽지 않는다. 문자열만 본다. 따라서 코퍼스가 없어도 전부 시험할 수 있고,
     허용된 질문에 대해서는 아무 부작용도 남기지 않는다.
 
+    F4는 두 벌의 규칙을 쓴다. 출처와 무관하게 결과를 묻는 형태(_F4_PATTERNS)와, 출처를
+    지목하지 않았을 때만 판정하는 형태(_F4_REPORTED_STATEMENT_PATTERNS)다. "사업보고서에
+    적힌 회사 전망이 어때?"는 뒤쪽에 걸리지만 출처 표현이 있어 통과하고, "삼성전자 전망이
+    어때?"는 그대로 걸린다.
+
     F3와 F4가 동시에 걸리면 F3를 고른다. pattern_f_safety.md §3.4의 우선순위이며, 이유는
     사실 조회로 축소될 위험이 F3 쪽이 더 크기 때문이다. "내년 실적 보고 사도 될까?"를 F4로
     분류하면 '예측 거부'로 집계되지만 실제 요구는 투자 의견이다. 고르기 전의 목록은
@@ -245,6 +306,11 @@ def screen_question(question: str) -> PolicyDecision:
 
     f3 = _first_match(question, _F3_PATTERNS)
     f4 = _first_match(question, _F4_PATTERNS)
+
+    if f4 is None and not _SOURCE_BACKED.search(question):
+        # 출처를 지목하지 않았을 때만 본다. 지목했다면 문서에 적힌 전망을 읽어 달라는
+        # 요구이므로 사실 조회다.
+        f4 = _first_match(question, _F4_REPORTED_STATEMENT_PATTERNS)
 
     matched_categories = tuple(
         category

@@ -49,7 +49,11 @@ from disclosure_agent.agent.answer_builder import (
 )
 from disclosure_agent.agent.handlers.event_history import handle_event_history
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
-from disclosure_agent.agent.normalization import blocked_execution, refused_execution
+from disclosure_agent.agent.normalization import (
+    answerability_reason_for_policy_category,
+    blocked_execution,
+    refused_execution,
+)
 from disclosure_agent.agent.query_analyzer import (
     KNOWN_INTENTS,
     QueryPlan,
@@ -57,7 +61,7 @@ from disclosure_agent.agent.query_analyzer import (
     build_query_plan,
 )
 from disclosure_agent.agent.safety import STAGE_ANSWERABILITY_GATE, screen_question
-from disclosure_agent.common.enums import AnswerabilityReason, Intent
+from disclosure_agent.common.enums import Intent
 from disclosure_agent.common.schemas import AgentExecutionResult
 from disclosure_agent.retrieval.metadata_filter import (
     FilingNotFoundError,
@@ -181,16 +185,17 @@ def answer_question(
         # 판정 근거는 answerability_detail에 남는다. execution_issue는 채우지 않는다.
         # 막힌 것이 아니라 답하지 않기로 한 것이기 때문이다.
         #
-        # canonical reason을 여기서 고르는 이유: safety.py는 Contract 타입을 만들지 않는
-        # 순수 함수로 두고, 판정을 Contract 어휘로 옮기는 일은 이 층이 맡는다. Gate가
-        # 판정하는 F3·F4는 둘 다 정책 범위 밖이므로 OUT_OF_SCOPE_POLICY 하나로 모인다.
-        # F3와 F4를 가르는 것은 answerability_detail.reason이다. F1(OUT_OF_DATA_RANGE)과
-        # F2(OUT_OF_SCOPE_DATA)는 아직 Gate에 없으므로 여기에도 나타나지 않는다.
+        # canonical reason은 범주가 정한다. safety.py는 Contract 타입을 만들지 않는 순수
+        # 함수로 두고, 범주를 Contract 어휘로 옮기는 일은 normalization의 대응표가 맡는다.
+        # 여기서 값을 고르지 않으므로, F1·F2 판정이 붙어도 이 자리는 그대로다.
+        #
+        # 대응표에 없는 범주면 예외로 멈춘다. OUT_OF_SCOPE_POLICY로 덮으면 새 범주가 조용히
+        # 정책 거부로 집계된다.
         return refused_execution(
             STAGE_ANSWERABILITY_GATE,
             decision.reason or "",
             decision.detail,
-            answerability_reason=AnswerabilityReason.OUT_OF_SCOPE_POLICY,
+            answerability_reason=answerability_reason_for_policy_category(decision.category),
         )
 
     corpus_root = Path(corpus_root)

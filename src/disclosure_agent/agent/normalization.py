@@ -70,6 +70,12 @@ from disclosure_agent.agent.answer_builder import (
     STAGE_FILING_DISCOVERY,
     BlockedInfo,
 )
+from disclosure_agent.agent.safety import (
+    CATEGORY_EXTERNAL_INFORMATION,
+    CATEGORY_FORWARD_LOOKING,
+    CATEGORY_INVESTMENT_ADVICE,
+    CATEGORY_OUT_OF_CORPUS_PERIOD,
+)
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
@@ -227,6 +233,59 @@ def to_conversion_gap(gap: ContractGapLike) -> ConversionGap:
         is_temporary=gap.is_temporary,
         contract_version=TARGET_CONTRACT_VERSION,
     )
+
+
+class UnmappedPolicyCategoryError(RuntimeError):
+    """정책 범주에 대응하는 canonical reason이 대응표에 없는 경우."""
+
+    def __init__(self, category: str | None) -> None:
+        super().__init__(
+            f"정책 범주 {category!r}에 대응하는 AnswerabilityReason이 없습니다. "
+            f"ANSWERABILITY_REASON_BY_POLICY_CATEGORY에 추가하십시오."
+        )
+
+        self.category = category
+
+
+# 정책 범주 하나가 어떤 canonical reason으로 나가는지.
+#
+# ANSWERABILITY_BY_STOP과 같은 자리에 같은 모양으로 둔다. 판정이 일어나는 곳(safety.py,
+# 각 handler)과 그것을 Contract 어휘로 옮기는 곳을 나누는 것이 이 모듈의 역할이고,
+# 정책 판정이라고 예외를 둘 이유가 없다.
+#
+# F3와 F4가 같은 값으로 모이는 것은 의도된 것이다. 둘 다 "정책상 답하지 않는다"이며,
+# 무엇을 막았는지는 answerability_detail.reason이 구분한다
+# (pattern_f_safety.md §5.1).
+#
+# F1·F2는 판정 규칙이 아직 없어 지금은 도달하지 않는 줄이다. 그래도 비워 두지 않는 이유는,
+# 규칙을 붙이는 쪽이 canonical reason을 즉석에서 고르게 두면 F1·F2가 F3·F4와 같은 값으로
+# 새기 때문이다. 세 판정이 한 값으로 묶이면 평가에서 구분되지 않는다.
+ANSWERABILITY_REASON_BY_POLICY_CATEGORY: dict[str, AnswerabilityReason] = {
+    CATEGORY_OUT_OF_CORPUS_PERIOD: AnswerabilityReason.OUT_OF_DATA_RANGE,
+    CATEGORY_EXTERNAL_INFORMATION: AnswerabilityReason.OUT_OF_SCOPE_DATA,
+    CATEGORY_INVESTMENT_ADVICE: AnswerabilityReason.OUT_OF_SCOPE_POLICY,
+    CATEGORY_FORWARD_LOOKING: AnswerabilityReason.OUT_OF_SCOPE_POLICY,
+}
+
+
+def answerability_reason_for_policy_category(category: str | None) -> AnswerabilityReason:
+    """
+    정책 범주를 canonical reason으로 옮긴다.
+
+    대응표에 없으면 예외로 멈춘다. OUT_OF_SCOPE_POLICY로 기본값을 두지 않는 이유:
+        지금 대응표에 없는 범주는 F1과 F2뿐이고, 둘 다 정책 범위 밖이 아니다. 기본값을
+        두면 새 범주가 조용히 정책 거부로 집계되고, 그 사실이 어디에도 드러나지 않는다.
+        판정을 붙이는 쪽이 대응표를 먼저 고치게 하는 편이 낫다.
+
+    범주가 없는 경우(None)도 같이 막는다. PolicyDecision이 거부인데 category가 비어 있다면
+    safety.py 쪽 결함이며, 그것을 canonical reason으로 덮으면 원인이 사라진다.
+    """
+    reason = ANSWERABILITY_REASON_BY_POLICY_CATEGORY.get(category) if category else None
+
+    if reason is None:
+        raise UnmappedPolicyCategoryError(category)
+
+    return reason
 
 
 def blocked_execution(

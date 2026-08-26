@@ -122,6 +122,42 @@ def test_future_representative_gold_is_not_empty() -> None:
         )
 
 
+def test_representative_calculation_counts_match_final_targets() -> None:
+    gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
+
+    # Q07: difference + growth rate. Q08: two margins + their change.
+    # Q11/Q12: one derived result or aggregate per compared company.
+    assert {
+        case_id: gold_by_id[case_id].counts.calculations
+        for case_id in ("q07", "q08", "q11", "q12")
+    } == {"q07": 2, "q08": 3, "q11": 2, "q12": 2}
+
+
+def test_narrative_future_gold_does_not_require_zero_facts() -> None:
+    gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
+
+    for case_id in ("q04", "q05", "q06", "q09"):
+        counts = gold_by_id[case_id].counts
+        assert counts is None or counts.facts is None
+
+    for case_id in ("q16", "q17", "q18"):
+        counts = gold_by_id[case_id].counts
+        assert counts.facts == 0
+        assert counts.evidence == 0
+
+
+def test_event_history_gold_records_only_supported_structural_invariants() -> None:
+    gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
+
+    # Remaining comparator gaps: Q14 final-state content and Q15 change
+    # cardinality cannot be asserted until content comparison and corpus-verified
+    # cardinality are available. Do not substitute guessed values or link counts.
+    assert gold_by_id["q14"].counts.event_histories == 1
+    assert gold_by_id["q14"].counts.event_links is None
+    assert gold_by_id["q15"].counts.event_histories == 1
+    assert gold_by_id["q15"].counts.event_links is None
+
+
 def test_runner_rejects_answerable_case_without_evidence(tmp_path: Path) -> None:
     questions = tmp_path / "questions.jsonl"
     gold = tmp_path / "gold.jsonl"

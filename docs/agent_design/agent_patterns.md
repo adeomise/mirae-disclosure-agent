@@ -170,7 +170,8 @@ Query Analysis
      Pattern D에는 상속되지 않습니다
   2. 동일 지표 개념 (①②)
   3. 동일 `accounting_scope` (①②)
-  4. 단위 일치 또는 정규화 성공 (①)
+  4. 단위 일치 또는 정규화 성공 (①②) — Numeric Calculation 입력은 ①에서, 두 값을 함께 쓰기
+     직전은 ②에서 확인합니다
 
   해당 지점에서 하나라도 실패하면 그 이후 연산을 수행하지 않습니다. ①이 실패하면 Numeric
   Calculation을 하지 않고, ②가 실패하면 두 값을 함께 쓰는 파생값도 ComparisonResult도 만들지
@@ -206,10 +207,12 @@ Query Analysis
           → Aggregation (기업별 합계 = Numeric Calculation 2건)
 → Unit & Concept Normalization
 → Comparability Validation [guard ①] — Calculation 입력 검증
-  (Q11 분자·분모 기준 정합. Q12는 위 집계 경로에서 이미 통과)
+  (Q11 분자·분모 기준 정합과 단위 정규화 성공. Q12는 위 집계 경로에서 이미 통과.
+   Q10은 Numeric Calculation이 없어 이 지점을 지나지 않음)
 → Numeric Calculation — 기업별 파생값
   (Q11 영업이익률 2건. Q12는 위 Aggregation 결과가 해당. Q10은 없음)
 → Comparability Validation [guard ②] — 두 기업 값의 비교 가능성
+  (결산월·계정 체계 정합. **Q10은 여기서 단위 정규화 성공도 함께 확인**)
 → Comparison Judgment (Q10 Q11 Q12)
 → ComparisonResult (Q10 Q11 Q12)
 → Evidence Verification (기업별 각각)
@@ -235,8 +238,10 @@ Query Analysis
   - C12 Answerability Judgment — Q10 Q11 Q12
 - **문항별 단계 구성** — Calculation 개수는
   [evidence_and_answerability.md](evidence_and_answerability.md#calculation-cardinality)를 따릅니다
-  - **Q10** — Fact A · Fact B → Unit & Concept Normalization → Comparability Validation →
-    Comparison Judgment → ComparisonResult. **Calculation 0**
+  - **Q10** — Fact A · Fact B → Unit & Concept Normalization →
+    Comparability Validation [guard ②] (단위 정규화 성공 포함) → Comparison Judgment →
+    ComparisonResult. **Calculation 0**. Numeric Calculation이 없어 guard ①을 지나지 않으므로,
+    단위 검증이 빠지지 않도록 ②가 반드시 걸립니다
   - **Q11** — 원천 Fact → 기업 A 영업이익률 Calculation → 기업 B 영업이익률 Calculation →
     Comparability Validation → Comparison Judgment → ComparisonResult. **Calculation 2**
   - **Q12** — 기업별 Event/Fact 집합 → 최신 정정값 반영 → 기업 A 투자 합계 Calculation →
@@ -248,7 +253,10 @@ Query Analysis
   (→ [Comparability Validation의 적용 지점](#comparability-validation의-적용-지점))
   2. 동일 지표 개념 (①②) — Pattern C와 공통
   3. 동일 `accounting_scope` (①②) — Pattern C와 공통
-  4. 단위 일치 또는 정규화 성공 (①) — Pattern C와 공통. 기업 간 단위 표기 차이가 실제로 관찰됨
+  4. 단위 일치 또는 정규화 성공 (①②) — Pattern C와 공통. 기업 간 단위 표기 차이가 실제로
+     관찰되므로 **Pattern D에서는 어느 경로든 반드시 확인합니다.** Q11·Q12는 Calculation 입력
+     단계인 ①에서, **Q10은 Numeric Calculation이 없으므로 Comparison Judgment 직전 ②에서**
+     확인합니다
   5. 결산월 일치 (②) — **Pattern D 전용**. 현재 코퍼스 관찰 기준이며 일반 규칙으로 확정하지 않음
   6. 계정 체계 호환 (①②) — **Pattern D 전용**. 한쪽 기업에 해당 지표 개념이 존재하지 않으면
      비교 불가
@@ -389,7 +397,7 @@ guard**입니다. 항목마다 확인해야 하는 시점이 다르기 때문입
 | Guard | 언제 | 무엇을 막는가 |
 |---|---|---|
 | **① Calculation 입력 검증** | Numeric Calculation 직전. Q12는 Aggregation 직전이므로 집계 경로 안에서 | 잘못된 Fact로 파생값을 만드는 것 |
-| **② 비교 가능성 검증** | 두 값을 함께 쓰기 직전 — 변화량 Calculation과 Comparison Judgment | 서로 견줄 수 없는 두 값을 견주는 것 |
+| **② 비교 가능성 검증** | 두 값을 함께 쓰기 직전 — 변화량 Calculation과 Comparison Judgment. Q10처럼 Calculation 없이 Fact를 바로 견주는 경로에서는 **여기가 유일한 guard** | 서로 견줄 수 없는 두 값을 견주는 것 |
 
 항목별 적용 지점입니다. 번호는 Pattern C·D 검증 조건의 번호이며, Pattern 전용 항목은 그 Pattern
 에서만 적용합니다. 특히 **동일 기업(1)은 Pattern C temporal comparison 전용**이고, Pattern D는
@@ -397,7 +405,7 @@ guard**입니다. 항목마다 확인해야 하는 시점이 다르기 때문입
 
 | 검증 항목 | Guard |
 |---|---|
-| 단위 일치 또는 정규화 성공 (4) | ① |
+| 단위 일치 또는 정규화 성공 (4) | ① Numeric Calculation 입력 · ② Q10처럼 direct Fact comparison, 그리고 파생값끼리의 최종 비교 |
 | 동일 지표 개념 (2) · 계정 체계 호환 (6) | ① 계산 입력의 개념 · ② 두 값의 개념 |
 | 동일 `accounting_scope` (3) | ① 분자·분모 기준 · ② 두 값의 기준 |
 | 파생지표의 분모 개념 동일 (7, Q11) | ① 기업별 비율 산출 · ② 두 비율 비교 |

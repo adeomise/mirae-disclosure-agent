@@ -49,7 +49,7 @@ Fact는 "무엇이 사실인가"를, Evidence는 "그것을 어디서 확인할 
 | 3 시계열 수치 (Q07) | 2 | **2** | **Pending D4** | 입력 Fact 2건 전부 참조 |
 | 3 시계열 파생지표 (Q08) | 4 | **2~4** | **Pending D4** | 기간별 분자·분모 4건 참조. **Calculation 3** |
 | 3 시계열 서술 (Q09) | 0 | **2** (연도별 각 1) | **Pending D4** | 변화 항목마다 해당 연도 Evidence |
-| 4 기업 간 수치 (Q10) | 2 | 2 (기업별 1) | 확정 | **Calculation 0**. Fact 2건을 Comparison Judgment로 판정해 ComparisonResult 1건. 정규화 전 값과 정규화 후 값을 모두 보존 |
+| 4 기업 간 수치 (Q10) | 2 | 2 (기업별 1) | 확정 | **Calculation 0**. Fact 2건을 Comparison Judgment로 판정해 ComparisonResult 1건. 단위 정규화 성공은 비교 직전 guard ②에서 확인. 정규화 전 값과 정규화 후 값을 모두 보존 |
 | 4 기업 간 파생지표 (Q11) | 4 | 2~4 | 확정 | 기업별 비율 **Calculation 2** → Comparison Judgment → ComparisonResult 1건 |
 | 4 기업 간 집계 (Q12) | 기업별 투자 건 수만큼 (합계 3 이상) | **합산에 포함된 투자 건별 1 이상**. 값을 확정한 정정공시가 있으면 그 문서도 포함 | 확정 | 기업별 합계 **Calculation 2** → Comparison Judgment → ComparisonResult 1건. 합계는 해당 기업의 건별 Fact 전부 참조 |
 | 5 단일 필드 정정 (Q13) | 2 (변경 전·후) | 2 이상 (원공시와 정정공시) | 확정 | 변경점은 두 Fact 모두 참조 |
@@ -109,7 +109,9 @@ Evidence B   = {당해 연도 사업보고서, 재무제표 Section, 해당 계�
 Fact A = {기업 A, 지표=revenue, 기간, 기준=연결, 값, 단위 = 단위 X}
 Fact B = {기업 B, 지표=revenue, 기간, 기준=연결, 값, 단위 = 단위 Y}
 
-Validation②  = ... ∧ 단위 정규화 성공   # Calculation이 없어 비교 직전 guard만 적용
+Validation②  = ... ∧ 단위 정규화 성공
+               # Calculation이 없어 guard ①을 지나지 않으므로
+               # 단위 정규화 검증을 여기서 반드시 수행
 Calculation  = 없음 (질문이 수치형 파생 결과를 요구하지 않음)
 Comparison   = ComparisonResult{left=Fact A, right=Fact B, relation}   # Comparison Judgment
 출력          = 원문 단위 값과 정규화 값을 병기

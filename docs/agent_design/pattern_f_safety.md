@@ -317,6 +317,12 @@ PR #18에서 `AnswerabilityDetail`이 추가되어 판정 근거를 실을 자�
 6. **`pending_decision=true` gap이 있으면 사유를 단정하지 않습니다.** Contract에 값이 없어
    비워 둔 것이므로, 문장에서 임의로 사유를 고르면 근거가 틀린 답이 됩니다. F1~F4는 여기
    해당하지 않습니다. 대응 값이 있으므로 `answerability_reason`이 채워집니다(§5.1).
+7. **판정을 새로 하지 않습니다.** Fact 확보 · Numeric Calculation · Comparability Validation ·
+   Comparison Judgment · ComparisonResult 생성은 Agent가 끝냅니다. Builder는 **Agent가 이미
+   확정한 결과를 읽어 deterministic하게 자연어로 표현**하는 역할만 맡습니다. raw Fact를 직접
+   비교하거나, Calculation 값을 다시 비교하거나, greater/less/equal을 새로 판단하거나, 새로운
+   계산을 수행하지 않습니다
+   ([agent_patterns.md](agent_patterns.md#agent와-answer-builder의-책임-경계)).
 
 ## 9. 평가 test matrix
 

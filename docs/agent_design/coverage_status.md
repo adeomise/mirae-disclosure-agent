@@ -136,9 +136,11 @@
    무관한 파싱 실패입니다. Pattern F에서 판정으로 거부되는 것은 Q18(F3)뿐입니다. 자세한
    내용은 [pattern_f_safety.md](pattern_f_safety.md) 부록.
 3. **오라우팅은 미구현보다 나쁩니다.** 미구현은 답을 안 하지만, 오라우팅은 근거를 붙인 틀린
-   답을 합니다. Q10(기업 다중 값)은 해소됐고, 같은 성격의 `F6-02`(Q07 계열 기간 다중 값)는
-   남아 있습니다. "삼성전자 2024년 매출과 2025년 매출을 비교해줘"가 여전히 첫 연도만
-   `ANSWERABLE`로 답합니다.
+   답을 합니다. Q10(기업 다중 값)과 `F6-02`(Q07 계열 기간 다중 값)가 같은 성격이었고 둘 다
+   해소됐습니다. "삼성전자 2024년 매출과 2025년 매출을 비교해줘"는 이제 첫 연도만
+   `ANSWERABLE`로 답하지 않고 `routing`/`unimplemented_intent`로 막힙니다. 회귀 감시는
+   `scripts/corpus_regression_cases.jsonl`의 `GUARD-MULTI-COMPANY`와 `GUARD-MULTI-PERIOD`가
+   맡습니다. 두 Pattern(C·D) 자체는 아직 구현되지 않았습니다.
 
 ## 관련 문서
 

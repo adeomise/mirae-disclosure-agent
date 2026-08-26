@@ -19,12 +19,19 @@
 - 여러 기업을 함께 묻는 질문은 기업 하나로 줄여서 답하지 않는다. cross_entity_compare로
   분류해 Router가 routing 단계에서 막게 한다. Pattern D handler는 아직 없다.
 
+- 여러 기간을 함께 묻는 질문도 같은 이유로 기간 하나로 줄이지 않는다. temporal_compare로
+  분류해 Router가 막게 한다. Pattern C handler는 아직 없다.
+
 TODO:
 - 계산형/비교형 질의 의도 추가
 - 분기·반기 보고서 대상 기간 표현 확장
 - Pattern D 구현 시 '비교 의도'와 '단순 다중 기업 언급'을 구분한다. 지금은 안전을 위해
   기업이 둘 이상 매치되면 비교 의도인지 보지 않고 cross_entity_compare로 분류한다.
   막는 쪽에서는 이 구분이 없어도 되지만, 실제로 답하기 시작하면 필요해진다.
+- Pattern C 구현 시 같은 구분이 기간에도 필요하다. 지금은 서로 다른 절대연도가 둘 이상
+  보이면 비교 의도인지 보지 않고 temporal_compare로 분류한다.
+- Pattern C 구현 시 상대기간 표현("작년")을 해석한다. 지금은 절대연도만 읽으므로 상대기간
+  질문은 missing_year로 막힌다. 답을 축소하지는 않으므로 이번 범위에서 다루지 않는다.
 """
 
 from __future__ import annotations
@@ -209,16 +216,44 @@ class QueryPlan:
         return asdict(self)
 
 
-def _extract_year(question: str) -> int:
-    match = YEAR_PATTERN.search(question)
+def _extract_years(question: str) -> tuple[int, ...]:
+    """
+    질문에 쓰인 절대연도를 전부 찾는다. 없으면 빈 튜플이며 추측하지 않는다.
 
-    if not match:
+    첫 매치 하나만 돌려주지 않는다. 두 기간을 묻는 질문에서 하나만 고르면 나머지 기간이
+    사라진 채로 답이 조립되고, 사라졌다는 사실이 warnings에도 결과에도 남지 않는다.
+    _extract_companies가 기업에 대해 하는 일과 같다.
+
+    같은 연도가 문장에 여러 번 나오는 것은 두 기간이 아니다("2024년 매출과 2024년 영업이익").
+    그래서 값으로 중복을 제거한다. 돌아오는 순서는 질문에 나타난 순서다.
+
+    상대기간 표현("작년")은 읽지 않는다. 해석하려면 기준 시점을 정해야 하고 그것은 이번
+    범위 밖이다. 읽지 못한 결과는 missing_year이므로 답이 축소되지는 않는다.
+    """
+    seen: dict[int, None] = {}
+
+    for match in YEAR_PATTERN.finditer(question):
+        seen.setdefault(int(match.group(0)), None)
+
+    return tuple(seen)
+
+
+def _extract_year(question: str) -> int:
+    """
+    질문이 가리키는 연도 하나. 단일 기간 Pattern(A·E)이 쓴다.
+
+    연도가 둘 이상인 질문은 build_query_plan이 이 함수에 닿기 전에 temporal_compare로
+    갈라내므로, 여기까지 온 질문의 연도는 하나다.
+    """
+    years = _extract_years(question)
+
+    if not years:
         raise UnsupportedQuestionError(
             reason="missing_year",
             detail="질문에서 대상 연도를 찾을 수 없습니다.",
         )
 
-    return int(match.group(0))
+    return years[0]
 
 
 def _find_unclaimed_span(
@@ -409,6 +444,48 @@ def _build_cross_entity_compare_plan(
     )
 
 
+def _build_temporal_compare_plan(
+    question: str,
+    companies: tuple[str, ...],
+    years: tuple[int, ...],
+) -> QueryPlan:
+    """
+    여러 기간을 함께 묻는 질문의 계획을 만든다.
+
+    Pattern C handler는 아직 없다. 그런데도 계획을 만들어 두는 이유는
+    _build_cross_entity_compare_plan과 같다. intent를 붙이지 않고 single_fact로 흘려보내면
+    첫 연도만 남은 답이 Fact와 Evidence까지 갖춘 채로 ANSWERABLE로 돌아간다. 미지원보다
+    그쪽이 위험하다.
+
+    지표와 회계기준은 느슨하게 읽는다. 이 계획을 실행할 handler가 없으므로 여기서 거절하면
+    막힌 이유가 'Pattern C 미구현'이 아니라 '지표를 모르겠다'로 바뀌어, 무엇을 구현하면
+    풀리는 질문인지가 결과에서 사라진다. Q08("영업이익률이 2024년이랑 2025년에 어떻게
+    달라졌어?")이 그 경우다.
+
+    year에 첫 연도를 담는 것은 QueryPlan이 아직 스칼라 year를 요구하기 때문이며, 이것은
+    다중 기간의 정본 표현이 아니다. 정본 표현(periods[])은 Data Contract 확인 뒤에 정한다
+    (위 QueryPlan docstring 참조). 그래서 확보한 연도 전부는 warnings에 남긴다. 계획 구조에
+    담을 자리가 없더라도 어느 연도를 읽었는지가 결과에서 사라지면 안 된다.
+    """
+    accounting_scope, scope_explicit = _extract_accounting_scope(question)
+
+    listed = ", ".join(str(year) for year in years)
+
+    return QueryPlan(
+        question=question.strip(),
+        companies=companies,
+        year=years[0],
+        intent=INTENT_TEMPORAL_COMPARE,
+        accounting_scope=accounting_scope,
+        metric=_find_metric(question),
+        accounting_scope_explicit=scope_explicit,
+        warnings=(
+            f"질문이 {len(years)}개 기간({listed})을 함께 묻고 있어 시계열 비교로 "
+            "해석했습니다.",
+        ),
+    )
+
+
 def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> QueryPlan:
     """
     Q13 계열 정정 이력 조회 계획을 만든다.
@@ -501,6 +578,30 @@ def build_query_plan(
     # 남은 의도를 가른다. 이후 단계는 의도마다 요구하는 것이 다르다.
     if _looks_like_event_history(question):
         return _build_event_history_plan(question, companies)
+
+    years = _extract_years(question)
+
+    # 서로 다른 절대연도가 둘 이상이면 Pattern C다.
+    #
+    # 위치가 규약이다. 세 경계 사이에 있어야 한다.
+    #
+    #   다중 기업 판정보다 뒤   기업 축과 기간 축이 함께 여럿이면 Pattern D가 먼저다.
+    #                          Pattern D 판정이 이미 그 자리에 있고 순서를 바꿀 이유가 없다.
+    #
+    #   이력 판정보다 뒤       거래소공시 이력 질문은 원공시 연도와 정정 연도를 함께 적을 수
+    #                          있다("2024년 8월에 공시한 계약, 2025년에 바뀐 내용 있어?").
+    #                          앞에 두면 실제로 답하고 있던 Pattern E 질문을 가로챈다.
+    #                          Q08은 이력 표현이 있어도 유형 토큰이 없어 여기까지 내려온다.
+    #
+    #   지표 판정보다 앞       여기서 거절하면 막힌 이유가 'Pattern C 미구현'이 아니라
+    #                          '지표를 모르겠다'로 바뀐다. Pattern D가 같은 이유로 같은
+    #                          순서를 택했다.
+    #
+    # 뒤로 미루면 단일 기간 흐름(Pattern A)이 먼저 연도 하나를 골라 버린다. 그러면 두 기간을
+    # 물은 질문에 첫 연도의 Fact만 근거까지 갖춰 COMPLETED/ANSWERABLE로 돌아가고, 나머지
+    # 기간이 사라진 흔적이 어디에도 남지 않는다.
+    if len(years) > 1:
+        return _build_temporal_compare_plan(question, companies, years)
 
     year = _extract_year(question)
 

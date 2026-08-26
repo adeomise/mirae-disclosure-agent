@@ -47,15 +47,44 @@ Fact는 "무엇이 사실인가"를, Evidence는 "그것을 어디서 확인할 
 | 1 단일 사실 (Q02) | 3 (금액, 시작일, 종료일) | 같은 문서 내 2~3 | 확정 | 계산 없음 |
 | 2 단일 문서 요약 (Q04~Q06) | 0 (Fact 추출 아님) | 요약 항목 수만큼 | 확정 | 계산 없음. 원문 기재 비율은 인용하고 재계산하지 않음 |
 | 3 시계열 수치 (Q07) | 2 | **2** | **Pending D4** | 입력 Fact 2건 전부 참조 |
-| 3 시계열 파생지표 (Q08) | 4 | **2~4** | **Pending D4** | 기간별 분자·분모 4건 참조 |
+| 3 시계열 파생지표 (Q08) | 4 | **2~4** | **Pending D4** | 기간별 분자·분모 4건 참조. **Calculation 3** |
 | 3 시계열 서술 (Q09) | 0 | **2** (연도별 각 1) | **Pending D4** | 변화 항목마다 해당 연도 Evidence |
-| 4 기업 간 수치 (Q10) | 2 | 2 (기업별 1) | 확정 | 정규화 전 값과 정규화 후 값을 모두 보존 |
-| 4 기업 간 파생지표 (Q11) | 4 | 2~4 | 확정 | 기업별 비율 산출 후 비교 |
-| 4 기업 간 집계 (Q12) | 기업별 투자 건 수만큼 (합계 3 이상) | **합산에 포함된 투자 건별 1 이상**. 값을 확정한 정정공시가 있으면 그 문서도 포함 | 확정 | 기업별 합계는 해당 기업의 건별 Fact 전부 참조 |
+| 4 기업 간 수치 (Q10) | 2 | 2 (기업별 1) | 확정 | **Calculation 0**. Fact 2건을 Comparison Judgment로 판정해 ComparisonResult 1건. 단위 정규화 성공은 비교 직전 guard ②에서 확인. 정규화 전 값과 정규화 후 값을 모두 보존 |
+| 4 기업 간 파생지표 (Q11) | 4 | 2~4 | 확정 | 기업별 비율 **Calculation 2** → Comparison Judgment → ComparisonResult 1건 |
+| 4 기업 간 집계 (Q12) | 기업별 투자 건 수만큼 (합계 3 이상) | **합산에 포함된 투자 건별 1 이상**. 값을 확정한 정정공시가 있으면 그 문서도 포함 | 확정 | 기업별 합계 **Calculation 2** → Comparison Judgment → ComparisonResult 1건. 합계는 해당 기업의 건별 Fact 전부 참조 |
 | 5 단일 필드 정정 (Q13) | 2 (변경 전·후) | 2 이상 (원공시와 정정공시) | 확정 | 변경점은 두 Fact 모두 참조 |
 | 5 최종 상태 (Q14) | 3 이상 | 3 이상 (체인 전 문서) | 확정 | 상태 판정은 체인 전체 참조 |
 | 5 다중 변경 (Q15) | 4 이상 | 체인 전 문서 | 확정 | 필드별 궤적은 해당 필드가 등장한 모든 문서 참조 |
 | 6 답변 불가능 (Q16~Q18) | 0 | 0 | 확정 | 계산 없음 |
+
+## Calculation cardinality
+
+Calculation은 Fact 또는 다른 Calculation에서 나온 **수치형 파생 결과**만 가리킵니다. 관계 판정은
+Calculation이 아니라 별도의 **ComparisonResult**입니다. 두 구조의 범위 정의는
+[agent_patterns.md](agent_patterns.md#c10-calculation의-범위)를 정본으로 씁니다. 개수는 내부 산술
+primitive 개수가 아니라 **최종 답변에서 의미 있게 사용되는 수치형 파생 결과 하나당 1건**으로
+셉니다.
+
+| 문항 | Calculation | ComparisonResult | 구성 | 근거 |
+|---|---|---|---|---|
+| Q08 | **3** | 없음 | 2024년 영업이익률 · 2025년 영업이익률 · 두 영업이익률의 변화량 | 원문에 없는 파생지표를 연도별로 각각 만들고, 질문이 "어떻게 달라졌어"로 변화량 자체를 요구합니다. 최종 우열 판정을 요구하지 않아 ComparisonResult가 없습니다 |
+| Q10 | **0** | 1 | – | 원문 Fact 두 개를 그대로 비교하므로 수치형 파생 결과가 없습니다 |
+| Q11 | **2** | 1 | 기업 A 영업이익률 · 기업 B 영업이익률 | 기업별 영업이익률 2건이 파생값입니다 |
+| Q12 | **2** | 1 | 기업 A 투자 합계 · 기업 B 투자 합계 | 기업별 투자 합계 2건이 파생값입니다 |
+
+- 최종 greater/less/equal 판정은 **Calculation count에 포함하지 않습니다.** Q10·Q11·Q12의 우열
+  판정은 ComparisonResult로 표현합니다.
+- Q10의 `0`은 계산 능력이 없다는 뜻이 아니라 **현재 질문이 수치형 파생 결과를 요구하지 않는다**는
+  뜻입니다. 같은 두 Fact를 두고 "얼마나 더 큰가", "몇 %p 차이인가"처럼 차이 수치 자체를 물으면 그
+  결과가 Calculation 1건으로 추가됩니다.
+- Q07은 위 canonical 목록에 포함되지 않았습니다. 질문("얼마나 늘었어")이 증감 수치를 요구하므로
+  Calculation은 최소 1건(증감액)이며, 답변에 증감률을 함께 제시하면 증감액·증감률 2건입니다.
+  Q07·Q08 모두 최종 우열 판정을 요구하지 않으므로 ComparisonResult를 만들지 않습니다.
+- **Comparability Validation이 실패하면** 그 지점 이후의 파생값도 ComparisonResult도 만들지 않고
+  answerability 경로로 넘깁니다. 검증은 단일 단계가 아니라 연산 직전마다 적용되는 guard입니다
+  (→ [agent_patterns.md](agent_patterns.md#comparability-validation의-적용-지점),
+  [답변 가능성 상태](#답변-가능성-상태)).
+- 여기서는 개수의 의미만 정합니다. 평가에서 이 개수를 어떻게 채점할지는 `evaluation/`의 범위입니다.
 
 ## 표기 예시
 
@@ -67,8 +96,9 @@ Fact는 "무엇이 사실인가"를, Evidence는 "그것을 어디서 확인할 
 Fact A = {기업, 지표=revenue, 기간=직전 회계연도, 기준=연결, 값, 단위}
 Fact B = {기업, 지표=revenue, 기간=당해 회계연도, 기준=연결, 값, 단위}
 
-Validation   = 동일 기업 ∧ 동일 개념 ∧ 동일 기준 ∧ 단위 정규화 성공
-Calculation  = delta(A, B), delta_pct(A, B)   # Python
+Validation①  = 동일 개념 ∧ 동일 기준 ∧ 단위 정규화 성공   # Calculation 입력 검증
+Validation②  = 동일 기업 ∧ 두 기간 값의 비교 가능성        # 증감 산출 직전
+Calculation  = 질문이 요구하는 증감 수치 — delta(A, B), 필요하면 delta_pct(A, B)   # Python
 Evidence A   = {직전 연도 사업보고서, 재무제표 Section, 해당 계정 행·열}
 Evidence B   = {당해 연도 사업보고서, 재무제표 Section, 해당 계정 행·열}
 ```
@@ -79,8 +109,11 @@ Evidence B   = {당해 연도 사업보고서, 재무제표 Section, 해당 계�
 Fact A = {기업 A, 지표=revenue, 기간, 기준=연결, 값, 단위 = 단위 X}
 Fact B = {기업 B, 지표=revenue, 기간, 기준=연결, 값, 단위 = 단위 Y}
 
-Validation   = ... ∧ 단위 정규화 성공
-Calculation  = compare(정규화된 A, 정규화된 B)
+Validation②  = ... ∧ 단위 정규화 성공
+               # Calculation이 없어 guard ①을 지나지 않으므로
+               # 단위 정규화 검증을 여기서 반드시 수행
+Calculation  = 없음 (질문이 수치형 파생 결과를 요구하지 않음)
+Comparison   = ComparisonResult{left=Fact A, right=Fact B, relation}   # Comparison Judgment
 출력          = 원문 단위 값과 정규화 값을 병기
                 (정규화 결과만 제시하면 사용자가 검증할 수 없음)
 ```
@@ -95,8 +128,10 @@ Calculation  = compare(정규화된 A, 정규화된 B)
             값은 해당 건의 필드 단위 최신값 (정정 반영)
             같은 건의 정정공시를 별개 건으로 세지 않음
 
-Calculation = aggregate(기업 A 건별 Fact) , aggregate(기업 B 건별 Fact)
-              → compare(합계 A, 합계 B)
+Validation① = 단위 정규화 성공 ∧ 집계 대상 집합 확정 ∧ 건별 최신값 확정   # 집계 직전
+Calculation = aggregate(기업 A 건별 Fact) , aggregate(기업 B 건별 Fact)   # 수치형 파생 2건
+Validation② = 결산월 일치 ∧ 계정 체계 호환                                # 비교 직전
+Comparison  = ComparisonResult{left=합계 A, right=합계 B, relation}       # Comparison Judgment
 
 Evidence    = 건별 원공시 + 값을 확정한 정정공시
 출력         = 기업별 합계와 함께 **합산에 포함된 투자 건 목록**을 제시
@@ -108,7 +143,8 @@ Evidence    = 건별 원공시 + 값을 확정한 정정공시
 Fact chain(투자금액)   = [원본, 정정 1, 정정 2, ...]
 Fact chain(투자 종료일) = [원본, 정정 2, 정정 3, ...]
 
-Calculation = state_resolution(공시일 시간순 정렬 → 필드별 최신값)
+State resolution = 공시일 시간순 정렬 → 필드별 최신값
+                   (수치형 파생값이 아니므로 Calculation으로 세지 않음)
 Evidence    = 원본과 정정 공시 전량
               (일부 생략 시 이력 신뢰성을 확인할 수 없음)
 ```
@@ -120,6 +156,15 @@ Evidence    = 원본과 정정 공시 전량
 | `ANSWERABLE` | 요구 정보를 확보했고 Evidence가 완비됨 | Q01~Q13, Q15 |
 | `PARTIALLY_ANSWERABLE` | 일부만 확보. 확보분은 답하고 미확보분을 명시 | Q14의 일부, 체인 미완결 사례, Q12에서 일부 건의 최신값 미확정 시 |
 | `UNANSWERABLE` | 답변 불가 | Q16 Q17 Q18 |
+
+**Comparability Validation 실패** — 비교 가능성 항목은 각각 필요한 연산 직전에 확인하며, Pattern
+전용 항목은 그 Pattern에서만 적용합니다(동일 기업은 Pattern C 전용, 결산월 일치는 Pattern D 전용)
+(→ [agent_patterns.md](agent_patterns.md#comparability-validation의-적용-지점)). Calculation 입력
+검증이 실패하면 Numeric Calculation을 수행하지 않고, 비교 가능성 검증이 실패하면 Comparison
+Judgment를 성공 결과로 확정하지 않고 ComparisonResult를 생성하지 않으며, 두 경우 모두 위
+answerability 경로로 넘깁니다.
+실패를 `relation` 값으로 표현하지 않습니다. 어떤 `AnswerabilityStatus`·`AnswerabilityReason`·
+stage/detail에 매핑할지는 **별도 Contract PR에서 확정**합니다.
 
 ## 사유 코드
 

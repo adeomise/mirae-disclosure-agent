@@ -2,9 +2,14 @@
 
 from decimal import Decimal
 
+import pytest
+from pydantic import ValidationError
+
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
+    ComparisonInputType,
+    ComparisonRelation,
     EventLinkRelation,
     EventLinkResolutionStatus,
     EventType,
@@ -18,6 +23,8 @@ from disclosure_agent.common.schemas import (
     AnswerabilityDetail,
     AnswerResponse,
     CalculationResult,
+    ComparisonInputReference,
+    ComparisonResult,
     ConversionGap,
     Event,
     EventHistory,
@@ -67,6 +74,90 @@ def test_additional_source_metric_concepts_validate_as_facts() -> None:
             accounting_scope=FactAccountingScope.NOT_APPLICABLE,
         )
         assert fact.metric is metric
+
+
+def test_comparison_enums_preserve_contract_values() -> None:
+    assert {relation.name: relation.value for relation in ComparisonRelation} == {
+        "LEFT_GREATER": "left_greater",
+        "RIGHT_GREATER": "right_greater",
+        "EQUAL": "equal",
+    }
+    assert {input_type.name: input_type.value for input_type in ComparisonInputType} == {
+        "FACT": "fact",
+        "CALCULATION": "calculation",
+    }
+
+
+def test_comparison_input_reference_accepts_fact_and_calculation() -> None:
+    fact_reference = ComparisonInputReference(
+        input_type=ComparisonInputType.FACT,
+        input_id="fact_dummy_left",
+    )
+    calculation_reference = ComparisonInputReference(
+        input_type=ComparisonInputType.CALCULATION,
+        input_id="calculation_dummy_right",
+    )
+
+    assert fact_reference.model_dump(mode="json") == {
+        "input_type": "fact",
+        "input_id": "fact_dummy_left",
+    }
+    assert calculation_reference.model_dump(mode="json") == {
+        "input_type": "calculation",
+        "input_id": "calculation_dummy_right",
+    }
+
+
+def test_comparison_result_serializes_successful_relation() -> None:
+    comparison = ComparisonResult(
+        comparison_id="comparison_dummy_revenue",
+        left=ComparisonInputReference(input_type="fact", input_id="fact_dummy_left"),
+        right=ComparisonInputReference(
+            input_type="calculation",
+            input_id="calculation_dummy_right",
+        ),
+        relation=ComparisonRelation.LEFT_GREATER,
+    )
+
+    assert comparison.model_dump(mode="json") == {
+        "comparison_id": "comparison_dummy_revenue",
+        "left": {"input_type": "fact", "input_id": "fact_dummy_left"},
+        "right": {
+            "input_type": "calculation",
+            "input_id": "calculation_dummy_right",
+        },
+        "relation": "left_greater",
+    }
+
+
+def test_comparison_result_rejects_failure_relation() -> None:
+    with pytest.raises(ValidationError):
+        ComparisonResult(
+            comparison_id="comparison_dummy_invalid",
+            left=ComparisonInputReference(input_type="fact", input_id="fact_dummy_left"),
+            right=ComparisonInputReference(input_type="fact", input_id="fact_dummy_right"),
+            relation="not_comparable",
+        )
+
+
+def test_calculation_result_requires_and_serializes_identity() -> None:
+    calculation = CalculationResult(
+        calculation_id="calculation_dummy_ratio",
+        operation="ratio",
+        value="dummy",
+        unit="percent",
+    )
+
+    assert calculation.model_dump(mode="json") == {
+        "calculation_id": "calculation_dummy_ratio",
+        "operation": "ratio",
+        "value": "dummy",
+        "unit": "percent",
+        "evidence_ids": [],
+    }
+
+    with pytest.raises(ValidationError):
+        CalculationResult(operation="ratio")
 
 
 def test_q02_dummy_supply_contract_event() -> None:
@@ -323,6 +414,7 @@ def test_execution_result_default_lists_are_not_shared() -> None:
         "event_histories",
         "evidence",
         "calculations",
+        "comparisons",
         "warnings",
         "conversion_gaps",
     )
@@ -337,6 +429,28 @@ def test_execution_result_default_lists_are_not_shared() -> None:
 
     assert second.warnings == []
     assert second.conversion_gaps == []
+
+
+def test_execution_result_accepts_comparison_and_defaults_to_empty_list() -> None:
+    comparison = ComparisonResult(
+        comparison_id="comparison_dummy_revenue",
+        left=ComparisonInputReference(input_type="fact", input_id="fact_dummy_left"),
+        right=ComparisonInputReference(input_type="fact", input_id="fact_dummy_right"),
+        relation=ComparisonRelation.EQUAL,
+    )
+    with_comparison = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        comparisons=[comparison],
+    )
+    without_comparison = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+    )
+
+    assert with_comparison.comparisons == [comparison]
+    assert with_comparison.model_dump(mode="json")["comparisons"] == [
+        comparison.model_dump(mode="json")
+    ]
+    assert without_comparison.comparisons == []
 
 
 def test_execution_result_accepts_existing_common_contract_objects() -> None:
@@ -463,6 +577,7 @@ def test_execution_result_serializes_to_json_compatible_contract() -> None:
         answerability_status=AnswerabilityStatus.ANSWERABLE,
         calculations=[
             CalculationResult(
+                calculation_id="calculation_dummy_identity",
                 operation="identity",
                 value="dummy",
                 unit="dummy-unit",
@@ -479,6 +594,7 @@ def test_execution_result_serializes_to_json_compatible_contract() -> None:
     assert dumped["answerability_status"] == "ANSWERABLE"
     assert dumped["calculations"] == [
         {
+            "calculation_id": "calculation_dummy_identity",
             "operation": "identity",
             "value": "dummy",
             "unit": "dummy-unit",

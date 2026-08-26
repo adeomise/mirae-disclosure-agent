@@ -538,7 +538,13 @@ def test_calculation_evidence_reference_integrity_is_supported() -> None:
     )
     actual = prediction(
         "case",
-        calculations=[{"operation": "difference", "evidence_ids": ["missing"]}],
+        calculations=[
+            {
+                "calculation_id": "calculation-1",
+                "operation": "difference",
+                "evidence_ids": ["missing"],
+            }
+        ],
     )
 
     failures = compare_prediction(gold, actual)

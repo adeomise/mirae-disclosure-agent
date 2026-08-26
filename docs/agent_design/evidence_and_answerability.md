@@ -98,7 +98,7 @@ Fact B = {기업, 지표=revenue, 기간=당해 회계연도, 기준=연결, 값
 
 Validation①  = 동일 개념 ∧ 동일 기준 ∧ 단위 정규화 성공   # Calculation 입력 검증
 Validation②  = 동일 기업 ∧ 두 기간 값의 비교 가능성        # 증감 산출 직전
-Calculation  = delta(A, B), delta_pct(A, B)   # Python
+Calculation  = 질문이 요구하는 증감 수치 — delta(A, B), 필요하면 delta_pct(A, B)   # Python
 Evidence A   = {직전 연도 사업보고서, 재무제표 Section, 해당 계정 행·열}
 Evidence B   = {당해 연도 사업보고서, 재무제표 Section, 해당 계정 행·열}
 ```
@@ -155,7 +155,8 @@ Evidence    = 원본과 정정 공시 전량
 | `PARTIALLY_ANSWERABLE` | 일부만 확보. 확보분은 답하고 미확보분을 명시 | Q14의 일부, 체인 미완결 사례, Q12에서 일부 건의 최신값 미확정 시 |
 | `UNANSWERABLE` | 답변 불가 | Q16 Q17 Q18 |
 
-**Comparability Validation 실패** — 비교 가능성 1~8항은 각각 필요한 연산 직전에 확인합니다
+**Comparability Validation 실패** — 비교 가능성 항목은 각각 필요한 연산 직전에 확인하며, Pattern
+전용 항목은 그 Pattern에서만 적용합니다(동일 기업은 Pattern C 전용, 결산월 일치는 Pattern D 전용)
 (→ [agent_patterns.md](agent_patterns.md#comparability-validation의-적용-지점)). Calculation 입력
 검증이 실패하면 Numeric Calculation을 수행하지 않고, 비교 가능성 검증이 실패하면 Comparison
 Judgment를 성공 결과로 확정하지 않고 ComparisonResult를 생성하지 않으며, 두 경우 모두 위

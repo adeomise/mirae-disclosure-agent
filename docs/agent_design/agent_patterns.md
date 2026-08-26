@@ -133,13 +133,16 @@ Query Analysis
 → Section Navigation (양쪽 동일 경로)
 → Content Extraction
      ├ 수치 경로 (Q07 Q08)
-     │    → Fact Retrieval ×2
+     │    → Period Retrieval ×2 — 기간별로 필요한 source Fact를 각각 확보
+     │      (Q07 revenue 2건 → source Fact 2건.
+     │       Q08 revenue·operating_income 각 2건 → source Fact 4건)
      │    → Unit & Concept Normalization
      │    → Comparability Validation [guard ①] — Calculation 입력 검증
-     │    → Numeric Calculation — 기간별 파생값 (Q08 영업이익률 2건. Q07은 없음)
+     │    → Numeric Calculation — 기간별 파생값
+     │      (Q08 영업이익률 2건. Q07은 기간별 파생값 없음)
      │    → Comparability Validation [guard ②] — 두 기간 값의 비교 가능성
      │    → Numeric Calculation — 두 값에서 나오는 파생값
-     │      (Q07 증감액·증감률, Q08 변화량 1건)
+     │      (Q07 질문이 요구하는 증감 수치, Q08 변화량 1건 → 합계 3건)
      │    → Comparison Judgment → ComparisonResult
      │      (질문이 관계 판정을 요구할 때. Q07·Q08은 해당 없음)
      └ 서술 경로 (Q09)
@@ -163,7 +166,8 @@ Query Analysis
   - C14 Narrative Diff — Q09
 - **검증 조건** — 수치 경로의 비교 가능성 4항목. 괄호는 적용 지점입니다
   (→ [Comparability Validation의 적용 지점](#comparability-validation의-적용-지점))
-  1. 동일 기업 (②)
+  1. 동일 기업 (②) — **Pattern C 전용**. 같은 기업의 두 기간을 견주므로 성립하는 조건이며,
+     Pattern D에는 상속되지 않습니다
   2. 동일 지표 개념 (①②)
   3. 동일 `accounting_scope` (①②)
   4. 단위 일치 또는 정규화 성공 (①)
@@ -238,14 +242,20 @@ Query Analysis
   - **Q12** — 기업별 Event/Fact 집합 → 최신 정정값 반영 → 기업 A 투자 합계 Calculation →
     기업 B 투자 합계 Calculation → Comparability Validation → Comparison Judgment →
     ComparisonResult. **Calculation 2**
-- **검증 조건** — Pattern C 수치 경로의 4항목에 더해. 괄호는 적용 지점입니다
+- **검증 조건** — **서로 다른 두 기업이 정상 입력입니다.** Pattern C의 "동일 기업"(조건 1)은
+  같은 기업의 두 기간을 견주는 temporal comparison 전용 조건이므로 여기에 **상속되지 않습니다.**
+  Pattern D가 확인하는 항목은 다음과 같습니다. 괄호는 적용 지점입니다
   (→ [Comparability Validation의 적용 지점](#comparability-validation의-적용-지점))
-  5. 결산월 일치 (②) — 현재 코퍼스 관찰 기준이며 일반 규칙으로 확정하지 않음
-  6. 계정 체계 호환 (①②). 한쪽 기업에 해당 지표 개념이 존재하지 않으면 비교 불가
-  7. 파생지표 비교 시 분모 개념 동일 여부 (①②) (Q11)
-  8. **집계 대상 집합의 정확성** (①) (Q12) — 대상 연도에 최초 공시된 건만 포함했는가, 동일 투자
-     건의 정정본을 별건으로 세지 않았는가, 각 건에 필드 단위 최신값을 반영했는가. 합계를 만들기
-     전에 확정해야 하므로 집계 경로 안에서 걸립니다
+  2. 동일 지표 개념 (①②) — Pattern C와 공통
+  3. 동일 `accounting_scope` (①②) — Pattern C와 공통
+  4. 단위 일치 또는 정규화 성공 (①) — Pattern C와 공통. 기업 간 단위 표기 차이가 실제로 관찰됨
+  5. 결산월 일치 (②) — **Pattern D 전용**. 현재 코퍼스 관찰 기준이며 일반 규칙으로 확정하지 않음
+  6. 계정 체계 호환 (①②) — **Pattern D 전용**. 한쪽 기업에 해당 지표 개념이 존재하지 않으면
+     비교 불가
+  7. 파생지표 비교 시 분모 개념 동일 여부 (①②) — **Pattern D 전용** (Q11)
+  8. **집계 대상 집합의 정확성** (①) — **Pattern D 전용** (Q12). 대상 연도에 최초 공시된 건만
+     포함했는가, 동일 투자 건의 정정본을 별건으로 세지 않았는가, 각 건에 필드 단위 최신값을
+     반영했는가. 합계를 만들기 전에 확정해야 하므로 집계 경로 안에서 걸립니다
 - **출력 요구사항** — 기업별 값을 **원문 단위와 정규화 단위 모두 병기**. 정규화 결과만 제시하면
   사용자가 검증할 수 없습니다. Q12는 합계뿐 아니라 **합계에 포함된 투자 건 목록**을 함께 제시해야
   중복·누락을 확인할 수 있습니다. Evidence는 기업별로 각각 유지합니다
@@ -381,7 +391,9 @@ guard**입니다. 항목마다 확인해야 하는 시점이 다르기 때문입
 | **① Calculation 입력 검증** | Numeric Calculation 직전. Q12는 Aggregation 직전이므로 집계 경로 안에서 | 잘못된 Fact로 파생값을 만드는 것 |
 | **② 비교 가능성 검증** | 두 값을 함께 쓰기 직전 — 변화량 Calculation과 Comparison Judgment | 서로 견줄 수 없는 두 값을 견주는 것 |
 
-항목별 적용 지점입니다. 번호는 Pattern C·D 검증 조건의 번호입니다.
+항목별 적용 지점입니다. 번호는 Pattern C·D 검증 조건의 번호이며, Pattern 전용 항목은 그 Pattern
+에서만 적용합니다. 특히 **동일 기업(1)은 Pattern C temporal comparison 전용**이고, Pattern D는
+서로 다른 두 기업이 정상 입력이므로 이 조건을 적용하지 않습니다.
 
 | 검증 항목 | Guard |
 |---|---|
@@ -390,7 +402,8 @@ guard**입니다. 항목마다 확인해야 하는 시점이 다르기 때문입
 | 동일 `accounting_scope` (3) | ① 분자·분모 기준 · ② 두 값의 기준 |
 | 파생지표의 분모 개념 동일 (7, Q11) | ① 기업별 비율 산출 · ② 두 비율 비교 |
 | 집계 대상 집합·건별 최신 정정값 확정 (8, Q12) | ① |
-| 동일 기업 (1) · 결산월 일치 (5) | ② |
+| 동일 기업 (1) — **Pattern C 전용** | ② |
+| 결산월 일치 (5) — **Pattern D cross-entity 전용** | ② |
 
 - ①이 실패하면 Numeric Calculation을 수행하지 않습니다.
 - ②가 실패하면 두 값을 함께 쓰는 파생값도 만들지 않고 ComparisonResult도 생성하지 않습니다.
@@ -405,7 +418,8 @@ guard**입니다. 항목마다 확인해야 하는 시점이 다르기 때문입
 **ComparisonResult**는 그 판정 결과를 표현하는 **별도의 semantic result**입니다. Calculation의 한
 종류가 아니며 Calculation 개수에 더해지지 않습니다.
 
-최소 의미는 다음 네 가지입니다.
+최소 의미는 다음 네 가지입니다. **아래 명칭은 semantic placeholder이며, 실제 field name과 타입
+표현은 별도 Contract PR에서 확정합니다.**
 
 | 항목 | 의미 |
 |---|---|

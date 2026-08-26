@@ -87,13 +87,19 @@ def test_default_dataset_preserves_synthetic_contract_cases() -> None:
     assert all(question.evaluation_mode == "contract" for question in synthetic)
 
 
-def test_representative_gold_has_no_source_identifiers_or_corpus_values() -> None:
+def test_future_representative_gold_has_no_source_identifiers_or_corpus_values() -> None:
+    questions = {item.case_id: item for item in load_dataset().questions}
     records = [
         json.loads(line)
         for line in runner.DEFAULT_GOLD_PATH.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    representative = [record for record in records if record["case_id"].startswith("q")]
+    representative = [
+        record
+        for record in records
+        if record["case_id"].startswith("q")
+        and questions[record["case_id"]].lifecycle == "future"
+    ]
     serialized = json.dumps(representative, ensure_ascii=False)
 
     assert '"receipt_no"' not in serialized
@@ -101,6 +107,53 @@ def test_representative_gold_has_no_source_identifiers_or_corpus_values() -> Non
     assert '"raw_value"' not in serialized
     assert '"normalized_value"' not in serialized
     assert all(fact for record in representative for fact in record.get("facts", []))
+
+
+def test_active_q01_gold_pins_corpus_verified_fact() -> None:
+    gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
+    q01 = gold_by_id["q01"]
+
+    assert q01.counts.model_dump(exclude_none=True) == {"facts": 1, "evidence": 1}
+    assert [fact.model_dump(exclude_none=True, mode="json") for fact in q01.expected_facts()] == [
+        {
+            "company": "한미반도체(주)",
+            "metric": "revenue",
+            "fiscal_year": 2025,
+            "accounting_scope": "consolidated",
+            "raw_unit": "원",
+            "normalized_value": "576684619527",
+            "normalized_unit": "원",
+        }
+    ]
+    assert q01.min_evidence_count == 1
+    assert q01.integrity.fact_evidence_references is True
+
+
+def test_active_q13_gold_pins_corpus_verified_chain_structure() -> None:
+    q13 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q13"]
+
+    assert q13.counts.model_dump(exclude_none=True) == {
+        "event_links": 2,
+        "event_histories": 1,
+    }
+    assert q13.event_history.model_dump(mode="json") == {
+        "link_resolution": "resolved",
+        "chain_complete": True,
+    }
+    # The actual chain has three documents and document-level Evidence for each.
+    # Do not freeze the producer's current exact Evidence count (9).
+    assert q13.min_evidence_count == 3
+
+
+def test_active_q18_gold_pins_actual_safety_gate_contract() -> None:
+    q18 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q18"]
+
+    assert q18.execution_status.value == "COMPLETED"
+    assert q18.status.value == "UNANSWERABLE"
+    assert q18.reason.value == "out_of_scope_policy"
+    assert q18.answerability_detail_reason == "investment_advice"
+    assert q18.counts.model_dump(exclude_none=True) == {"facts": 0, "evidence": 0}
+    assert q18.min_evidence_count == 0
 
 
 def test_future_representative_gold_is_not_empty() -> None:

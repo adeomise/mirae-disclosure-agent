@@ -30,8 +30,9 @@ TODO:
   막는 쪽에서는 이 구분이 없어도 되지만, 실제로 답하기 시작하면 필요해진다.
 - Pattern C 구현 시 같은 구분이 기간에도 필요하다. 지금은 서로 다른 절대연도가 둘 이상
   보이면 비교 의도인지 보지 않고 temporal_compare로 분류한다.
-- Pattern C 구현 시 상대기간 표현("작년")을 해석한다. 지금은 절대연도만 읽으므로 상대기간
-  질문은 missing_year로 막힌다. 답을 축소하지는 않으므로 이번 범위에서 다루지 않는다.
+- Pattern C 구현 시 상대기간 표현("작년")을 연도로 옮긴다. 지금은 탐지만 하고 해석하지
+  않는다. 절대연도와 함께 쓰이면 기간이 둘이므로 temporal_compare로 막고, 상대기간만 있는
+  질문은 missing_year로 막힌다. 어느 쪽도 답을 축소하지 않는다.
 """
 
 from __future__ import annotations
@@ -108,7 +109,29 @@ KNOWN_INTENTS: tuple[str, ...] = (
 # 조용히 인식하거나 못 하는 차이를 만든다.
 DEFAULT_KNOWN_COMPANIES: tuple[str, ...] = ()
 
-YEAR_PATTERN = re.compile(r"(19|20)\d{2}")
+# 절대연도. '년'이 붙은 표기만 연도로 읽는다.
+#
+# 네 자리 숫자를 그대로 연도로 보면 금액이 연도가 된다. "2024년 매출이 2025억원 맞아?"의
+# 2025는 기간이 아닌데, 그것을 두 번째 연도로 세면 답할 수 있는 질문이 시계열 비교로
+# 오분류되어 막힌다. 막는 쪽으로 틀리는 것도 틀리는 것이다.
+#
+# '년'을 요구해도 기존 입력을 깨지 않는다. 대표 질문 18문항과 테스트·회귀 케이스의 질문
+# 문자열은 전부 'YYYY년' 표기이며, '년' 없는 네 자리 숫자는 보고서명("사업보고서 (2025.12)")
+# 이나 공시일처럼 질문이 아닌 자리에만 나온다.
+#
+# 앞자리 숫자를 배제해 더 긴 숫자의 일부를 연도로 읽지 않는다. 뒤에 오는 조사는 보지 않는다
+# ("2024년이랑", "2024년과", "2024년에").
+YEAR_PATTERN = re.compile(r"(?<!\d)(?:19|20)\d{2}(?=\s*년)")
+
+# 기준 시점이 있어야 연도로 옮길 수 있는 기간 표현.
+#
+# 이번 범위는 이 표현을 해석하지 않는다. 탐지만 한다. 절대연도와 함께 쓰이면 질문이 가리키는
+# 기간이 둘이므로, 하나로 줄여 답하지 않도록 시계열 비교로 분류하기 위해서다.
+#
+# 과거 방향만 둔다. "내년"·"올해"도 상대 기간이지만 이번 구멍(절대연도 + 과거 상대기간이
+# single_fact로 축소되는 경로)의 원인이 아니고, 미래 방향은 Gate(F4)가 query_analyzer보다
+# 앞에서 판정한다. 확인되지 않은 표현을 미리 넣으면 답할 수 있는 질문까지 막는다.
+RELATIVE_PERIOD_TOKENS = ("작년", "전년", "지난해")
 
 # 분기/반기 표현이 보이면 이번 슬라이스 범위 밖이다.
 QUARTER_TOKENS = ("분기", "반기", "상반기", "하반기", "q1", "q2", "q3", "q4")
@@ -227,8 +250,10 @@ def _extract_years(question: str) -> tuple[int, ...]:
     같은 연도가 문장에 여러 번 나오는 것은 두 기간이 아니다("2024년 매출과 2024년 영업이익").
     그래서 값으로 중복을 제거한다. 돌아오는 순서는 질문에 나타난 순서다.
 
-    상대기간 표현("작년")은 읽지 않는다. 해석하려면 기준 시점을 정해야 하고 그것은 이번
-    범위 밖이다. 읽지 못한 결과는 missing_year이므로 답이 축소되지는 않는다.
+    상대기간 표현("작년")은 여기서 읽지 않는다. 해석하려면 기준 시점을 정해야 하고 그것은
+    이번 범위 밖이다. 탐지는 _has_relative_period가 따로 맡는다.
+
+    '년'이 붙지 않은 네 자리 숫자는 연도로 보지 않는다(YEAR_PATTERN 주석 참조).
     """
     seen: dict[int, None] = {}
 
@@ -236,6 +261,21 @@ def _extract_years(question: str) -> tuple[int, ...]:
         seen.setdefault(int(match.group(0)), None)
 
     return tuple(seen)
+
+
+def _has_relative_period(question: str) -> bool:
+    """
+    기준 시점이 있어야 연도로 옮길 수 있는 기간 표현이 있는가.
+
+    해석하지 않고 있는지만 본다. 이번 범위는 "작년"을 2024로 바꾸지 않는다. 그 변환은 기준
+    시점(as_of) 정책을 먼저 정해야 하고, 정하지 않은 채 오늘 날짜로 대신하면 같은 질문이
+    실행 시점에 따라 다른 해를 가리킨다.
+
+    탐지만으로 충분한 이유는, 이 판정이 답을 만들기 위한 것이 아니라 답을 만들지 않기 위한
+    것이기 때문이다. 절대연도와 함께 쓰이면 질문이 가리키는 기간이 둘이라는 사실만 확정되면
+    되고, 그 둘이 정확히 몇 년인지는 Pattern C를 구현할 때 정한다.
+    """
+    return any(token in question for token in RELATIVE_PERIOD_TOKENS)
 
 
 def _extract_year(question: str) -> int:
@@ -471,6 +511,13 @@ def _build_temporal_compare_plan(
 
     listed = ", ".join(str(year) for year in years)
 
+    # 상대기간이 섞인 질문은 확보한 절대연도 개수가 곧 기간 개수가 아니다. 개수를 세어 적으면
+    # "1개 기간"이라고 말하면서 시계열 비교로 분류한 결과가 되어 진단이 스스로 모순된다.
+    if _has_relative_period(question):
+        detail = f"질문이 절대연도({listed})와 상대 기간 표현을 함께 쓰고 있어"
+    else:
+        detail = f"질문이 {len(years)}개 기간({listed})을 함께 묻고 있어"
+
     return QueryPlan(
         question=question.strip(),
         companies=companies,
@@ -479,10 +526,7 @@ def _build_temporal_compare_plan(
         accounting_scope=accounting_scope,
         metric=_find_metric(question),
         accounting_scope_explicit=scope_explicit,
-        warnings=(
-            f"질문이 {len(years)}개 기간({listed})을 함께 묻고 있어 시계열 비교로 "
-            "해석했습니다.",
-        ),
+        warnings=(f"{detail} 시계열 비교로 해석했습니다.",),
     )
 
 
@@ -600,7 +644,15 @@ def build_query_plan(
     # 뒤로 미루면 단일 기간 흐름(Pattern A)이 먼저 연도 하나를 골라 버린다. 그러면 두 기간을
     # 물은 질문에 첫 연도의 Fact만 근거까지 갖춰 COMPLETED/ANSWERABLE로 돌아가고, 나머지
     # 기간이 사라진 흔적이 어디에도 남지 않는다.
-    if len(years) > 1:
+    #
+    # 절대연도 하나에 상대기간 표현이 붙은 질문도 같은 구멍이다("2025년 매출이 전년보다 얼마나
+    # 늘었어?"). 절대연도 개수만 세면 하나이므로 이 가드를 통과해 single_fact로 축소된다.
+    # 상대기간을 연도로 옮기지는 않는다. 기간이 둘이라는 사실만 확정하면 막기에 충분하다.
+    #
+    # 절대연도가 하나도 없는 질문(Q07 "매출이 작년보다 얼마나 늘었어?")은 여기서 걸지 않는다.
+    # 아래 _extract_year가 missing_year로 막으므로 이미 fail-closed이고, 그 질문에 답하려면
+    # 상대기간 해석이 필요한데 그것은 Pattern C 구현 범위다.
+    if len(years) > 1 or (years and _has_relative_period(question)):
         return _build_temporal_compare_plan(question, companies, years)
 
     year = _extract_year(question)

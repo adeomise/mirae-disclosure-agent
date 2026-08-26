@@ -43,13 +43,121 @@ def test_default_dataset_reports_deterministic_metrics() -> None:
     assert json.loads(completed.stdout) == {
         "mode": "case_validation",
         "real_agent_execution": "BLOCKED",
-        "case_count": 3,
+        "case_count": 21,
         "synthetic_case_count": 3,
-        "paired_case_count": 3,
-        "answerable_cases_requiring_evidence": 2,
-        "unanswerable_cases_without_fact": 1,
-        "event_history_case_count": 1,
+        "paired_case_count": 21,
+        "answerable_cases_requiring_evidence": 17,
+        "unanswerable_cases_without_fact": 4,
+        "event_history_case_count": 4,
     }
+
+
+def test_default_dataset_registers_q01_through_q18_once() -> None:
+    loaded = load_dataset()
+    representative = [
+        question
+        for question in loaded.questions
+        if question.representative_question_id is not None
+    ]
+
+    assert [question.representative_question_id for question in representative] == [
+        f"Q{number:02d}" for number in range(1, 19)
+    ]
+    assert len({question.representative_question_id for question in representative}) == 18
+    assert {question.case_id for question in loaded.questions} == {
+        gold.case_id for gold in loaded.gold_answers
+    }
+    assert {question.case_id for question in representative if question.lifecycle == "active"} == {
+        "q01",
+        "q13",
+        "q18",
+    }
+    assert sum(question.lifecycle == "future" for question in representative) == 15
+
+
+def test_default_dataset_preserves_synthetic_contract_cases() -> None:
+    loaded = load_dataset()
+    synthetic = [question for question in loaded.questions if question.synthetic]
+
+    assert [question.case_id for question in synthetic] == [
+        "synthetic_q01_contract",
+        "synthetic_unanswerable_contract",
+        "synthetic_event_history_contract",
+    ]
+    assert all(question.evaluation_mode == "contract" for question in synthetic)
+
+
+def test_representative_gold_has_no_source_identifiers_or_corpus_values() -> None:
+    records = [
+        json.loads(line)
+        for line in runner.DEFAULT_GOLD_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    representative = [record for record in records if record["case_id"].startswith("q")]
+    serialized = json.dumps(representative, ensure_ascii=False)
+
+    assert '"receipt_no"' not in serialized
+    assert '"doc_id"' not in serialized
+    assert '"raw_value"' not in serialized
+    assert '"normalized_value"' not in serialized
+    assert all(fact for record in representative for fact in record.get("facts", []))
+
+
+def test_future_representative_gold_is_not_empty() -> None:
+    loaded = load_dataset()
+    gold_by_id = {gold.case_id: gold for gold in loaded.gold_answers}
+
+    for question in loaded.questions:
+        if question.representative_question_id is None or question.lifecycle != "future":
+            continue
+        gold = gold_by_id[question.case_id]
+        has_counts = gold.counts is not None and bool(
+            gold.counts.model_dump(exclude_none=True)
+        )
+        assert (
+            gold.expected_facts()
+            or gold.event_history
+            or has_counts
+            or gold.min_evidence_count > 0
+        )
+
+
+def test_representative_calculation_counts_match_final_targets() -> None:
+    gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
+
+    # Numeric-only policy: comparisons are not Calculations. Q08 has two margins
+    # and their percentage-point change; Q11/Q12 have two numeric derivations.
+    assert {
+        case_id: gold_by_id[case_id].counts.calculations
+        for case_id in ("q08", "q10", "q11", "q12")
+    } == {"q08": 3, "q10": 0, "q11": 2, "q12": 2}
+
+    assert gold_by_id["q10"].integrity.calculation_evidence_references is None
+
+
+def test_narrative_future_gold_does_not_require_zero_facts() -> None:
+    gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
+
+    for case_id in ("q04", "q05", "q06", "q09"):
+        counts = gold_by_id[case_id].counts
+        assert counts is None or counts.facts is None
+
+    for case_id in ("q16", "q17", "q18"):
+        counts = gold_by_id[case_id].counts
+        assert counts.facts == 0
+        assert counts.evidence == 0
+
+
+def test_event_history_gold_records_only_supported_structural_invariants() -> None:
+    gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
+
+    # Remaining comparator gaps: Q14 final-state content and Q15 change
+    # cardinality cannot be asserted until content comparison and corpus-verified
+    # cardinality are available. Do not substitute guessed values or link counts.
+    assert gold_by_id["q14"].counts.event_histories == 1
+    assert gold_by_id["q14"].counts.event_links is None
+    assert gold_by_id["q15"].counts.event_histories == 1
+    assert gold_by_id["q15"].counts.event_links is None
 
 
 def test_runner_rejects_answerable_case_without_evidence(tmp_path: Path) -> None:

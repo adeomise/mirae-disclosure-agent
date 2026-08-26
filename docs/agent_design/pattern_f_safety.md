@@ -38,7 +38,9 @@ Agent가 **답하지 않아야 할 질문에 답하지 않게** 하고, 거부�
 
 **제외**
 
-- 자연어 거부 문장 생성 — 현재 파이프라인은 자연어를 만들지 않습니다
+- 자연어 거부 문장 생성 — 이 문서가 다루는 것은 판정과 그 Contract 표현까지입니다. 거부 문장
+  자체는 `answer_builder.build_answer_response`가 결정론적으로 만들며, 지켜야 할 원칙은 §8에
+  있습니다
 - 응답 단계의 PII 필터링(C15) — [open_decisions.md](open_decisions.md) D6에 걸려 있습니다
 - 공시유보(`WITHHELD_IN_SOURCE`) 처리 — Pattern E/A 실행 중의 부분 거부이며 Parser 결과에
   의존합니다
@@ -301,7 +303,8 @@ PR #18에서 `AnswerabilityDetail`이 추가되어 판정 근거를 실을 자�
 
 ## 8. Answer Builder가 향후 지켜야 할 원칙
 
-현재 `answer_builder.py`는 자연어를 만들지 않습니다. 만들게 될 때 지킬 원칙입니다.
+`answer_builder.build_answer_response`가 결정론적 자연어를 만듭니다. 아래는 그 문장이 지키는
+원칙이며, HyperCLOVA X 표면 렌더링을 붙일 때도 같은 원칙이 적용됩니다.
 
 1. **거부 응답에 Evidence를 붙이지 않습니다.** 원문 근거가 붙으면 부분 답변으로 읽힙니다.
 2. **`NOT_FOUND`와 기간 밖 거부는 표현을 구분합니다.** 전자는 "찾지 못했습니다"(시스템 한계

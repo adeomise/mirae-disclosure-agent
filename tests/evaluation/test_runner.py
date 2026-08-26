@@ -125,12 +125,14 @@ def test_future_representative_gold_is_not_empty() -> None:
 def test_representative_calculation_counts_match_final_targets() -> None:
     gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
 
-    # Q07: difference + growth rate. Q08: two margins + their change.
-    # Q11/Q12: one derived result or aggregate per compared company.
+    # Numeric-only policy: comparisons are not Calculations. Q08 has two margins
+    # and their percentage-point change; Q11/Q12 have two numeric derivations.
     assert {
         case_id: gold_by_id[case_id].counts.calculations
-        for case_id in ("q07", "q08", "q11", "q12")
-    } == {"q07": 2, "q08": 3, "q11": 2, "q12": 2}
+        for case_id in ("q08", "q10", "q11", "q12")
+    } == {"q08": 3, "q10": 0, "q11": 2, "q12": 2}
+
+    assert gold_by_id["q10"].integrity.calculation_evidence_references is None
 
 
 def test_narrative_future_gold_does_not_require_zero_facts() -> None:

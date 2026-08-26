@@ -38,6 +38,7 @@ from disclosure_agent.agent.query_analyzer import (
     INTENT_SINGLE_FACT,
     INTENT_TEMPORAL_COMPARE,
     KNOWN_INTENTS,
+    QueryPlan,
     UnsupportedQuestionError,
     _extract_years,
     build_query_plan,
@@ -503,3 +504,175 @@ def test_single_year_question_still_reaches_the_pattern_a_handler(
     issue = result.execution_issue
 
     assert issue is None or issue.stage != STAGE_ROUTING
+
+
+# --------------------------------------------------------------------------
+# 6. canonical years — 다중 기간 정보가 구조에 남는가
+# --------------------------------------------------------------------------
+
+
+def test_multi_period_plan_keeps_every_absolute_year_in_years() -> None:
+    """
+    두 연도가 계획 구조에 남는다.
+
+    C-0까지는 scalar year 하나만 있어서 2025년이 warnings 문자열 안에만 존재했다. 기계가
+    읽을 수 있는 자리에 없으면 Pattern C handler가 그것을 근거로 쓸 수 없다.
+    """
+    plan = build_query_plan(
+        "삼성전자 2024년 매출과 2025년 매출 비교해줘",
+        known_companies=REAL_COMPANIES,
+    )
+
+    assert plan.intent == INTENT_TEMPORAL_COMPARE
+    assert plan.years == (2024, 2025)
+
+
+def test_reading_year_on_a_multi_period_plan_fails_fast() -> None:
+    """
+    다중 기간 계획에서 year를 읽으면 막힌다.
+
+    이 파일에서 가장 중요한 구조적 회귀다. C-0가 제거한 silent first-year truncation이
+    compatibility property를 통해 되살아나지 않는다는 것을 고정한다.
+
+    company와 달리 첫 값을 돌려주지 않는 이유:
+        여러 기업 중 하나를 고르는 일은 Router가 막아 handler에 도달하지 않지만, Pattern C
+        handler가 생기면 다중 기간 계획은 handler 안까지 들어온다. 그때 year가 첫 연도를
+        돌려주면 두 기간을 물은 질문에 한 연도만 답하는 결과가 되고, 그것이 F6-02다.
+    """
+    plan = build_query_plan(
+        "삼성전자 2024년 매출과 2025년 매출 비교해줘",
+        known_companies=REAL_COMPANIES,
+    )
+
+    with pytest.raises(ValueError) as error:
+        plan.year  # noqa: B018 - 접근 자체가 검사 대상이다
+
+    # 무엇을 대신 읽어야 하는지가 메시지에 있어야 후속 작업을 고를 수 있다.
+    assert "years" in str(error.value)
+
+
+def test_year_fail_fast_is_not_swallowed_by_getattr() -> None:
+    """
+    가드가 hasattr/getattr에 삼켜지지 않는다.
+
+    AttributeError로 막으면 hasattr(plan, "year")가 False를 돌려주고
+    getattr(plan, "year", 기본값)이 조용히 기본값을 준다. 값을 고르지 않으려고 만든 가드가
+    그렇게 삼켜지면 가드가 없는 것과 같다. 그래서 ValueError를 쓴다.
+    """
+    plan = build_query_plan(
+        "삼성전자 2024년 매출과 2025년 매출 비교해줘",
+        known_companies=REAL_COMPANIES,
+    )
+
+    with pytest.raises(ValueError):
+        getattr(plan, "year", 2024)
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("삼성전자 2024년 매출 알려줘", (2024,)),
+        ("한미반도체 2025년 연결 기준 매출액이 얼마야?", (2025,)),
+        # 같은 연도를 두 번 적어도 기간은 하나다.
+        ("삼성전자 2024년 매출과 2024년 매출액 알려줘", (2024,)),
+    ],
+)
+def test_single_period_plan_exposes_year(
+    question: str,
+    expected: tuple[int, ...],
+) -> None:
+    """단일 기간에서는 year가 기존과 똑같이 동작한다."""
+    plan = build_query_plan(question, known_companies=REAL_COMPANIES)
+
+    assert plan.years == expected
+    assert plan.year == expected[0]
+    assert plan.intent == INTENT_SINGLE_FACT
+
+
+def test_mixed_period_plan_keeps_only_the_absolute_year() -> None:
+    """
+    상대기간을 연도로 바꾸지 않는다.
+
+    "전년"이 2024로 들어가면 해석을 시작한 것이고, 그것은 Pattern C 범위다. years에 2025만
+    남아야 하며, 그래도 intent가 temporal_compare라 fail-closed는 유지된다.
+    """
+    plan = build_query_plan(
+        "삼성전자 2025년 매출이 전년보다 얼마나 늘었어?",
+        known_companies=REAL_COMPANIES,
+    )
+
+    assert plan.intent == INTENT_TEMPORAL_COMPARE
+    assert plan.years == (2025,)
+    assert 2024 not in plan.years
+
+
+def test_event_history_plan_keeps_a_single_anchor_year() -> None:
+    """
+    Pattern E는 연도가 둘 보여도 기준점 하나만 갖는다.
+
+    Pattern E의 연도는 비교 대상 기간이 아니라 원공시를 찾는 공시일 기준점이다. handler가
+    filing_date_window로 원공시 후보만 좁히고 정정본은 기간 제한 없이 문서에 적힌 연결을
+    따라가므로, 2025년은 그 체인이 이미 포함하는 서술이다.
+
+    그래서 이 계획에서는 year가 막히지 않고 정상적으로 기준점을 돌려줘야 한다. 막히면
+    실제로 답하고 있던 Q13 계열이 깨진다.
+    """
+    plan = build_query_plan(
+        "테스트반도체가 2024년 8월에 공시한 공급계약, 2025년에 바뀐 내용 있어?",
+        known_companies=SYNTHETIC_COMPANIES,
+    )
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.years == (2024,)
+    assert plan.year == 2024
+    assert plan.month == 8
+
+
+# --------------------------------------------------------------------------
+# 7. 직렬화 — 정본만 싣는다
+# --------------------------------------------------------------------------
+
+
+def test_serialized_plan_carries_years_only() -> None:
+    """
+    파생값을 함께 실으면 읽는 쪽이 무엇이 정본인지 알 수 없게 된다.
+
+    companies/company가 이미 같은 규칙을 따른다. year는 property이므로 asdict가 담지 않고,
+    그것이 의도한 결과다. 진단 dict는 공개 응답(AnswerResponse)에 실리지 않는다.
+    """
+    plan = build_query_plan(
+        "삼성전자 2024년 매출과 2025년 매출 비교해줘",
+        known_companies=REAL_COMPANIES,
+    )
+
+    dumped = plan.to_dict()
+
+    assert dumped["years"] == (2024, 2025)
+    assert "year" not in dumped
+
+
+def test_serialized_single_period_plan_also_carries_years() -> None:
+    """단일 기간에서도 정본은 years 하나다. 기존 shape을 되살리지 않는다."""
+    dumped = build_query_plan(
+        "삼성전자 2024년 매출 알려줘",
+        known_companies=REAL_COMPANIES,
+    ).to_dict()
+
+    assert dumped["years"] == (2024,)
+    assert "year" not in dumped
+
+
+def test_query_plan_rejects_a_bare_year_int() -> None:
+    """
+    정수를 그대로 받으면 순회되지 않아 다른 자리에서 터진다.
+
+    companies가 문자열 하나를 거부하는 것과 같은 이유로, 생성 시점에 막는다.
+    """
+    with pytest.raises(TypeError):
+        QueryPlan(question="합성", companies=("합성",), years=2025)  # type: ignore[arg-type]
+
+
+def test_query_plan_rejects_an_empty_year_set() -> None:
+    """기간이 없는 계획은 만들 수 없다."""
+    with pytest.raises(ValueError):
+        QueryPlan(question="합성", companies=("합성",), years=())

@@ -20,11 +20,13 @@ import pytest
 
 from disclosure_agent.agent.answer_builder import (
     ACCOUNTING_SCOPE_LABELS,
+    ALLOWED_REASONS_BY_STATUS,
     LIMITATION_MESSAGE_BY_REASON,
     METRIC_LABELS,
     POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON,
+    REFUSAL_REASONS_WITHOUT_SUPPORTING_PAYLOAD,
     SCOPE_OMITTED_IN_ANSWER,
-    UNANSWERABLE_WITHOUT_REASON_MESSAGE,
+    STATUSES_ALLOWING_NO_REASON,
     UNAVAILABLE_MESSAGE_BY_REASON,
     UNRESOLVED_WITHOUT_REASON_MESSAGE,
     MissingAnswerabilityStatusError,
@@ -212,6 +214,51 @@ def test_normalized_value_is_used_only_when_the_raw_value_is_absent() -> None:
     assert build_answer_response(result).answer.endswith("매출액은 1234000000원입니다.")
 
 
+def test_raw_value_without_its_unit_falls_back_to_the_normalized_pair() -> None:
+    """
+    값과 단위는 짝이다.
+
+    원문 값만 쓰면 "매출액은 1,234입니다"가 되어 자릿수를 알 수 없고, 원문 값에 정규화
+    단위를 붙이면 배수가 맞지 않는 수치가 나간다.
+    """
+    result = answerable_single_fact_result(raw_value="1,234", raw_unit=None)
+
+    answer = build_answer_response(result).answer
+
+    assert answer.endswith("매출액은 1234000000원입니다.")
+    assert "1,234원" not in answer
+
+
+def test_raw_unit_without_its_value_falls_back_to_the_normalized_pair() -> None:
+    result = answerable_single_fact_result(raw_value=None, raw_unit="백만원")
+
+    assert build_answer_response(result).answer.endswith("매출액은 1234000000원입니다.")
+
+
+def test_incomplete_raw_pair_without_a_complete_normalized_pair_fails_fast() -> None:
+    result = answerable_single_fact_result(
+        raw_value="1,234",
+        raw_unit=None,
+        normalized_value="1234000000",
+        normalized_unit=None,
+    )
+
+    with pytest.raises(MissingAnswerSupportError):
+        build_answer_response(result)
+
+
+def test_normalized_value_without_its_unit_fails_fast() -> None:
+    result = answerable_single_fact_result(
+        raw_value=None,
+        raw_unit=None,
+        normalized_value="1234000000",
+        normalized_unit=None,
+    )
+
+    with pytest.raises(MissingAnswerSupportError):
+        build_answer_response(result)
+
+
 def test_missing_fiscal_year_omits_the_period_phrase() -> None:
     result = answerable_single_fact_result(fiscal_year=None)
 
@@ -376,13 +423,23 @@ def test_refusal_answer_never_offers_a_substitute_value() -> None:
         assert not any(character.isdigit() for character in answer), answer
 
 
-def test_unanswerable_without_a_reason_does_not_borrow_the_not_found_wording() -> None:
+def test_unanswerable_without_a_reason_fails_fast() -> None:
+    """
+    사유 없는 UNANSWERABLE은 producer가 만들지 않는다.
+
+    refused_execution은 answerability_reason을 필수 키워드로 받고, _stopped_execution이
+    쓰는 ANSWERABILITY_BY_STOP은 모든 항목이 사유를 채운다. 그런데도 사유 없이 들어오면
+    "왜 답하지 못했는가"가 응답에서 사라지므로, 사유를 단정하지 않는 문장으로 덮지 않는다.
+    """
     result = AgentExecutionResult(
         execution_status=ExecutionStatus.COMPLETED,
         answerability_status=AnswerabilityStatus.UNANSWERABLE,
     )
 
-    assert build_answer_response(result).answer == UNANSWERABLE_WITHOUT_REASON_MESSAGE
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert "canonical 사유" in str(error.value)
 
 
 # --------------------------------------------------------------------------
@@ -783,6 +840,272 @@ def test_response_collections_do_not_alias_the_execution_result() -> None:
     response.facts.clear()
 
     assert len(result.facts) == 1
+
+
+# --------------------------------------------------------------------------
+# 결과 정합성
+#
+# Contract는 pydantic 모델이라 서로 모순되는 조합도 만들어진다. 그런 입력을 문장으로
+# 옮기면 두 판정 중 하나가 조용히 사라지므로, 문장을 고르기 전에 멈춘다.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        AnswerabilityReason.NOT_FOUND,
+        AnswerabilityReason.INSUFFICIENT_EVIDENCE,
+        AnswerabilityReason.OUT_OF_DATA_RANGE,
+        AnswerabilityReason.OUT_OF_SCOPE_DATA,
+        AnswerabilityReason.OUT_OF_SCOPE_POLICY,
+        AnswerabilityReason.INCOMPLETE_CHAIN,
+    ],
+)
+def test_unresolved_with_an_incompatible_reason_fails_fast(
+    reason: AnswerabilityReason,
+) -> None:
+    """
+    UNRESOLVED + NOT_FOUND는 스키마상 유효하지만 두 판정을 동시에 말한다.
+
+    사유 쪽 문장을 고르면 "후보를 좁히지 못했다"가 사라지고, 상태 쪽 문장을 고르면 사유가
+    사라진다. 어느 쪽이든 판정 하나가 조용히 없어진다.
+    """
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNRESOLVED,
+        answerability_reason=reason,
+    )
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert reason.value in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    sorted(ALLOWED_REASONS_BY_STATUS[AnswerabilityStatus.UNRESOLVED], key=lambda r: r.value),
+)
+def test_unresolved_allows_only_the_ambiguity_reasons(reason: AnswerabilityReason) -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNRESOLVED,
+        answerability_reason=reason,
+    )
+
+    assert build_answer_response(result).reason is reason
+
+
+def test_answerable_must_not_carry_a_failure_reason() -> None:
+    """evaluation.runner의 GoldAnswer 검증과 같은 규칙을 응답 경계에서도 고정한다."""
+    result = answerable_single_fact_result()
+    result.answerability_reason = AnswerabilityReason.NOT_FOUND
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_partially_answerable_with_an_unrelated_reason_fails_fast() -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.NOT_FOUND,
+        event_histories=[make_event_history(document_ids=["a"], chain_complete=False)],
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [AnswerabilityReason.AMBIGUOUS_MATCH, AnswerabilityReason.INCOMPLETE_CHAIN],
+)
+def test_unanswerable_does_not_take_reasons_that_belong_to_other_statuses(
+    reason: AnswerabilityReason,
+) -> None:
+    """
+    "답이 없다"와 "확정하지 못했다"가 한 값으로 묶이면 평가에서 두 실패가 구분되지 않는다.
+    """
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=reason,
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+# --------------------------------------------------------------------------
+# Pattern E 체인 정합성
+#
+# chain_complete가 판정을 정하므로 둘은 같은 사실의 두 표현이다
+# (handlers.event_history._judge_answerability, normalization._chain_reason).
+# --------------------------------------------------------------------------
+
+
+def test_answerable_chain_that_is_not_complete_fails_fast() -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        event_histories=[
+            make_event_history(
+                document_ids=["exchange_SYNTHETIC0011", "exchange_SYNTHETIC0013"],
+                chain_complete=False,
+            )
+        ],
+    )
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert "chain_complete" in str(error.value)
+
+
+def test_partially_answerable_chain_that_is_complete_fails_fast() -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.INCOMPLETE_CHAIN,
+        event_histories=[
+            make_event_history(
+                document_ids=["exchange_SYNTHETIC0011"],
+                chain_complete=True,
+            )
+        ],
+    )
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert "chain_complete" in str(error.value)
+
+
+def test_partially_answerable_without_a_reason_fails_fast() -> None:
+    """
+    사유 없는 PARTIALLY_ANSWERABLE은 구조적으로 나올 수 없다.
+
+    _judge_answerability와 _chain_reason이 같은 boolean(FilingChain.is_complete)에서
+    갈리므로, PARTIALLY라면 INCOMPLETE_CHAIN이 반드시 함께 나온다. 사유를 비우면 무엇을
+    확정하지 못했는지가 응답에서 사라진다.
+    """
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        event_histories=[
+            make_event_history(document_ids=["exchange_SYNTHETIC0013"], chain_complete=False)
+        ],
+    )
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert AnswerabilityReason.INCOMPLETE_CHAIN.value in str(error.value)
+
+
+def test_statuses_allowing_no_reason_are_pinned_to_actual_producers() -> None:
+    """
+    "미래에 생길 수도 있다"는 이유로 사유 없는 조합을 열어 두지 않는다.
+
+    현재 사유 없이 나오는 것은 두 가지뿐이다. ANSWERABLE(정상)과, Pattern E가 루트를
+    확정하지 못한 UNRESOLVED다. 새 capability가 붙으면 이 집합을 명시적으로 넓힌다.
+    """
+    assert STATUSES_ALLOWING_NO_REASON == {
+        AnswerabilityStatus.ANSWERABLE,
+        AnswerabilityStatus.UNRESOLVED,
+    }
+
+
+def test_chain_invariant_does_not_touch_results_without_an_event_history() -> None:
+    """불변식의 근거는 Pattern E 하나다. EventHistory가 없는 결과까지 넓히지 않는다."""
+    result = answerable_single_fact_result()
+
+    assert build_answer_response(result).status is AnswerabilityStatus.ANSWERABLE
+
+
+# --------------------------------------------------------------------------
+# 거부 응답 payload 정합성
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reason",
+    sorted(REFUSAL_REASONS_WITHOUT_SUPPORTING_PAYLOAD, key=lambda item: item.value),
+)
+def test_refusal_with_a_fact_fails_fast(reason: AnswerabilityReason) -> None:
+    """
+    거부 응답에 근거를 붙이면 부분 답변으로 읽힌다(evidence_and_answerability.md 원칙 7).
+
+    걸러내지 않고 멈춘다. 여기서 지우면 producer가 원칙을 어긴 사실이 사라진다.
+    """
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=reason,
+        facts=[make_fact()],
+    )
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert reason.value in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    sorted(REFUSAL_REASONS_WITHOUT_SUPPORTING_PAYLOAD, key=lambda item: item.value),
+)
+def test_refusal_with_evidence_fails_fast(reason: AnswerabilityReason) -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=reason,
+        evidence=[make_evidence()],
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_policy_refusal_from_the_gate_still_succeeds() -> None:
+    """F3/F4의 정상 결과는 그대로 통과해야 한다."""
+    for detail_reason in (REASON_INVESTMENT_ADVICE, REASON_FORWARD_LOOKING_PREDICTION):
+        response = build_answer_response(refused_result(detail_reason))
+
+        assert response.status is AnswerabilityStatus.UNANSWERABLE
+        assert response.reason is AnswerabilityReason.OUT_OF_SCOPE_POLICY
+        assert response.facts == []
+        assert response.evidence == []
+
+
+def test_not_found_may_still_carry_structured_payload() -> None:
+    """
+    이 불변식은 F1~F4 거부 사유에만 걸린다.
+
+    pattern_f_safety.md §4가 명시한 것은 그 범위이고, Pattern E의 no_matching_filing 경로는
+    UNANSWERABLE 결과에 event_links를 실어 보낼 수 있는 구조다. 추측으로 범위를 넓히면
+    그 경로가 함께 막힌다.
+    """
+    link = EventLink(
+        link_id="link_SYNTHETIC_01",
+        source_doc_id="exchange_SYNTHETIC0013",
+        relation=EventLinkRelation.CORRECTION_OF,
+        raw_reference=RawReference(original_filing_date="YYYY-MM-DD"),
+        resolved_doc_id="exchange_SYNTHETIC0011",
+        resolution_status=EventLinkResolutionStatus.RESOLVED,
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=AnswerabilityReason.NOT_FOUND,
+        event_links=[link],
+    )
+
+    response = build_answer_response(result)
+
+    assert response.answer == UNAVAILABLE_MESSAGE_BY_REASON[AnswerabilityReason.NOT_FOUND]
+    assert response.event_links == [link]
 
 
 # --------------------------------------------------------------------------

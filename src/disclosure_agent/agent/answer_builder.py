@@ -374,12 +374,13 @@ POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON: dict[str, str] = {
     ),
 }
 
-# 판정은 났는데 canonical 사유가 비어 있는 경우의 문장.
+# 사유 없이 UNRESOLVED만 남은 결과의 문장.
 #
-# 현재 producer는 UNANSWERABLE이면 사유를 채우고, Pattern E의 루트 미확정만 사유 없이
-# UNRESOLVED로 남긴다(execution_result_mapping.md §3). 없는 사유를 골라 채우지 않고,
-# 사유를 단정하지 않는 문장을 쓴다.
-UNANSWERABLE_WITHOUT_REASON_MESSAGE = "확보한 근거로는 답변할 수 없습니다."
+# Pattern E가 루트를 확정하지 못한 경로다(execution_result_mapping.md §3). 없는 사유를 골라
+# 채우지 않고, 사유를 단정하지 않는 문장을 쓴다.
+#
+# UNANSWERABLE에는 같은 문장을 두지 않는다. 사유 없는 UNANSWERABLE은 producer가 만들지
+# 않으므로 _require_compatible_reason이 먼저 막는다.
 UNRESOLVED_WITHOUT_REASON_MESSAGE = "대상을 하나로 확정하지 못해 답변을 확정할 수 없습니다."
 
 # 일부만 답할 수 있을 때 확보분 뒤에 붙는 한계 문장.
@@ -390,6 +391,103 @@ LIMITATION_MESSAGE_BY_REASON: dict[AnswerabilityReason, str] = {
 }
 
 LIMITATION_WITHOUT_REASON_MESSAGE = "다만 요청하신 내용의 일부는 확인하지 못했습니다."
+
+
+# --------------------------------------------------------------------------
+# 결과 정합성
+#
+# Contract는 pydantic 모델이라 서로 모순되는 조합도 만들어진다. UNRESOLVED + NOT_FOUND는
+# 스키마상 유효하지만 "후보를 좁히지 못했다"와 "찾지 못했다"를 동시에 말한다. 그런 입력을
+# 문장으로 옮기면 두 판정 중 하나가 조용히 사라진다.
+#
+# 여기서 걸러내지 않고 문장만 고르면, 잘못된 조합이 형식상 정상인 AnswerResponse로 나가
+# 어느 단계에서 어긋났는지 되짚을 수 없게 된다. 값을 고쳐 맞추지 않고 멈춘다.
+# --------------------------------------------------------------------------
+
+# 판정 상태별로 실릴 수 있는 canonical 사유.
+#
+# 각 줄의 근거:
+#     ANSWERABLE            사유를 싣지 않는다. evaluation.runner의 GoldAnswer 검증이
+#                           "ANSWERABLE cases must not define a failure reason"으로
+#                           같은 규칙을 이미 고정하고 있다.
+#     PARTIALLY_ANSWERABLE  INCOMPLETE_CHAIN. execution_result_mapping.md §3의 체인 미완결
+#                           행이 유일한 producer다.
+#     UNRESOLVED            AMBIGUOUS_MATCH / AMBIGUOUS_LINK. 둘 다 "후보를 하나로 좁히지
+#                           못했다"이며, normalization의 ANSWERABILITY_BY_STOP이 만드는
+#                           것은 AMBIGUOUS_MATCH다. AMBIGUOUS_LINK는
+#                           evidence_and_answerability.md가 "정정 대상 문서를 1건으로
+#                           확정할 수 없음"으로 정의한 같은 계열이라 함께 허용한다.
+#     UNANSWERABLE          위 세 사유를 뺀 나머지. 세 사유는 정의상 다른 상태의 것이며,
+#                           UNANSWERABLE로 실리면 "답이 없다"와 "확정하지 못했다"가 한
+#                           지표로 묶인다(normalization의 AMBIGUOUS_MATCH 주석 참조).
+_UNRESOLVED_REASONS: frozenset[AnswerabilityReason] = frozenset(
+    {AnswerabilityReason.AMBIGUOUS_MATCH, AnswerabilityReason.AMBIGUOUS_LINK}
+)
+
+ALLOWED_REASONS_BY_STATUS: dict[AnswerabilityStatus, frozenset[AnswerabilityReason]] = {
+    AnswerabilityStatus.ANSWERABLE: frozenset(),
+    AnswerabilityStatus.PARTIALLY_ANSWERABLE: frozenset(
+        {AnswerabilityReason.INCOMPLETE_CHAIN}
+    ),
+    AnswerabilityStatus.UNRESOLVED: _UNRESOLVED_REASONS,
+    AnswerabilityStatus.UNANSWERABLE: frozenset(AnswerabilityReason)
+    - _UNRESOLVED_REASONS
+    - {AnswerabilityReason.INCOMPLETE_CHAIN},
+}
+
+# 사유를 비운 채로 나올 수 있는 판정 상태.
+#
+# "언젠가 생길 수 있다"가 아니라 지금 producer가 실제로 그렇게 만드는 것만 넣는다. 현재
+# canonical shape를 고정해 두고, 새 capability가 붙을 때 이 집합을 명시적으로 넓히는 편이
+# 낫다. 미리 열어 두면 사유를 채우지 않은 새 경로가 조용히 통과한다.
+#
+#     ANSWERABLE   사유를 싣지 않는 것이 정상이다. normalize_single_fact_result의 성공
+#                  경로와 normalize_event_history_result의 체인 완결 경로가 모두 그렇다.
+#     UNRESOLVED   normalize_event_history_result에서 history도 blocked도 없는 경로가
+#                  사유 없이 UNRESOLVED만 남긴다(execution_result_mapping.md §3의
+#                  "conversion.history is None ... answerability_reason 없음" 행).
+#
+# 빠진 두 상태의 근거:
+#     PARTIALLY_ANSWERABLE  구조적으로 불가능하다. handlers.event_history._judge_answerability와
+#                           normalization._chain_reason이 같은 boolean(FilingChain.is_complete,
+#                           event.contract_adapter가 EventHistory.chain_complete에 그대로
+#                           옮긴 값)에서 갈리므로, PARTIALLY라면 INCOMPLETE_CHAIN이 반드시
+#                           함께 나온다.
+#     UNANSWERABLE          producer가 없다. refused_execution은 answerability_reason을
+#                           필수 키워드로 받고, _stopped_execution은 ANSWERABILITY_BY_STOP의
+#                           모든 항목이 사유를 채우고 있다.
+STATUSES_ALLOWING_NO_REASON: frozenset[AnswerabilityStatus] = frozenset(
+    {AnswerabilityStatus.ANSWERABLE, AnswerabilityStatus.UNRESOLVED}
+)
+
+# 근거를 붙이면 안 되는 거부 사유.
+#
+# pattern_f_safety.md §4 "F1~F4는 facts와 evidence가 비어 있어야 합니다"와
+# evidence_and_answerability.md 원칙 7이 근거다. 거부 응답에 원문 근거가 붙으면 부분 답변으로
+# 읽히고, 투자 판단 질문에 지표를 제시한 것과 같아진다(§8 원칙 4).
+#
+# events / event_links / event_histories는 넣지 않았다. 위 두 문서가 명시한 것은 facts와
+# evidence뿐이고, 나머지까지 막을 근거를 문서에서 찾지 못했다. 실제로 Pattern E의
+# no_matching_filing 경로는 UNANSWERABLE 결과에 event_links를 실어 보낼 수 있는 구조다
+# (normalization._stopped_execution). 추측으로 범위를 넓히면 그 경로가 함께 막힌다.
+REFUSAL_REASONS_WITHOUT_SUPPORTING_PAYLOAD: frozenset[AnswerabilityReason] = frozenset(
+    {
+        AnswerabilityReason.OUT_OF_DATA_RANGE,
+        AnswerabilityReason.OUT_OF_SCOPE_DATA,
+        AnswerabilityReason.OUT_OF_SCOPE_POLICY,
+    }
+)
+
+# EventHistory를 실은 결과에서 판정 상태가 요구하는 chain_complete 값.
+#
+# handlers.event_history._judge_answerability가 chain.is_complete 하나로 두 상태를 가르고,
+# normalization._chain_reason이 같은 값으로 INCOMPLETE_CHAIN을 붙인다. 그래서 상태와
+# chain_complete는 서로를 결정한다. 어긋나면 둘 중 하나가 틀린 것이고, 문장은 그 틀린 쪽을
+# 따라간다.
+CHAIN_COMPLETE_BY_STATUS: dict[AnswerabilityStatus, bool] = {
+    AnswerabilityStatus.ANSWERABLE: True,
+    AnswerabilityStatus.PARTIALLY_ANSWERABLE: False,
+}
 
 
 def build_answer_response(result: AgentExecutionResult) -> AnswerResponse:
@@ -411,7 +509,8 @@ def build_answer_response(result: AgentExecutionResult) -> AnswerResponse:
         UnsupportedExecutionStatusError: execution_status가 COMPLETED가 아닌 경우.
         MissingAnswerabilityStatusError: COMPLETED인데 판정이 비어 있는 경우.
         MissingAnswerSupportError: 답할 수 있다고 판정됐는데 근거가 없는 경우.
-        UnsupportedResultShapeError: 표현 방법이 정해지지 않은 결과 모양인 경우.
+        UnsupportedResultShapeError: 서로 모순되는 조합이거나 표현 방법이 정해지지 않은
+            결과 모양인 경우.
     """
     if result.execution_status is not ExecutionStatus.COMPLETED:
         raise UnsupportedExecutionStatusError(result.execution_status)
@@ -420,6 +519,10 @@ def build_answer_response(result: AgentExecutionResult) -> AnswerResponse:
 
     if status is None:
         raise MissingAnswerabilityStatusError
+
+    _require_compatible_reason(status, result.answerability_reason)
+    _require_empty_refusal_payload(result, status)
+    _require_consistent_chain(result, status)
 
     return AnswerResponse(
         answer=_build_answer(result, status),
@@ -431,6 +534,121 @@ def build_answer_response(result: AgentExecutionResult) -> AnswerResponse:
         event_histories=list(result.event_histories),
         evidence=list(result.evidence),
     )
+
+
+def _require_compatible_reason(
+    status: AnswerabilityStatus,
+    reason: AnswerabilityReason | None,
+) -> None:
+    """
+    판정 상태와 canonical 사유가 같은 것을 말하는지 확인한다.
+
+    UNRESOLVED + NOT_FOUND처럼 서로 다른 판정을 동시에 담은 결과는 문장으로 옮기지 않는다.
+    사유 쪽 문장을 고르면 "후보를 좁히지 못했다"가 사라지고, 상태 쪽 문장을 고르면 사유가
+    사라진다. 어느 쪽을 골라도 판정 하나가 조용히 없어진다.
+
+    사유가 비어 있는 경우도 상태별로 나눈다. 현재 producer가 사유 없이 만들지 않는 상태는
+    허용하지 않는다(STATUSES_ALLOWING_NO_REASON 참조).
+    """
+    allowed = ALLOWED_REASONS_BY_STATUS.get(status)
+
+    if allowed is None:
+        raise UnsupportedResultShapeError(
+            f"허용 사유가 정해지지 않은 answerability_status입니다: {status!r}. "
+            "ALLOWED_REASONS_BY_STATUS에 추가하십시오."
+        )
+
+    if reason is None:
+        if status in STATUSES_ALLOWING_NO_REASON:
+            return
+
+        permitted = ", ".join(sorted(item.value for item in allowed))
+
+        raise UnsupportedResultShapeError(
+            f"{status.value} 결과에는 canonical 사유가 있어야 합니다. "
+            f"현재 producer가 만드는 사유: {permitted}. "
+            "사유를 비우면 무엇 때문에 답하지 못했는지가 응답에서 사라집니다."
+        )
+
+    if reason in allowed:
+        return
+
+    permitted = ", ".join(sorted(item.value for item in allowed)) or "없음(사유를 싣지 않음)"
+
+    raise UnsupportedResultShapeError(
+        f"{status.value}에 실릴 수 없는 answerability_reason입니다: {reason.value!r}. "
+        f"허용되는 사유: {permitted}. "
+        "두 판정이 어긋난 결과이므로 문장으로 옮기지 않습니다."
+    )
+
+
+def _require_empty_refusal_payload(
+    result: AgentExecutionResult,
+    status: AnswerabilityStatus,
+) -> None:
+    """
+    거부 응답에 근거가 붙어 있지 않은지 확인한다.
+
+    걸러내지 않고 멈춘다. 여기서 facts/evidence를 비워 응답을 만들면 producer가 원칙을
+    어긴 사실이 사라지고, 같은 판정이 두 곳에 생긴다. 원칙을 지키는 자리는 producer이고
+    이곳은 그것을 확인하는 자리다.
+    """
+    if status is not AnswerabilityStatus.UNANSWERABLE:
+        return
+
+    reason = result.answerability_reason
+
+    if reason not in REFUSAL_REASONS_WITHOUT_SUPPORTING_PAYLOAD:
+        return
+
+    if not result.facts and not result.evidence:
+        return
+
+    raise UnsupportedResultShapeError(
+        f"{reason.value} 거부 결과에 facts {len(result.facts)}건, "
+        f"evidence {len(result.evidence)}건이 붙어 있습니다. "
+        "거부 응답에 근거를 붙이면 부분 답변으로 읽힙니다"
+        "(evidence_and_answerability.md 원칙 7). 지우지 않고 여기서 멈춥니다."
+    )
+
+
+def _require_consistent_chain(
+    result: AgentExecutionResult,
+    status: AnswerabilityStatus,
+) -> None:
+    """
+    EventHistory를 실은 결과의 판정과 chain_complete가 서로 맞는지 확인한다.
+
+    체인 완결 여부가 판정을 정하므로 둘은 같은 사실의 두 표현이다. 어긋난 결과로 문장을
+    만들면 미완결 체인을 완결로 말하거나 그 반대가 된다.
+
+    EventHistory가 없는 결과는 보지 않는다. 이 불변식의 근거는 Pattern E의
+    _judge_answerability 하나이며, Fact 기반 PARTIALLY 같은 다른 조합은 아직 producer도
+    문서도 없어 여기서 판정하지 않는다.
+    """
+    if not result.event_histories:
+        return
+
+    expected = CHAIN_COMPLETE_BY_STATUS.get(status)
+
+    if expected is None:
+        return
+
+    mismatched = [
+        history for history in result.event_histories if history.chain_complete is not expected
+    ]
+
+    if mismatched:
+        raise UnsupportedResultShapeError(
+            f"{status.value} 결과인데 chain_complete가 {not expected}인 EventHistory가 "
+            f"{len(mismatched)}건 있습니다. 체인 완결 여부와 판정이 어긋났습니다"
+            "(execution_result_mapping.md §3)."
+        )
+
+    # PARTIALLY_ANSWERABLE의 사유가 INCOMPLETE_CHAIN인지는 여기서 보지 않는다.
+    # ALLOWED_REASONS_BY_STATUS가 그 상태에 INCOMPLETE_CHAIN만 허용하고
+    # STATUSES_ALLOWING_NO_REASON이 사유를 비우는 것도 막으므로, 이 지점에 도달한 결과는
+    # 이미 그 사유를 달고 있다.
 
 
 def _build_answer(result: AgentExecutionResult, status: AnswerabilityStatus) -> str:
@@ -576,25 +794,43 @@ def _fact_value(fact: Fact) -> str:
     """
     문장에 적을 값.
 
-    원문 표기(raw_value/raw_unit)를 먼저 쓴다. 정규화 값은 배수를 곱해 만든 파생값이므로,
+    값과 단위는 짝으로 다룬다. 한쪽만 있으면 그 표현을 쓰지 않는다:
+        값만 쓰면 "매출액은 1,234입니다"처럼 단위 없는 금액이 되어 자릿수를 알 수 없다.
+        단위만 있는 쪽은 애초에 적을 값이 없다.
+
+    원문 짝(raw_value/raw_unit)을 먼저 쓴다. 정규화 값은 배수를 곱해 만든 파생값이므로,
     원문에 적힌 표기가 있으면 그것이 공시 대조에 맞다. 값을 여기서 다시 계산하지 않는다.
+
+    짝이 하나도 완전하지 않으면 멈춘다. 남은 한쪽을 섞어 쓰면(원문 값 + 정규화 단위) 배수가
+    맞지 않는 수치가 나간다.
     """
-    raw_value = (fact.raw_value or "").strip()
+    for value, unit in (
+        (fact.raw_value, fact.raw_unit),
+        (fact.normalized_value, fact.normalized_unit),
+    ):
+        rendered = _value_with_unit(value, unit)
 
-    if raw_value:
-        return f"{raw_value}{(fact.raw_unit or '').strip()}"
-
-    normalized_value = (
-        "" if fact.normalized_value is None else str(fact.normalized_value).strip()
-    )
-
-    if normalized_value:
-        return f"{normalized_value}{(fact.normalized_unit or '').strip()}"
+        if rendered is not None:
+            return rendered
 
     raise MissingAnswerSupportError(
-        f"Fact {fact.fact_id!r}에 raw_value도 normalized_value도 없습니다. "
-        "값 없이 문장을 만들지 않습니다."
+        f"Fact {fact.fact_id!r}에 값과 단위가 모두 갖춰진 표현이 없습니다. "
+        "값만 있거나 단위만 있는 상태로는 문장을 만들지 않습니다."
     )
+
+
+def _value_with_unit(value: float | str | None, unit: str | None) -> str | None:
+    """값과 단위가 모두 있을 때만 붙여서 돌려준다. 하나라도 없으면 None."""
+    if value is None or unit is None:
+        return None
+
+    rendered_value = str(value).strip()
+    rendered_unit = unit.strip()
+
+    if not rendered_value or not rendered_unit:
+        return None
+
+    return f"{rendered_value}{rendered_unit}"
 
 
 def _event_history_sentence(histories: list[EventHistory], *, partial: bool) -> str:
@@ -651,12 +887,14 @@ def _event_history_sentence(histories: list[EventHistory], *, partial: bool) -> 
 
 
 def _limitation(result: AgentExecutionResult, *, partial: bool) -> str:
-    """일부만 답한 경우 무엇이 남았는지 밝히는 문장."""
+    """
+    일부만 답한 경우 무엇이 남았는지 밝히는 문장.
+
+    사유가 비어 있는 경우는 보지 않는다. _require_compatible_reason이
+    PARTIALLY_ANSWERABLE에 사유를 요구하므로 여기 도달한 결과는 사유를 달고 있다.
+    """
     if not partial:
         return ""
-
-    if result.answerability_reason is None:
-        return LIMITATION_WITHOUT_REASON_MESSAGE
 
     return LIMITATION_MESSAGE_BY_REASON.get(
         result.answerability_reason,
@@ -676,10 +914,8 @@ def _unavailable_answer(result: AgentExecutionResult) -> str:
     사유를 하나의 문장으로 뭉개지 않는다. 사유가 다르면 사용자가 할 수 있는 다음 행동이
     다르고, 평가도 두 실패를 따로 센다.
     """
+    # 사유가 비어 있는 UNANSWERABLE은 _require_compatible_reason이 이미 막았다.
     reason = result.answerability_reason
-
-    if reason is None:
-        return UNANSWERABLE_WITHOUT_REASON_MESSAGE
 
     if reason is AnswerabilityReason.OUT_OF_SCOPE_POLICY:
         return _policy_refusal_answer(result)

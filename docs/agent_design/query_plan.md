@@ -43,9 +43,11 @@ holding  → 지분공시     (대량보유 상황 보고)
    채우지 않고 `unspecified`를 명시 상태로 유지합니다.
 4. **기간은 회계기간과 공시일을 구분합니다.** 정기공시는 회계기간으로, 거래소·지분공시는 공시일로
    지정됩니다. 같은 "2025년"이라도 의미가 다르므로 종류 구분자를 함께 둡니다.
-5. **`operations`는 Python 계산·비교 동작을 표현합니다.** `AGENTS.md`가 계산을 Python으로
-   수행하도록 정하고 있으므로, 어떤 연산이 요청되었는지가 QueryPlan에 드러나야 계산 경로를
-   검증할 수 있습니다.
+5. **`operations`는 QueryPlan이 요청하는 deterministic processing step의 목록입니다.**
+   `AGENTS.md`가 계산을 Python으로 수행하도록 정하고 있으므로, 어떤 처리가 요청되었는지가
+   QueryPlan에 드러나야 실행 경로를 검증할 수 있습니다. 이 목록은 **Calculation operation
+   전용 목록이 아닙니다.** `compare`·`field_diff`·`state_resolution`은 Calculation을 만들지
+   않습니다(→ 아래 표와 [agent_patterns.md](agent_patterns.md#c10-calculation의-범위)).
 6. **`chain_policy`는 정정·후속 처리 방식을 표현합니다.** 같은 거래소공시라도 원본만 볼 것인지
    체인 전체를 볼 것인지에 따라 문서 선택 결과와 집계 결과가 달라집니다.
 
@@ -63,9 +65,22 @@ holding  → 지분공시     (대량보유 상황 보고)
 | 5 | `document_subtype` | 문서군 내 세부 종류 | 문자열 | `annual`, `quarter`, `half` / 공급계약 체결·해지, 신규시설투자 / 대량보유 보고 | 전 유형 | optional. 미지정 시 문서 목록 조회 단계에서 확정 |
 | 6 | `accounting_scope` | 연결·별도 기준 | 열거형 | `consolidated`, `separate`, `unspecified` | 1·3·4 | 재무 수치 질문에서 사실상 required |
 | 7 | `metrics` | 조회·계산 대상 지표. 사용자 표현과 해석된 개념을 함께 보존 | 객체 배열 `{surface, concept}` | `{surface: "매출", concept: "revenue"}` | 1·3·4 | 유형 3·4는 required |
-| 8 | `operations` | 검색 이후 수행할 결정적 연산 | 열거형 배열 | `none`, `delta`, `delta_pct`, `ratio`, `diff_pp`, `aggregate`, `compare`, `field_diff`, `state_resolution` | 3·4·5 | 유형 1·2·6은 `[none]` |
+| 8 | `operations` | 검색 이후 수행할 deterministic processing step 목록 (아래 구분표 참조) | 열거형 배열 | `none`, `delta`, `delta_pct`, `ratio`, `diff_pp`, `aggregate`, `compare`, `field_diff`, `state_resolution` | 3·4·5 | 유형 1·2·6은 `[none]` |
 | 9 | `section_scope` | 문서 내 탐색 범위 힌트 | 열거형·문자열 | `financial_statement`, `business_overview`, `products`, `facility_investment`, `whole_document` | 2·3(Q09)·1 | 유형 2는 required |
 | 10 | `chain_policy` | 정정·후속 문서 처리 방식 | 열거형 | `exclude_corrections`, `latest_only`, `full_chain` | 2(Q06)·4(Q12)·5 | 유형 5는 `full_chain` required |
+
+`operations`의 값은 **Calculation을 만드는 것**과 **그렇지 않은 것**으로 갈립니다.
+
+| 값 | 무엇을 만드는가 |
+|---|---|
+| `delta` `delta_pct` `ratio` `diff_pp` `aggregate` | **Numeric Calculation** — 수치형 파생 결과 |
+| `compare` | **Comparison Judgment → ComparisonResult** — Calculation이 아님 |
+| `field_diff` | field-level change resolution — Calculation이 아님 |
+| `state_resolution` | latest-state resolution — Calculation이 아님 |
+
+`compare`를 Calculation operation이라고 부르지 않습니다. 관계 판정의 결과는 별도의
+ComparisonResult입니다(→
+[agent_patterns.md](agent_patterns.md#comparison-judgment와-comparisonresult)).
 
 `aggregate`는 Q12에서 기업별 투자금액 총합을 구하기 위해 필요한 연산입니다. 집계 이전에 동일 투자
 건의 정정본을 하나로 합치는 처리가 선행되어야 하므로, Q12는 `chain_policy`도 함께 사용합니다.
@@ -116,7 +131,7 @@ periods           = [{kind: fiscal, year: 2025, period_type: annual}]
 document_class    = periodic
 accounting_scope  = consolidated
 metrics           = [{surface: "매출", concept: revenue}]
-operations        = [compare]
+operations        = [compare]   # Calculation 0 → Comparison Judgment → ComparisonResult
 section_scope     = financial_statement
 ```
 
@@ -129,7 +144,8 @@ periods           = [{kind: filing, year: 2024, note: "최초 공시 연도 기�
 document_class    = event
 document_subtype  = 신규시설투자
 metrics           = [{surface: "시설투자", concept: investment_amount}]
-operations        = [aggregate, compare]
+operations        = [aggregate, compare]   # aggregate → Numeric Calculation (기업별 합계 2건)
+                                           # compare   → Comparison Judgment / ComparisonResult
 chain_policy      = full_chain    # 정정 반영이 필요하되 중복 합산은 금지
 ```
 

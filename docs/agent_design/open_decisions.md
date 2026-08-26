@@ -246,3 +246,9 @@ D5의 하위 항목입니다.
 - `docs/team_roles.md`·`docs/development_plan.md`의 대표 질문 수 표기 — 공통 문서이므로 수정하지
   않았습니다. 현황은 [README.md](README.md)에 기록했습니다.
 - 평가 지표의 정의와 산출 방식 — `docs/evaluation/`의 평가 설계 범위입니다.
+- **ComparisonResult의 Contract 반영** — Calculation을 numeric-only로 두고 관계 판정을
+  ComparisonResult로 분리한다는 설계는 팀 합의로 확정됐고
+  [agent_patterns.md](agent_patterns.md#comparison-judgment와-comparisonresult)에 기록했습니다.
+  실제 schema, input reference 표현, `AgentExecutionResult` 수용 위치, `AnswerResponse` 노출
+  여부, Comparability Validation 실패의 status/reason 매핑은 **별도 Contract PR에서 확정**하며
+  본 문서에서 결정 항목으로 추가하지 않았습니다.

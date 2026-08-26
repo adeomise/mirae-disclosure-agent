@@ -147,7 +147,9 @@ Capability 이름은 [agent_patterns.md](agent_patterns.md)의 표기를 정본�
 
 - **Q10**은 18문항 중 실패 검증 목적이 가장 뚜렷한 문항입니다. 같은 업종·같은 기간·같은 표준 계정
   식별자인데도 두 기업의 금액 **단위 표기가 서로 다른** 사례가 관찰되었습니다. 단위 정규화를
-  누락하면 자릿수 오답이 조용히 발생합니다.
+  누락하면 자릿수 오답이 조용히 발생합니다. 원문 Fact 두 개를 그대로 비교하는 질문이라 수치형 파생
+  결과가 없어 **Calculation은 0건**이고, 우열 판정은 ComparisonResult 1건으로 표현합니다
+  ([evidence_and_answerability.md](evidence_and_answerability.md#calculation-cardinality)).
 - **Q11**은 Q10과 같은 문서를 사용하되 파생지표를 다룹니다. 비율은 무차원이므로 단위가 달라도
   결과가 같습니다. 따라서 **Q10 실패와 Q11 성공이 동시에 나타나면 원인이 단위 정규화로 특정**됩니다.
   의도적인 대조쌍이며 평가 진단력을 위해 배치했습니다. "수익성"처럼 여러 지표로 해석될 수 있는
@@ -160,8 +162,8 @@ Capability 이름은 [agent_patterns.md](agent_patterns.md)의 표기를 정본�
   여러 이벤트 검색
   → 기업별 투자금액 확보
   → 중복·정정 여부 처리
-  → 기업별 합계
-  → 기업 간 비교
+  → 기업별 합계 (Numeric Calculation 2건)
+  → 기업 간 비교 (Comparison Judgment → ComparisonResult)
   ```
 
   후보 선정 기준은 **최초 공시가 대상 연도에 속하는 투자 건만 포함**하는 것입니다. 한 기업은 해당
@@ -223,7 +225,7 @@ Capability 이름은 [agent_patterns.md](agent_patterns.md)의 표기를 정본�
 | C7 Event History Resolution (정정·후속 체인 해소) | Q12~Q15 |
 | C8 Unit & Concept Normalization (단위·개념 정규화) | Q07 Q08 Q10 Q12 |
 | C9 Comparability Validation (비교 가능성 검증) | Q07 Q08 Q10~Q12 |
-| C10 Calculation (결정적 계산) | Q07 Q08 Q10~Q12 |
+| C10 Calculation (결정적 수치 계산) | Q07 Q08 Q11 Q12 (Q10은 수치형 파생값 없음) |
 | C11 Evidence Verification (근거 연결·검증) | Q01~Q15 |
 | C12 Answerability Judgment (답변 가능성 판정) | 전 문항 |
 | C13 Semantic Search (의미 검색) | Q04 (조건부 fallback) |

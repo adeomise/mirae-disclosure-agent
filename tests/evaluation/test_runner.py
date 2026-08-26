@@ -120,7 +120,6 @@ def test_active_q01_gold_pins_corpus_verified_fact() -> None:
             "metric": "revenue",
             "fiscal_year": 2025,
             "accounting_scope": "consolidated",
-            "raw_value": "576,684,619,527",
             "raw_unit": "원",
             "normalized_value": "576684619527",
             "normalized_unit": "원",

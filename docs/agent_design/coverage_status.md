@@ -14,8 +14,12 @@
   (PR #24 `feat/periodic-operating-income` 병합, 2026-08-25). 그 이후 반영분은 아래 표에
   재측정되지 않았습니다.
 - **Q16~Q18 재측정: 2026-08-25**, 브랜치 `feat/f3-f4-safety-gate`
-  (F3·F4 pre-retrieval Gate + PR #29 `AnswerabilityReason` 반영분). 나머지 문항은
-  재측정하지 않았습니다.
+  (F3·F4 pre-retrieval Gate + PR #29 `AnswerabilityReason` 반영분).
+- **Q08~Q09 재측정: 2026-08-26**, 브랜치 `fix/multi-period-silent-wrong`
+  (다중 기간 질문 fail-closed 가드 반영분, base `develop` = `eb70f12`). 두 문항의 정지 지점이
+  `query_plan/unsupported_metric`에서 `routing/unimplemented_intent`로 바뀌어 아래 표를
+  갱신했습니다. 지원 상태(`NOT_IMPLEMENTED`)는 그대로입니다.
+- 위에 적은 문항 외에는 재측정하지 않았습니다. 나머지 문항의 값은 최초 측정일 기준입니다.
 
 본 문서에는 실제 공시 값·접수번호를 기재하지 않습니다. 상태와 건수만 기록합니다.
 

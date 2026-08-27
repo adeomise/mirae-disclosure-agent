@@ -25,7 +25,8 @@
 - FieldChange 목록
 
 TODO:
-- 신규시설투자 등 다른 이벤트 유형의 필드 어휘 추가
+- 지원 이벤트 유형의 미매핑 정정 필드 어휘 확장
+- extractor/diff 간 correction canonical mapping parity 보장
 - 정정표와 본문 값의 일치 검증
 """
 
@@ -50,6 +51,8 @@ FIELD_CONTRACT_DATE = "contract_date"
 FIELD_COUNTERPARTY = "counterparty"
 FIELD_SUPPLY_REGION = "supply_region"
 FIELD_CONTRACT_DETAIL = "contract_detail"
+FIELD_INVESTMENT_AMOUNT = "investment_amount"
+FIELD_INVESTMENT_END_DATE = "investment_end_date"
 
 # 원문 표기 -> 의미 단위 필드.
 #
@@ -76,6 +79,8 @@ FIELD_ALIASES: dict[str, str] = {
     "판매공급계약구분및세부내용": FIELD_CONTRACT_DETAIL,
     "판매공급계약구분": FIELD_CONTRACT_DETAIL,
     "세부내용": FIELD_CONTRACT_DETAIL,
+    "투자내역투자금액": FIELD_INVESTMENT_AMOUNT,
+    "투자기간종료일": FIELD_INVESTMENT_END_DATE,
 }
 
 # 필드 이름 끝에 붙는 단위 표기. 의미가 아니라 표기이므로 key에서 뗀다.

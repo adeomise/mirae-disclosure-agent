@@ -22,6 +22,8 @@ from disclosure_agent.event.diff import (
     FIELD_CONTRACT_PERIOD,
     FIELD_CONTRACT_START_DATE,
     FIELD_COUNTERPARTY,
+    FIELD_INVESTMENT_AMOUNT,
+    FIELD_INVESTMENT_END_DATE,
     FIELD_SUPPLY_REGION,
     FieldChange,
     changed_field_names,
@@ -52,6 +54,8 @@ from disclosure_agent.event.diff import (
         ("판매ㆍ공급지역", FIELD_SUPPLY_REGION),
         ("판매ㆍ공급계약 구분 및 세부내용", FIELD_CONTRACT_DETAIL),
         ("세부내용", FIELD_CONTRACT_DETAIL),
+        ("2. 투자내역 - 투자금액(원)", FIELD_INVESTMENT_AMOUNT),
+        ("4. 투자기간 - 종료일", FIELD_INVESTMENT_END_DATE),
     ],
 )
 def test_field_aliases_resolve_to_semantic_names(raw_field: str, expected: str) -> None:
@@ -109,6 +113,33 @@ def test_raw_values_are_preserved_verbatim(before: str, after: str) -> None:
 
     assert changes[0].before == before
     assert changes[0].after == after
+
+
+def test_facility_investment_changes_are_mapped_without_reversing_values() -> None:
+    changes = normalize_changes(
+        [
+            {
+                "raw_field": "4. 투자기간 - 종료일",
+                "before": "2025-09-30",
+                "after": "2025-04-01",
+            },
+            {
+                "raw_field": "2. 투자내역 - 투자금액(원)",
+                "before": "1,980,100,000,000",
+                "after": "2,009,800,000,000",
+            },
+        ]
+    )
+
+    assert [change.field for change in changes] == [
+        FIELD_INVESTMENT_END_DATE,
+        FIELD_INVESTMENT_AMOUNT,
+    ]
+    assert all(change.is_mapped for change in changes)
+    assert changes[0].before == "2025-09-30"
+    assert changes[0].after == "2025-04-01"
+    assert changes[1].before == "1,980,100,000,000"
+    assert changes[1].after == "2,009,800,000,000"
 
 
 def test_unmapped_change_still_keeps_its_values() -> None:

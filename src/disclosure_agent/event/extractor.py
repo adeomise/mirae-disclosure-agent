@@ -317,6 +317,7 @@ def match_correction_field(
     elif event_type == EVENT_FACILITY_INVESTMENT:
         unique_aliases = {
             "투자금액": "investment_amount",
+            "투자기간-종료일": "investment_end_date",
             "투자구분": "investment_type",
             "투자대상": "investment_target",
             "투자목적": "investment_purpose",

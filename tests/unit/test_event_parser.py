@@ -109,6 +109,42 @@ def test_facility_investment_keeps_existing_row_shape_with_fallback_table_id(
     assert investment["table_id"] == "table_0001"
     assert investment["row_index"] == 0
 
+
+def test_facility_investment_correction_fields_are_canonicalized(tmp_path: Path) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <title>신규시설투자등</title>
+        <span>정정신고(보고)</span><span>신규 시설투자 등</span>
+        <table id="XFormD8_Form0_Table1">
+          <tr><td>정정일자</td><td>2024-12-18</td></tr>
+        </table>
+        <table id="XFormD8_Form0_RepeatTable0">
+          <tr><td>정정항목</td><td>정정전</td><td>정정후</td></tr>
+          <tr>
+            <td>4. 투자기간 - 종료일</td>
+            <td>2025-09-30</td>
+            <td>2025-04-01</td>
+          </tr>
+          <tr>
+            <td>2. 투자내역 - 투자금액(원)</td>
+            <td>1,980,100,000,000</td>
+            <td>2,009,800,000,000</td>
+          </tr>
+        </table>
+        """,
+    )
+
+    changes = extract_event(document)["correction"]["changes"]
+
+    assert [change["canonical_field"] for change in changes] == [
+        "investment_end_date",
+        "investment_amount",
+    ]
+    assert changes[0]["before"] == "2025-09-30"
+    assert changes[0]["after"] == "2025-04-01"
+    assert changes[1]["raw_unit"] == "원"
+
 def test_parser_does_not_treat_parenthetical_label_as_unit(
     tmp_path: Path,
 ) -> None:

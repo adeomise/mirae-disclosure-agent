@@ -187,13 +187,30 @@ class QueryPlan:
     나머지 기업이 사라진 사실이 어디에도 남지 않고, 그 계획으로 만든 답은 형식만 맞고
     질문에는 답하지 않은 결과가 된다.
 
-    periods[] 같은 나머지 다중 값 표현으로 넓히는 작업은 팀원 3의 Data Contract가 확인된
-    뒤에 한다. 지금 확인되지 않은 어휘로 구조를 바꾸면 되돌릴 비용만 커진다.
+    대상 기간도 같은 이유로 years 하나에만 담는다. 질문이 두 기간을 물었는데 계획이 첫
+    연도만 담으면 나머지 기간이 사라진 사실이 어디에도 남지 않는다.
+
+    years의 위치:
+        years는 이 dataclass, 즉 agent 내부 실행 계획이 절대연도를 담는 정본이다. 범위는
+        agent 계층 안이며, 공유 Data Contract의 기간 표현을 대체하지 않는다.
+
+        공유 Contract의 기간 정본은 common.schemas.QueryPlan.periods(list[Period])다. 그쪽은
+        {kind, year, period_type, range}로 회계기간과 공시일을 구분하고 범위 표현까지 담는
+        모델이며, 팀 확인을 거친 shared Data Contract의 일부다. 여기서 부정하거나 대신하는
+        것이 아니다.
+
+        두 계층을 이번 PR에서 연결하지 않는다. agent 내부 표현이 공유 경계를 넘어가야 할 때
+        agent의 years -> common의 periods 변환을 명시적으로 하는 adapter를 두고, 그 자리에서
+        kind와 period_type을 정한다. Pattern 내부 결과를 공통 Contract로 옮기는 일을
+        agent.normalization이 맡는 것과 같은 구조다.
+
+        지금 years만 두는 이유는 이 슬라이스가 요구하는 것이 절대연도를 잃지 않는 것뿐이기
+        때문이지, 공유 Contract의 periods가 불필요해서가 아니다.
     """
 
     question: str
     companies: tuple[str, ...]
-    year: int
+    years: tuple[int, ...]
     intent: str = INTENT_SINGLE_FACT
     document_class: str = DOCUMENT_CLASS_PERIODIC
     document_subtype: str = DOCUMENT_SUBTYPE_ANNUAL
@@ -217,8 +234,72 @@ class QueryPlan:
                 f"{self.companies!r}"
             )
 
+        if isinstance(self.years, int):
+            raise TypeError(
+                "years는 연도 하나가 아니라 튜플이어야 합니다: " f"{self.years!r}"
+            )
+
         if not self.companies:
             raise ValueError("companies는 최소 한 곳의 기업을 담아야 합니다.")
+
+        if not self.years:
+            raise ValueError("years는 최소 한 개의 연도를 담아야 합니다.")
+
+    @property
+    def year(self) -> int:
+        """
+        단일 기간 경로를 위한 호환 통로.
+
+        **시계열 비교(Pattern C)에서는 쓰지 않는다. years를 읽어야 한다.**
+
+        정본이 아니다. years에서 파생되는 읽기 전용 값이며, 단일 기간을 전제로 이미
+        동작하고 있는 호출부(Pattern A·E)를 위해 남겼다. 값을 따로 저장하지 않으므로
+        years와 어긋날 수 없고, 기간 정보를 읽어야 하는 새 코드는 이 통로가 아니라 years를
+        본다.
+
+        "기간이 하나면 쓸 수 있는 값"이 아니다:
+            개수만으로 판정하지 않는다. intent가 temporal_compare면 years에 절대연도가
+            하나뿐이어도 막는다. 그 계획에는 해석하지 않은 상대 기간 표현이 함께 있을 수
+            있기 때문이다.
+
+            "2025년 매출이 전년보다 얼마나 늘었어?"가 그 경우다. 질문이 가리키는 기간은
+            둘인데 "전년"은 기준 시점 정책이 없어 연도로 옮기지 않았으므로 years에는 2025
+            하나만 남는다. 여기서 이 통로가 2025를 돌려주면 두 기간을 물은 질문에 한 기간만
+            답하게 되고, 그것이 C-0에서 막은 silent-wrong과 같은 결과다. 개수로만 판정하면
+            이 경로가 그대로 열린다.
+
+        company와 같은 자리이지만 한 가지가 다르다. company는 companies[0]을 그냥
+        돌려주는 반면, 이 값은 조건을 만족하지 않으면 돌려주지 않고 막는다.
+
+        그 차이의 이유:
+            여러 기업 중 하나를 고르는 일은 Router가 routing 단계에서 막으므로 company를
+            읽는 handler에 애초에 도달하지 않는다. 기간도 지금은 같지만, Pattern C handler가
+            생기는 순간 시계열 비교 계획이 handler 안까지 들어온다. Pattern C는 이 통로가
+            아니라 years를 읽어야 하며, 한 줄 실수로 옛 경로에 기대지 않도록 통로 쪽에서
+            막는다.
+
+        ValueError를 쓰고 AttributeError를 쓰지 않는 이유:
+            AttributeError는 hasattr()와 getattr(plan, "year", 기본값)이 조용히 삼킨다.
+            값을 고르지 않으려고 만든 가드가 그렇게 삼켜지면 가드가 없는 것과 같아진다.
+            같은 dataclass의 __post_init__이 이미 잘못된 생성을 ValueError로 막고 있으므로
+            어휘도 그쪽에 맞춘다.
+        """
+        if self.intent == INTENT_TEMPORAL_COMPARE:
+            raise ValueError(
+                f"시계열 비교 계획에서는 year를 읽을 수 없습니다: years={self.years!r}. "
+                "절대연도가 하나만 구조화돼 있어도 해석하지 않은 상대 기간 표현이 함께 있을 "
+                "수 있어, 이 값 하나로 답하면 질문이 물은 기간 중 일부만 답하게 됩니다. "
+                "years를 읽어야 합니다."
+            )
+
+        if len(self.years) != 1:
+            raise ValueError(
+                f"기간이 {len(self.years)}개인 계획에서 year를 읽을 수 없습니다: "
+                f"{self.years!r}. 단일 기간 계획에서만 쓰는 통로이며, 다중 기간은 years를 "
+                "읽어야 합니다. 첫 연도만 골라 답하지 않습니다."
+            )
+
+        return self.years[0]
 
     @property
     def company(self) -> str:
@@ -234,8 +315,9 @@ class QueryPlan:
         return self.companies[0]
 
     def to_dict(self) -> dict[str, Any]:
-        # company는 담지 않는다. companies에서 파생되는 값을 함께 실으면 읽는 쪽이
-        # 둘 중 무엇이 정본인지 알 수 없게 된다.
+        # company와 year는 담지 않는다. companies·years에서 파생되는 값을 함께 실으면 읽는
+        # 쪽이 둘 중 무엇이 정본인지 알 수 없게 된다. property는 asdict가 담지 않으므로
+        # 따로 지울 것이 없다.
         return asdict(self)
 
 
@@ -278,22 +360,23 @@ def _has_relative_period(question: str) -> bool:
     return any(token in question for token in RELATIVE_PERIOD_TOKENS)
 
 
-def _extract_year(question: str) -> int:
+def _require_years(years: tuple[int, ...]) -> tuple[int, ...]:
     """
-    질문이 가리키는 연도 하나. 단일 기간 Pattern(A·E)이 쓴다.
+    연도를 하나도 읽지 못한 질문을 거절한다.
 
-    연도가 둘 이상인 질문은 build_query_plan이 이 함수에 닿기 전에 temporal_compare로
-    갈라내므로, 여기까지 온 질문의 연도는 하나다.
+    이미 뽑아 둔 값을 검사만 하고 다시 뽑지 않는다. 호출부마다 _extract_years를 또 부르면
+    같은 질문에서 두 번 해석하게 되고, 나중에 해석 규칙이 바뀔 때 한쪽만 고쳐질 수 있다.
+
+    거절 사유를 UnsupportedQuestionError로 두는 것은 기존 동작이다. Router가 이 예외를
+    query_plan 단계의 BLOCKED로 옮긴다.
     """
-    years = _extract_years(question)
-
     if not years:
         raise UnsupportedQuestionError(
             reason="missing_year",
             detail="질문에서 대상 연도를 찾을 수 없습니다.",
         )
 
-    return years[0]
+    return years
 
 
 def _find_unclaimed_span(
@@ -476,7 +559,7 @@ def _build_cross_entity_compare_plan(
     return QueryPlan(
         question=question.strip(),
         companies=companies,
-        year=_extract_year(question),
+        years=_require_years(_extract_years(question)),
         intent=INTENT_CROSS_ENTITY_COMPARE,
         accounting_scope=accounting_scope,
         metric=_find_metric(question),
@@ -502,10 +585,17 @@ def _build_temporal_compare_plan(
     풀리는 질문인지가 결과에서 사라진다. Q08("영업이익률이 2024년이랑 2025년에 어떻게
     달라졌어?")이 그 경우다.
 
-    year에 첫 연도를 담는 것은 QueryPlan이 아직 스칼라 year를 요구하기 때문이며, 이것은
-    다중 기간의 정본 표현이 아니다. 정본 표현(periods[])은 Data Contract 확인 뒤에 정한다
-    (위 QueryPlan docstring 참조). 그래서 확보한 연도 전부는 warnings에 남긴다. 계획 구조에
-    담을 자리가 없더라도 어느 연도를 읽었는지가 결과에서 사라지면 안 된다.
+    확보한 절대연도는 years에 그대로 담는다. 첫 연도를 골라 담지 않으며, 그렇게 하면 두
+    기간을 물은 질문에 한 연도만 남아 F6-02가 재현된다.
+
+    warnings는 진단 용도다. 어느 연도를 왜 그렇게 읽었는지를 사람이 읽는 자리이며, 기간
+    정보를 기계가 읽어야 할 때 참조하는 곳이 아니다. agent 안에서 그 값을 읽어야 하면
+    years를 본다.
+
+    상대기간이 섞인 질문에서는 years에 절대연도만 남는다("2025년 매출이 전년보다"는
+    years=(2025,)). "전년"을 연도로 옮기려면 기준 시점 정책이 필요하고 그것은 Pattern C
+    범위다. 미해결 상대기간을 표현해야 할 때가 오면 공유 Contract의 Period.kind가 그 자리를
+    이미 갖고 있으므로, 그때 agent -> common 변환 경계에서 정한다.
     """
     accounting_scope, scope_explicit = _extract_accounting_scope(question)
 
@@ -521,7 +611,7 @@ def _build_temporal_compare_plan(
     return QueryPlan(
         question=question.strip(),
         companies=companies,
-        year=years[0],
+        years=years,
         intent=INTENT_TEMPORAL_COMPARE,
         accounting_scope=accounting_scope,
         metric=_find_metric(question),
@@ -536,13 +626,24 @@ def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> Quer
 
     chain_policy는 full_chain으로 고정한다. 이력을 묻는 질문에서 정정본을 빼면 답할 것이
     남지 않는다. 다른 정책이 필요한 질문 형태는 이번 범위 밖이다.
+
+    years에는 연도를 하나만 담는다. 질문에 연도가 둘 이상 보여도 마찬가지다.
+
+    Pattern E의 연도는 비교 대상 기간이 아니라 원공시를 찾는 공시일 기준점이기 때문이다.
+    handler는 이 값으로 원공시 후보만 좁히고(filing_date_window), 정정본은 기간 제한 없이
+    문서에 적힌 연결을 따라간다. 그래서 "2024년 8월에 공시한 공급계약, 2025년에 바뀐 내용
+    있어?"에서 2024는 기준점이고 2025는 그 기준점에서 출발한 체인이 이미 포함하는 서술이다.
+    첫 연도를 고르는 것이 값을 버리는 일이 아니라 기준점을 고르는 일이다.
+
+    다중 기간 질문을 여기로 들이지 않는 것은 build_query_plan의 판정 순서가 맡는다. 이력
+    판정이 다중 기간 판정보다 앞이라 이 builder에 먼저 도달하며, 그 순서가 규약이다.
     """
-    year = _extract_year(question)
+    anchor, *_ = _require_years(_extract_years(question))
 
     return QueryPlan(
         question=question.strip(),
         companies=companies,
-        year=year,
+        years=(anchor,),
         intent=INTENT_EVENT_HISTORY,
         document_class=DOCUMENT_CLASS_EVENT,
         document_subtype=_extract_event_subtype(question),
@@ -650,12 +751,12 @@ def build_query_plan(
     # 상대기간을 연도로 옮기지는 않는다. 기간이 둘이라는 사실만 확정하면 막기에 충분하다.
     #
     # 절대연도가 하나도 없는 질문(Q07 "매출이 작년보다 얼마나 늘었어?")은 여기서 걸지 않는다.
-    # 아래 _extract_year가 missing_year로 막으므로 이미 fail-closed이고, 그 질문에 답하려면
+    # 아래 _require_years가 missing_year로 막으므로 이미 fail-closed이고, 그 질문에 답하려면
     # 상대기간 해석이 필요한데 그것은 Pattern C 구현 범위다.
     if len(years) > 1 or (years and _has_relative_period(question)):
         return _build_temporal_compare_plan(question, companies, years)
 
-    year = _extract_year(question)
+    _require_years(years)
 
     metric = _extract_metric(question)
 
@@ -671,7 +772,7 @@ def build_query_plan(
     return QueryPlan(
         question=question.strip(),
         companies=companies,
-        year=year,
+        years=years,
         intent=INTENT_SINGLE_FACT,
         document_class=DOCUMENT_CLASS_PERIODIC,
         document_subtype=DOCUMENT_SUBTYPE_ANNUAL,

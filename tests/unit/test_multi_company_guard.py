@@ -295,12 +295,12 @@ def test_query_plan_rejects_a_bare_company_string() -> None:
     조용히 통과시키면 계획을 만든 쪽이 아니라 답을 받는 쪽에서 틀린다.
     """
     with pytest.raises(TypeError):
-        QueryPlan(question="합성", companies="한미반도체", year=2025)  # type: ignore[arg-type]
+        QueryPlan(question="합성", companies="한미반도체", years=(2025,))  # type: ignore[arg-type]
 
 
 def test_query_plan_rejects_an_empty_company_set() -> None:
     with pytest.raises(ValueError):
-        QueryPlan(question="합성", companies=(), year=2025)
+        QueryPlan(question="합성", companies=(), years=(2025,))
 
 
 # --------------------------------------------------------------------------

@@ -25,7 +25,8 @@
 - FieldChange 목록
 
 TODO:
-- 신규시설투자 등 다른 이벤트 유형의 필드 어휘 추가
+- 지원 이벤트 유형의 미매핑 정정 필드 어휘 확장
+- extractor/diff 간 correction canonical mapping parity 보장
 - 정정표와 본문 값의 일치 검증
 """
 

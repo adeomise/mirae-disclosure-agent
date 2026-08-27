@@ -527,22 +527,35 @@ def test_multi_period_plan_keeps_every_absolute_year_in_years() -> None:
     assert plan.years == (2024, 2025)
 
 
-def test_reading_year_on_a_multi_period_plan_fails_fast() -> None:
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 절대연도가 둘. years에 둘 다 있다.
+        "삼성전자 2024년 매출과 2025년 매출 비교해줘",
+        # 절대연도가 하나뿐인데도 막아야 한다. 아래 docstring 참조.
+        "삼성전자 2025년 매출이 전년보다 얼마나 늘었어?",
+        "삼성전자 2025년 매출이 작년보다 얼마나 늘었어?",
+    ],
+)
+def test_reading_year_on_a_temporal_compare_plan_fails_fast(question: str) -> None:
     """
-    다중 기간 계획에서 year를 읽으면 막힌다.
+    시계열 비교 계획에서 year를 읽으면 막힌다.
 
     이 파일에서 가장 중요한 구조적 회귀다. C-0가 제거한 silent first-year truncation이
     compatibility property를 통해 되살아나지 않는다는 것을 고정한다.
 
+    개수가 아니라 intent로 판정한다:
+        절대연도 개수만 보면 "2025년 매출이 전년보다 얼마나 늘었어?"는 years=(2025,)라
+        하나뿐이어서 통과한다. 그런데 질문이 가리키는 기간은 둘이고, "전년"을 연도로 옮기지
+        않았을 뿐이다. 여기서 2025를 돌려주면 두 기간을 물은 질문에 한 기간만 답하게 되고,
+        결과는 C-0가 막은 silent-wrong과 같다.
+
     company와 달리 첫 값을 돌려주지 않는 이유:
         여러 기업 중 하나를 고르는 일은 Router가 막아 handler에 도달하지 않지만, Pattern C
-        handler가 생기면 다중 기간 계획은 handler 안까지 들어온다. 그때 year가 첫 연도를
-        돌려주면 두 기간을 물은 질문에 한 연도만 답하는 결과가 되고, 그것이 F6-02다.
+        handler가 생기면 시계열 비교 계획은 handler 안까지 들어온다. Pattern C는 이 통로가
+        아니라 years를 읽어야 한다.
     """
-    plan = build_query_plan(
-        "삼성전자 2024년 매출과 2025년 매출 비교해줘",
-        known_companies=REAL_COMPANIES,
-    )
+    plan = build_query_plan(question, known_companies=REAL_COMPANIES)
 
     with pytest.raises(ValueError) as error:
         plan.year  # noqa: B018 - 접근 자체가 검사 대상이다
@@ -551,18 +564,25 @@ def test_reading_year_on_a_multi_period_plan_fails_fast() -> None:
     assert "years" in str(error.value)
 
 
-def test_year_fail_fast_is_not_swallowed_by_getattr() -> None:
+@pytest.mark.parametrize(
+    "question",
+    [
+        "삼성전자 2024년 매출과 2025년 매출 비교해줘",
+        "삼성전자 2025년 매출이 전년보다 얼마나 늘었어?",
+    ],
+)
+def test_year_fail_fast_is_not_swallowed_by_getattr(question: str) -> None:
     """
     가드가 hasattr/getattr에 삼켜지지 않는다.
 
     AttributeError로 막으면 hasattr(plan, "year")가 False를 돌려주고
     getattr(plan, "year", 기본값)이 조용히 기본값을 준다. 값을 고르지 않으려고 만든 가드가
     그렇게 삼켜지면 가드가 없는 것과 같다. 그래서 ValueError를 쓴다.
+
+    절대연도가 하나뿐인 혼합 질문에서도 같아야 한다. 그 경우가 기본값으로 조용히 넘어가면
+    개수 판정으로 되돌아간 것과 다르지 않다.
     """
-    plan = build_query_plan(
-        "삼성전자 2024년 매출과 2025년 매출 비교해줘",
-        known_companies=REAL_COMPANIES,
-    )
+    plan = build_query_plan(question, known_companies=REAL_COMPANIES)
 
     with pytest.raises(ValueError):
         getattr(plan, "year", 2024)
@@ -604,6 +624,11 @@ def test_mixed_period_plan_keeps_only_the_absolute_year() -> None:
     assert plan.intent == INTENT_TEMPORAL_COMPARE
     assert plan.years == (2025,)
     assert 2024 not in plan.years
+
+    # 절대연도가 하나뿐이어도 scalar 통로는 열리지 않는다. 질문이 가리키는 기간은 둘이고,
+    # 그중 하나를 아직 연도로 옮기지 않았을 뿐이다.
+    with pytest.raises(ValueError):
+        plan.year  # noqa: B018 - 접근 자체가 검사 대상이다
 
 
 def test_event_history_plan_keeps_a_single_anchor_year() -> None:

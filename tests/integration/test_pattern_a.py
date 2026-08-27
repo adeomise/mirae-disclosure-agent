@@ -22,9 +22,8 @@ from typing import Any
 
 import pytest
 
-from disclosure_agent.agent import router
+from disclosure_agent.agent import period_retrieval, router
 from disclosure_agent.agent.answer_builder import STATUS_BLOCKED, STATUS_OK
-from disclosure_agent.agent.handlers import single_fact
 from disclosure_agent.agent.handlers.single_fact import (
     build_single_fact_result,
     handle_single_fact,
@@ -58,11 +57,14 @@ def parsed_document_stub(monkeypatch: pytest.MonkeyPatch):
 
     합성 corpus의 XML은 파싱 경계를 시험하기 위한 최소 파일이므로, 정상 흐름 검증에는
     parser가 보완된 뒤의 출력 형태를 전제한 fixture를 쓴다.
+
+    대체 지점은 파싱을 실제로 부르는 agent.period_retrieval이다. Pattern A는 그 모듈의
+    primitive를 호출하며, Pattern C도 같은 자리를 쓴다.
     """
 
     def _install(document: dict[str, Any]) -> None:
         monkeypatch.setattr(
-            single_fact,
+            period_retrieval,
             "load_parsed_document",
             lambda document_path: document,
         )

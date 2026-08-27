@@ -43,26 +43,21 @@ from pathlib import Path
 from typing import Any
 
 from disclosure_agent.agent.answer_builder import (
-    REASON_PARSE_FAILED,
-    STAGE_EVIDENCE,
-    STAGE_EXTRACTION,
-    STAGE_FILING_DISCOVERY,
-    STAGE_PARSING,
     BlockedInfo,
     build_blocked_result,
     build_structured_result,
 )
-from disclosure_agent.agent.evidence import Evidence, MissingEvidenceError, build_evidence
+from disclosure_agent.agent.evidence import Evidence
 from disclosure_agent.agent.normalization import normalize_single_fact_result
+from disclosure_agent.agent.period_retrieval import (
+    PeriodFact,
+    extract_period_fact_from_document,
+    fetch_period_fact,
+)
 from disclosure_agent.agent.query_analyzer import QueryPlan
 from disclosure_agent.common.schemas import AgentExecutionResult
-from disclosure_agent.periodic.extractor import ExtractionBlockedError, FinancialFact
-from disclosure_agent.periodic.service import extract_fact, load_parsed_document
-from disclosure_agent.retrieval.metadata_filter import (
-    FilingNotFoundError,
-    FilingRef,
-    locate_filing,
-)
+from disclosure_agent.periodic.extractor import FinancialFact
+from disclosure_agent.retrieval.metadata_filter import FilingRef
 
 
 @dataclass(frozen=True)
@@ -154,47 +149,42 @@ def build_single_fact_result(
     실패 시 예외를 올리지 않고 blocked를 채운 결과를 돌려준다.
     어느 단계에서 왜 막혔는지 호출자가 그대로 볼 수 있게 하기 위해서다.
     """
-    corpus_root = Path(corpus_root)
-
-    manifest_path = Path(manifest_path) if manifest_path else corpus_root / "manifest.jsonl"
-
-    try:
-        # QueryPlan을 검색 조건으로 옮기는 일은 여기서 한다.
-        # retrieval은 질문 해석 결과를 모르고 primitive만 받는다.
-        filing = locate_filing(
-            manifest_path=manifest_path,
-            corpus_root=corpus_root,
+    # QueryPlan을 검색 조건으로 옮기는 일은 여기서 한다.
+    # agent.period_retrieval은 질문 해석 결과를 모르고 primitive만 받는다.
+    #
+    # plan.year는 단일 기간 계획에서만 읽을 수 있는 통로다. 이 Pattern이 만드는 계획은 모두
+    # 단일 기간이므로 그대로 쓴다. 다중 기간은 Pattern C가 plan.years를 펼쳐 같은 primitive를
+    # 부른다.
+    return _to_single_fact_result(
+        plan,
+        fetch_period_fact(
             company=plan.company,
+            fiscal_year=plan.year,
+            metric=plan.metric,
+            accounting_scope=plan.accounting_scope,
             document_class=plan.document_class,
             document_subtype=plan.document_subtype,
-            year=plan.year,
-        )
+            corpus_root=corpus_root,
+            manifest_path=manifest_path,
+        ),
+    )
 
-    except FilingNotFoundError as error:
-        return SingleFactResult(
-            plan=plan,
-            blocked=BlockedInfo(
-                stage=STAGE_FILING_DISCOVERY,
-                reason=error.reason,
-                detail=error.detail,
-            ),
-        )
 
-    try:
-        document = load_parsed_document(filing.main_document)
+def _to_single_fact_result(plan: QueryPlan, found: PeriodFact) -> SingleFactResult:
+    """
+    기간별 확보 결과를 Pattern A의 내부 결과로 옮긴다.
 
-    except (FileNotFoundError, ValueError) as error:
-        return SingleFactResult(
-            plan=plan,
-            filing=filing,
-            blocked=BlockedInfo(
-                stage=STAGE_PARSING,
-                reason=REASON_PARSE_FAILED,
-                detail=str(error),
-            ),
-        )
-
-    return build_result_from_document(document, plan=plan, filing=filing)
+    값을 새로 만들지 않는다. 어느 단계에서 막혔는지도 그대로 옮긴다. Pattern A가 이 Pattern의
+    계획(QueryPlan)을 함께 들고 있어야 하므로 감싸는 자리만 필요하다.
+    """
+    return SingleFactResult(
+        plan=plan,
+        filing=found.filing,
+        document=found.document,
+        fact=found.fact,
+        evidence=found.evidence,
+        blocked=found.blocked,
+    )
 
 
 def build_result_from_document(
@@ -208,45 +198,13 @@ def build_result_from_document(
 
     parser 호출과 분리해 두어 synthetic parsed document로도 검증할 수 있다.
     """
-    try:
-        fact = extract_fact(
+    return _to_single_fact_result(
+        plan,
+        extract_period_fact_from_document(
             document,
             metric=plan.metric,
             fiscal_year=plan.year,
             accounting_scope=plan.accounting_scope,
-        )
-
-    except ExtractionBlockedError as error:
-        return SingleFactResult(
-            plan=plan,
             filing=filing,
-            document=document,
-            blocked=BlockedInfo(
-                stage=STAGE_EXTRACTION,
-                reason=error.reason,
-                detail=error.detail,
-            ),
-        )
-
-    try:
-        evidence = build_evidence(fact, filing=filing, document=document)
-
-    except MissingEvidenceError as error:
-        return SingleFactResult(
-            plan=plan,
-            filing=filing,
-            document=document,
-            blocked=BlockedInfo(
-                stage=STAGE_EVIDENCE,
-                reason=error.reason,
-                detail=error.detail,
-            ),
-        )
-
-    return SingleFactResult(
-        plan=plan,
-        filing=filing,
-        document=document,
-        fact=fact,
-        evidence=evidence,
+        ),
     )

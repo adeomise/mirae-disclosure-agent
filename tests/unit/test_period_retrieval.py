@@ -423,8 +423,9 @@ def test_q08_source_facts_are_available_in_the_actual_corpus() -> None:
 
     assert collection.is_complete
     assert len(collection.facts) == 4
-    assert len(collection.evidence) == 4
 
+    # 요청한 (회계연도, 지표) 조합 넷이 그대로 돌아왔는지를 집합 동등성으로 본다. 넷 중
+    # 하나라도 다른 연도나 다른 지표로 바뀌면 여기서 걸린다.
     combinations = {(fact.fiscal_year, fact.metric) for fact in collection.facts}
 
     assert combinations == {
@@ -433,21 +434,27 @@ def test_q08_source_facts_are_available_in_the_actual_corpus() -> None:
         for metric in (MetricConcept.REVENUE, MetricConcept.OPERATING_INCOME)
     }
 
-    # 연도별로 서로 다른 원 보고서에서 나와야 한다. 최신 보고서의 비교 열로 과거 연도를
-    # 대신 읽는 경로는 두지 않았다(D4는 여전히 미결정 사항이다).
-    doc_ids_by_year: dict[int, set[str]] = {}
+    # 근거가 함께 나오고 그 참조가 해소되는지만 본다. 어느 공시에서 왔는지는 고정하지 않는다.
+    #
+    # 현재 구현은 회계연도마다 locate_filing을 따로 부르므로 연도별로 다른 보고서를 고른다.
+    # 다만 각 연도를 그 해의 원 보고서에서 읽을지 이후 보고서의 비교 열에서 읽을지는 D4에서
+    # 정할 사항이라, 테스트가 지금의 선택을 정책으로 못박지 않는다.
+    available = {item.evidence_id for item in collection.evidence}
 
-    for fact, item in zip(collection.facts, collection.evidence, strict=True):
-        doc_ids_by_year.setdefault(fact.fiscal_year, set()).add(item.doc_id)
+    dangling = [
+        evidence_id
+        for fact in collection.facts
+        for evidence_id in fact.evidence_ids
+        if evidence_id not in available
+    ]
 
-    assert len(doc_ids_by_year[2024] | doc_ids_by_year[2025]) == 2
-    assert doc_ids_by_year[2024].isdisjoint(doc_ids_by_year[2025])
+    assert dangling == []
 
     for fact in collection.facts:
         assert fact.accounting_scope is FactAccountingScope.CONSOLIDATED
         assert fact.normalized_unit == "원"
         assert fact.normalized_value is not None
-        assert len(fact.evidence_ids) == 1
+        assert fact.evidence_ids
 
 
 @pytest.mark.corpus

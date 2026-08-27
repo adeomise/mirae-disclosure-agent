@@ -87,6 +87,21 @@ class EventLinkResolutionStatus(StrEnum):
     OUT_OF_CORPUS = "out_of_corpus"
 
 
+class ComparisonRelation(StrEnum):
+    """Successful relation between two comparable inputs."""
+
+    LEFT_GREATER = "left_greater"
+    RIGHT_GREATER = "right_greater"
+    EQUAL = "equal"
+
+
+class ComparisonInputType(StrEnum):
+    """Semantic result types accepted as comparison inputs."""
+
+    FACT = "fact"
+    CALCULATION = "calculation"
+
+
 class AnswerabilityStatus(StrEnum):
     """Whether the available evidence supports an answer."""
 

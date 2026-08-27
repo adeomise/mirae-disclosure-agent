@@ -9,6 +9,8 @@ from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
     ChainPolicy,
+    ComparisonInputType,
+    ComparisonRelation,
     DocumentClass,
     EventLinkRelation,
     EventLinkResolutionStatus,
@@ -175,10 +177,27 @@ class AnswerabilityDetail(BaseModel):
 class CalculationResult(BaseModel):
     """A minimal deterministic calculation with its evidence linkage."""
 
+    calculation_id: str
     operation: str
     value: float | str | None = None
     unit: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ComparisonInputReference(BaseModel):
+    """A typed reference to one semantic comparison input."""
+
+    input_type: ComparisonInputType
+    input_id: str
+
+
+class ComparisonResult(BaseModel):
+    """A successful relation between two comparable inputs."""
+
+    comparison_id: str
+    left: ComparisonInputReference
+    right: ComparisonInputReference
+    relation: ComparisonRelation
 
 
 class ConversionGap(BaseModel):
@@ -213,6 +232,7 @@ class AgentExecutionResult(BaseModel):
     event_histories: list[EventHistory] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     calculations: list[CalculationResult] = Field(default_factory=list)
+    comparisons: list[ComparisonResult] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     conversion_gaps: list[ConversionGap] = Field(default_factory=list)
 

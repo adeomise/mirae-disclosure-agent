@@ -8,7 +8,6 @@ from pydantic import ValidationError
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
-    ComparisonInputType,
     ComparisonRelation,
     EventLinkRelation,
     EventLinkResolutionStatus,
@@ -17,13 +16,13 @@ from disclosure_agent.common.enums import (
     ExecutionStatus,
     FactAccountingScope,
     MetricConcept,
+    ResultInputType,
 )
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
     AnswerabilityDetail,
     AnswerResponse,
     CalculationResult,
-    ComparisonInputReference,
     ComparisonResult,
     ConversionGap,
     Event,
@@ -35,6 +34,7 @@ from disclosure_agent.common.schemas import (
     Fact,
     FieldChange,
     RawReference,
+    ResultInputReference,
 )
 from disclosure_agent.event.identity import make_event_id
 
@@ -76,25 +76,25 @@ def test_additional_source_metric_concepts_validate_as_facts() -> None:
         assert fact.metric is metric
 
 
-def test_comparison_enums_preserve_contract_values() -> None:
+def test_result_input_and_comparison_enums_preserve_contract_values() -> None:
     assert {relation.name: relation.value for relation in ComparisonRelation} == {
         "LEFT_GREATER": "left_greater",
         "RIGHT_GREATER": "right_greater",
         "EQUAL": "equal",
     }
-    assert {input_type.name: input_type.value for input_type in ComparisonInputType} == {
+    assert {input_type.name: input_type.value for input_type in ResultInputType} == {
         "FACT": "fact",
         "CALCULATION": "calculation",
     }
 
 
-def test_comparison_input_reference_accepts_fact_and_calculation() -> None:
-    fact_reference = ComparisonInputReference(
-        input_type=ComparisonInputType.FACT,
+def test_result_input_reference_accepts_fact_and_calculation() -> None:
+    fact_reference = ResultInputReference(
+        input_type=ResultInputType.FACT,
         input_id="fact_dummy_left",
     )
-    calculation_reference = ComparisonInputReference(
-        input_type=ComparisonInputType.CALCULATION,
+    calculation_reference = ResultInputReference(
+        input_type=ResultInputType.CALCULATION,
         input_id="calculation_dummy_right",
     )
 
@@ -111,8 +111,8 @@ def test_comparison_input_reference_accepts_fact_and_calculation() -> None:
 def test_comparison_result_serializes_successful_relation() -> None:
     comparison = ComparisonResult(
         comparison_id="comparison_dummy_revenue",
-        left=ComparisonInputReference(input_type="fact", input_id="fact_dummy_left"),
-        right=ComparisonInputReference(
+        left=ResultInputReference(input_type="fact", input_id="fact_dummy_left"),
+        right=ResultInputReference(
             input_type="calculation",
             input_id="calculation_dummy_right",
         ),
@@ -134,8 +134,8 @@ def test_comparison_result_rejects_failure_relation() -> None:
     with pytest.raises(ValidationError):
         ComparisonResult(
             comparison_id="comparison_dummy_invalid",
-            left=ComparisonInputReference(input_type="fact", input_id="fact_dummy_left"),
-            right=ComparisonInputReference(input_type="fact", input_id="fact_dummy_right"),
+            left=ResultInputReference(input_type="fact", input_id="fact_dummy_left"),
+            right=ResultInputReference(input_type="fact", input_id="fact_dummy_right"),
             relation="not_comparable",
         )
 
@@ -144,6 +144,10 @@ def test_calculation_result_requires_and_serializes_identity() -> None:
     calculation = CalculationResult(
         calculation_id="calculation_dummy_ratio",
         operation="ratio",
+        inputs=[
+            ResultInputReference(input_type="fact", input_id="fact_dummy_numerator"),
+            ResultInputReference(input_type="fact", input_id="fact_dummy_denominator"),
+        ],
         value="dummy",
         unit="percent",
     )
@@ -151,13 +155,64 @@ def test_calculation_result_requires_and_serializes_identity() -> None:
     assert calculation.model_dump(mode="json") == {
         "calculation_id": "calculation_dummy_ratio",
         "operation": "ratio",
+        "inputs": [
+            {"input_type": "fact", "input_id": "fact_dummy_numerator"},
+            {"input_type": "fact", "input_id": "fact_dummy_denominator"},
+        ],
         "value": "dummy",
         "unit": "percent",
         "evidence_ids": [],
     }
 
     with pytest.raises(ValidationError):
-        CalculationResult(operation="ratio")
+        CalculationResult(
+            operation="ratio",
+            inputs=[ResultInputReference(input_type="fact", input_id="fact_dummy_input")],
+        )
+
+
+def test_calculation_result_requires_non_empty_inputs() -> None:
+    with pytest.raises(ValidationError):
+        CalculationResult(calculation_id="calculation_dummy", operation="ratio")
+    with pytest.raises(ValidationError):
+        CalculationResult(
+            calculation_id="calculation_dummy",
+            operation="ratio",
+            inputs=[],
+        )
+
+
+def test_calculation_result_accepts_fact_and_calculation_inputs() -> None:
+    calculation = CalculationResult(
+        calculation_id="calculation_dummy_diff",
+        operation="diff_pp",
+        inputs=[
+            ResultInputReference(input_type="fact", input_id="fact_dummy_source"),
+            ResultInputReference(
+                input_type="calculation",
+                input_id="calculation_dummy_margin",
+            ),
+        ],
+    )
+
+    assert [item.input_type for item in calculation.inputs] == [
+        ResultInputType.FACT,
+        ResultInputType.CALCULATION,
+    ]
+
+
+def test_calculation_result_rejects_direct_self_reference() -> None:
+    with pytest.raises(ValidationError, match="cannot directly reference itself"):
+        CalculationResult(
+            calculation_id="calculation_dummy",
+            operation="identity",
+            inputs=[
+                ResultInputReference(
+                    input_type="calculation",
+                    input_id="calculation_dummy",
+                )
+            ],
+        )
 
 
 def test_q02_dummy_supply_contract_event() -> None:
@@ -434,8 +489,8 @@ def test_execution_result_default_lists_are_not_shared() -> None:
 def test_execution_result_accepts_comparison_and_defaults_to_empty_list() -> None:
     comparison = ComparisonResult(
         comparison_id="comparison_dummy_revenue",
-        left=ComparisonInputReference(input_type="fact", input_id="fact_dummy_left"),
-        right=ComparisonInputReference(input_type="fact", input_id="fact_dummy_right"),
+        left=ResultInputReference(input_type="fact", input_id="fact_dummy_left"),
+        right=ResultInputReference(input_type="fact", input_id="fact_dummy_right"),
         relation=ComparisonRelation.EQUAL,
     )
     with_comparison = AgentExecutionResult(
@@ -579,6 +634,12 @@ def test_execution_result_serializes_to_json_compatible_contract() -> None:
             CalculationResult(
                 calculation_id="calculation_dummy_identity",
                 operation="identity",
+                inputs=[
+                    ResultInputReference(
+                        input_type="fact",
+                        input_id="fact_dummy_source",
+                    )
+                ],
                 value="dummy",
                 unit="dummy-unit",
                 evidence_ids=["evidence_dummy"],
@@ -596,6 +657,9 @@ def test_execution_result_serializes_to_json_compatible_contract() -> None:
         {
             "calculation_id": "calculation_dummy_identity",
             "operation": "identity",
+            "inputs": [
+                {"input_type": "fact", "input_id": "fact_dummy_source"}
+            ],
             "value": "dummy",
             "unit": "dummy-unit",
             "evidence_ids": ["evidence_dummy"],

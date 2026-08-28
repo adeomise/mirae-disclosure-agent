@@ -541,7 +541,8 @@ def test_calculation_evidence_reference_integrity_is_supported() -> None:
         calculations=[
             {
                 "calculation_id": "calculation-1",
-                "operation": "difference",
+                "operation": "identity",
+                "inputs": [{"input_type": "fact", "input_id": "fact-1"}],
                 "evidence_ids": ["missing"],
             }
         ],
@@ -550,6 +551,55 @@ def test_calculation_evidence_reference_integrity_is_supported() -> None:
     failures = compare_prediction(gold, actual)
 
     assert any("dangling Calculation evidence_ids=['missing']" in item for item in failures)
+
+
+@pytest.mark.parametrize(
+    ("input_type", "input_id"),
+    (("fact", "missing-fact"), ("calculation", "missing-calculation")),
+)
+def test_dangling_calculation_input_reference_fails(
+    input_type: str, input_id: str
+) -> None:
+    gold = answerable_gold("case", integrity={"result_input_references": True})
+    actual = prediction(
+        "case",
+        calculations=[
+            {
+                "calculation_id": "calculation-1",
+                "operation": "identity",
+                "inputs": [{"input_type": input_type, "input_id": input_id}],
+            }
+        ],
+    )
+
+    failures = compare_prediction(gold, actual)
+
+    assert any(f"{input_type}:{input_id}" in item for item in failures)
+
+
+@pytest.mark.parametrize(
+    ("input_type", "input_id"),
+    (("fact", "missing-fact"), ("calculation", "missing-calculation")),
+)
+def test_dangling_comparison_input_reference_fails(
+    input_type: str, input_id: str
+) -> None:
+    gold = answerable_gold("case", integrity={"result_input_references": True})
+    actual = prediction(
+        "case",
+        comparisons=[
+            {
+                "comparison_id": "comparison-1",
+                "left": {"input_type": "fact", "input_id": "fact-1"},
+                "right": {"input_type": input_type, "input_id": input_id},
+                "relation": "left_greater",
+            }
+        ],
+    )
+
+    failures = compare_prediction(gold, actual)
+
+    assert any(f"{input_type}:{input_id}" in item for item in failures)
 
 
 def test_duplicate_prediction_case_id_fails(tmp_path: Path) -> None:

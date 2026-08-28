@@ -3,13 +3,12 @@
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
     ChainPolicy,
-    ComparisonInputType,
     ComparisonRelation,
     DocumentClass,
     EventLinkRelation,
@@ -21,6 +20,7 @@ from disclosure_agent.common.enums import (
     Intent,
     MetricConcept,
     QueryAccountingScope,
+    ResultInputType,
 )
 
 
@@ -174,29 +174,39 @@ class AnswerabilityDetail(BaseModel):
     detail: str | None = None
 
 
+class ResultInputReference(BaseModel):
+    """A typed reference to one semantic result input."""
+
+    input_type: ResultInputType
+    input_id: str
+
+
 class CalculationResult(BaseModel):
-    """A minimal deterministic calculation with its evidence linkage."""
+    """A minimal deterministic calculation with its inputs and evidence linkage."""
 
     calculation_id: str
     operation: str
+    inputs: list[ResultInputReference] = Field(min_length=1)
     value: float | str | None = None
     unit: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
 
-
-class ComparisonInputReference(BaseModel):
-    """A typed reference to one semantic comparison input."""
-
-    input_type: ComparisonInputType
-    input_id: str
-
+    @model_validator(mode="after")
+    def reject_direct_self_reference(self) -> "CalculationResult":
+        if any(
+            item.input_type is ResultInputType.CALCULATION
+            and item.input_id == self.calculation_id
+            for item in self.inputs
+        ):
+            raise ValueError("CalculationResult cannot directly reference itself")
+        return self
 
 class ComparisonResult(BaseModel):
     """A successful relation between two comparable inputs."""
 
     comparison_id: str
-    left: ComparisonInputReference
-    right: ComparisonInputReference
+    left: ResultInputReference
+    right: ResultInputReference
     relation: ComparisonRelation
 
 

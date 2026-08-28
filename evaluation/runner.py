@@ -78,6 +78,7 @@ class IntegrityExpectation(BaseModel):
 
     fact_evidence_references: bool | None = None
     calculation_evidence_references: bool | None = None
+    result_input_references: bool | None = None
 
 
 class GoldAnswer(BaseModel):
@@ -298,6 +299,29 @@ def _dangling_references(result: PredictionCase, collection: str) -> list[str]:
     )
 
 
+def _dangling_result_input_references(result: PredictionCase) -> list[str]:
+    known_ids = {
+        "fact": {item.fact_id for item in result.facts},
+        "calculation": {item.calculation_id for item in result.calculations},
+    }
+    references = [
+        reference
+        for calculation in result.calculations
+        for reference in calculation.inputs
+    ] + [
+        reference
+        for comparison in result.comparisons
+        for reference in (comparison.left, comparison.right)
+    ]
+    return sorted(
+        {
+            f"{reference.input_type.value}:{reference.input_id}"
+            for reference in references
+            if reference.input_id not in known_ids[reference.input_type.value]
+        }
+    )
+
+
 def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str]:
     """Return stable, human-readable field failures for one prediction."""
     failures: list[str] = []
@@ -369,6 +393,15 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
                 failures.append(
                     f"integrity.{field}: expected {expected}, got {actual}; "
                     f"dangling {label} evidence_ids={dangling}"
+                )
+        expected = gold.integrity.result_input_references
+        if expected is not None:
+            dangling = _dangling_result_input_references(prediction)
+            actual = not dangling
+            if actual != expected:
+                failures.append(
+                    "integrity.result_input_references: "
+                    f"expected {expected}, got {actual}; dangling inputs={dangling}"
                 )
     return failures
 

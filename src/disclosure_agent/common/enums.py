@@ -95,8 +95,8 @@ class ComparisonRelation(StrEnum):
     EQUAL = "equal"
 
 
-class ComparisonInputType(StrEnum):
-    """Semantic result types accepted as comparison inputs."""
+class ResultInputType(StrEnum):
+    """Semantic result types accepted as inputs to derived results."""
 
     FACT = "fact"
     CALCULATION = "calculation"

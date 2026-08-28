@@ -47,6 +47,10 @@ from typing import Any
 # - 문서군은 manifest 표기(doc_group)와의 대응을 알아야 하므로 검색 계층이 안다.
 #
 # 기존 import 경로를 유지하기 위해 이 모듈에서도 같은 이름으로 노출한다.
+#
+# 파생 개념은 추출 계층의 어휘가 아니다. 대응하는 ACODE가 없고 문서에서 읽히지도 않으며,
+# 원천 지표에서 계산으로 만들어진다. 그래서 agent.derived_metrics가 정의한다.
+from disclosure_agent.agent.derived_metrics import DerivedMetric
 from disclosure_agent.common.enums import ChainPolicy, Intent, QueryAccountingScope
 from disclosure_agent.periodic.extractor import (
     METRIC_REVENUE,
@@ -141,6 +145,15 @@ SEPARATE_TOKENS = ("별도", "개별")
 
 REVENUE_TOKENS = ("매출액", "매출", "영업수익", "수익")
 
+# 파생지표 표기. 여기 담기는 값은 계산으로 만들어지는 요청 개념이며 원천 지표가 아니다.
+#
+# 이번 범위는 영업이익률 하나다. 다른 비율 표현을 함께 넣지 않는 이유는, 대응표에 등록되지
+# 않은 개념을 인식하면 계획에는 담기지만 만들 수 없는 값이 되기 때문이다. 인식 범위는
+# agent.derived_metrics의 등록 범위를 넘지 않는다.
+DERIVED_METRIC_TOKENS: tuple[tuple[str, DerivedMetric], ...] = (
+    ("영업이익률", DerivedMetric.OPERATING_MARGIN),
+)
+
 MONTH_PATTERN = re.compile(r"(1[0-2]|0?[1-9])\s*월")
 
 # 거래소공시 세부유형. Q13 계열이 다루는 것만 둔다.
@@ -216,7 +229,17 @@ class QueryPlan:
     document_subtype: str = DOCUMENT_SUBTYPE_ANNUAL
     accounting_scope: str = SCOPE_CONSOLIDATED
     # 거래소공시 질의에는 지표가 없다. 값이 아니라 이력을 묻기 때문이다.
+    #
+    # 이 자리에 담기는 것은 문서에서 추출되는 원천 지표다. 계산으로 만들어지는 요청 개념은
+    # derived_metric에 담는다. 파생 개념을 이 자리에 담으면 그대로 추출 계층으로 넘어가고,
+    # 계산으로 답할 수 있는 질문이 '지원하지 않는 지표'로 막힌다.
     metric: str | None = METRIC_REVENUE
+    # 사용자가 요청한 파생 개념. metric과 서로 배타다.
+    #
+    # 이 값을 만들려면 어떤 원천 지표가 필요한지는 담지 않는다. agent.derived_metrics의
+    # 대응표에서 전부 파생되므로, 계획에 함께 담으면 같은 질문에 대응표와 계획이 서로 다른
+    # 답을 갖는 순간이 생긴다.
+    derived_metric: DerivedMetric | None = None
     # 질문이 월까지 지정한 경우. Q13처럼 원공시를 월 단위로 지목할 때 쓴다.
     month: int | None = None
     # 정정·후속 문서를 어디까지 볼 것인가. 값은 Contract v0.1의 ChainPolicy를 따른다.
@@ -244,6 +267,18 @@ class QueryPlan:
 
         if not self.years:
             raise ValueError("years는 최소 한 개의 연도를 담아야 합니다.")
+
+        # 원천 지표와 파생 개념을 동시에 담지 않는다.
+        #
+        # 둘 다 담기면 이 계획을 읽는 쪽이 무엇을 답해야 하는지 스스로 골라야 하고, 무엇을
+        # 골랐는지는 계획 어디에도 남지 않는다. companies·years를 생성 시점에 막는 것과 같은
+        # 이유로, 두 정본이 공존할 수 있는 상태 자체를 만들지 않는다.
+        if self.metric is not None and self.derived_metric is not None:
+            raise ValueError(
+                "metric과 derived_metric을 함께 담을 수 없습니다: "
+                f"metric={self.metric!r}, derived_metric={self.derived_metric!r}. "
+                "원천 지표와 파생 개념 중 하나만 정본입니다."
+            )
 
     @property
     def year(self) -> int:
@@ -484,6 +519,58 @@ def _find_metric(question: str) -> str | None:
     return None
 
 
+def _find_derived_metric(question: str) -> tuple[DerivedMetric, str] | None:
+    """
+    질문에서 파생 개념을 읽는다. 없으면 None이며 추측하지 않는다.
+
+    찾은 표기를 함께 돌려준다. 원천 지표를 읽기 전에 그 표기를 질문에서 걷어내야 하기
+    때문이다(_resolve_requested_metrics 참조).
+    """
+    for token, metric in DERIVED_METRIC_TOKENS:
+        if token in question:
+            return metric, token
+
+    return None
+
+
+def _resolve_requested_metrics(question: str) -> tuple[str | None, DerivedMetric | None]:
+    """
+    질문이 요청한 지표를 읽는다. 원천 지표와 파생 개념을 각각 돌려준다.
+
+    파생 개념을 먼저 본다:
+        원천 지표 표기가 파생지표 표기 안에 들어 있을 수 있다. "영업이익률"이 "영업이익"을
+        품고 있는 것이 그 경우다. 원천 지표를 먼저 읽으면 영업이익률을 물은 질문이
+        영업이익으로 분류되고, 그렇게 나온 답은 형식이 맞아 틀렸다는 사실이 드러나지 않는다.
+
+        그래서 파생 개념을 먼저 찾고, 찾았으면 그 표기를 걷어낸 나머지에서 원천 지표를
+        읽는다. 순서만 정하면 두 판정이 같은 글자를 각각 세므로 표기를 소비한다. 이번 범위의
+        원천 어휘에는 "영업이익"이 없지만, 나중에 그것을 추가하는 작업이 이 판정을 조용히
+        뒤집지 못하도록 지금 구조로 막아 둔다.
+
+    둘 다 읽히면 고르지 않는다:
+        "매출이랑 영업이익률"처럼 서로 다른 두 지표를 함께 물으면 한쪽만으로는 답이 되지
+        않는다. 조용히 하나를 고르면 나머지를 물었다는 사실이 결과 어디에도 남지 않는다.
+    """
+    found = _find_derived_metric(question)
+
+    if found is None:
+        return _find_metric(question), None
+
+    derived, token = found
+    source = _find_metric(question.replace(token, " "))
+
+    if source is not None:
+        raise UnsupportedQuestionError(
+            reason="unsupported_metric",
+            detail=(
+                f"질문이 원천 지표({source})와 파생지표({derived.value})를 함께 묻고 "
+                "있습니다. 한쪽만 골라 답하지 않습니다."
+            ),
+        )
+
+    return None, derived
+
+
 def _extract_metric(question: str) -> str:
     metric = _find_metric(question)
 
@@ -553,8 +640,16 @@ def _build_cross_entity_compare_plan(
     지표와 회계기준은 느슨하게 읽는다. 이 계획을 실행할 handler가 없으므로 여기서 거절하면
     막힌 이유가 'Pattern D 미구현'이 아니라 '지표를 모르겠다'로 바뀌어, 무엇을 구현하면
     풀리는 질문인지가 결과에서 사라진다.
+
+    한 가지만 예외다. 원천 지표와 파생지표를 함께 물은 질문은 여기서 막는다. 그것은 지표를
+    모르는 상태가 아니라 한쪽을 골라야만 답이 되는 상태이고, 골라 담으면 나머지를 물었다는
+    사실이 사라진다(_resolve_requested_metrics 참조).
+
+    Q11("영업이익률이 더 높은 곳은 어디야?")의 파생 개념은 Pattern C와 같은 대응표에서 읽는다.
+    비교 축이 기업인지 기간인지는 "영업이익률이 무엇에서 나오는가"와 무관하다.
     """
     accounting_scope, scope_explicit = _extract_accounting_scope(question)
+    metric, derived_metric = _resolve_requested_metrics(question)
 
     return QueryPlan(
         question=question.strip(),
@@ -562,7 +657,8 @@ def _build_cross_entity_compare_plan(
         years=_require_years(_extract_years(question)),
         intent=INTENT_CROSS_ENTITY_COMPARE,
         accounting_scope=accounting_scope,
-        metric=_find_metric(question),
+        metric=metric,
+        derived_metric=derived_metric,
         accounting_scope_explicit=scope_explicit,
     )
 
@@ -582,8 +678,16 @@ def _build_temporal_compare_plan(
 
     지표와 회계기준은 느슨하게 읽는다. 이 계획을 실행할 handler가 없으므로 여기서 거절하면
     막힌 이유가 'Pattern C 미구현'이 아니라 '지표를 모르겠다'로 바뀌어, 무엇을 구현하면
-    풀리는 질문인지가 결과에서 사라진다. Q08("영업이익률이 2024년이랑 2025년에 어떻게
-    달라졌어?")이 그 경우다.
+    풀리는 질문인지가 결과에서 사라진다.
+
+    한 가지만 예외다. 원천 지표와 파생지표를 함께 물은 질문은 여기서 막는다. 그것은 지표를
+    모르는 상태가 아니라 한쪽을 골라야만 답이 되는 상태이고, 골라 담으면 나머지를 물었다는
+    사실이 사라진다(_resolve_requested_metrics 참조).
+
+    Q08("영업이익률이 2024년이랑 2025년에 어떻게 달라졌어?")의 영업이익률은 원천 지표가
+    아니라 파생 개념이므로 derived_metric에 담긴다. 그것을 만들려면 어떤 원천 지표가 필요한지는
+    여기서 정하지 않는다. 계획은 무엇을 물었는지까지만 담고, 무엇을 확보하고 계산할지는 이
+    계획을 실행하는 쪽이 대응표를 보고 정한다.
 
     확보한 절대연도는 years에 그대로 담는다. 첫 연도를 골라 담지 않으며, 그렇게 하면 두
     기간을 물은 질문에 한 연도만 남아 F6-02가 재현된다.
@@ -598,6 +702,7 @@ def _build_temporal_compare_plan(
     이미 갖고 있으므로, 그때 agent -> common 변환 경계에서 정한다.
     """
     accounting_scope, scope_explicit = _extract_accounting_scope(question)
+    metric, derived_metric = _resolve_requested_metrics(question)
 
     listed = ", ".join(str(year) for year in years)
 
@@ -614,7 +719,8 @@ def _build_temporal_compare_plan(
         years=years,
         intent=INTENT_TEMPORAL_COMPARE,
         accounting_scope=accounting_scope,
-        metric=_find_metric(question),
+        metric=metric,
+        derived_metric=derived_metric,
         accounting_scope_explicit=scope_explicit,
         warnings=(f"{detail} 시계열 비교로 해석했습니다.",),
     )

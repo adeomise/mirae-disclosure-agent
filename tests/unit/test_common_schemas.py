@@ -516,6 +516,7 @@ def test_not_comparable_is_completed_unanswerable_canonical_reason() -> None:
         "events": [],
         "event_links": [],
         "event_histories": [],
+        "resolved_event_states": [],
         "evidence": [],
         "calculations": [],
         "comparisons": [],

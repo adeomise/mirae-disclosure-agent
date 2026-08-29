@@ -478,6 +478,69 @@ def test_exact_collection_count_mismatch_fails(counts, failure_field) -> None:
     assert any(item.startswith(failure_field) for item in failures)
 
 
+def test_comparisons_exact_count_match_passes() -> None:
+    actual = prediction(
+        "case",
+        comparisons=[
+            {
+                "comparison_id": "comparison-1",
+                "left": {"input_type": "fact", "input_id": "fact-1"},
+                "right": {"input_type": "fact", "input_id": "fact-2"},
+                "relation": "left_greater",
+            }
+        ],
+    )
+
+    assert compare_prediction(
+        answerable_gold("case", counts={"comparisons": 1}), actual
+    ) == []
+
+
+def test_comparisons_exact_count_mismatch_fails() -> None:
+    failures = compare_prediction(
+        answerable_gold("case", counts={"comparisons": 1}), prediction("case")
+    )
+
+    assert "counts.comparisons: expected 1, got 0" in failures
+
+
+def test_unspecified_comparisons_count_preserves_existing_behavior() -> None:
+    actual = prediction(
+        "case",
+        comparisons=[
+            {
+                "comparison_id": "comparison-1",
+                "left": {"input_type": "fact", "input_id": "fact-1"},
+                "right": {"input_type": "fact", "input_id": "fact-2"},
+                "relation": "equal",
+            }
+        ],
+    )
+
+    assert compare_prediction(answerable_gold("case"), actual) == []
+
+
+def test_existing_exact_collection_counts_still_pass() -> None:
+    actual = prediction(
+        "case",
+        calculations=[
+            {
+                "calculation_id": "calculation-1",
+                "operation": "difference",
+                "inputs": [{"input_type": "fact", "input_id": "fact-1"}],
+            }
+        ],
+    )
+
+    assert compare_prediction(
+        answerable_gold(
+            "case",
+            counts={"facts": 1, "evidence": 1, "calculations": 1},
+        ),
+        actual,
+    ) == []
+
+
 def test_multiple_fact_expectations_match_distinct_facts() -> None:
     gold = answerable_gold(
         "case",

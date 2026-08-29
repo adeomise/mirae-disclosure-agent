@@ -28,6 +28,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from disclosure_agent.event.correction_fields import resolve_correction_field
+
 EVENT_SUPPLY_CONTRACT = "supply_contract"
 EVENT_FACILITY_INVESTMENT = "facility_investment"
 
@@ -302,37 +304,7 @@ def match_correction_field(
     확실하지 않은 값은 억지로 추론하지 않고 None으로 둔다.
     """
 
-    field_key = normalize_label(raw_field)
-
-    if event_type == EVENT_SUPPLY_CONTRACT:
-        unique_aliases = {
-            "계약상대": "counterparty",
-            "계약금액": "contract_amount",
-            "체결계약명": "contract_name",
-            "계약(수주)일자": "contract_date",
-            "판매ㆍ공급지역": "supply_region",
-            "기타투자판단과관련한중요사항": "notes",
-        }
-
-    elif event_type == EVENT_FACILITY_INVESTMENT:
-        unique_aliases = {
-            "투자금액": "investment_amount",
-            "투자기간-종료일": "investment_end_date",
-            "투자구분": "investment_type",
-            "투자대상": "investment_target",
-            "투자목적": "investment_purpose",
-            "이사회결의일(결정일)": "board_resolution_date",
-            "기타투자판단과관련한중요사항": "notes",
-        }
-
-    else:
-        return None
-
-    for alias, canonical in unique_aliases.items():
-        if alias in field_key:
-            return canonical
-
-    return None
+    return resolve_correction_field(raw_field, event_type=event_type)
 
 
 # ---------------------------------------------------------------------------

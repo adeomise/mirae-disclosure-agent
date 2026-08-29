@@ -131,6 +131,11 @@ def test_facility_investment_correction_fields_are_canonicalized(tmp_path: Path)
             <td>1,980,100,000,000</td>
             <td>2,009,800,000,000</td>
           </tr>
+          <tr>
+            <td>5. 이사회결의일(결정일)</td>
+            <td>2024-12-17</td>
+            <td>2024-12-18</td>
+          </tr>
         </table>
         """,
     )
@@ -140,6 +145,7 @@ def test_facility_investment_correction_fields_are_canonicalized(tmp_path: Path)
     assert [change["canonical_field"] for change in changes] == [
         "investment_end_date",
         "investment_amount",
+        "board_resolution_date",
     ]
     assert changes[0]["before"] == "2025-09-30"
     assert changes[0]["after"] == "2025-04-01"

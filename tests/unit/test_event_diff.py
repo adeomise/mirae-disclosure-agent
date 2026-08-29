@@ -14,6 +14,13 @@ from typing import Any
 
 import pytest
 
+from disclosure_agent.event.correction_fields import (
+    FIELD_BOARD_RESOLUTION_DATE,
+    HISTORY_CANONICAL_FIELDS,
+    iter_correction_aliases,
+    normalize_correction_label,
+    resolve_correction_field,
+)
 from disclosure_agent.event.diff import (
     FIELD_CONTRACT_AMOUNT,
     FIELD_CONTRACT_DATE,
@@ -32,6 +39,7 @@ from disclosure_agent.event.diff import (
     resolve_field_name,
     unmapped_changes,
 )
+from disclosure_agent.event.extractor import match_correction_field
 
 # --------------------------------------------------------------------------
 # 1. 필드 이름 대응
@@ -56,6 +64,7 @@ from disclosure_agent.event.diff import (
         ("세부내용", FIELD_CONTRACT_DETAIL),
         ("2. 투자내역 - 투자금액(원)", FIELD_INVESTMENT_AMOUNT),
         ("4. 투자기간 - 종료일", FIELD_INVESTMENT_END_DATE),
+        ("이사회결의일(결정일)", FIELD_BOARD_RESOLUTION_DATE),
     ],
 )
 def test_field_aliases_resolve_to_semantic_names(raw_field: str, expected: str) -> None:
@@ -66,6 +75,48 @@ def test_correction_table_and_body_row_names_meet_at_the_same_field() -> None:
     """이름이 다르면 같은 필드의 이력을 이어 붙일 수 없다."""
     assert resolve_field_name("계약기간 종료일") == resolve_field_name("종료일")
     assert resolve_field_name("계약금액(원)") == resolve_field_name("계약금액")
+
+
+def test_board_resolution_alias_uses_one_normalization_contract() -> None:
+    assert normalize_correction_label("이사회결의일(결정일)") == "이사회결의일"
+    assert (
+        resolve_correction_field(
+            " 5.  이사회결의일(결정일) ",
+            event_type="facility_investment",
+        )
+        == FIELD_BOARD_RESOLUTION_DATE
+    )
+
+
+@pytest.mark.parametrize(
+    ("event_type", "alias", "canonical_field"),
+    list(iter_correction_aliases()),
+)
+def test_shared_correction_aliases_round_trip(
+    event_type: str,
+    alias: str,
+    canonical_field: str,
+) -> None:
+    assert (
+        resolve_correction_field(alias, event_type=event_type)
+        == canonical_field
+    )
+
+@pytest.mark.parametrize(
+    ("event_type", "alias", "canonical_field"),
+    list(iter_correction_aliases()),
+)
+def test_extractor_and_history_diff_share_supported_correction_vocabulary(
+    event_type: str,
+    alias: str,
+    canonical_field: str,
+) -> None:
+    assert match_correction_field(event_type, alias) == canonical_field
+
+    if canonical_field in HISTORY_CANONICAL_FIELDS:
+        assert resolve_field_name(alias) == canonical_field
+    else:
+        assert resolve_field_name(alias) is None
 
 
 @pytest.mark.parametrize(
@@ -83,7 +134,7 @@ def test_unit_suffix_is_stripped_only_at_the_end() -> None:
 
 @pytest.mark.parametrize(
     "raw_field",
-    ["기타 투자판단과 관련한 중요사항", "대규모법인여부", "최근매출액", ""],
+    ["대규모법인여부", "최근매출액", ""],
 )
 def test_unknown_field_names_resolve_to_none(raw_field: str) -> None:
     """모른다는 사실을 None으로 남긴다. '변경 없음'과 다르다."""
@@ -147,7 +198,7 @@ def test_unmapped_change_still_keeps_its_values() -> None:
     changes = normalize_changes(
         [
             {
-                "raw_field": "기타 투자판단과 관련한 중요사항",
+                "raw_field": "대규모법인여부",
                 "before": "해당사항 없음",
                 "after": "이사회 결의일 변경",
             }
@@ -155,7 +206,7 @@ def test_unmapped_change_still_keeps_its_values() -> None:
     )
 
     assert changes[0].field is None
-    assert changes[0].raw_field == "기타 투자판단과 관련한 중요사항"
+    assert changes[0].raw_field == "대규모법인여부"
     assert changes[0].before == "해당사항 없음"
     assert changes[0].after == "이사회 결의일 변경"
 
@@ -243,14 +294,14 @@ def test_unmapped_changes_are_reportable() -> None:
     changes = normalize_changes(
         [
             {"raw_field": "계약금액(원)", "before": "A", "after": "B"},
-            {"raw_field": "기타 투자판단과 관련한 중요사항", "before": "C", "after": "D"},
+            {"raw_field": "대규모법인여부", "before": "C", "after": "D"},
         ]
     )
 
     unmapped = unmapped_changes(changes)
 
     assert len(unmapped) == 1
-    assert unmapped[0].raw_field == "기타 투자판단과 관련한 중요사항"
+    assert unmapped[0].raw_field == "대규모법인여부"
 
 
 def test_field_change_serializes(make_exchange_document) -> None:

@@ -353,6 +353,46 @@ def test_out_of_data_range_uses_the_definitive_wording() -> None:
     assert answer != UNAVAILABLE_MESSAGE_BY_REASON[AnswerabilityReason.NOT_FOUND]
 
 
+def test_not_comparable_uses_the_comparability_wording_without_leaking_detail() -> None:
+    internal_detail = "SYNTHETIC-INTERNAL-COMPARABILITY-DIAGNOSTIC"
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=AnswerabilityReason.NOT_COMPARABLE,
+        answerability_detail=AnswerabilityDetail(
+            stage="comparability_validation",
+            reason="synthetic_internal_reason",
+            detail=internal_detail,
+        ),
+    )
+
+    response = build_answer_response(result)
+
+    assert response.answer == UNAVAILABLE_MESSAGE_BY_REASON[AnswerabilityReason.NOT_COMPARABLE]
+    assert response.status is AnswerabilityStatus.UNANSWERABLE
+    assert response.reason is AnswerabilityReason.NOT_COMPARABLE
+    assert internal_detail not in response.answer
+
+
+def test_not_comparable_preserves_available_facts_and_evidence() -> None:
+    fact = make_fact()
+    evidence = make_evidence()
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=AnswerabilityReason.NOT_COMPARABLE,
+        facts=[fact],
+        evidence=[evidence],
+    )
+
+    response = build_answer_response(result)
+
+    assert response.facts == [fact]
+    assert response.evidence == [evidence]
+    assert result.calculations == []
+    assert result.comparisons == []
+
+
 def test_investment_advice_refusal_is_deterministic() -> None:
     response = build_answer_response(refused_result(REASON_INVESTMENT_ADVICE))
 
@@ -1191,21 +1231,8 @@ def test_mapped_and_unmapped_reasons_exhaust_the_contract_without_overlap() -> N
 
     assert mapped.isdisjoint(unmapped)
     assert mapped | unmapped == set(AnswerabilityReason)
-    assert AnswerabilityReason.NOT_COMPARABLE in unmapped
-
-
-def test_not_comparable_fails_before_message_lookup() -> None:
-    result = AgentExecutionResult(
-        execution_status=ExecutionStatus.COMPLETED,
-        answerability_status=AnswerabilityStatus.UNANSWERABLE,
-        answerability_reason=AnswerabilityReason.NOT_COMPARABLE,
-    )
-
-    with pytest.raises(UnsupportedResultShapeError) as error:
-        build_answer_response(result)
-
-    assert "UNANSWERABLE에 실릴 수 없는 answerability_reason" in str(error.value)
-    assert "UNAVAILABLE_MESSAGE_BY_REASON" not in str(error.value)
+    assert AnswerabilityReason.NOT_COMPARABLE in mapped
+    assert AnswerabilityReason.NOT_COMPARABLE not in unmapped
 
 
 def test_reason_sentences_are_distinct() -> None:

@@ -334,6 +334,10 @@ UNAVAILABLE_MESSAGE_BY_REASON: dict[AnswerabilityReason, str] = {
     AnswerabilityReason.INSUFFICIENT_EVIDENCE: (
         "요청하신 항목의 근거를 원문에서 확인하지 못해 답변하지 않습니다."
     ),
+    AnswerabilityReason.NOT_COMPARABLE: (
+        "확보한 값들이 비교 기준·단위·개념 등의 조건을 충족하지 않아 "
+        "직접 비교할 수 없습니다."
+    ),
     # 문서 목록이라는 완전한 집합과 대조한 결과다. 확정 표현을 쓴다.
     AnswerabilityReason.OUT_OF_DATA_RANGE: (
         "요청하신 기간의 공시 데이터를 보유하고 있지 않습니다."
@@ -361,9 +365,7 @@ UNAVAILABLE_MESSAGE_BY_REASON: dict[AnswerabilityReason, str] = {
 
 # Contract에는 있지만 사용자 문구가 아직 확정되지 않아 Answer Builder가 지원하지 않는 사유.
 # 문구가 확정되면 UNAVAILABLE_MESSAGE_BY_REASON으로 옮기고 이 집합에서 제거한다.
-UNMAPPED_ANSWERABILITY_REASONS: frozenset[AnswerabilityReason] = frozenset(
-    {AnswerabilityReason.NOT_COMPARABLE}
-)
+UNMAPPED_ANSWERABILITY_REASONS: frozenset[AnswerabilityReason] = frozenset()
 
 # 정책 거부 문장. answerability_detail.reason이 고른다.
 #

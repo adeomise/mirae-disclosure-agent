@@ -17,6 +17,7 @@ import pytest
 from disclosure_agent.agent import router
 from disclosure_agent.agent.handlers.event_history import handle_event_history
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
+from disclosure_agent.agent.handlers.temporal_compare import handle_temporal_compare
 from disclosure_agent.agent.query_analyzer import (
     INTENT_CROSS_ENTITY_COMPARE,
     INTENT_DOCUMENT_SUMMARY,
@@ -71,9 +72,23 @@ def test_event_history_intent_resolves_to_pattern_e_handler() -> None:
     assert router.resolve_handler(INTENT_EVENT_HISTORY) is handle_event_history
 
 
+def test_temporal_compare_intent_resolves_to_pattern_c_handler() -> None:
+    """
+    Contract v0.1의 Intent에 없는 값도 등록된다.
+
+    Router가 dispatch하는 것은 agent의 QueryPlan이고 그 intent는 문자열이다. 이 key를
+    등록하려고 공유 Contract의 enum을 넓힐 이유가 없다.
+    """
+    assert router.resolve_handler(INTENT_TEMPORAL_COMPARE) is handle_temporal_compare
+
+
 def test_supported_intents_reports_only_registered_handlers() -> None:
-    """Contract v0.1의 Intent 2개가 등록돼 있다."""
-    assert router.supported_intents() == (INTENT_EVENT_HISTORY, INTENT_SINGLE_FACT)
+    """Pattern A / C / E 셋이 등록돼 있다."""
+    assert router.supported_intents() == (
+        INTENT_EVENT_HISTORY,
+        INTENT_SINGLE_FACT,
+        INTENT_TEMPORAL_COMPARE,
+    )
 
 
 def test_dispatch_passes_plan_and_context_to_handler(
@@ -116,7 +131,6 @@ def test_dispatch_passes_plan_and_context_to_handler(
     "intent",
     [
         INTENT_DOCUMENT_SUMMARY,
-        INTENT_TEMPORAL_COMPARE,
         INTENT_CROSS_ENTITY_COMPARE,
         INTENT_UNANSWERABLE_CHECK,
     ],
@@ -125,7 +139,13 @@ def test_known_but_unimplemented_intent_is_blocked(
     single_fact_plan: QueryPlan,
     intent: str,
 ) -> None:
-    """설계 어휘에는 있으나 handler가 없는 intent는 구현 대기로 구분해 막는다."""
+    """
+    설계 어휘에는 있으나 handler가 없는 intent는 구현 대기로 구분해 막는다.
+
+    temporal_compare는 이 목록에서 빠졌다. handler가 등록됐기 때문이며, 그 Pattern이 다루지
+    못하는 계획을 막는 자리는 Router가 아니라 handler 입구다
+    (tests/integration/test_pattern_c.py 3절).
+    """
     plan = dataclasses.replace(single_fact_plan, intent=intent)
 
     result = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
@@ -149,7 +169,7 @@ def test_unknown_intent_is_blocked_with_distinct_reason(single_fact_plan: QueryP
 
 def test_blocked_route_does_not_invent_a_fact(single_fact_plan: QueryPlan) -> None:
     """가장 가까운 handler로 대신 처리하지 않는다."""
-    plan = dataclasses.replace(single_fact_plan, intent=INTENT_TEMPORAL_COMPARE)
+    plan = dataclasses.replace(single_fact_plan, intent=INTENT_DOCUMENT_SUMMARY)
 
     result = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
@@ -190,15 +210,15 @@ def test_register_handler_makes_a_new_intent_routable(
     single_fact_plan: QueryPlan,
     isolated_registry: dict[str, Any],
 ) -> None:
-    """Pattern C는 handler 등록만으로 붙을 수 있어야 한다."""
-    plan = dataclasses.replace(single_fact_plan, intent=INTENT_TEMPORAL_COMPARE)
+    """아직 없는 Pattern은 handler 등록만으로 붙을 수 있어야 한다."""
+    plan = dataclasses.replace(single_fact_plan, intent=INTENT_CROSS_ENTITY_COMPARE)
 
     before = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
     assert before.execution_status is ExecutionStatus.BLOCKED
 
     router.register_handler(
-        INTENT_TEMPORAL_COMPARE,
+        INTENT_CROSS_ENTITY_COMPARE,
         lambda plan, **context: AgentExecutionResult(
             execution_status=ExecutionStatus.COMPLETED,
             warnings=[plan.intent],
@@ -208,9 +228,13 @@ def test_register_handler_makes_a_new_intent_routable(
     after = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
     assert after.execution_status is ExecutionStatus.COMPLETED
-    assert after.warnings == [INTENT_TEMPORAL_COMPARE]
+    assert after.warnings == [INTENT_CROSS_ENTITY_COMPARE]
 
 
 def test_registry_is_restored_between_tests() -> None:
     """isolated_registry가 실제로 되돌리는지 확인한다."""
-    assert router.supported_intents() == (INTENT_EVENT_HISTORY, INTENT_SINGLE_FACT)
+    assert router.supported_intents() == (
+        INTENT_EVENT_HISTORY,
+        INTENT_SINGLE_FACT,
+        INTENT_TEMPORAL_COMPARE,
+    )

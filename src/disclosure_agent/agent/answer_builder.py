@@ -71,6 +71,23 @@ STAGE_PARSING = "parsing"
 STAGE_EXTRACTION = "extraction"
 STAGE_EVIDENCE = "evidence"
 
+# handler가 계획을 받아 들고 "이 모양은 내가 실행할 수 없다"고 판정한 단계.
+#
+# routing과 나누는 이유:
+#     routing/unimplemented_intent는 "그 intent를 맡을 handler가 없다"이다. handler가 등록된
+#     뒤에는 그 진술이 거짓이 된다. Pattern C는 등록되어 있고, 다만 계획의 모양이 이번
+#     구현 범위 밖일 뿐이다. 같은 사유로 뭉개면 "Pattern C를 구현하면 풀린다"와 "Pattern C의
+#     어느 부분을 더 구현해야 풀린다"가 구분되지 않는다.
+#
+# 코퍼스를 열기 전이므로 답변 가능성을 판정하지 않는다. 그 성질은 routing과 같다.
+STAGE_PATTERN_ENTRY = "pattern_entry"
+
+# 두 값을 함께 써도 되는지 판정하는 단계(C9 Comparability Validation).
+#
+# 계산 입력 검증(guard①)과 비교 가능성 검증(guard②)이 모두 여기에 적힌다. 둘은 적용 시점이
+# 다를 뿐 같은 판정이며(agent_patterns.md), 무엇이 어긋났는지는 reason이 나눈다.
+STAGE_COMPARABILITY = "comparability"
+
 # 내부 결과를 공통 Contract 타입으로 옮기는 단계.
 #
 # 다른 stage와 달리 원문을 더 읽지 않는다. 확정된 값을 옮기지 못한 경우이므로 값을 추측해
@@ -94,6 +111,25 @@ REASON_AMBIGUOUS_CANDIDATES = "ambiguous_candidates"
 # Pattern E가 자체 판정으로 만드는 사유.
 REASON_NO_ORIGINAL_FILING = "no_original_filing"
 REASON_AMBIGUOUS_ROOT = "ambiguous_root"
+
+# Pattern C가 계획 입구에서 만드는 사유.
+#
+# 넷으로 나눈 이유는 후속 작업이 서로 다르기 때문이다. 비교 대상이 하나가 아닌 것과, 기간이
+# 둘이 아닌 것과, 파생 개념이 아닌 것과, 대응표의 연산을 아직 만들 수 없는 것은 각각 다른
+# 구현을 요구한다. 하나로 묶으면 결과만 보고 무엇을 구현하면 풀리는지 알 수 없다.
+REASON_UNSUPPORTED_COMPARISON_SUBJECT = "unsupported_comparison_subject"
+REASON_UNSUPPORTED_COMPARISON_PERIOD = "unsupported_comparison_period"
+REASON_UNSUPPORTED_COMPARISON_METRIC = "unsupported_comparison_metric"
+REASON_UNSUPPORTED_DERIVED_OPERATION = "unsupported_derived_operation"
+
+# agent.calculator가 계산을 거부한 사유.
+#
+# 둘을 나누는 이유는 성질이 다르기 때문이다. 앞쪽은 "값은 읽었지만 함께 쓸 수 없다"는
+# 판정이고, 뒤쪽은 "그 값으로는 산술 자체가 성립하지 않는다"이다. 전자만 답변 가능성
+# 판정(NOT_COMPARABLE)으로 나가고, 후자는 대응표에 없어 실행 중단으로 남는다.
+REASON_INCOMPARABLE_CALCULATION_INPUTS = "incomparable_calculation_inputs"
+REASON_INCOMPARABLE_PERIODS = "incomparable_periods"
+REASON_UNUSABLE_CALCULATION_INPUT = "unusable_calculation_input"
 
 # 확정된 내부 값을 공통 Contract 타입으로 옮기지 못한 경우.
 REASON_UNCONVERTIBLE_FACT = "unconvertible_fact"

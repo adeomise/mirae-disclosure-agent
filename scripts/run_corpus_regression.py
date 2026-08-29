@@ -67,7 +67,11 @@ SUPPORTED_EXPECTATION_KEYS: frozenset[str] = frozenset(
         "min_event_links",
         "event_histories",
         "chain_complete",
+        "calculations",
+        "comparisons",
+        "calculation_units",
         "evidence_linkage",
+        "result_input_linkage",
         "conversion_gaps_pending",
     }
 )
@@ -247,10 +251,12 @@ def _check_fact_accounting_scope(
 
 def _check_evidence_linkage(failures: list[str], result: AgentExecutionResult) -> None:
     """
-    Fact와 FieldChange가 가리키는 Evidence가 실제로 결과 안에 있는지 본다.
+    Fact와 CalculationResult, FieldChange가 가리키는 Evidence가 결과 안에 있는지 본다.
 
     근거 없는 Fact는 계산에도 답변에도 쓸 수 없다는 것이 설계 원칙이므로, 건수만 세는
     검사로는 회귀를 잡지 못한다. 연결이 끊긴 채 Evidence 개수만 맞는 결과가 나올 수 있다.
+
+    계산 결과도 같은 규칙을 따른다. 원문에 없는 값일수록 어디서 나왔는지가 남아 있어야 한다.
     """
     known = {evidence.evidence_id for evidence in result.evidence}
 
@@ -267,6 +273,22 @@ def _check_evidence_linkage(failures: list[str], result: AgentExecutionResult) -
                 f"{dangling}"
             )
 
+    for calculation in result.calculations:
+        if not calculation.evidence_ids:
+            failures.append(
+                f"evidence_linkage: calculation '{calculation.calculation_id}' "
+                "has no evidence_ids"
+            )
+            continue
+
+        dangling = sorted(set(calculation.evidence_ids) - known)
+
+        if dangling:
+            failures.append(
+                f"evidence_linkage: calculation '{calculation.calculation_id}' "
+                f"references unknown evidence {dangling}"
+            )
+
     for history in result.event_histories:
         for change in history.changes:
             for side in ("before_evidence_id", "after_evidence_id"):
@@ -277,6 +299,70 @@ def _check_evidence_linkage(failures: list[str], result: AgentExecutionResult) -
                         f"evidence_linkage: change '{change.field_name}'.{side} references "
                         f"unknown evidence '{evidence_id}'"
                     )
+
+
+def _check_result_input_linkage(failures: list[str], result: AgentExecutionResult) -> None:
+    """
+    파생 결과가 가리키는 입력이 같은 결과 안에 있는지 본다.
+
+    값과 근거가 맞아도 "무엇에서 나온 값인가"가 결과 밖을 가리키면 되짚을 수 없다.
+    evaluation/runner.py의 result_input_references 검사와 같은 성질을 실측 경로에서도 본다.
+    """
+    known: dict[str, set[str]] = {
+        "fact": {fact.fact_id for fact in result.facts},
+        "calculation": {item.calculation_id for item in result.calculations},
+    }
+
+    for calculation in result.calculations:
+        if not calculation.inputs:
+            failures.append(
+                f"result_input_linkage: calculation '{calculation.calculation_id}' "
+                "has no inputs"
+            )
+            continue
+
+        dangling = sorted(
+            f"{reference.input_type.value}:{reference.input_id}"
+            for reference in calculation.inputs
+            if reference.input_id not in known[reference.input_type.value]
+        )
+
+        if dangling:
+            failures.append(
+                f"result_input_linkage: calculation '{calculation.calculation_id}' "
+                f"references unknown inputs {dangling}"
+            )
+
+    for comparison in result.comparisons:
+        dangling = sorted(
+            f"{reference.input_type.value}:{reference.input_id}"
+            for reference in (comparison.left, comparison.right)
+            if reference.input_id not in known[reference.input_type.value]
+        )
+
+        if dangling:
+            failures.append(
+                f"result_input_linkage: comparison '{comparison.comparison_id}' "
+                f"references unknown inputs {dangling}"
+            )
+
+
+def _check_calculation_units(
+    failures: list[str],
+    expected: Any,
+    result: AgentExecutionResult,
+) -> None:
+    """
+    계산 결과의 단위를 순서대로 대조한다.
+
+    값은 담지 않는다. 실제 공시 수치를 저장소에 적지 않는다는 규칙 때문이며, 단위는 값이
+    아니라 분류이므로 적을 수 있다. 백분율과 percentage point가 뒤바뀌면 받는 쪽이 차이를
+    비율로 읽으므로 개수만으로는 잡히지 않는다.
+    """
+    actual = [calculation.unit for calculation in result.calculations]
+
+    if actual != list(expected):
+        failures.append(f"calculation_units: expected {list(expected)}, got {actual}")
 
 
 def check_expectations(
@@ -360,6 +446,19 @@ def check_expectations(
                 result.event_histories[0].chain_complete,
             )
 
+    if "calculations" in expect:
+        _check_exact_count(
+            failures, "calculations", expect["calculations"], len(result.calculations)
+        )
+
+    if "comparisons" in expect:
+        _check_exact_count(
+            failures, "comparisons", expect["comparisons"], len(result.comparisons)
+        )
+
+    if "calculation_units" in expect:
+        _check_calculation_units(failures, expect["calculation_units"], result)
+
     if "conversion_gaps_pending" in expect:
         pending = sum(1 for gap in result.conversion_gaps if gap.pending_decision)
         _check_exact_count(
@@ -371,6 +470,9 @@ def check_expectations(
 
     if expect.get("evidence_linkage"):
         _check_evidence_linkage(failures, result)
+
+    if expect.get("result_input_linkage"):
+        _check_result_input_linkage(failures, result)
 
     return failures
 
@@ -402,6 +504,11 @@ def summarize_result(result: AgentExecutionResult) -> dict[str, Any]:
         "chain_complete": (
             result.event_histories[0].chain_complete if result.event_histories else None
         ),
+        "calculations": len(result.calculations),
+        "comparisons": len(result.comparisons),
+        # 연산과 단위는 분류이므로 남긴다. 값은 남기지 않는다.
+        "calculation_operations": [item.operation for item in result.calculations],
+        "calculation_units": [item.unit for item in result.calculations],
         "warnings": len(result.warnings),
         "conversion_gaps": len(result.conversion_gaps),
         "conversion_gaps_pending": sum(
@@ -533,6 +640,8 @@ def _render_text(summary: dict[str, Any]) -> str:
         actual = record["actual"]
 
         if actual is not None:
+            units = ",".join(unit or "-" for unit in actual["calculation_units"])
+
             lines.append(
                 "         "
                 f"exec={actual['execution_status']} "
@@ -541,7 +650,9 @@ def _render_text(summary: dict[str, Any]) -> str:
                 f"facts={actual['facts']} "
                 f"scope={','.join(actual['fact_accounting_scope']) or '-'} "
                 f"evidence={actual['evidence']} "
-                f"links={actual['event_links']} histories={actual['event_histories']}"
+                f"links={actual['event_links']} histories={actual['event_histories']} "
+                f"calc={actual['calculations']}{f'({units})' if units else ''} "
+                f"comparisons={actual['comparisons']}"
             )
 
         for failure in record["failures"]:

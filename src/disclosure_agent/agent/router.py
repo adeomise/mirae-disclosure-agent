@@ -6,7 +6,8 @@
 현재 구현 범위:
 - QueryPlan.intent 하나만 보고 handler를 고른다. 문서군이나 질문 문자열을 다시 들여다보지
   않는다. 라우팅 근거를 한 곳에 모아 두어야 어떤 질문이 어디로 갔는지 재현할 수 있다.
-- 등록된 intent는 single_fact(Pattern A) 하나다.
+- 등록된 intent는 single_fact(Pattern A), event_history(Pattern E),
+  temporal_compare(Pattern C) 셋이다.
 - 등록되지 않은 intent는 조용히 다른 경로로 넘기지 않고 blocked 결과로 답한다.
 
 지원하지 않는 요청에 대한 메모:
@@ -14,6 +15,10 @@
   건수가 다르므로, 대신 처리한 결과는 형식만 맞고 근거가 틀린 답이 된다.
 - 그래서 "왜 처리할 수 없는지"를 두 가지로 나눠 답한다. 어휘에는 있으나 아직 구현되지 않은
   intent와, 어휘에 없는 intent는 후속 작업이 서로 다르다.
+- 한 intent 안에서 일부 모양만 지원하는 경우는 Router가 판정하지 않는다. intent만 보는 것이
+  이 모듈의 규약이고, 계획의 모양은 그 Pattern이 안다. temporal_compare가 그 경우이며,
+  Pattern C가 다루지 못하는 계획은 handler 입구에서 pattern_entry로 막힌다. 막는 자리가
+  옮겨졌을 뿐 축소해서 답하지 않는 것은 같다.
 
 Pattern 추가 방법:
 - agent/handlers/에 모듈을 만들고 아래 HANDLERS에 한 줄 등록한다.
@@ -33,7 +38,7 @@ Pattern 추가 방법:
 - AgentExecutionResult. 라우팅 단계에서 막힌 경우도 같은 타입으로 답한다.
 
 TODO:
-- Pattern C(temporal_compare) 등록
+- Pattern B(document_summary) / Pattern D(cross_entity_compare) 등록
 - 복합 질문의 처리 순서 정의
 """
 
@@ -49,12 +54,14 @@ from disclosure_agent.agent.answer_builder import (
 )
 from disclosure_agent.agent.handlers.event_history import handle_event_history
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
+from disclosure_agent.agent.handlers.temporal_compare import handle_temporal_compare
 from disclosure_agent.agent.normalization import (
     answerability_reason_for_policy_category,
     blocked_execution,
     refused_execution,
 )
 from disclosure_agent.agent.query_analyzer import (
+    INTENT_TEMPORAL_COMPARE,
     KNOWN_INTENTS,
     QueryPlan,
     UnsupportedQuestionError,
@@ -78,9 +85,13 @@ REASON_UNKNOWN_INTENT = "unknown_intent"
 # QueryPlan.intent가 문자열이어도 조회된다.
 Handler = Callable[..., AgentExecutionResult]
 
+# temporal_compare는 Contract v0.1의 Intent에 아직 없어 query_analyzer의 문자열 상수를 쓴다.
+# Router가 dispatch하는 것은 agent.query_analyzer.QueryPlan이고 그 intent는 문자열이므로,
+# 이 key를 등록하기 위해 공유 Contract의 enum을 넓힐 이유가 없다.
 HANDLERS: dict[str, Handler] = {
     Intent.SINGLE_FACT: handle_single_fact,
     Intent.EVENT_HISTORY: handle_event_history,
+    INTENT_TEMPORAL_COMPARE: handle_temporal_compare,
 }
 
 

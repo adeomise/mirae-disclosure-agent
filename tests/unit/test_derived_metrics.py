@@ -333,35 +333,33 @@ def test_single_period_metric_questions_still_stop_at_the_query_plan(
 
 
 # --------------------------------------------------------------------------
-# 6. 실행 — Pattern C/D는 여전히 미활성
+# 6. 실행 — 같은 대응표를 쓰는 두 Pattern의 상태가 다르다
+#
+# Pattern C(기간 축)는 등록됐고 Pattern D(기업 축)는 아직 없다. 대응표는 하나이지만 그것을
+# 읽어 실행하는 쪽은 Pattern마다 따로 붙는다는 것을 여기서 고정한다.
+#
+# Pattern C가 실제로 만드는 값과 개수는 tests/integration/test_pattern_c.py가 맡는다. 이
+# 파일은 대응표와 계획을 보는 자리이므로 실행 결과의 세부까지 다시 재지 않는다.
 # --------------------------------------------------------------------------
 
 
-def test_router_does_not_gain_a_handler() -> None:
-    """계획을 담게 됐다고 실행할 수 있게 된 것은 아니다."""
-    assert supported_intents() == ("event_history", "single_fact")
+def test_only_the_temporal_axis_gained_a_handler() -> None:
+    """계획을 담게 됐다고 두 Pattern이 함께 실행 가능해진 것은 아니다."""
+    assert supported_intents() == ("event_history", "single_fact", "temporal_compare")
 
 
-@pytest.mark.parametrize(
-    "question",
-    [
-        f"{SYNTHETIC_COMPANY} 영업이익률이 2024년이랑 2025년에 어떻게 달라졌어?",
-        f"{SYNTHETIC_COMPANY}랑 테스트전자 중에 2025년 영업이익률이 더 높은 곳은 어디야?",
-    ],
-)
-def test_derived_metric_questions_are_still_blocked_at_routing(
-    question: str,
+def test_cross_entity_derived_metric_question_is_still_blocked_at_routing(
     synthetic_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
     """
-    파생 개념을 계획에 담아도 답이 나가지는 않는다.
+    같은 파생 개념이라도 기업 축 비교는 아직 실행되지 않는다.
 
     facts와 evidence가 비어 있어야 한다. 하나라도 남으면 계산 없이 원천 값 하나를 골라
     답했다는 뜻이다.
     """
     result = answer_question(
-        question,
+        f"{SYNTHETIC_COMPANY}랑 테스트전자 중에 2025년 영업이익률이 더 높은 곳은 어디야?",
         corpus_root=nfd_corpus_root,
         manifest_path=synthetic_manifest_path,
     )
@@ -380,23 +378,33 @@ def test_derived_metric_questions_are_still_blocked_at_routing(
 
 
 @pytest.mark.corpus
-def test_q08_and_q11_are_blocked_at_routing_in_the_actual_corpus() -> None:
-    """대표 질문 원문 그대로 실행해도 결과가 같은지 본다."""
+def test_q08_is_answered_and_q11_is_still_blocked_in_the_actual_corpus() -> None:
+    """
+    대표 질문 원문 그대로 실행해 두 축의 상태 차이를 본다.
+
+    Q08은 계산까지 끝나고, Q11은 Pattern D가 없어 routing에서 막힌다. 막힌 쪽에 값이 하나도
+    없어야 한다는 것이 이 파일이 계속 지키는 성질이다.
+    """
     corpus_root = _resolve_corpus_root()
 
     if corpus_root is None:
         pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
 
-    for question in (Q08, Q11):
-        result = answer_question(question, corpus_root=corpus_root)
+    answered = answer_question(Q08, corpus_root=corpus_root)
 
-        assert result.execution_status is ExecutionStatus.BLOCKED
-        assert result.facts == []
-        assert result.evidence == []
-        assert result.calculations == []
+    assert answered.execution_status is ExecutionStatus.COMPLETED
+    assert answered.execution_issue is None
+    assert answered.calculations
 
-        issue = result.execution_issue
+    blocked = answer_question(Q11, corpus_root=corpus_root)
 
-        assert issue is not None
-        assert issue.stage == STAGE_ROUTING
-        assert issue.reason == REASON_UNIMPLEMENTED_INTENT
+    assert blocked.execution_status is ExecutionStatus.BLOCKED
+    assert blocked.facts == []
+    assert blocked.evidence == []
+    assert blocked.calculations == []
+
+    issue = blocked.execution_issue
+
+    assert issue is not None
+    assert issue.stage == STAGE_ROUTING
+    assert issue.reason == REASON_UNIMPLEMENTED_INTENT

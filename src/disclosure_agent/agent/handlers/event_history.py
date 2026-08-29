@@ -289,6 +289,7 @@ def build_event_history_result(
         root_receipt_no=root.receipt_no,
         filings=chain_candidates,
         documents=documents,
+        event_type=EVENT_TYPE,
     )
 
     conversion = to_event_history(

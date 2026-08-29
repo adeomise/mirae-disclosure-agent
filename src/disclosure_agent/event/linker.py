@@ -289,6 +289,7 @@ def build_filing_chain(
     root_receipt_no: str,
     filings: Sequence[FilingLike],
     documents: Mapping[str, Mapping[str, Any]],
+    event_type: str,
     match_document_subtype: bool = True,
 ) -> FilingChain:
     """
@@ -358,7 +359,10 @@ def build_filing_chain(
             filing=filing,
             is_correction=filing.is_correction,
             link=links.get(filing.receipt_no),
-            changes=diff_correction(documents.get(filing.receipt_no))
+            changes=diff_correction(
+                documents.get(filing.receipt_no),
+                event_type=event_type,
+            )
             if filing.is_correction
             else (),
         )

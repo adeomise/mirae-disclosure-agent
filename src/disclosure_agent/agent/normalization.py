@@ -1,7 +1,7 @@
 """Pattern 실행 결과를 공통 실행 Contract로 옮기는 정규화 계층.
 
 역할:
-- Pattern A/E가 각자의 형태로 만든 내부 결과를 common.schemas.AgentExecutionResult 하나로
+- Pattern A/C/E가 각자의 형태로 만든 내부 결과를 common.schemas.AgentExecutionResult 하나로
   옮긴다.
 - 그 과정에서 공통 Contract에 자리가 없는 정보를 조용히 버리지 않고 conversion_gaps에
   남긴다.
@@ -30,12 +30,13 @@ execution_status와 answerability_status를 나누는 기준:
     어느 사유가 어느 쪽인지는 아래 ANSWERABILITY_BY_STOP 하나가 정한다.
 
 ExecutionStatus.FAILED에 대하여:
-    이 모듈은 FAILED를 만들지 않는다. Pattern A/E는 예상한 실패를 전부 BlockedInfo로
+    이 모듈은 FAILED를 만들지 않는다. Pattern A/C/E는 예상한 실패를 전부 BlockedInfo로
     돌려주고, 예상하지 못한 예외는 삼키지 않고 호출자에게 올린다. 그 예외를 FAILED로 바꿀지는
     API/Runtime 경계의 결정이며 여기서 앞질러 정하지 않는다.
 
 입력:
-- Pattern A의 SingleFactResult, Pattern E의 EventHistoryResult
+- Pattern A의 SingleFactResult, Pattern C의 TemporalCompareResult,
+  Pattern E의 EventHistoryResult
 
 출력:
 - AgentExecutionResult
@@ -48,7 +49,7 @@ ExecutionStatus.FAILED에 대하여:
     판정 근거는 손실이 아니라 진단이므로 conversion_gaps에 넣지 않는다.
 
 TODO:
-- 계산 결과(CalculationResult) 연결
+- Pattern D(ComparisonResult) 연결
 """
 
 from __future__ import annotations
@@ -60,11 +61,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 from disclosure_agent.agent.answer_builder import (
     REASON_AMBIGUOUS_CANDIDATES,
     REASON_AMBIGUOUS_ROOT,
+    REASON_INCOMPARABLE_CALCULATION_INPUTS,
+    REASON_INCOMPARABLE_PERIODS,
     REASON_NO_MATCHING_CONTEXT,
     REASON_NO_MATCHING_FILING,
     REASON_NO_METRIC_ACODE,
     REASON_NO_ORIGINAL_FILING,
     REASON_UNCONVERTIBLE_FACT,
+    STAGE_COMPARABILITY,
     STAGE_CONTRACT_ADAPTATION,
     STAGE_EXTRACTION,
     STAGE_FILING_DISCOVERY,
@@ -88,12 +92,14 @@ from disclosure_agent.common.schemas import (
     EventLink,
     Evidence,
     ExecutionIssue,
+    Fact,
 )
 from disclosure_agent.periodic.adapter import adapt_financial_fact
 
 if TYPE_CHECKING:  # pragma: no cover - 순환 import를 만들지 않기 위한 타입 전용 import
     from disclosure_agent.agent.handlers.event_history import EventHistoryResult
     from disclosure_agent.agent.handlers.single_fact import SingleFactResult
+    from disclosure_agent.agent.handlers.temporal_compare import TemporalCompareResult
 
 # 이 정규화가 맞추는 Contract 버전. conversion_gaps의 기본값과 같아야 한다.
 TARGET_CONTRACT_VERSION = "0.1"
@@ -144,6 +150,12 @@ class Answerability:
 #         UNANSWERABLE로 보내면 코퍼스에 답이 없다는 뜻이 되어 사실과 달라진다.
 #     unsupported_metric / unsupported_accounting_scope / unimplemented_intent 등
 #         아직 구현하지 않은 요청이다. 코퍼스에 대한 판정이 아니다.
+#     unsupported_comparison_* / unsupported_derived_operation
+#         Pattern C가 계획 입구에서 막은 것이다. 위와 같은 이유로 코퍼스를 보기 전이다.
+#     unusable_calculation_input
+#         값은 확보했지만 그 값으로 산술이 성립하지 않는다(분모 0, 파싱 불가). 근거가 없는
+#         것이 아니므로 INSUFFICIENT_EVIDENCE가 아니고, 코퍼스에 답이 없다는 판정도 아니다.
+#         대응하는 Contract 값이 아직 없어 실행 중단으로 둔다.
 ANSWERABILITY_BY_STOP: dict[tuple[str, str], Answerability] = {
     (STAGE_FILING_DISCOVERY, REASON_NO_MATCHING_FILING): Answerability(
         AnswerabilityStatus.UNANSWERABLE,
@@ -174,6 +186,20 @@ ANSWERABILITY_BY_STOP: dict[tuple[str, str], Answerability] = {
     (STAGE_EXTRACTION, REASON_AMBIGUOUS_CANDIDATES): Answerability(
         AnswerabilityStatus.UNRESOLVED,
         AnswerabilityReason.AMBIGUOUS_MATCH,
+    ),
+    # 비교 가능성 판정(C9)은 코퍼스를 끝까지 읽고 값을 확보한 뒤에 내린다. 실행은 끝났고,
+    # 확보한 값으로는 답할 수 없다고 판정한 것이다.
+    #
+    # 두 사유가 같은 값으로 모이는 것은 의도된 것이다. 둘 다 "이 값들은 함께 쓸 수 없다"이며,
+    # 계산 입력이 어긋난 것인지 두 기간이 어긋난 것인지는 answerability_detail.reason이
+    # 구분한다(pattern_f_safety.md §5.1의 F3·F4와 같은 구조).
+    (STAGE_COMPARABILITY, REASON_INCOMPARABLE_CALCULATION_INPUTS): Answerability(
+        AnswerabilityStatus.UNANSWERABLE,
+        AnswerabilityReason.NOT_COMPARABLE,
+    ),
+    (STAGE_COMPARABILITY, REASON_INCOMPARABLE_PERIODS): Answerability(
+        AnswerabilityStatus.UNANSWERABLE,
+        AnswerabilityReason.NOT_COMPARABLE,
     ),
 }
 
@@ -371,6 +397,7 @@ def _stopped_execution(
     blocked: BlockedInfo,
     *,
     warnings: Sequence[str] = (),
+    facts: Sequence[Fact] = (),
     event_links: Sequence[EventLink] = (),
     evidence: Sequence[Evidence] = (),
     conversion_gaps: Sequence[ConversionGap] = (),
@@ -380,6 +407,17 @@ def _stopped_execution(
 
     대응표에 있으면 정상적으로 끝난 실행의 답변 가능성 판정으로 보고, 없으면 실행 중단으로
     본다.
+
+    facts를 받는 이유:
+        멈추기 전에 확보한 것을 지우지 않는다. 비교 가능성 판정(Pattern C)은 값을 다 확보한
+        뒤에 내리므로, Fact를 지우면 무엇이 견줄 수 없다고 판정됐는지 결과에서 사라진다.
+        Pattern E가 같은 이유로 evidence와 event_links를 남기는 것과 같은 자리다.
+
+        정책 거부(F1~F4)와 섞이지 않는다. 그쪽은 refused_execution이 따로 만들고 근거를
+        붙이지 않는다(evidence_and_answerability.md 원칙 7).
+
+    calculations는 받지 않는다. 멈춘 결과에 파생값을 실으면 받는 쪽이 그것으로 막힌 계산을
+    이어서 할 수 있고, 그러면 guard가 막은 일이 결과를 받는 쪽에서 그대로 일어난다.
     """
     outcome = ANSWERABILITY_BY_STOP.get((blocked.stage, blocked.reason))
 
@@ -393,6 +431,7 @@ def _stopped_execution(
                 reason=blocked.reason,
                 detail=blocked.detail,
             ),
+            facts=list(facts),
             event_links=list(event_links),
             evidence=list(evidence),
             warnings=list(warnings),
@@ -404,6 +443,7 @@ def _stopped_execution(
         answerability_status=outcome.status,
         answerability_reason=outcome.reason,
         answerability_detail=_answerability_detail(blocked),
+        facts=list(facts),
         event_links=list(event_links),
         evidence=list(evidence),
         warnings=list(warnings),
@@ -445,6 +485,46 @@ def normalize_single_fact_result(result: SingleFactResult) -> AgentExecutionResu
         answerability_status=AnswerabilityStatus.ANSWERABLE,
         facts=[fact],
         evidence=[evidence],
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------------
+# Pattern C
+# --------------------------------------------------------------------------
+
+
+def normalize_temporal_compare_result(result: TemporalCompareResult) -> AgentExecutionResult:
+    """
+    Pattern C의 구조화 결과를 공통 실행 Contract로 옮긴다.
+
+    Fact/Evidence/CalculationResult는 이미 Contract 타입이므로 다시 만들지 않고 그대로 싣는다.
+    확보는 agent.period_retrieval이, 계산은 agent.calculator가 끝냈고, 여기서 다시 변환하면
+    같은 판정이 두 곳에 생긴다.
+
+    성공 경로에 answerability_reason을 싣지 않는다. ANSWERABLE은 사유를 갖지 않으며, 그
+    규칙은 answer_builder의 ALLOWED_REASONS_BY_STATUS와 evaluation.runner의 GoldAnswer 검증이
+    이미 고정하고 있다.
+
+    ComparisonResult를 만들지 않는다. Q08은 변화량 자체를 묻고 최종 우열 판정을 요구하지
+    않는다(evidence_and_answerability.md Calculation cardinality).
+    """
+    warnings = list(result.plan.warnings)
+
+    if result.blocked is not None:
+        return _stopped_execution(
+            result.blocked,
+            warnings=warnings,
+            facts=result.facts,
+            evidence=result.evidence,
+        )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=list(result.facts),
+        evidence=list(result.evidence),
+        calculations=list(result.calculations),
         warnings=warnings,
     )
 

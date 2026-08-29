@@ -13,8 +13,14 @@
     때문이다. 그래서 '조용히 틀린 답'이 아니라 'routing 단계에서 막혔다'로 답하게 한다.
 
 무엇을 검증하지 않는가:
-    Pattern C(시계열 비교)의 실제 동작은 검증하지 않는다. handler가 없기 때문이다.
-    여기서 고정하는 것은 '축소해서 답하지 않는다'까지다.
+    Pattern C(시계열 비교)가 실제로 답하는 경로는 검증하지 않는다. 여기서 고정하는 것은
+    '축소해서 답하지 않는다'까지이며, 답하는 경로는 tests/integration/test_pattern_c.py가
+    맡는다.
+
+Pattern C handler가 등록된 뒤:
+    이 질문들은 여전히 값을 하나도 만들지 않고 막힌다. 막는 자리만 Router에서 handler
+    입구(pattern_entry)로 옮겨왔다. Router는 intent만 보므로 "원천 지표의 시계열 증감은
+    아직 못 한다"를 판정할 자리가 아니고, 그 판정은 Pattern C가 한다.
 
 false positive:
     같은 연도가 문장에 여러 번 나오는 것은 두 기간이 아니다. 값으로 중복을 제거하며,
@@ -31,23 +37,25 @@ from pathlib import Path
 
 import pytest
 
-from disclosure_agent.agent.answer_builder import STAGE_ROUTING
+from disclosure_agent.agent.answer_builder import (
+    REASON_UNSUPPORTED_COMPARISON_METRIC,
+    REASON_UNSUPPORTED_COMPARISON_PERIOD,
+    STAGE_PATTERN_ENTRY,
+    STAGE_ROUTING,
+)
 from disclosure_agent.agent.query_analyzer import (
     INTENT_CROSS_ENTITY_COMPARE,
     INTENT_EVENT_HISTORY,
     INTENT_SINGLE_FACT,
     INTENT_TEMPORAL_COMPARE,
     KNOWN_INTENTS,
+    METRIC_REVENUE,
     QueryPlan,
     UnsupportedQuestionError,
     _extract_years,
     build_query_plan,
 )
-from disclosure_agent.agent.router import (
-    REASON_UNIMPLEMENTED_INTENT,
-    answer_question,
-    supported_intents,
-)
+from disclosure_agent.agent.router import answer_question, supported_intents
 from disclosure_agent.common.enums import ExecutionStatus
 
 # 합성 manifest에 실제로 있는 기업명. 2024·2025 사업보고서를 모두 가지고 있다.
@@ -165,12 +173,15 @@ def test_multi_period_question_is_classified_as_temporal_compare(question: str) 
 
     temporal_compare는 이미 KNOWN_INTENTS에 있다. 새 intent를 만들면 Router가 '어휘에 없는
     intent'로 보고 후속 작업이 달라진다.
+
+    이 intent에는 handler가 있다. 그래도 아래 질문들은 값을 만들지 않는데, 원천 지표의
+    시계열 증감이 Pattern C의 이번 구현 범위 밖이기 때문이다. 그 판정은 5절이 고정한다.
     """
     plan = build_query_plan(question, known_companies=REAL_COMPANIES)
 
     assert plan.intent == INTENT_TEMPORAL_COMPARE
     assert plan.intent in KNOWN_INTENTS
-    assert plan.intent not in supported_intents()
+    assert plan.intent in supported_intents()
 
 
 @pytest.mark.parametrize("question", MULTI_PERIOD_QUESTIONS)
@@ -188,7 +199,7 @@ def test_multi_period_plan_carries_a_diagnostic_warning(question: str) -> None:
     이 파일이 고정하는 안전 불변식은 넷이며 전부 다른 케이스가 맡는다.
         1. distinct 절대연도가 둘 이상이면 temporal_compare   (2절)
         2. single_fact로 축소되지 않는다                      (2절·3절)
-        3. Router가 routing/unimplemented_intent로 막는다     (5절)
+        3. 값을 만들기 전에 막힌다 (pattern_entry)            (5절)
         4. facts와 evidence가 비어 있다                       (5절)
     """
     plan = build_query_plan(question, known_companies=REAL_COMPANIES)
@@ -398,7 +409,7 @@ def test_out_of_scope_period_still_wins_over_multi_period() -> None:
         "테스트반도체 2024년이랑 2025년 매출 알려줘",
     ],
 )
-def test_multi_period_question_is_blocked_at_routing(
+def test_multi_period_question_produces_no_value(
     question: str,
     synthetic_manifest_path: Path,
     nfd_corpus_root: Path,
@@ -411,6 +422,10 @@ def test_multi_period_question_is_blocked_at_routing(
 
     answerability_status도 비어 있어야 한다. 코퍼스를 보지 않았으므로 답이 있는지 없는지
     판정하지 않았다.
+
+    막히는 자리는 Pattern C handler의 입구다. 이 질문들은 원천 지표(매출)를 두 기간에 걸쳐
+    묻고 있고, 그 증감은 이번 구현 범위 밖이다. handler가 등록되기 전에는 같은 결과가
+    routing/unimplemented_intent로 나왔다.
     """
     result = answer_question(
         question,
@@ -423,12 +438,13 @@ def test_multi_period_question_is_blocked_at_routing(
     assert result.answerability_reason is None
     assert result.facts == []
     assert result.evidence == []
+    assert result.calculations == []
 
     issue = result.execution_issue
 
     assert issue is not None
-    assert issue.stage == STAGE_ROUTING
-    assert issue.reason == REASON_UNIMPLEMENTED_INTENT
+    assert issue.stage == STAGE_PATTERN_ENTRY
+    assert issue.reason == REASON_UNSUPPORTED_COMPARISON_METRIC
 
 
 @pytest.mark.parametrize(
@@ -438,7 +454,7 @@ def test_multi_period_question_is_blocked_at_routing(
         "테스트반도체 2025년 매출이 작년보다 얼마나 늘었어?",
     ],
 )
-def test_absolute_plus_relative_question_is_blocked_at_routing(
+def test_absolute_plus_relative_question_produces_no_value(
     question: str,
     synthetic_manifest_path: Path,
     nfd_corpus_root: Path,
@@ -446,8 +462,12 @@ def test_absolute_plus_relative_question_is_blocked_at_routing(
     """
     절대연도 + 상대기간 질문도 값을 만들어 내지 않는다.
 
-    이것이 이번 라운드에서 막는 구멍이다. 절대연도가 하나뿐이라 다중 기간 판정을 통과하고,
+    이것이 C-0에서 막은 구멍이다. 절대연도가 하나뿐이라 다중 기간 판정을 통과하고,
     Pattern A가 그 한 연도의 Fact를 근거까지 갖춰 ANSWERABLE로 돌려주던 경로였다.
+
+    Pattern C handler가 생긴 지금이 이 구멍이 되살아나기 가장 쉬운 자리다. 계획에는 연도가
+    하나만 남아 있으므로, handler가 그 하나로 진행하면 두 기간을 물은 질문에 한 기간만
+    답하게 된다. 그래서 handler 입구가 연도 개수를 먼저 본다.
     """
     result = answer_question(
         question,
@@ -460,19 +480,25 @@ def test_absolute_plus_relative_question_is_blocked_at_routing(
     assert result.answerability_reason is None
     assert result.facts == []
     assert result.evidence == []
+    assert result.calculations == []
 
     issue = result.execution_issue
 
     assert issue is not None
-    assert issue.stage == STAGE_ROUTING
-    assert issue.reason == REASON_UNIMPLEMENTED_INTENT
+    assert issue.stage == STAGE_PATTERN_ENTRY
+    assert issue.reason == REASON_UNSUPPORTED_COMPARISON_PERIOD
 
 
 def test_blocked_multi_period_result_names_the_missing_capability(
     synthetic_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
-    """무엇을 구현하면 풀리는 질문인지가 결과에 남아야 후속 작업을 고를 수 있다."""
+    """
+    무엇을 구현하면 풀리는 질문인지가 결과에 남아야 후속 작업을 고를 수 있다.
+
+    handler가 등록되기 전에는 그 이름이 intent였다(temporal_compare 미구현). 지금은 그보다
+    좁게, 어느 지표의 무엇을 못 만드는지가 남는다.
+    """
     result = answer_question(
         "테스트반도체 2024년 매출과 2025년 매출 비교해줘",
         corpus_root=nfd_corpus_root,
@@ -482,7 +508,8 @@ def test_blocked_multi_period_result_names_the_missing_capability(
     issue = result.execution_issue
 
     assert issue is not None
-    assert INTENT_TEMPORAL_COMPARE in issue.detail
+    assert METRIC_REVENUE in issue.detail
+    assert "시계열" in issue.detail
 
 
 def test_single_year_question_still_reaches_the_pattern_a_handler(

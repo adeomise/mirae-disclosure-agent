@@ -3,26 +3,48 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel
 
 from disclosure_agent.agent.answer_builder import build_answer_response
 from disclosure_agent.agent.router import answer_question
 from disclosure_agent.common.enums import ExecutionStatus
-from disclosure_agent.common.schemas import (
-    AgentExecutionResult,
-    AnswerResponse,
-    AskRequest,
-    ExecutionIssue,
-)
+from disclosure_agent.common.schemas import AgentExecutionResult, AnswerResponse, AskRequest
+
+BLOCKED_PUBLIC_MESSAGE = "요청을 처리하는 데 필요한 조건을 충족하지 못했습니다."
+FAILED_PUBLIC_MESSAGE = "요청 처리 중 오류가 발생했습니다."
+
+
+class PublicExecutionError(BaseModel):
+    """Public-safe projection of an internal execution diagnostic."""
+
+    stage: str
+    reason: str
+    message: str
 
 
 class AgentExecutionErrorResponse(BaseModel):
     """Public error envelope for an Agent execution that did not complete."""
 
     execution_status: Literal[ExecutionStatus.BLOCKED, ExecutionStatus.FAILED]
-    error: ExecutionIssue
+    error: PublicExecutionError
+
+
+class RequestValidationErrorItem(BaseModel):
+    """FastAPI request-validation item documented alongside Agent BLOCKED errors."""
+
+    type: str
+    loc: list[str | int]
+    msg: str
+    input: Any | None = None
+    ctx: dict[str, Any] | None = None
+
+
+class RequestValidationErrorResponse(BaseModel):
+    """FastAPI's request-validation 422 payload, distinct from Agent execution errors."""
+
+    detail: list[RequestValidationErrorItem]
 
 
 class AgentExecutionHTTPError(RuntimeError):
@@ -44,6 +66,33 @@ class MissingExecutionIssueError(RuntimeError):
 
 
 AnswerQuestion = Callable[..., AgentExecutionResult]
+
+
+def agent_execution_error_response(
+    execution_status: Literal[ExecutionStatus.BLOCKED, ExecutionStatus.FAILED],
+    *,
+    stage: str,
+    reason: str,
+) -> AgentExecutionErrorResponse:
+    """Build a public error without copying the internal diagnostic detail."""
+    message = (
+        BLOCKED_PUBLIC_MESSAGE
+        if execution_status is ExecutionStatus.BLOCKED
+        else FAILED_PUBLIC_MESSAGE
+    )
+    return AgentExecutionErrorResponse(
+        execution_status=execution_status,
+        error=PublicExecutionError(stage=stage, reason=reason, message=message),
+    )
+
+
+def unexpected_failure_response() -> AgentExecutionErrorResponse:
+    """Return the fixed public envelope for an unexpected runtime failure."""
+    return agent_execution_error_response(
+        ExecutionStatus.FAILED,
+        stage="runtime",
+        reason="unexpected_failure",
+    )
 
 
 class AskService(Protocol):
@@ -79,8 +128,9 @@ class AgentAskService:
             )
 
         raise AgentExecutionHTTPError(
-            AgentExecutionErrorResponse(
-                execution_status=result.execution_status,
-                error=issue,
+            agent_execution_error_response(
+                result.execution_status,
+                stage=issue.stage,
+                reason=issue.reason,
             )
         )

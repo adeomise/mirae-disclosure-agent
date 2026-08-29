@@ -8,7 +8,12 @@ from fastapi.testclient import TestClient
 
 from disclosure_agent.api.dependencies import get_ask_service
 from disclosure_agent.api.main import app
-from disclosure_agent.api.service import AgentAskService, MissingExecutionIssueError
+from disclosure_agent.api.service import (
+    BLOCKED_PUBLIC_MESSAGE,
+    FAILED_PUBLIC_MESSAGE,
+    AgentAskService,
+    MissingExecutionIssueError,
+)
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
@@ -205,8 +210,17 @@ def test_non_completed_agent_result_returns_error_envelope(
     assert response.status_code == http_status
     assert response.json() == {
         "execution_status": execution_status.value,
-        "error": issue.model_dump(mode="json"),
+        "error": {
+            "stage": issue.stage,
+            "reason": issue.reason,
+            "message": (
+                BLOCKED_PUBLIC_MESSAGE
+                if execution_status is ExecutionStatus.BLOCKED
+                else FAILED_PUBLIC_MESSAGE
+            ),
+        },
     }
+    assert issue.detail not in response.text
 
 
 @pytest.mark.parametrize("execution_status", [ExecutionStatus.BLOCKED, ExecutionStatus.FAILED])
@@ -217,6 +231,62 @@ def test_non_completed_result_without_execution_issue_fails_fast(
 
     with pytest.raises(MissingExecutionIssueError, match="has no execution_issue"):
         service.answer(AskRequest(question="synthetic invalid result"))
+
+
+def test_missing_execution_issue_is_sanitized_at_the_http_boundary() -> None:
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(
+        AgentExecutionResult(execution_status=ExecutionStatus.FAILED)
+    )
+
+    response = client.post("/api/ask", json={"question": "synthetic invalid result"})
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "execution_status": "FAILED",
+        "error": {
+            "stage": "runtime",
+            "reason": "unexpected_failure",
+            "message": FAILED_PUBLIC_MESSAGE,
+        },
+    }
+    assert "has no execution_issue" not in response.text
+
+
+def test_unexpected_runtime_exception_returns_a_safe_failed_envelope() -> None:
+    sensitive_detail = "sensitive path /private/corpus/source.xml"
+
+    def raise_unexpected_error(question: str, **_: object) -> AgentExecutionResult:
+        assert question
+        raise RuntimeError(sensitive_detail)
+
+    app.dependency_overrides[get_ask_service] = lambda: AgentAskService(
+        corpus_root=Path("unused-synthetic-corpus"),
+        answer_question_fn=raise_unexpected_error,
+    )
+
+    response = client.post("/api/ask", json={"question": "synthetic crash"})
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "execution_status": "FAILED",
+        "error": {
+            "stage": "runtime",
+            "reason": "unexpected_failure",
+            "message": FAILED_PUBLIC_MESSAGE,
+        },
+    }
+    assert sensitive_detail not in response.text
+
+
+def test_request_validation_422_remains_distinct_from_agent_blocked_422() -> None:
+    response = client.post("/api/ask", json={})
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert "detail" in payload
+    assert payload["detail"][0]["loc"] == ["body", "question"]
+    assert "execution_status" not in payload
+    assert "error" not in payload
 
 
 def test_q18_runs_through_the_real_api_dependency(

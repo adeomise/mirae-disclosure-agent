@@ -307,6 +307,7 @@ def test_chain_orders_entries_by_filing_date(
         root_receipt_no="A0001",
         filings=filings,
         documents=documents,
+        event_type="supply_contract",
     )
 
     assert [entry.filing.receipt_no for entry in chain.entries] == ["A0001", "A0002", "A0003"]
@@ -324,12 +325,14 @@ def test_chain_is_independent_of_input_order(
         root_receipt_no="A0001",
         filings=filings,
         documents=documents,
+        event_type="supply_contract",
     )
 
     backward = build_filing_chain(
         root_receipt_no="A0001",
         filings=list(reversed(filings)),
         documents=documents,
+        event_type="supply_contract",
     )
 
     assert forward.to_dict() == backward.to_dict()
@@ -345,6 +348,7 @@ def test_chain_entries_carry_normalized_changes(
         root_receipt_no="A0001",
         filings=filings,
         documents=documents,
+        event_type="supply_contract",
     )
 
     root, first, second = chain.entries
@@ -386,6 +390,7 @@ def test_chain_follows_multi_stage_corrections(
         root_receipt_no="A0001",
         filings=[second, first, original],
         documents=documents,
+        event_type="supply_contract",
     )
 
     assert [entry.filing.receipt_no for entry in chain.entries] == ["A0001", "A0002", "A0003"]
@@ -411,6 +416,7 @@ def test_chain_excludes_unrelated_corrections(
         root_receipt_no="A0001",
         filings=[*filings, unrelated_original, unrelated_correction],
         documents=documents,
+        event_type="supply_contract",
     )
 
     assert [entry.filing.receipt_no for entry in chain.entries] == ["A0001", "A0002", "A0003"]
@@ -442,6 +448,7 @@ def test_ambiguous_correction_is_reported_not_dropped(
         root_receipt_no="A0001",
         filings=[original, twin, correction],
         documents=documents,
+        event_type="supply_contract",
     )
 
     assert [entry.filing.receipt_no for entry in chain.entries] == ["A0001"]
@@ -457,6 +464,7 @@ def test_chain_with_unknown_root_is_empty(make_event_filing, make_exchange_docum
         root_receipt_no="NOT_IN_CANDIDATES",
         filings=filings,
         documents=documents,
+        event_type="supply_contract",
     )
 
     assert chain.entries == ()
@@ -470,6 +478,7 @@ def test_chain_serializes(make_event_filing, make_exchange_document) -> None:
         root_receipt_no="A0001",
         filings=filings,
         documents=documents,
+        event_type="supply_contract",
     )
 
     data = json.loads(json.dumps(chain.to_dict(), ensure_ascii=False))

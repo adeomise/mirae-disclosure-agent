@@ -98,21 +98,27 @@ def iter_correction_aliases() -> Iterator[tuple[str, str, str]]:
 
 def _build_alias_indexes() -> tuple[dict[str, dict[str, str]], dict[str, str]]:
     by_event_type: dict[str, dict[str, str]] = {}
-    combined: dict[str, str] = {}
+    global_candidates: dict[str, set[str]] = {}
 
     for event_type, alias, canonical_field in iter_correction_aliases():
         normalized = normalize_correction_label(alias)
         event_index = by_event_type.setdefault(event_type, {})
 
-        for index in (event_index, combined):
-            existing = index.get(normalized)
-            if existing is not None and existing != canonical_field:
-                raise ValueError(
-                    "correction alias collision: "
-                    f"{alias!r} normalizes to {normalized!r} for both "
-                    f"{existing!r} and {canonical_field!r}"
-                )
-            index[normalized] = canonical_field
+        existing = event_index.get(normalized)
+        if existing is not None and existing != canonical_field:
+            raise ValueError(
+                "correction alias collision: "
+                f"{alias!r} normalizes to {normalized!r} within "
+                f"{event_type!r} for both {existing!r} and {canonical_field!r}"
+            )
+        event_index[normalized] = canonical_field
+        global_candidates.setdefault(normalized, set()).add(canonical_field)
+
+    combined = {
+        alias: next(iter(canonical_fields))
+        for alias, canonical_fields in global_candidates.items()
+        if len(canonical_fields) == 1
+    }
 
     return by_event_type, combined
 
@@ -131,9 +137,13 @@ def resolve_correction_field(
     return aliases.get(normalized)
 
 
-def resolve_history_correction_field(raw_field: str | None) -> str | None:
+def resolve_history_correction_field(
+    raw_field: str | None,
+    *,
+    event_type: str,
+) -> str | None:
     """Resolve only canonical fields currently supported by EventHistory."""
-    canonical_field = resolve_correction_field(raw_field)
+    canonical_field = resolve_correction_field(raw_field, event_type=event_type)
     if canonical_field in HISTORY_CANONICAL_FIELDS:
         return canonical_field
     return None

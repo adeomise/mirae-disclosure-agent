@@ -47,34 +47,57 @@ from disclosure_agent.event.extractor import match_correction_field
 
 
 @pytest.mark.parametrize(
-    ("raw_field", "expected"),
+    ("event_type", "raw_field", "expected"),
     [
         # 정정표 표기와 본문 행 표기가 같은 필드로 모여야 한다.
-        ("계약기간 종료일", FIELD_CONTRACT_END_DATE),
-        ("종료일", FIELD_CONTRACT_END_DATE),
-        ("계약기간 시작일", FIELD_CONTRACT_START_DATE),
-        ("시작일", FIELD_CONTRACT_START_DATE),
-        ("계약금액(원)", FIELD_CONTRACT_AMOUNT),
-        ("계약금액", FIELD_CONTRACT_AMOUNT),
-        ("계약기간", FIELD_CONTRACT_PERIOD),
-        ("계약(수주)일", FIELD_CONTRACT_DATE),
-        ("계약상대", FIELD_COUNTERPARTY),
-        ("판매ㆍ공급지역", FIELD_SUPPLY_REGION),
-        ("판매ㆍ공급계약 구분 및 세부내용", FIELD_CONTRACT_DETAIL),
-        ("세부내용", FIELD_CONTRACT_DETAIL),
-        ("2. 투자내역 - 투자금액(원)", FIELD_INVESTMENT_AMOUNT),
-        ("4. 투자기간 - 종료일", FIELD_INVESTMENT_END_DATE),
-        ("이사회결의일(결정일)", FIELD_BOARD_RESOLUTION_DATE),
+        ("supply_contract", "계약기간 종료일", FIELD_CONTRACT_END_DATE),
+        ("supply_contract", "종료일", FIELD_CONTRACT_END_DATE),
+        ("supply_contract", "계약기간 시작일", FIELD_CONTRACT_START_DATE),
+        ("supply_contract", "시작일", FIELD_CONTRACT_START_DATE),
+        ("supply_contract", "계약금액(원)", FIELD_CONTRACT_AMOUNT),
+        ("supply_contract", "계약금액", FIELD_CONTRACT_AMOUNT),
+        ("supply_contract", "계약기간", FIELD_CONTRACT_PERIOD),
+        ("supply_contract", "계약(수주)일", FIELD_CONTRACT_DATE),
+        ("supply_contract", "계약상대", FIELD_COUNTERPARTY),
+        ("supply_contract", "판매ㆍ공급지역", FIELD_SUPPLY_REGION),
+        ("supply_contract", "판매ㆍ공급계약 구분 및 세부내용", FIELD_CONTRACT_DETAIL),
+        ("supply_contract", "세부내용", FIELD_CONTRACT_DETAIL),
+        ("facility_investment", "2. 투자내역 - 투자금액(원)", FIELD_INVESTMENT_AMOUNT),
+        ("facility_investment", "4. 투자기간 - 종료일", FIELD_INVESTMENT_END_DATE),
+        ("facility_investment", "이사회결의일(결정일)", FIELD_BOARD_RESOLUTION_DATE),
     ],
 )
-def test_field_aliases_resolve_to_semantic_names(raw_field: str, expected: str) -> None:
-    assert resolve_field_name(raw_field) == expected
+def test_field_aliases_resolve_to_semantic_names(
+    event_type: str, raw_field: str, expected: str
+) -> None:
+    assert resolve_field_name(raw_field, event_type=event_type) == expected
 
 
 def test_correction_table_and_body_row_names_meet_at_the_same_field() -> None:
     """이름이 다르면 같은 필드의 이력을 이어 붙일 수 없다."""
-    assert resolve_field_name("계약기간 종료일") == resolve_field_name("종료일")
-    assert resolve_field_name("계약금액(원)") == resolve_field_name("계약금액")
+    assert resolve_field_name(
+        "계약기간 종료일", event_type="supply_contract"
+    ) == resolve_field_name("종료일", event_type="supply_contract")
+    assert resolve_field_name(
+        "계약금액(원)", event_type="supply_contract"
+    ) == resolve_field_name("계약금액", event_type="supply_contract")
+
+
+def test_history_resolution_is_scoped_by_event_type() -> None:
+    assert (
+        resolve_field_name(
+            "이사회결의일(결정일)",
+            event_type="facility_investment",
+        )
+        == FIELD_BOARD_RESOLUTION_DATE
+    )
+    assert (
+        resolve_field_name(
+            "이사회결의일(결정일)",
+            event_type="supply_contract",
+        )
+        is None
+    )
 
 
 def test_board_resolution_alias_uses_one_normalization_contract() -> None:
@@ -114,9 +137,9 @@ def test_extractor_and_history_diff_share_supported_correction_vocabulary(
     assert match_correction_field(event_type, alias) == canonical_field
 
     if canonical_field in HISTORY_CANONICAL_FIELDS:
-        assert resolve_field_name(alias) == canonical_field
+        assert resolve_field_name(alias, event_type=event_type) == canonical_field
     else:
-        assert resolve_field_name(alias) is None
+        assert resolve_field_name(alias, event_type=event_type) is None
 
 
 @pytest.mark.parametrize(
@@ -124,12 +147,14 @@ def test_extractor_and_history_diff_share_supported_correction_vocabulary(
     ["  계약금액  ", "계약 금액", "1. 계약금액", "- 계약금액", "계약금액(원)"],
 )
 def test_field_key_normalization_ignores_spacing_and_prefixes(raw_field: str) -> None:
-    assert resolve_field_name(raw_field) == FIELD_CONTRACT_AMOUNT
+    assert resolve_field_name(raw_field, event_type="supply_contract") == FIELD_CONTRACT_AMOUNT
 
 
 def test_unit_suffix_is_stripped_only_at_the_end() -> None:
     """'계약(수주)일'의 가운데 괄호는 단위가 아니므로 떼면 안 된다."""
-    assert resolve_field_name("계약(수주)일") == FIELD_CONTRACT_DATE
+    assert resolve_field_name(
+        "계약(수주)일", event_type="supply_contract"
+    ) == FIELD_CONTRACT_DATE
 
 
 @pytest.mark.parametrize(
@@ -138,7 +163,7 @@ def test_unit_suffix_is_stripped_only_at_the_end() -> None:
 )
 def test_unknown_field_names_resolve_to_none(raw_field: str) -> None:
     """모른다는 사실을 None으로 남긴다. '변경 없음'과 다르다."""
-    assert resolve_field_name(raw_field) is None
+    assert resolve_field_name(raw_field, event_type="supply_contract") is None
 
 
 # --------------------------------------------------------------------------
@@ -159,7 +184,8 @@ def test_unknown_field_names_resolve_to_none(raw_field: str) -> None:
 def test_raw_values_are_preserved_verbatim(before: str, after: str) -> None:
     """값을 해석하거나 보정하지 않는다. 원문과 대조할 수 있어야 한다."""
     changes = normalize_changes(
-        [{"raw_field": "계약금액(원)", "before": before, "after": after}]
+        [{"raw_field": "계약금액(원)", "before": before, "after": after}],
+        event_type="supply_contract",
     )
 
     assert changes[0].before == before
@@ -179,7 +205,8 @@ def test_facility_investment_changes_are_mapped_without_reversing_values() -> No
                 "before": "1,980,100,000,000",
                 "after": "2,009,800,000,000",
             },
-        ]
+        ],
+        event_type="facility_investment",
     )
 
     assert [change.field for change in changes] == [
@@ -202,7 +229,8 @@ def test_unmapped_change_still_keeps_its_values() -> None:
                 "before": "해당사항 없음",
                 "after": "이사회 결의일 변경",
             }
-        ]
+        ],
+        event_type="supply_contract",
     )
 
     assert changes[0].field is None
@@ -213,7 +241,8 @@ def test_unmapped_change_still_keeps_its_values() -> None:
 
 def test_raw_field_keeps_original_spelling() -> None:
     changes = normalize_changes(
-        [{"raw_field": "계약기간 종료일", "before": "A", "after": "B"}]
+        [{"raw_field": "계약기간 종료일", "before": "A", "after": "B"}],
+        event_type="supply_contract",
     )
 
     assert changes[0].raw_field == "계약기간 종료일"
@@ -222,7 +251,9 @@ def test_raw_field_keeps_original_spelling() -> None:
 
 def test_missing_values_become_empty_strings_not_placeholders() -> None:
     """빈 값도 정보다. 없는 값을 지어내지 않는다."""
-    changes = normalize_changes([{"raw_field": "계약금액(원)"}])
+    changes = normalize_changes(
+        [{"raw_field": "계약금액(원)"}], event_type="supply_contract"
+    )
 
     assert changes[0].before == ""
     assert changes[0].after == ""
@@ -233,14 +264,18 @@ def test_entries_without_a_field_name_are_skipped() -> None:
         [
             {"raw_field": "", "before": "A", "after": "B"},
             {"raw_field": "계약금액(원)", "before": "A", "after": "B"},
-        ]
+        ],
+        event_type="supply_contract",
     )
 
     assert len(changes) == 1
 
 
 def test_field_change_falls_back_to_field_key_when_raw_field_absent() -> None:
-    changes = normalize_changes([{"field": "종료일", "before": "A", "after": "B"}])
+    changes = normalize_changes(
+        [{"field": "종료일", "before": "A", "after": "B"}],
+        event_type="supply_contract",
+    )
 
     assert changes[0].field == FIELD_CONTRACT_END_DATE
 
@@ -257,7 +292,7 @@ def test_diff_correction_reads_the_correction_block(make_exchange_document) -> N
         changes=[("계약기간 종료일", "2026-01-31", "2026-06-30")],
     )
 
-    changes = diff_correction(document)
+    changes = diff_correction(document, event_type="supply_contract")
 
     assert len(changes) == 1
     assert changes[0].field == FIELD_CONTRACT_END_DATE
@@ -269,12 +304,12 @@ def test_diff_correction_returns_empty_for_original_filing(make_exchange_documen
     """원공시에는 정정 블록이 없다. 본문끼리 비교해 변경을 추정하지 않는다."""
     document = make_exchange_document()
 
-    assert diff_correction(document) == ()
+    assert diff_correction(document, event_type="supply_contract") == ()
 
 
 @pytest.mark.parametrize("document", [None, {}, {"correction": None}])
 def test_diff_correction_handles_absent_document(document: Any) -> None:
-    assert diff_correction(document) == ()
+    assert diff_correction(document, event_type="supply_contract") == ()
 
 
 def test_changed_field_names_deduplicates_and_keeps_order() -> None:
@@ -283,7 +318,8 @@ def test_changed_field_names_deduplicates_and_keeps_order() -> None:
             {"raw_field": "계약금액(원)", "before": "A", "after": "B"},
             {"raw_field": "계약기간 종료일", "before": "C", "after": "D"},
             {"raw_field": "계약금액", "before": "E", "after": "F"},
-        ]
+        ],
+        event_type="supply_contract",
     )
 
     assert changed_field_names(changes) == (FIELD_CONTRACT_AMOUNT, FIELD_CONTRACT_END_DATE)
@@ -295,7 +331,8 @@ def test_unmapped_changes_are_reportable() -> None:
         [
             {"raw_field": "계약금액(원)", "before": "A", "after": "B"},
             {"raw_field": "대규모법인여부", "before": "C", "after": "D"},
-        ]
+        ],
+        event_type="supply_contract",
     )
 
     unmapped = unmapped_changes(changes)

@@ -78,6 +78,7 @@ def q13_chain(make_event_filing, make_exchange_document):
         root_receipt_no="A0001",
         filings=[original, first, second],
         documents=documents,
+        event_type="supply_contract",
     )
 
     return chain, documents
@@ -546,6 +547,7 @@ def test_missing_root_does_not_get_a_canonical_event_id(
         root_receipt_no="NOT_IN_CANDIDATES",
         filings=[make_event_filing("A0001", "20250830")],
         documents={},
+        event_type="supply_contract",
     )
 
     conversion = to_event_history(chain)
@@ -616,6 +618,7 @@ def test_incomplete_chain_is_reported(
         root_receipt_no="A0001",
         filings=[original, twin, correction],
         documents=documents,
+        event_type="supply_contract",
     )
 
     conversion = to_event_history(chain, documents=documents)

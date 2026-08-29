@@ -73,16 +73,23 @@ class FieldChange:
         return data
 
 
-def resolve_field_name(raw_field: str) -> str | None:
+def resolve_field_name(raw_field: str, *, event_type: str) -> str | None:
     """
     원문 필드 이름에 대응하는 의미 단위 이름. 모르면 None.
 
     None은 '변경이 없다'가 아니라 '이 이름을 아직 모른다'는 뜻이다.
     """
-    return correction_fields.resolve_history_correction_field(raw_field)
+    return correction_fields.resolve_history_correction_field(
+        raw_field,
+        event_type=event_type,
+    )
 
 
-def normalize_changes(changes: Iterable[Mapping[str, Any]]) -> tuple[FieldChange, ...]:
+def normalize_changes(
+    changes: Iterable[Mapping[str, Any]],
+    *,
+    event_type: str,
+) -> tuple[FieldChange, ...]:
     """
     event.parser가 뽑은 changes 목록을 FieldChange로 정리한다.
 
@@ -99,7 +106,7 @@ def normalize_changes(changes: Iterable[Mapping[str, Any]]) -> tuple[FieldChange
 
         normalized.append(
             FieldChange(
-                field=resolve_field_name(raw_field),
+                field=resolve_field_name(raw_field, event_type=event_type),
                 raw_field=raw_field,
                 before=str(change.get("before") or ""),
                 after=str(change.get("after") or ""),
@@ -109,7 +116,11 @@ def normalize_changes(changes: Iterable[Mapping[str, Any]]) -> tuple[FieldChange
     return tuple(normalized)
 
 
-def diff_correction(document: Mapping[str, Any] | None) -> tuple[FieldChange, ...]:
+def diff_correction(
+    document: Mapping[str, Any] | None,
+    *,
+    event_type: str,
+) -> tuple[FieldChange, ...]:
     """
     파싱된 정정공시 하나에서 변경 목록을 만든다.
 
@@ -124,7 +135,10 @@ def diff_correction(document: Mapping[str, Any] | None) -> tuple[FieldChange, ..
     if not correction:
         return ()
 
-    return normalize_changes(correction.get("changes") or ())
+    return normalize_changes(
+        correction.get("changes") or (),
+        event_type=event_type,
+    )
 
 
 def changed_field_names(changes: Iterable[FieldChange]) -> tuple[str, ...]:

@@ -1,5 +1,6 @@
 """Validation tests for contract v0.1 vertical-slice objects."""
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -34,6 +35,8 @@ from disclosure_agent.common.schemas import (
     Fact,
     FieldChange,
     RawReference,
+    ResolvedEventState,
+    ResolvedFieldValue,
     ResultInputReference,
 )
 from disclosure_agent.event.identity import make_event_id
@@ -330,6 +333,132 @@ def test_event_id_is_deterministic_for_canonical_root_document() -> None:
     assert first != different_root
 
 
+def test_resolved_event_state_serializes_field_level_provenance() -> None:
+    state = ResolvedEventState(
+        event_id="event_chain_dummy_supply_contract",
+        event_type=EventType.SUPPLY_CONTRACT,
+        company="dummy-company",
+        as_of=date(2025, 3, 14),
+        fields={
+            "contract_amount": ResolvedFieldValue(
+                value=123.5,
+                unit="KRW",
+                source_doc_id="doc_dummy_correction",
+                evidence_ids=["evidence_dummy_amount"],
+            )
+        },
+    )
+
+    assert state.model_dump(mode="json") == {
+        "event_id": "event_chain_dummy_supply_contract",
+        "event_type": "supply_contract",
+        "company": "dummy-company",
+        "as_of": "2025-03-14",
+        "fields": {
+            "contract_amount": {
+                "value": 123.5,
+                "unit": "KRW",
+                "source_doc_id": "doc_dummy_correction",
+                "evidence_ids": ["evidence_dummy_amount"],
+            }
+        },
+    }
+
+
+def test_resolved_event_state_event_id_is_correction_chain_identity() -> None:
+    history = EventHistory(
+        event_id="event_chain_dummy_supply_contract",
+        document_ids=["doc_dummy_original", "doc_dummy_correction"],
+        chain_complete=True,
+    )
+    state = ResolvedEventState(
+        event_id=history.event_id,
+        event_type=EventType.SUPPLY_CONTRACT,
+        company="dummy-company",
+        as_of=date(2025, 3, 14),
+    )
+    individual_event = Event(
+        event_id="event_individual_dummy_correction",
+        event_type=EventType.SUPPLY_CONTRACT,
+        company="dummy-company",
+        source_doc_id="doc_dummy_correction",
+        is_correction=True,
+    )
+
+    assert state.event_id == history.event_id
+    assert state.event_id != individual_event.event_id
+
+
+def test_resolved_contract_defaults_are_not_shared() -> None:
+    first_value = ResolvedFieldValue(source_doc_id="doc_dummy_first")
+    second_value = ResolvedFieldValue(source_doc_id="doc_dummy_second")
+    first_state = ResolvedEventState(
+        event_id="event_chain_dummy_first",
+        event_type=EventType.SUPPLY_CONTRACT,
+        company="dummy-company",
+        as_of=date(2025, 3, 14),
+    )
+    second_state = ResolvedEventState(
+        event_id="event_chain_dummy_second",
+        event_type=EventType.SUPPLY_CONTRACT,
+        company="dummy-company",
+        as_of=date(2025, 3, 15),
+    )
+
+    assert first_value.value is None
+    assert first_value.unit is None
+    assert first_value.evidence_ids == []
+    assert first_value.evidence_ids is not second_value.evidence_ids
+    assert first_state.fields == {}
+    assert first_state.fields is not second_state.fields
+
+
+@pytest.mark.parametrize(
+    ("model", "kwargs"),
+    [
+        (ResolvedFieldValue, {}),
+        (
+            ResolvedEventState,
+            {
+                "event_type": EventType.SUPPLY_CONTRACT,
+                "company": "dummy-company",
+                "as_of": date(2025, 3, 14),
+            },
+        ),
+        (
+            ResolvedEventState,
+            {
+                "event_id": "event_chain_dummy",
+                "company": "dummy-company",
+                "as_of": date(2025, 3, 14),
+            },
+        ),
+        (
+            ResolvedEventState,
+            {
+                "event_id": "event_chain_dummy",
+                "event_type": EventType.SUPPLY_CONTRACT,
+                "as_of": date(2025, 3, 14),
+            },
+        ),
+        (
+            ResolvedEventState,
+            {
+                "event_id": "event_chain_dummy",
+                "event_type": EventType.SUPPLY_CONTRACT,
+                "company": "dummy-company",
+            },
+        ),
+    ],
+)
+def test_resolved_contract_rejects_missing_required_fields(
+    model: type[ResolvedFieldValue] | type[ResolvedEventState],
+    kwargs: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        model(**kwargs)
+
+
 def test_completed_answerable_execution_result() -> None:
     result = AgentExecutionResult(
         execution_status=ExecutionStatus.COMPLETED,
@@ -467,6 +596,7 @@ def test_execution_result_default_lists_are_not_shared() -> None:
         "events",
         "event_links",
         "event_histories",
+        "resolved_event_states",
         "evidence",
         "calculations",
         "comparisons",
@@ -506,6 +636,25 @@ def test_execution_result_accepts_comparison_and_defaults_to_empty_list() -> Non
         comparison.model_dump(mode="json")
     ]
     assert without_comparison.comparisons == []
+
+
+def test_execution_result_accepts_resolved_event_state_and_defaults_to_empty_list() -> None:
+    state = ResolvedEventState(
+        event_id="event_chain_dummy_supply_contract",
+        event_type=EventType.SUPPLY_CONTRACT,
+        company="dummy-company",
+        as_of=date(2025, 3, 14),
+    )
+    with_state = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        resolved_event_states=[state],
+    )
+    without_state = AgentExecutionResult(execution_status=ExecutionStatus.COMPLETED)
+
+    assert with_state.model_dump(mode="json")["resolved_event_states"] == [
+        state.model_dump(mode="json")
+    ]
+    assert without_state.resolved_event_states == []
 
 
 def test_execution_result_accepts_existing_common_contract_objects() -> None:

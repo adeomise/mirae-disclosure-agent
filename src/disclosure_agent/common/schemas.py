@@ -1,5 +1,6 @@
 """Pydantic models for the Disclosure Agent contract v0.1."""
 
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -158,6 +159,29 @@ class EventHistory(BaseModel):
     chain_complete: bool
 
 
+class ResolvedFieldValue(BaseModel):
+    """A resolved field value with document and evidence provenance."""
+
+    value: str | float | None = None
+    unit: str | None = None
+    source_doc_id: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ResolvedEventState(BaseModel):
+    """An event's field-level state at a filing-date resolution cutoff.
+
+    ``event_id`` is the correction-chain identity used by ``EventHistory.event_id``.
+    It may therefore have a different meaning from an individual ``Event.event_id``.
+    """
+
+    event_id: str
+    event_type: EventType
+    company: str
+    as_of: date
+    fields: dict[str, ResolvedFieldValue] = Field(default_factory=dict)
+
+
 class ExecutionIssue(BaseModel):
     """A reason the Agent execution was blocked or failed."""
 
@@ -240,6 +264,7 @@ class AgentExecutionResult(BaseModel):
     events: list[Event] = Field(default_factory=list)
     event_links: list[EventLink] = Field(default_factory=list)
     event_histories: list[EventHistory] = Field(default_factory=list)
+    resolved_event_states: list[ResolvedEventState] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     calculations: list[CalculationResult] = Field(default_factory=list)
     comparisons: list[ComparisonResult] = Field(default_factory=list)

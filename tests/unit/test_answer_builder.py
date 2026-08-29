@@ -28,6 +28,7 @@ from disclosure_agent.agent.answer_builder import (
     SCOPE_OMITTED_IN_ANSWER,
     STATUSES_ALLOWING_NO_REASON,
     UNAVAILABLE_MESSAGE_BY_REASON,
+    UNMAPPED_ANSWERABILITY_REASONS,
     UNRESOLVED_WITHOUT_REASON_MESSAGE,
     MissingAnswerabilityStatusError,
     MissingAnswerSupportError,
@@ -1175,11 +1176,36 @@ def test_every_accounting_scope_is_labelled_or_deliberately_omitted(
     assert scope in ACCOUNTING_SCOPE_LABELS or scope in SCOPE_OMITTED_IN_ANSWER
 
 
-@pytest.mark.parametrize("reason", list(AnswerabilityReason))
-def test_every_answerability_reason_has_a_sentence(reason: AnswerabilityReason) -> None:
+@pytest.mark.parametrize("reason", list(UNAVAILABLE_MESSAGE_BY_REASON))
+def test_every_mapped_answerability_reason_has_a_sentence(
+    reason: AnswerabilityReason,
+) -> None:
     assert reason in UNAVAILABLE_MESSAGE_BY_REASON
 
     assert UNAVAILABLE_MESSAGE_BY_REASON[reason].strip()
+
+
+def test_mapped_and_unmapped_reasons_exhaust_the_contract_without_overlap() -> None:
+    mapped = set(UNAVAILABLE_MESSAGE_BY_REASON)
+    unmapped = set(UNMAPPED_ANSWERABILITY_REASONS)
+
+    assert mapped.isdisjoint(unmapped)
+    assert mapped | unmapped == set(AnswerabilityReason)
+    assert AnswerabilityReason.NOT_COMPARABLE in unmapped
+
+
+def test_not_comparable_fails_before_message_lookup() -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=AnswerabilityReason.NOT_COMPARABLE,
+    )
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert "UNANSWERABLE에 실릴 수 없는 answerability_reason" in str(error.value)
+    assert "UNAVAILABLE_MESSAGE_BY_REASON" not in str(error.value)
 
 
 def test_reason_sentences_are_distinct() -> None:

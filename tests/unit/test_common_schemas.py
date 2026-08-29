@@ -308,9 +308,39 @@ def test_answerability_reason_values_include_pattern_f_contract_extensions() -> 
         "AMBIGUOUS_MATCH": "ambiguous_match",
         "NOT_FOUND": "not_found",
         "INSUFFICIENT_EVIDENCE": "insufficient_evidence",
+        "NOT_COMPARABLE": "not_comparable",
         "OUT_OF_DATA_RANGE": "out_of_data_range",
         "OUT_OF_SCOPE_DATA": "out_of_scope_data",
         "OUT_OF_SCOPE_POLICY": "out_of_scope_policy",
+    }
+
+
+def test_not_comparable_is_completed_unanswerable_canonical_reason() -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=AnswerabilityReason.NOT_COMPARABLE,
+    )
+
+    assert result.model_dump(mode="json") == {
+        "execution_status": "COMPLETED",
+        "answerability_status": "UNANSWERABLE",
+        "answerability_reason": "not_comparable",
+        "answerability_detail": None,
+        "execution_issue": None,
+        "facts": [],
+        "events": [],
+        "event_links": [],
+        "event_histories": [],
+        "evidence": [],
+        "calculations": [],
+        "comparisons": [],
+        "warnings": [],
+        "conversion_gaps": [],
+    }
+    assert result.answerability_reason not in {
+        AnswerabilityReason.NOT_FOUND,
+        AnswerabilityReason.INSUFFICIENT_EVIDENCE,
     }
 
 

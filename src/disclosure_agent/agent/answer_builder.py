@@ -359,6 +359,12 @@ UNAVAILABLE_MESSAGE_BY_REASON: dict[AnswerabilityReason, str] = {
     ),
 }
 
+# Contract에는 있지만 사용자 문구가 아직 확정되지 않아 Answer Builder가 지원하지 않는 사유.
+# 문구가 확정되면 UNAVAILABLE_MESSAGE_BY_REASON으로 옮기고 이 집합에서 제거한다.
+UNMAPPED_ANSWERABILITY_REASONS: frozenset[AnswerabilityReason] = frozenset(
+    {AnswerabilityReason.NOT_COMPARABLE}
+)
+
 # 정책 거부 문장. answerability_detail.reason이 고른다.
 #
 # safety.py가 만든 detail 원문을 그대로 노출하지 않는다. 그 문자열에는 어떤 규칙과 어떤
@@ -432,7 +438,8 @@ ALLOWED_REASONS_BY_STATUS: dict[AnswerabilityStatus, frozenset[AnswerabilityReas
     AnswerabilityStatus.UNRESOLVED: _UNRESOLVED_REASONS,
     AnswerabilityStatus.UNANSWERABLE: frozenset(AnswerabilityReason)
     - _UNRESOLVED_REASONS
-    - {AnswerabilityReason.INCOMPLETE_CHAIN},
+    - {AnswerabilityReason.INCOMPLETE_CHAIN}
+    - UNMAPPED_ANSWERABILITY_REASONS,
 }
 
 # 사유를 비운 채로 나올 수 있는 판정 상태.

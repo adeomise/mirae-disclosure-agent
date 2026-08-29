@@ -527,6 +527,7 @@ def test_existing_exact_collection_counts_still_pass() -> None:
             {
                 "calculation_id": "calculation-1",
                 "operation": "difference",
+                "inputs": [{"input_type": "fact", "input_id": "fact-1"}],
             }
         ],
     )

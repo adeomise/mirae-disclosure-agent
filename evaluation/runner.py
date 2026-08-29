@@ -70,6 +70,7 @@ class CollectionCounts(BaseModel):
     events: int | None = Field(default=None, ge=0)
     event_links: int | None = Field(default=None, ge=0)
     event_histories: int | None = Field(default=None, ge=0)
+    resolved_event_states: int | None = Field(default=None, ge=0)
     calculations: int | None = Field(default=None, ge=0)
     comparisons: int | None = Field(default=None, ge=0)
 
@@ -79,6 +80,7 @@ class IntegrityExpectation(BaseModel):
 
     fact_evidence_references: bool | None = None
     calculation_evidence_references: bool | None = None
+    resolved_field_evidence_references: bool | None = None
     result_input_references: bool | None = None
 
 
@@ -289,7 +291,16 @@ def _facts_match_distinctly(
 
 def _dangling_references(result: PredictionCase, collection: str) -> list[str]:
     evidence_ids = {item.evidence_id for item in result.evidence}
-    items = result.facts if collection == "facts" else result.calculations
+    if collection == "facts":
+        items = result.facts
+    elif collection == "calculations":
+        items = result.calculations
+    else:
+        items = [
+            field
+            for state in result.resolved_event_states
+            for field in state.fields.values()
+        ]
     return sorted(
         {
             evidence_id
@@ -383,6 +394,10 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
         checks = {
             "fact_evidence_references": ("facts", "Fact"),
             "calculation_evidence_references": ("calculations", "Calculation"),
+            "resolved_field_evidence_references": (
+                "resolved_event_states",
+                "Resolved field",
+            ),
         }
         for field, (collection, label) in checks.items():
             expected = getattr(gold.integrity, field)

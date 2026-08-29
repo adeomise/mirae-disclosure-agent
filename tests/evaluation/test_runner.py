@@ -478,6 +478,7 @@ def test_exact_collection_count_mismatch_fails(counts, failure_field) -> None:
     assert any(item.startswith(failure_field) for item in failures)
 
 
+
 def test_comparisons_exact_count_match_passes() -> None:
     actual = prediction(
         "case",
@@ -515,6 +516,52 @@ def test_unspecified_comparisons_count_preserves_existing_behavior() -> None:
                 "relation": "equal",
             }
         ],
+    )
+
+    assert compare_prediction(answerable_gold("case"), actual) == []
+
+
+def resolved_event_state(*, evidence_ids: list[str]) -> dict:
+    return {
+        "event_id": "event-chain-1",
+        "event_type": "supply_contract",
+        "company": "Synthetic Company",
+        "as_of": "2025-03-14",
+        "fields": {
+            "contract_amount": {
+                "value": 100.0,
+                "unit": "KRW",
+                "source_doc_id": "doc-1",
+                "evidence_ids": evidence_ids,
+            }
+        },
+    }
+
+
+def test_resolved_event_states_exact_count_match_passes() -> None:
+    actual = prediction(
+        "case",
+        resolved_event_states=[resolved_event_state(evidence_ids=["evidence-1"])],
+    )
+
+    assert compare_prediction(
+        answerable_gold("case", counts={"resolved_event_states": 1}), actual
+    ) == []
+
+
+def test_resolved_event_states_exact_count_mismatch_fails() -> None:
+    failures = compare_prediction(
+        answerable_gold("case", counts={"resolved_event_states": 1}),
+        prediction("case"),
+    )
+
+    assert "counts.resolved_event_states: expected 1, got 0" in failures
+
+
+def test_omitted_resolved_event_states_count_is_ignored() -> None:
+    actual = prediction(
+        "case",
+        resolved_event_states=[resolved_event_state(evidence_ids=["evidence-1"])],
     )
 
     assert compare_prediction(answerable_gold("case"), actual) == []
@@ -614,6 +661,32 @@ def test_calculation_evidence_reference_integrity_is_supported() -> None:
     failures = compare_prediction(gold, actual)
 
     assert any("dangling Calculation evidence_ids=['missing']" in item for item in failures)
+
+
+def test_resolved_field_evidence_reference_integrity_passes() -> None:
+    gold = answerable_gold(
+        "case", integrity={"resolved_field_evidence_references": True}
+    )
+    actual = prediction(
+        "case",
+        resolved_event_states=[resolved_event_state(evidence_ids=["evidence-1"])],
+    )
+
+    assert compare_prediction(gold, actual) == []
+
+
+def test_dangling_resolved_field_evidence_reference_fails() -> None:
+    gold = answerable_gold(
+        "case", integrity={"resolved_field_evidence_references": True}
+    )
+    actual = prediction(
+        "case",
+        resolved_event_states=[resolved_event_state(evidence_ids=["missing"])],
+    )
+
+    failures = compare_prediction(gold, actual)
+
+    assert any("dangling Resolved field evidence_ids=['missing']" in item for item in failures)
 
 
 @pytest.mark.parametrize(

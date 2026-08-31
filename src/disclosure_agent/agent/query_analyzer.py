@@ -12,6 +12,8 @@
 - 사용자 질문 문자열
 - 검색 대상 기업명 목록. service가 manifest에서 읽어 전달한다. 목록이 없으면 기업명을
   추측하지 않고 거절한다.
+- 기업별 상대 기간 기준 연도(anchor) 대응표. 같은 이유로 manifest에서 읽어 전달한다.
+  주지 않으면 상대 기간 질문이 막히며, 오늘 연도로 대신하지 않는다.
 
 출력:
 - QueryPlan
@@ -30,14 +32,23 @@ TODO:
   막는 쪽에서는 이 구분이 없어도 되지만, 실제로 답하기 시작하면 필요해진다.
 - Pattern C 구현 시 같은 구분이 기간에도 필요하다. 지금은 서로 다른 절대연도가 둘 이상
   보이면 비교 의도인지 보지 않고 temporal_compare로 분류한다.
-- Pattern C 구현 시 상대기간 표현("작년")을 연도로 옮긴다. 지금은 탐지만 하고 해석하지
-  않는다. 절대연도와 함께 쓰이면 기간이 둘이므로 temporal_compare로 막고, 상대기간만 있는
-  질문은 missing_year로 막힌다. 어느 쪽도 답을 축소하지 않는다.
+- 절대연도와 상대기간이 함께 쓰인 질문("2025년 매출이 전년보다")의 해석. 지금은 읽기만 하고
+  옮기지 않는다. 그 경우 "전년"의 기준이 문장에 적힌 연도인지 기업의 최신 사업보고서 연도인지가
+  D8에서 정해지지 않았고, 둘 중 하나를 골라 옮기면 고른 쪽이 조용히 답이 된다.
+- 두 해 앞("재작년") 등 지원하지 않는 상대 기간 표현. 지금은 unsupported_relative_period로
+  거절한다.
+
+상대 기간 해석에 대해:
+- 과거 방향 한 해("작년"·"전년"·"전년도"·"지난해")만 절대연도로 옮긴다. 기준 연도는 해당
+  기업의 사업보고서가 코퍼스에 존재하는 가장 최신 회계연도이며, 실행 시각을 쓰지 않는다
+  (docs/agent_design/open_decisions.md D8).
+- 미래 방향("내년"·"다음 해")은 여기서 해석하지 않는다. Pattern F 소관이다.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -64,6 +75,7 @@ from disclosure_agent.retrieval.metadata_filter import (
 )
 
 __all__ = [
+    "ANCHOR_SOURCE_LATEST_ANNUAL_FILING",
     "DOCUMENT_CLASS_PERIODIC",
     "DOCUMENT_SUBTYPE_ANNUAL",
     "INTENT_CROSS_ENTITY_COMPARE",
@@ -74,9 +86,12 @@ __all__ = [
     "INTENT_UNANSWERABLE_CHECK",
     "KNOWN_INTENTS",
     "METRIC_REVENUE",
+    "PREVIOUS_YEAR_EXPRESSIONS",
+    "PREVIOUS_YEAR_OFFSET",
     "SCOPE_CONSOLIDATED",
     "SCOPE_SEPARATE",
     "QueryPlan",
+    "RelativePeriod",
     "UnsupportedQuestionError",
     "build_query_plan",
     "normalize_company_name",
@@ -127,15 +142,63 @@ DEFAULT_KNOWN_COMPANIES: tuple[str, ...] = ()
 # ("2024년이랑", "2024년과", "2024년에").
 YEAR_PATTERN = re.compile(r"(?<!\d)(?:19|20)\d{2}(?=\s*년)")
 
-# 기준 시점이 있어야 연도로 옮길 수 있는 기간 표현.
+# 기준 연도(anchor)에서 한 해 앞을 가리키는 상대 기간 표현.
 #
-# 이번 범위는 이 표현을 해석하지 않는다. 탐지만 한다. 절대연도와 함께 쓰이면 질문이 가리키는
-# 기간이 둘이므로, 하나로 줄여 답하지 않도록 시계열 비교로 분류하기 위해서다.
+# 과거 방향만 둔다. "내년"·"올해"는 여기 넣지 않는다. 미래 방향은 Pattern F 소관이며
+# (F4는 safety Gate가 query_analyzer보다 앞에서, F1은 코퍼스 경계 판정이 맡는다), 이 모듈이
+# 미래 연도를 만들어 내면 아직 존재할 수 없는 문서를 찾는 질의가 된다.
 #
-# 과거 방향만 둔다. "내년"·"올해"도 상대 기간이지만 이번 구멍(절대연도 + 과거 상대기간이
-# single_fact로 축소되는 경로)의 원인이 아니고, 미래 방향은 Gate(F4)가 query_analyzer보다
-# 앞에서 판정한다. 확인되지 않은 표현을 미리 넣으면 답할 수 있는 질문까지 막는다.
-RELATIVE_PERIOD_TOKENS = ("작년", "전년", "지난해")
+# 이 목록은 사람이 읽는 어휘이고, 실제 판정은 아래 _PREVIOUS_YEAR_PATTERN이 한다. 두 벌을
+# 두는 이유는 부분문자열 검사로는 "재작년"과 "작년"을 가를 수 없기 때문이다.
+PREVIOUS_YEAR_EXPRESSIONS = ("작년", "전년", "전년도", "지난해")
+
+# 기준 연도에서 몇 해를 옮길 것인가. 이번 범위는 한 해 앞 하나뿐이다.
+PREVIOUS_YEAR_OFFSET = -1
+
+# 상대 기간 기준 연도의 출처.
+#
+# 값을 문자열로 남기는 이유는 결과를 읽는 쪽이 "몇 년인가"뿐 아니라 "무엇을 보고 정했는가"까지
+# 알아야 하기 때문이다. 실행 시각으로 정한 값과 문서 존재로 정한 값은 재현성이 다르다.
+ANCHOR_SOURCE_LATEST_ANNUAL_FILING = "latest_annual_filing"
+
+# 지원하는 과거 상대 기간 표현.
+#
+# 부분문자열 검사를 쓰지 않는 이유가 이 자리에 있다. "재작년"은 "작년"을, "지지난해"는
+# "지난해"를, "전전년도"는 "전년"을 각각 안에 담고 있다. `in`으로 보면 셋 다 걸리고, 걸린 것을
+# 그대로 해석하면 두 해 앞을 물은 질문에 한 해 앞을 답하게 된다. 근거를 갖춘 채로 질문과 다른
+# 기간을 답하는 형태이며, 개수나 형식으로는 드러나지 않는다.
+#
+# 그래서 앞 글자를 lookbehind로 배제한다. 한국어에는 정규식의 단어 경계(\b)로 가를 자리가
+# 없으므로, 경계 역할을 할 앞 글자를 직접 적는다.
+#
+#   (?<!재)작년      재작년 배제
+#   (?<!전)전년도?   전전년/전전년도 배제. "전년도"는 "전년"과 같은 뜻이라 함께 받는다
+#   (?<!지)지난해    지지난해 배제
+_PREVIOUS_YEAR_PATTERN = re.compile(r"(?<!재)작년|(?<!전)전년도?|(?<!지)지난해")
+
+# 상대 기간이긴 하나 이번 범위가 해석하지 않는 표현.
+#
+# 위 패턴이 걸러 내는 것만으로는 부족하다. "전년 동기"는 (?<!전)전년에 그대로 걸리는데, 그것이
+# 가리키는 것은 전년도 연간이 아니라 전년 같은 분기다. 해석하면 분기 값을 물은 질문에 연간 값을
+# 답하게 된다.
+#
+# 여기 걸리면 해석하지 않고 거절한다. 두 해 앞("재작년")을 지원 범위로 넓히는 것보다, 지원하지
+# 않는다고 말하는 쪽이 먼저다.
+#
+# "전기"는 넣지 않는다. 회계 용어로는 전년도를 뜻하지만 "전기차"·"전기전자"·"전기공사"가 모두
+# 같은 두 글자로 시작하고, 그쪽이 이 코퍼스에서 훨씬 흔한 기재 사실이다. 낱말 하나로 막으면
+# 답할 수 있는 조회 질문을 막는다. 해석되지 않으므로 지금도 fail-closed다.
+_UNSUPPORTED_RELATIVE_PERIOD_PATTERN = re.compile(
+    r"재작년|지지난해|전전년도?|(?:전년|작년|지난해)\s*동기"
+)
+
+# 옛 이름. 부분문자열 검사만 하던 시절의 어휘이며 정본이 아니다.
+#
+# 남겨 둔 이유는 이 값을 import해 "해석하지 않은 상대 기간이 있는가"를 판정하던 호출부가 있기
+# 때문이다. 그 판정은 이제 QueryPlan.has_unresolved_relative_period가 답한다. 계획에 남은
+# 구조를 보지 않고 질문 문자열을 다시 읽으면, 해석에 성공한 계획도 "작년"이라는 글자가 남아
+# 있다는 이유로 막힌다.
+RELATIVE_PERIOD_TOKENS = PREVIOUS_YEAR_EXPRESSIONS
 
 # 분기/반기 표현이 보이면 이번 슬라이스 범위 밖이다.
 QUARTER_TOKENS = ("분기", "반기", "상반기", "하반기", "q1", "q2", "q3", "q4")
@@ -267,6 +330,69 @@ class UnsupportedQuestionError(ValueError):
 
 
 @dataclass(frozen=True)
+class RelativePeriod:
+    """
+    질문에 쓰인 상대 기간 표현과 그것을 절대연도로 옮긴 결과.
+
+    QueryPlan이 이 값을 들고 다니는 이유:
+        "이 계획에 해석하지 않은 상대 기간이 남아 있는가"를 계획만 보고 답할 수 있어야 한다.
+        그 판정을 질문 문자열을 다시 읽어서 하면, 해석에 성공한 계획도 "작년"이라는 글자가
+        남아 있다는 이유로 막힌다. 원래 그 판정은 답을 축소하지 않으려고 만든 것인데, 그렇게
+        되면 답할 수 있는 질문을 막는 쪽으로 틀린다. 막는 쪽으로 틀리는 것도 틀리는 것이다.
+
+    anchor_year를 None으로 둘 수 있게 한 이유:
+        상대 기간을 읽었지만 옮기지 않은 계획이 실제로 있다. 절대연도와 상대 기간이 함께
+        쓰인 질문("2025년 매출이 전년보다 얼마나 늘었어?")이 그 경우다. 그 질문에서 "전년"의
+        기준이 문장에 적힌 2025인지 최신 사업보고서 연도인지는 이 구현이 정하지 않았고,
+        정하지 않은 것을 정한 척하면 두 해석 중 하나가 조용히 답이 된다. 그래서 읽었다는
+        사실만 남기고 연도는 비워 둔다.
+
+    warnings에 담지 않는 이유:
+        warnings는 사람이 읽는 진단 문자열이다. 기계가 상태를 판정해야 할 때 그 문자열을
+        다시 파싱하면, 문구를 다듬는 일이 곧 동작 변경이 된다.
+    """
+
+    expression: str
+    offset: int
+    anchor_year: int | None = None
+    anchor_source: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.offset >= 0:
+            # 미래 방향은 이 구현이 만들지 않는다. Pattern F 소관이며, 여기서 미래 연도를
+            # 만들면 아직 존재할 수 없는 문서를 찾는 질의가 된다.
+            raise ValueError(
+                f"과거 방향 상대 기간만 표현합니다: offset={self.offset!r}"
+            )
+
+        if (self.anchor_year is None) != (self.anchor_source is None):
+            # 연도만 있고 출처가 없으면 그 값이 무엇을 보고 정해졌는지 알 수 없다. 출처만
+            # 있고 연도가 없으면 해석하지 않은 것을 해석한 것처럼 보인다.
+            raise ValueError(
+                "anchor_year와 anchor_source는 함께 있거나 함께 비어 있어야 합니다: "
+                f"anchor_year={self.anchor_year!r}, anchor_source={self.anchor_source!r}"
+            )
+
+    @property
+    def resolved(self) -> bool:
+        """기준 연도가 정해졌는가."""
+        return self.anchor_year is not None
+
+    @property
+    def resolved_years(self) -> tuple[int, ...]:
+        """
+        옮겨진 절대연도를 오래된 것부터 돌려준다. 옮기지 않았으면 빈 튜플.
+
+        QueryPlan.years와 같은 값을 만들지만 정본은 years다. 이 값은 "무엇이 이 연도를
+        만들었는가"를 되짚는 자리이며, 실행 경로가 읽는 곳이 아니다.
+        """
+        if self.anchor_year is None:
+            return ()
+
+        return (self.anchor_year + self.offset, self.anchor_year)
+
+
+@dataclass(frozen=True)
 class QueryPlan:
     """
     Q01 계열 단일 수치 조회를 위한 결정론적 실행 계획.
@@ -324,6 +450,16 @@ class QueryPlan:
     chain_policy: ChainPolicy | None = None
     # accounting_scope가 질문에 명시됐는지 기록한다. 기본값으로 채운 경우를 구분하기 위함이다.
     accounting_scope_explicit: bool = True
+    # 질문에 상대 기간 표현이 있었다면 그 표현과 해석 결과.
+    #
+    # 이 계획을 읽는 쪽이 "해석하지 않은 상대 기간이 남아 있는가"를 계획만 보고 답할 수 있게
+    # 하는 자리다. 질문 문자열을 다시 읽는 판정을 대신한다
+    # (has_unresolved_relative_period 참조).
+    #
+    # 공유 Data Contract에는 넣지 않는다. 이 값은 질의 해석 계층이 자기 판정을 기록해 두는
+    # 실행 계획 상태이며, Pattern 결과로 나가지 않는다. 공유 Contract가 미해결 기간을
+    # 표현해야 할 때가 오면 common.schemas.Period.kind가 그 자리를 이미 갖고 있다.
+    relative_period: RelativePeriod | None = None
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -443,6 +579,20 @@ class QueryPlan:
         return self.years[0]
 
     @property
+    def has_unresolved_relative_period(self) -> bool:
+        """
+        계획에 해석하지 않은 상대 기간이 남아 있는가.
+
+        이 계획으로 답을 만들어도 되는지를 판정하는 쪽이 읽는다. 참이면 질문이 가리키는
+        기간이 계획의 years만으로 결정되지 않으므로, years를 그대로 써서 답하면 질문이 물은
+        기간 중 일부만 답하게 된다.
+
+        질문 문자열을 보지 않는다. "작년"은 해석에 성공한 계획에도 그대로 남아 있으므로,
+        문자열로 판정하면 옮기기 전과 옮긴 뒤를 가릴 수 없다.
+        """
+        return self.relative_period is not None and not self.relative_period.resolved
+
+    @property
     def company(self) -> str:
         """
         대표 기업 하나.
@@ -486,19 +636,101 @@ def _extract_years(question: str) -> tuple[int, ...]:
     return tuple(seen)
 
 
+def _match_previous_year_expression(question: str) -> str | None:
+    """
+    질문에 쓰인 과거 상대 기간 표현을 돌려준다. 없으면 None.
+
+    있다는 사실만이 아니라 무엇에 걸렸는지를 돌려준다. 해석 결과를 사람이 되짚으려면
+    "'작년'을 2024로 옮겼다"까지 남아야 하고, 참/거짓만으로는 그 문장을 만들 수 없다.
+
+    지원하지 않는 표현은 여기서 보지 않는다. 그 판정은 _reject_unsupported_relative_period가
+    질문 해석 앞에서 이미 끝내며, 순서가 규약이다. 여기서 함께 보면 "지원하지 않아서 걸리지
+    않은 것"과 "아예 없어서 걸리지 않은 것"이 같은 None이 된다.
+    """
+    match = _PREVIOUS_YEAR_PATTERN.search(question)
+
+    return match.group(0) if match else None
+
+
 def _has_relative_period(question: str) -> bool:
     """
-    기준 시점이 있어야 연도로 옮길 수 있는 기간 표현이 있는가.
+    해석 대상 상대 기간 표현이 있는가.
 
-    해석하지 않고 있는지만 본다. 이번 범위는 "작년"을 2024로 바꾸지 않는다. 그 변환은 기준
-    시점(as_of) 정책을 먼저 정해야 하고, 정하지 않은 채 오늘 날짜로 대신하면 같은 질문이
-    실행 시점에 따라 다른 해를 가리킨다.
-
-    탐지만으로 충분한 이유는, 이 판정이 답을 만들기 위한 것이 아니라 답을 만들지 않기 위한
-    것이기 때문이다. 절대연도와 함께 쓰이면 질문이 가리키는 기간이 둘이라는 사실만 확정되면
-    되고, 그 둘이 정확히 몇 년인지는 Pattern C를 구현할 때 정한다.
+    판정 규칙은 _match_previous_year_expression 하나가 갖는다. 여기서 다시 적으면 같은
+    질문에 두 벌의 어휘가 생기고, 한쪽만 넓어지는 날이 온다.
     """
-    return any(token in question for token in RELATIVE_PERIOD_TOKENS)
+    return _match_previous_year_expression(question) is not None
+
+
+def _reject_unsupported_relative_period(question: str) -> None:
+    """
+    상대 기간이긴 하나 이번 범위가 해석하지 않는 표현을 거절한다.
+
+    의도 분기보다 앞의 공통 경로에서 실행한다. _reject_out_of_scope_period와 같은 자리이며
+    이유도 같다. 의도별 builder 안에서 부르면 Pattern을 추가할 때마다 같은 검사를 다시 붙여야
+    하고, 한 번 빠뜨린 Pattern만 조용히 검사를 건너뛴다.
+
+    거절하지 않고 넘기면 어떻게 되는가:
+        "재작년보다 얼마나 늘었어?"는 지원 패턴에 걸리지 않으므로 상대 기간이 없는 질문이 되고,
+        절대연도도 없으니 missing_year로 막힌다. 막히기는 하지만 "연도를 못 읽었다"는 사유가
+        실제로 일어난 일과 다르다. 질문에는 기간이 분명히 적혀 있고, 이 구현이 그 표현을
+        지원하지 않을 뿐이다. 무엇을 구현하면 풀리는 질문인지가 결과에 남아야 한다.
+    """
+    match = _UNSUPPORTED_RELATIVE_PERIOD_PATTERN.search(question)
+
+    if match is None:
+        return
+
+    supported = ", ".join(f"'{item}'" for item in PREVIOUS_YEAR_EXPRESSIONS)
+
+    raise UnsupportedQuestionError(
+        reason="unsupported_relative_period",
+        detail=(
+            f"상대 기간 표현 '{match.group(0)}'에 대한 해석은 이번 범위에 포함되지 않습니다. "
+            f"지원하는 표현: {supported}."
+        ),
+    )
+
+
+def _resolve_anchor_year(
+    company: str,
+    fiscal_year_anchors: Mapping[str, int] | None,
+) -> int:
+    """
+    기업 한 곳의 상대 기간 기준 연도를 읽는다. 읽지 못하면 거절한다.
+
+    이 함수는 코퍼스를 열지 않는다. 호출자가 manifest에서 유도해 넘긴 대응표만 읽는다.
+    query_analyzer가 known_companies를 인자로 받는 것과 같은 자리이며, 질의 해석 계층이
+    검색 계층을 직접 부르지 않게 하려는 것이다(tests/unit/test_layering.py).
+
+    없을 때 오늘 날짜로 대신하지 않는다. 그렇게 하면 같은 질문이 실행한 날에 따라 다른 해를
+    가리키고, 평가에서 어제 맞던 답이 오늘 틀린다. 값이 없으면 막는다.
+
+    앞 연도가 대응표의 어느 범위에 있는지도 보지 않는다. anchor - 1의 사업보고서가 코퍼스에
+    없더라도 여기서 연도를 바꾸지 않으며, 그 판정은 문서를 실제로 찾아 본 뒤 filing_discovery가
+    한다. 여기서 앞당기면 질문이 물은 기간과 다른 기간을 답하게 된다.
+    """
+    if not fiscal_year_anchors:
+        raise UnsupportedQuestionError(
+            reason="missing_fiscal_year_anchor",
+            detail=(
+                "상대 기간을 옮길 기준 연도를 알 수 없습니다. 기업별 최신 사업보고서 회계연도 "
+                "대응표가 주어지지 않았습니다. manifest에서 읽어 전달해야 합니다."
+            ),
+        )
+
+    anchor = fiscal_year_anchors.get(normalize_company_name(company))
+
+    if anchor is None:
+        raise UnsupportedQuestionError(
+            reason="missing_fiscal_year_anchor",
+            detail=(
+                f"'{company}'의 사업보고서를 코퍼스에서 찾을 수 없어 상대 기간을 옮길 기준 "
+                "연도를 정할 수 없습니다."
+            ),
+        )
+
+    return anchor
 
 
 def _require_years(years: tuple[int, ...]) -> tuple[int, ...]:
@@ -828,6 +1060,8 @@ def _build_temporal_compare_plan(
     question: str,
     companies: tuple[str, ...],
     years: tuple[int, ...],
+    *,
+    relative_period: RelativePeriod | None = None,
 ) -> QueryPlan:
     """
     여러 기간을 함께 묻는 질문의 계획을 만든다.
@@ -869,8 +1103,11 @@ def _build_temporal_compare_plan(
 
     # 상대기간이 섞인 질문은 확보한 절대연도 개수가 곧 기간 개수가 아니다. 개수를 세어 적으면
     # "1개 기간"이라고 말하면서 시계열 비교로 분류한 결과가 되어 진단이 스스로 모순된다.
-    if _has_relative_period(question):
-        detail = f"질문이 절대연도({listed})와 상대 기간 표현을 함께 쓰고 있어"
+    if relative_period is not None:
+        detail = (
+            f"질문이 절대연도({listed})와 상대 기간 표현"
+            f"('{relative_period.expression}')을 함께 쓰고 있어"
+        )
     else:
         detail = f"질문이 {len(years)}개 기간({listed})을 함께 묻고 있어"
 
@@ -883,7 +1120,77 @@ def _build_temporal_compare_plan(
         metric=metric,
         derived_metric=derived_metric,
         accounting_scope_explicit=scope_explicit,
+        relative_period=relative_period,
         warnings=(f"{detail} 시계열 비교로 해석했습니다.",),
+    )
+
+
+def _build_relative_period_plan(
+    question: str,
+    companies: tuple[str, ...],
+    *,
+    expression: str,
+    fiscal_year_anchors: Mapping[str, int] | None,
+) -> QueryPlan:
+    """
+    절대연도 없이 과거 상대 기간만 쓴 질문의 계획을 만든다. Q07이 이 경로다.
+
+        "한미반도체 매출이 작년보다 얼마나 늘었어?"
+        -> anchor = 한미반도체의 최신 사업보고서 회계연도
+        -> years = (anchor - 1, anchor)
+
+    기준 연도를 어디서 가져오는가 (docs/agent_design/open_decisions.md D8):
+        해당 기업의 사업보고서가 코퍼스에 존재하는 가장 최신 회계연도다. 실행 시각을 쓰지
+        않으므로 같은 코퍼스에서 같은 질문은 언제 실행해도 같은 연도를 가리킨다.
+
+        요청 지표를 그 문서에서 실제로 읽을 수 있는지는 보지 않는다. 보기 시작하면 추출에
+        실패한 해가 조용히 건너뛰어져 "2025년 매출을 못 읽었으니 2024년으로 견주자"가 되고,
+        그 결과는 근거를 갖춘 채로 질문과 다른 기간을 답하는 형태다. anchor는 문서의 존재만으로
+        정하고, 값이 없으면 뒤 단계가 NOT_FOUND로 답한다.
+
+    years 순서는 오래된 것부터다. 질문에 적힌 순서를 그대로 쓰면 같은 변화에 부호가 뒤집힌
+    값이 나오고, 뒤집힌 값도 그럴듯하다. 이 순서를 계획 쪽에서 고정해 두면 실행하는 쪽이
+    매번 다시 정하지 않는다.
+
+    intent를 temporal_compare로 두는 이유는 질문이 가리키는 기간이 둘이기 때문이다. 기존
+    어휘를 쓰며 새 intent를 만들지 않는다. 절대연도 두 개를 적은 질문(Q08)과 이 질문은 계획이
+    같은 모양이어야 하고, 실행하는 쪽이 둘을 구분할 이유가 없다.
+
+    지표와 회계기준은 _build_temporal_compare_plan과 같은 규칙으로 읽는다. 두 경로가 만드는
+    계획의 모양이 달라지면, 같은 Pattern을 실행하는 쪽이 어느 경로로 왔는지 알아야 한다.
+    """
+    anchor_year = _resolve_anchor_year(companies[0], fiscal_year_anchors)
+
+    relative_period = RelativePeriod(
+        expression=expression,
+        offset=PREVIOUS_YEAR_OFFSET,
+        anchor_year=anchor_year,
+        anchor_source=ANCHOR_SOURCE_LATEST_ANNUAL_FILING,
+    )
+
+    years = relative_period.resolved_years
+
+    accounting_scope, scope_explicit = _extract_accounting_scope(question)
+    metric, derived_metric = _resolve_requested_metrics(question)
+
+    older, newer = years
+
+    return QueryPlan(
+        question=question.strip(),
+        companies=companies,
+        years=years,
+        intent=INTENT_TEMPORAL_COMPARE,
+        accounting_scope=accounting_scope,
+        metric=metric,
+        derived_metric=derived_metric,
+        accounting_scope_explicit=scope_explicit,
+        relative_period=relative_period,
+        warnings=(
+            f"질문의 상대 기간 표현('{expression}')에 기준 연도 FY{anchor_year}를 적용해 "
+            f"FY{older} -> FY{newer} 시계열 비교로 해석했습니다. "
+            f"기준 연도는 코퍼스에 있는 '{companies[0]}'의 최신 사업보고서 회계연도이며, "
+            "실행 시각이나 현재 연도를 쓰지 않았습니다.",
+        ),
     )
 
 
@@ -971,12 +1278,26 @@ def _reject_out_of_scope_period(question: str) -> None:
 def build_query_plan(
     question: str,
     known_companies: tuple[str, ...] | list[str] | None = None,
+    *,
+    fiscal_year_anchors: Mapping[str, int] | None = None,
 ) -> QueryPlan:
     """
     질문 문자열에서 Q01 계열 QueryPlan을 만든다.
 
     known_companies에 준 목록 안에서만 기업을 인식한다.
     목록이 없으면 기업명을 추측하지 않고 거절한다.
+
+    fiscal_year_anchors는 상대 기간("작년")을 절대연도로 옮길 기준 연도 대응표다. 키는
+    normalize_company_name을 거친 기업명이며, 값은 그 기업의 사업보고서가 코퍼스에 존재하는
+    가장 최신 회계연도다. retrieval 계층의
+    latest_annual_fiscal_year_by_company가 manifest에서 유도하고 호출자가 넘긴다.
+
+    known_companies와 같은 방식으로 주입받는 이유는 같다. 질의 해석 계층이 코퍼스를 직접
+    열지 않게 하려는 것이며(tests/unit/test_layering.py), 덕분에 이 모듈은 manifest 없이도
+    전부 시험할 수 있다.
+
+    주지 않으면 상대 기간 질문이 막힌다. 기본값으로 오늘 연도를 쓰지 않는다. 그렇게 하면 같은
+    질문이 실행한 날에 따라 다른 해를 가리키고, 그 차이는 결과만 봐서는 드러나지 않는다.
     """
     if not question or not question.strip():
         raise UnsupportedQuestionError(
@@ -1002,6 +1323,13 @@ def build_query_plan(
     # 한 번 빠뜨린 Pattern만 조용히 검사를 건너뛴다. 지금은 Pattern D handler가 없어
     # routing에서 막히지만, handler가 생기는 순간 그 경로가 기간 규칙을 우회하게 된다.
     _reject_out_of_scope_period(question)
+
+    # 지원하지 않는 상대 기간 표현도 의도 분기보다 먼저 본다. 같은 자리에 두는 이유가 같다.
+    #
+    # 이 검사가 여기 있어야 "재작년"이 아래 지원 패턴에 걸리지 않은 채로 흘러 내려가
+    # missing_year가 되는 일이 없다. 질문에는 기간이 분명히 적혀 있으므로 '연도를 못 읽었다'는
+    # 사유는 실제로 일어난 일과 다르다.
+    _reject_unsupported_relative_period(question)
 
     # 기업이 둘 이상이면 Pattern D다. 이 판정을 나머지 의도 분기보다 먼저 한다.
     #
@@ -1041,11 +1369,41 @@ def build_query_plan(
     # 늘었어?"). 절대연도 개수만 세면 하나이므로 이 가드를 통과해 single_fact로 축소된다.
     # 상대기간을 연도로 옮기지는 않는다. 기간이 둘이라는 사실만 확정하면 막기에 충분하다.
     #
-    # 절대연도가 하나도 없는 질문(Q07 "매출이 작년보다 얼마나 늘었어?")은 여기서 걸지 않는다.
-    # 아래 _require_years가 missing_year로 막으므로 이미 fail-closed이고, 그 질문에 답하려면
-    # 상대기간 해석이 필요한데 그것은 Pattern C 구현 범위다.
-    if len(years) > 1 or (years and _has_relative_period(question)):
-        return _build_temporal_compare_plan(question, companies, years)
+    # 절대연도가 하나도 없고 과거 상대 기간만 쓴 질문(Q07 "매출이 작년보다 얼마나 늘었어?")은
+    # 아래에서 따로 다룬다. 그쪽은 기준 연도를 붙여 절대연도 두 개를 만든다.
+    relative_expression = _match_previous_year_expression(question)
+
+    if len(years) > 1 or (years and relative_expression is not None):
+        # 절대연도와 상대 기간이 함께 쓰인 질문은 옮기지 않는다.
+        #
+        # "2025년 매출이 전년보다 얼마나 늘었어?"에서 "전년"의 기준이 문장에 적힌 2025인지
+        # 기업의 최신 사업보고서 연도인지는 D8이 정하지 않았다. D8이 정한 것은 기준을 밖에서
+        # 가져와야 하는 경우 하나뿐이고, 여기는 문장 안에 후보가 이미 있다.
+        #
+        # 둘 중 하나를 골라 옮기면 고른 쪽이 조용히 답이 된다. 그래서 읽었다는 사실만 계획에
+        # 남기고 연도는 비워 둔다. 이 계획은 has_unresolved_relative_period가 참이므로
+        # 실행하는 쪽이 years만으로 답하지 않는다.
+        return _build_temporal_compare_plan(
+            question,
+            companies,
+            years,
+            relative_period=(
+                RelativePeriod(
+                    expression=relative_expression,
+                    offset=PREVIOUS_YEAR_OFFSET,
+                )
+                if relative_expression is not None
+                else None
+            ),
+        )
+
+    if relative_expression is not None:
+        return _build_relative_period_plan(
+            question,
+            companies,
+            expression=relative_expression,
+            fiscal_year_anchors=fiscal_year_anchors,
+        )
 
     _require_years(years)
 

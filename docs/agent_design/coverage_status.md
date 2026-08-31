@@ -48,7 +48,7 @@
 | Q04 | B | `NOT_IMPLEMENTED` | – | `document_summary` handler 없음. `query_plan/unsupported_metric`으로 BLOCKED | Pattern B 착수 시. C13 Vector fallback 여부는 D7 |
 | Q05 | B | `NOT_IMPLEMENTED` | – | 같음 + 기간 미지정 기본 문서 정책 미확정(D5-a). `query_plan/missing_year`로 BLOCKED | D5-a 확정 필요 |
 | Q06 | B | `NOT_IMPLEMENTED` | – | 같음 + 판본 선택 정책 미확정(D5). `query_plan/missing_year`로 BLOCKED | D5 확정 필요 |
-| Q07 | C | `NOT_IMPLEMENTED` | – | 절대연도가 없어 `query_plan/missing_year`로 BLOCKED. `temporal_compare` 분류는 생겼으나 상대 기간("작년") 단독 질문은 그 판정에 닿지 않음. **상대 기간을 연도로 해석하는 순간 F4("내년 매출") 질문이 통과함** | Pattern C 착수. 미래 방향 차단(Pattern F)과 같은 PR로 묶어야 함 |
+| Q07 | C | `NOT_IMPLEMENTED` | – | 상대 기간 해석은 끝남(D8 확정). "작년"이 FY2024·FY2025로 옮겨져 `temporal_compare` 계획까지 만들어지며, 이제 `pattern_entry/unsupported_comparison_metric`으로 BLOCKED. 남은 것은 원천 지표의 증감(`delta`·`delta_pct`) 계산이며 그것이 Q07-2 범위. F4 충돌은 없음 — 미래 방향은 해석하지 않고 safety Gate가 질의 해석보다 앞에 있음(F-D6 해소) | Pattern C에 원천 지표 증감 추가 |
 | Q08 | C | `NOT_IMPLEMENTED` | – | 다중 기간으로 인식되어 `routing/unimplemented_intent`로 BLOCKED. 영업이익률 파생지표는 여전히 미지원이지만, 더 근본적인 미구현(Pattern C)이 먼저 판정됨 | `operating_income` 질의 어휘 + `agent/calculator` 연결 |
 | Q09 | C | `NOT_IMPLEMENTED` | – | 다중 기간으로 인식되어 `routing/unimplemented_intent`로 BLOCKED. 서술 비교(C14)는 여전히 없음 | Pattern B/C 이후 |
 | Q10 | D | `NOT_IMPLEMENTED` | – | 오라우팅 해소됨. analyzer가 매치된 서로 다른 기업을 모두 인식해 `cross_entity_compare`로 분류하고, handler가 없으므로 `routing/unimplemented_intent`로 BLOCKED(Fact 0 · Evidence 0). 이전에는 `_extract_company`가 가장 긴 이름 하나만 골라 `COMPLETED`/`ANSWERABLE`로 한 기업 값만 답했음 | Pattern D handler 착수. 차단 동작은 회귀 fixture에 고정 완료(`GUARD-MULTI-COMPANY`) |
@@ -100,7 +100,7 @@
 |---|---|---|
 | A 단일 사실 | Q01 Q02 Q03 | 1/3 실측 통과. 정기공시 매출만 |
 | B 문서 요약 | Q04 Q05 Q06 | 0/3. handler 없음 |
-| C 시계열 비교 | Q07 Q08 Q09 | 0/3. **상대 기간 해석과 Pattern F가 충돌** |
+| C 시계열 비교 | Q07 Q08 Q09 | 0/3. 상대 기간 해석은 완료(D8). Pattern F와 충돌하지 않음 — 과거 방향만 해석하고 Gate가 앞에 있음 |
 | D 기업 간 비교 | Q10 Q11 Q12 | 0/3. handler 없음. Q10 오라우팅은 해소되어 `routing`에서 BLOCKED |
 | E 정정·후속 추적 | Q13 Q14 Q15 | 2/3 실측 통과. 공급계약(연/월 지정)과 신규시설투자(연도 없음). 한 질문이 두 유형에 맞으면 고르지 않고 `query_plan/ambiguous_event_subtype`으로 BLOCKED |
 | F 답변 불가 | Q16 Q17 Q18 | 1/3 정상 판정. Q18은 F3 Gate가 retrieval 이전에 판정. Q16·Q17은 여전히 우연히 거부됨(F1·F2 미구현) |

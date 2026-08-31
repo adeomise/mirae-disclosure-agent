@@ -370,6 +370,13 @@ UNAVAILABLE_MESSAGE_BY_REASON: dict[AnswerabilityReason, str] = {
     AnswerabilityReason.INSUFFICIENT_EVIDENCE: (
         "요청하신 항목의 근거를 원문에서 확인하지 못해 답변하지 않습니다."
     ),
+    # 값은 확보했지만 함께 쓸 수 없다고 판정한 결과다(normalization의 STAGE_COMPARABILITY 행).
+    # "찾지 못했다"와 다르다. 계산 입력이 어긋난 것인지 기간이 어긋난 것인지는
+    # answerability_detail.reason이 구분하며, 문장은 그 구분을 담지 않는다. detail로 문장을
+    # 갈라 쓰면 사용자 문구가 진단 어휘를 따라가고 같은 뜻의 문장이 여러 벌이 된다.
+    AnswerabilityReason.NOT_COMPARABLE: (
+        "확보한 값들의 기준, 단위 또는 개념이 서로 달라 직접 비교할 수 없습니다."
+    ),
     # 문서 목록이라는 완전한 집합과 대조한 결과다. 확정 표현을 쓴다.
     AnswerabilityReason.OUT_OF_DATA_RANGE: (
         "요청하신 기간의 공시 데이터를 보유하고 있지 않습니다."
@@ -397,9 +404,13 @@ UNAVAILABLE_MESSAGE_BY_REASON: dict[AnswerabilityReason, str] = {
 
 # Contract에는 있지만 사용자 문구가 아직 확정되지 않아 Answer Builder가 지원하지 않는 사유.
 # 문구가 확정되면 UNAVAILABLE_MESSAGE_BY_REASON으로 옮기고 이 집합에서 제거한다.
-UNMAPPED_ANSWERABILITY_REASONS: frozenset[AnswerabilityReason] = frozenset(
-    {AnswerabilityReason.NOT_COMPARABLE}
-)
+#
+# 현재는 비어 있다. 마지막 항목이었던 NOT_COMPARABLE의 문구가 확정돼 대응표로 옮겨졌다.
+# 그래도 집합 자체는 남긴다. 이 자리는 "Contract에 사유가 늘었는데 문구가 아직 없다"를 담는
+# 곳이고, ALLOWED_REASONS_BY_STATUS의 뺄셈과 대응표 완전성 검사가 그 자리를 전제로 서 있다.
+# 지웠다가 다음 사유가 생길 때 다시 만들면, 그 사이에 문구 없는 사유가 UNANSWERABLE로 조용히
+# 통과해 영문 enum 값이 그대로 응답에 실릴 수 있다.
+UNMAPPED_ANSWERABILITY_REASONS: frozenset[AnswerabilityReason] = frozenset()
 
 # 정책 거부 문장. answerability_detail.reason이 고른다.
 #

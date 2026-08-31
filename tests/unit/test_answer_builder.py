@@ -24,8 +24,11 @@ from disclosure_agent.agent.answer_builder import (
     LIMITATION_MESSAGE_BY_REASON,
     METRIC_LABELS,
     POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON,
+    REASON_INCOMPARABLE_CALCULATION_INPUTS,
+    REASON_INCOMPARABLE_PERIODS,
     REFUSAL_REASONS_WITHOUT_SUPPORTING_PAYLOAD,
     SCOPE_OMITTED_IN_ANSWER,
+    STAGE_COMPARABILITY,
     STATUSES_ALLOWING_NO_REASON,
     UNAVAILABLE_MESSAGE_BY_REASON,
     UNMAPPED_ANSWERABILITY_REASONS,
@@ -351,6 +354,68 @@ def test_out_of_data_range_uses_the_definitive_wording() -> None:
 
     assert answer == "요청하신 기간의 공시 데이터를 보유하고 있지 않습니다."
     assert answer != UNAVAILABLE_MESSAGE_BY_REASON[AnswerabilityReason.NOT_FOUND]
+
+
+def test_not_comparable_says_the_values_could_not_be_compared() -> None:
+    """
+    NOT_COMPARABLE은 "찾지 못했다"가 아니다.
+
+    코퍼스를 끝까지 읽고 값을 확보한 뒤에 내린 판정이다(normalization의 STAGE_COMPARABILITY
+    행). NOT_FOUND 문장과 섞이면 사용자는 다시 찾으면 된다고 읽지만, 실제로는 비교 전제가
+    맞지 않아 질문을 바꿔야 하는 상황이다.
+    """
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=AnswerabilityReason.NOT_COMPARABLE,
+        answerability_detail=AnswerabilityDetail(
+            stage=STAGE_COMPARABILITY,
+            reason=REASON_INCOMPARABLE_CALCULATION_INPUTS,
+            detail="SYNTHETIC-DETAIL",
+        ),
+    )
+
+    response = build_answer_response(result)
+
+    assert response.answer == (
+        "확보한 값들의 기준, 단위 또는 개념이 서로 달라 직접 비교할 수 없습니다."
+    )
+    assert response.status is AnswerabilityStatus.UNANSWERABLE
+    assert response.reason is AnswerabilityReason.NOT_COMPARABLE
+    assert response.answer != UNAVAILABLE_MESSAGE_BY_REASON[AnswerabilityReason.NOT_FOUND]
+    assert response.facts == []
+    assert response.evidence == []
+
+
+@pytest.mark.parametrize(
+    "detail_reason",
+    [REASON_INCOMPARABLE_CALCULATION_INPUTS, REASON_INCOMPARABLE_PERIODS],
+)
+def test_not_comparable_sentence_does_not_follow_the_diagnostic_detail(
+    detail_reason: str,
+) -> None:
+    """
+    두 detail 사유가 같은 사용자 문장으로 나간다.
+
+    normalization이 둘을 하나의 canonical 사유로 모은 것은 의도된 것이고, 문장은 그 사유를
+    따라간다. detail로 문장을 갈라 쓰면 사용자 문구가 진단 어휘를 따라가고, 사유별 대응표가
+    아니라 detail별 대응표가 하나 더 생긴다.
+    """
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=AnswerabilityReason.NOT_COMPARABLE,
+        answerability_detail=AnswerabilityDetail(
+            stage=STAGE_COMPARABILITY,
+            reason=detail_reason,
+            detail="SYNTHETIC-DETAIL",
+        ),
+    )
+
+    answer = build_answer_response(result).answer
+
+    assert answer == UNAVAILABLE_MESSAGE_BY_REASON[AnswerabilityReason.NOT_COMPARABLE]
+    assert detail_reason not in answer
 
 
 def test_investment_advice_refusal_is_deterministic() -> None:
@@ -1191,21 +1256,22 @@ def test_mapped_and_unmapped_reasons_exhaust_the_contract_without_overlap() -> N
 
     assert mapped.isdisjoint(unmapped)
     assert mapped | unmapped == set(AnswerabilityReason)
-    assert AnswerabilityReason.NOT_COMPARABLE in unmapped
 
 
-def test_not_comparable_fails_before_message_lookup() -> None:
-    result = AgentExecutionResult(
-        execution_status=ExecutionStatus.COMPLETED,
-        answerability_status=AnswerabilityStatus.UNANSWERABLE,
-        answerability_reason=AnswerabilityReason.NOT_COMPARABLE,
+def test_not_comparable_is_registered_in_both_places_that_gate_it() -> None:
+    """
+    문장 등록과 미등록 집합 제거는 한 결정의 두 절반이다.
+
+    ALLOWED_REASONS_BY_STATUS[UNANSWERABLE]가 UNMAPPED_ANSWERABILITY_REASONS를 빼고 만들어지므로,
+    문장만 넣고 집합에서 빼지 않으면 문장은 있는데 도달할 수 없는 사유가 남고, 반대로 집합에서만
+    빼면 _message_for_reason이 실행 중단으로 떨어진다. 둘이 같은 것을 말하는지 고정한다.
+    """
+    assert AnswerabilityReason.NOT_COMPARABLE in UNAVAILABLE_MESSAGE_BY_REASON
+    assert AnswerabilityReason.NOT_COMPARABLE not in UNMAPPED_ANSWERABILITY_REASONS
+    assert (
+        AnswerabilityReason.NOT_COMPARABLE
+        in ALLOWED_REASONS_BY_STATUS[AnswerabilityStatus.UNANSWERABLE]
     )
-
-    with pytest.raises(UnsupportedResultShapeError) as error:
-        build_answer_response(result)
-
-    assert "UNANSWERABLE에 실릴 수 없는 answerability_reason" in str(error.value)
-    assert "UNAVAILABLE_MESSAGE_BY_REASON" not in str(error.value)
 
 
 def test_reason_sentences_are_distinct() -> None:

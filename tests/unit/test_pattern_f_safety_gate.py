@@ -48,6 +48,7 @@ from disclosure_agent.agent.safety import (
     STAGE_ANSWERABILITY_GATE,
     CorpusCoverage,
     PolicyDecision,
+    _is_source_backed_future_statement,
     screen_question,
 )
 from disclosure_agent.common.enums import (
@@ -594,6 +595,143 @@ def test_relative_future_refusal_does_not_touch_retrieval_or_parsing(
     assert result.facts == []
     assert result.evidence == []
     assert result.calculations == []
+
+
+# 문서에 이미 기재된 미래 진술.
+#
+# 미래 시점 표현을 담고 있지만 요구하는 것은 내년의 실제 결과가 아니라 지금 공시에 적혀
+# 있는 계획·목표다. 정기공시는 회사가 제시한 계획·전망을 기재 항목으로 담으므로 코퍼스
+# 안의 값이고, "보유하고 있지 않습니다"는 거짓이 된다.
+#
+# 리뷰에서 실제로 오검출이 확인된 형태다. 규칙이 시점 표현만 보고 판정하면 여기가 깨진다.
+SOURCE_BACKED_FUTURE_STATEMENTS = [
+    "공시에 기재된 내년 투자계획이 뭐야?",
+    "회사가 밝힌 내년 매출 목표가 얼마야?",
+    "사업보고서에 적힌 내년 생산계획 알려줘",
+    "회사가 발표한 내년 투자 예정 금액이 얼마야?",
+    "회사가 제시한 내년 매출 목표 알려줘",
+    "공시에 나온 다음 분기 생산계획 알려줘",
+    "보고서에 기재된 내후년 투자계획 알려줘",
+]
+
+
+@pytest.mark.parametrize("question", SOURCE_BACKED_FUTURE_STATEMENTS)
+def test_source_backed_future_statement_is_not_out_of_range(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert CATEGORY_OUT_OF_CORPUS_PERIOD not in decision.matched_categories, question
+
+
+def test_source_backed_exclusion_needs_both_a_source_and_a_reported_object() -> None:
+    """
+    출처 표현과 진술 대상이 **둘 다** 있어야 면제된다.
+
+    한쪽만으로 면제하면 각각 다른 구멍이 난다.
+
+        출처만        "공시에 기재된 내년 매출 알려줘"가 빠진다. 그 질문이 요구하는 것은
+                      아직 존재하지 않는 실적값이지 문서에 적힌 진술이 아니다.
+        대상만        "내년 매출 목표를 세워줘"가 빠진다. 문서를 가리키지 않는다.
+
+    F1의 방아쇠가 시점 표현('내년')뿐이라 무엇을 묻는지 담고 있지 않기 때문이며, F4의
+    면제가 출처 표현 하나로 갈리는 것과 다른 점이다.
+    """
+    assert _is_source_backed_future_statement("공시에 기재된 내년 투자계획이 뭐야?")
+
+    # 출처만 있고 진술 대상이 없다.
+    assert not _is_source_backed_future_statement("공시에 기재된 내년 매출 알려줘")
+
+    # 진술 대상만 있고 출처가 없다.
+    assert not _is_source_backed_future_statement("내년 매출 목표를 세워줘")
+
+
+def test_source_reference_alone_does_not_exempt_a_future_value_request() -> None:
+    """
+    출처를 붙였다고 미래 실적값 요구까지 통과하지 않는다.
+
+    "공시에 기재된 내년 매출"은 성립할 수 없는 요구다. 어떤 공시도 내년의 확정 매출을
+    담고 있지 않으므로 기간 밖 판정이 유지된다.
+    """
+    decision = screen_question("공시에 기재된 내년 매출 알려줘")
+
+    assert not decision.allowed
+    assert decision.category == CATEGORY_OUT_OF_CORPUS_PERIOD
+
+
+# 면제로 잘못 빠지면 안 되는 형태.
+#
+# 계획·목표 낱말을 담고 있지만 문서를 가리키지 않는다. 모델에게 새로 만들어 달라거나
+# 골라 달라는 요구이며, 기존 F1/F3 판정이 그대로 적용되어야 한다.
+FALSE_EXEMPTION_CANDIDATES = [
+    ("내년 매출 목표를 세워줘", CATEGORY_OUT_OF_CORPUS_PERIOD),
+    ("내년 투자계획 세워줘", CATEGORY_OUT_OF_CORPUS_PERIOD),
+    ("내년 투자계획 추천해줘", CATEGORY_INVESTMENT_ADVICE),
+    ("내년 매출 목표 추천해줘", CATEGORY_INVESTMENT_ADVICE),
+]
+
+
+@pytest.mark.parametrize(("question", "expected_category"), FALSE_EXEMPTION_CANDIDATES)
+def test_plan_vocabulary_without_a_source_is_not_exempted(
+    question: str,
+    expected_category: str,
+) -> None:
+    decision = screen_question(question)
+
+    assert not decision.allowed, question
+    assert decision.category == expected_category, question
+
+
+def test_source_backed_exclusion_does_not_bypass_prediction_policy() -> None:
+    """
+    출처를 지목해도 예측을 요구하면 F4다.
+
+    F1 면제가 F4를 우회시키면 정책 거부가 사라진다. 우선순위상 F4가 F1보다 앞이므로
+    구조적으로도 그렇지만, 면제를 screen_question 앞으로 끌어올리는 변경이 이 단언에서
+    깨진다.
+    """
+    decision = screen_question("회사가 밝힌 내년 매출 전망이 맞을까?")
+
+    assert not decision.allowed
+    assert decision.category == CATEGORY_FORWARD_LOOKING
+
+    assert screen_question("공시에 적힌 계획 기준으로 내년 매출 얼마나 될까?").category == (
+        CATEGORY_FORWARD_LOOKING
+    )
+
+
+def test_source_backed_exclusion_does_not_reach_absolute_periods() -> None:
+    """
+    절대 기간에는 적용하지 않는다.
+
+    이번 수정 범위는 상대기간 오검출뿐이다. "공시에 기재된 2027년 투자계획"은 수집 상한
+    대조가 그대로 판정하며, 그 동작을 바꾸지 않았다는 것을 여기서 고정한다.
+
+    2027년 투자계획을 담은 문서가 코퍼스 안에 있을 수 있다는 점에서 이 판정은 논쟁의
+    여지가 있다. 다만 그것은 절대 기간 규칙의 문제이고, 상대기간 오검출과 함께 고치면
+    수집 상한 대조가 조용히 느슨해진다.
+    """
+    decision = screen_question("공시에 기재된 2027년 투자계획이 뭐야?")
+
+    assert not decision.allowed
+    assert decision.category == CATEGORY_OUT_OF_CORPUS_PERIOD
+    assert decision.matched_expressions == ("2027년",)
+
+
+def test_source_backed_future_statement_reaches_the_pipeline() -> None:
+    """
+    면제된 질문이 production entrypoint에서 실제로 다음 단계로 넘어가는지 본다.
+
+    screen_question만 보면 판정이 통과했다까지만 알 수 있다. 없는 코퍼스 경로를 쓰므로
+    최종 결과는 BLOCKED가 되지만, 막힌 자리가 Gate가 아니라는 점이 통과의 증거다.
+    """
+    result = router.answer_question(
+        "공시에 기재된 내년 투자계획이 뭐야?",
+        corpus_root=NONEXISTENT_CORPUS,
+    )
+
+    assert result.execution_issue is not None
+    assert result.execution_issue.stage != STAGE_ANSWERABILITY_GATE
+    assert result.answerability_detail is None
 
 
 # --------------------------------------------------------------------------

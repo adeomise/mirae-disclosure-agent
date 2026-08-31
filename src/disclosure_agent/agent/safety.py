@@ -523,6 +523,40 @@ def _requested_periods(question: str) -> tuple[tuple[int, int | None, str], ...]
 # 영역이고 최신 회계연도를 anchor로 해석되므로, 여기서 막으면 그 작업이 답할 질문을 미리
 # 없앤다. query_analyzer.RELATIVE_PERIOD_TOKENS가 같은 세 낱말만 담고 있는 것과 짝이다.
 
+# 문서에 이미 기재된 미래 진술을 가리키는 낱말.
+#
+# 계획·목표·전망·가이던스·예정은 정기공시의 기재 항목이다. 회사가 스스로 내놓은 미래
+# 진술이며, 그것을 읽어 달라는 요구는 미래의 실제 결과를 요구하는 것이 아니다.
+#
+# 이 낱말들은 단독으로는 아무것도 면제하지 않는다. "내년 매출 목표를 세워줘"는 '목표'를
+# 담고 있지만 문서를 가리키지 않는다. 아래 _is_source_backed_future_statement가
+# _SOURCE_BACKED와 함께일 때만 쓴다.
+_REPORTED_FUTURE_OBJECT = re.compile(r"계획|목표|전망|가이던스|예정")
+
+
+def _is_source_backed_future_statement(question: str) -> bool:
+    """
+    문서에 이미 기재된 미래 진술을 조회하는 질문인가.
+
+    두 조건을 함께 요구한다.
+
+        출처 표현      _SOURCE_BACKED. F4가 쓰는 것과 같은 규칙을 그대로 쓴다.
+        진술 대상      계획·목표·전망·가이던스·예정
+
+    F4의 면제와 조건 수가 다른 이유:
+        F4가 면제하는 것은 _F4_REPORTED_STATEMENT_PATTERNS, 즉 "전망이 어때?" 한 갈래다.
+        그 규칙은 이미 진술 대상을 어간에 담고 있어 출처 표현만 더하면 갈린다.
+
+        F1의 방아쇠는 시점 표현('내년')뿐이고 무엇을 묻는지는 담고 있지 않다. 출처 표현만
+        보고 면제하면 "공시에 기재된 내년 매출 알려줘"까지 빠진다. 그 질문이 요구하는 것은
+        아직 존재하지 않는 실적값이지 문서에 적힌 진술이 아니다. 그래서 대상까지 본다.
+
+    절대 기간에는 적용하지 않는다. "공시에 기재된 2027년 투자계획"은 이 함수를 거치지
+    않으며, 수집 상한 대조가 그대로 판정한다. 이번 범위는 상대기간 오검출뿐이다.
+    """
+    return bool(_SOURCE_BACKED.search(question) and _REPORTED_FUTURE_OBJECT.search(question))
+
+
 # 발화 시점을 스스로 가리키는 표현. anchor를 붙일 수 없다.
 #
 # "2024년 내년"이라고 써도 '2024년의 다음 해'가 되지 않는다. 그래서 절대연도가 함께 있어도
@@ -563,7 +597,15 @@ def _first_future_relative_period(question: str) -> tuple[str, str] | None:
     판정을 보류하면 기존 경로가 그대로 처리하지만, 미래로 단정하면 되돌릴 수 없다.
 
     deictic 표현은 그 영향을 받지 않는다. '내년'은 앞에 무엇이 오든 발화 시점의 다음 해다.
+
+    출처를 지목하고 계획·목표를 물으면 그보다 앞서 통과시킨다. "공시에 기재된 내년
+    투자계획이 뭐야?"가 요구하는 것은 내년의 실제 결과가 아니라 지금 문서에 적혀 있는
+    진술이고, 그 진술은 코퍼스 안에 있다. deictic 표현도 여기서는 함께 면제된다.
     """
+    if _is_source_backed_future_statement(question):
+        # 문서에 이미 적힌 미래 진술을 읽어 달라는 요구다. 기간 밖이 아니다.
+        return None
+
     deictic = _first_match(question, _FUTURE_RELATIVE_DEICTIC)
 
     if deictic is not None:

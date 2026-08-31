@@ -29,6 +29,11 @@ SAMSUNG_FILINGS = (
     ("20241218800350", "2024-12-18", True),
 )
 
+SUPPLY_COMPANY = "삼성전자"
+SUPPLY_CONTRACT_FILINGS = (
+    ("20250728800035", "2025-07-28", False),
+    ("20250731800028", "2025-07-31", True),
+)
 
 @dataclass(frozen=True)
 class FilingStub:
@@ -236,7 +241,9 @@ def test_mismatched_event_history_identity_fails_closed() -> None:
         )
 
 
-def _actual_exchange_root() -> Path | None:
+def _actual_exchange_root(
+    filings: tuple[tuple[str, str, bool], ...],
+) -> Path | None:
     configured = os.environ.get(CORPUS_ROOT_ENV)
 
     if configured:
@@ -254,7 +261,7 @@ def _actual_exchange_root() -> Path | None:
     for candidate in candidates:
         if all(
             (candidate / f"{receipt_no}.xml").is_file()
-            for receipt_no, _, _ in SAMSUNG_FILINGS
+            for receipt_no, _, _ in filings
         ):
             return candidate
 
@@ -262,7 +269,7 @@ def _actual_exchange_root() -> Path | None:
 
 
 def test_samsung_biologics_actual_facility_investment_latest_state() -> None:
-    corpus_root = _actual_exchange_root()
+    corpus_root = _actual_exchange_root(SAMSUNG_FILINGS)
 
     if corpus_root is None:
         pytest.skip(
@@ -375,6 +382,125 @@ def test_samsung_biologics_actual_facility_investment_latest_state() -> None:
         state.fields["equity_ratio"].source_doc_id
         == "exchange_20230317800146"
     )
+
+    for field_name, (_, _, source_doc_id) in expected.items():
+        assert state.fields[field_name].evidence_ids == [
+            f"evidence_{source_doc_id}_{field_name}"
+        ]
+
+def test_samsung_supply_contract_actual_latest_state() -> None:
+    corpus_root = _actual_exchange_root(SUPPLY_CONTRACT_FILINGS)
+
+    if corpus_root is None:
+        pytest.skip(
+            f"실측 코퍼스가 없습니다. "
+            f"{CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다."
+        )
+
+    filings = [
+        FilingStub(
+            receipt_no=receipt_no,
+            receipt_date=receipt_date,
+            doc_id=f"exchange_{receipt_no}",
+            corp_name=SUPPLY_COMPANY,
+            document_subtype="단일판매공급계약체결",
+            is_correction=is_correction,
+        )
+        for receipt_no, receipt_date, is_correction in SUPPLY_CONTRACT_FILINGS
+    ]
+
+    parsed = {
+        filing.receipt_no: parse_exchange_document(
+            corpus_root / f"{filing.receipt_no}.xml",
+            corp_name=SUPPLY_COMPANY,
+            receipt_date=filing.receipt_date,
+        )
+        for filing in filings
+    }
+
+    adapted = {
+        filing.doc_id: adapt_extracted_event(
+            extract_event(parsed[filing.receipt_no])
+        )
+        for filing in filings
+    }
+
+    chain = build_filing_chain(
+        root_receipt_no=SUPPLY_CONTRACT_FILINGS[0][0],
+        filings=list(reversed(filings)),
+        documents=parsed,
+        event_type=EventType.SUPPLY_CONTRACT.value,
+    )
+
+    history = to_event_history(
+        chain,
+        documents=parsed,
+        filings=filings,
+        event_type=EventType.SUPPLY_CONTRACT,
+    ).history
+
+    assert history is not None
+
+    root_event = adapted[filings[0].doc_id].event
+
+    state = resolve_latest_event_state(
+        root_event=root_event,
+        history=history,
+        chain=chain,
+        documents=adapted,
+    )
+
+    expected = {
+        "counterparty": (
+            "테슬라(Tesla, Inc.)",
+            None,
+            "exchange_20250731800028",
+        ),
+        "contract_amount": (
+            22764764160000,
+            "KRW",
+            "exchange_20250728800035",
+        ),
+        "contract_name": (
+            "반도체 위탁생산 공급계약",
+            None,
+            "exchange_20250728800035",
+        ),
+        "contract_start_date": (
+            "2025-07-24",
+            None,
+            "exchange_20250728800035",
+        ),
+        "contract_end_date": (
+            "2033-12-31",
+            None,
+            "exchange_20250728800035",
+        ),
+        "contract_date": (
+            "2025-07-26",
+            None,
+            "exchange_20250728800035",
+        ),
+    }
+
+    assert state.as_of.isoformat() == "2025-07-31"
+    assert state.event_id == history.event_id
+    assert state.event_type is EventType.SUPPLY_CONTRACT
+    assert state.company == SUPPLY_COMPANY
+
+    assert {
+        field_name: (
+            field.value,
+            field.unit,
+            field.source_doc_id,
+        )
+        for field_name, field in state.fields.items()
+        if field_name in expected
+    } == expected
+
+    # notes는 Extractor에서는 change로 보이지만 EventHistory vocabulary에서는
+    # 지원하지 않으므로 latest state에 새 field로 추가하지 않는다.
+    assert "notes" not in state.fields
 
     for field_name, (_, _, source_doc_id) in expected.items():
         assert state.fields[field_name].evidence_ids == [

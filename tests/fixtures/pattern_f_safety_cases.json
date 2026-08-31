@@ -1,9 +1,9 @@
 {
   "schema_version": "0.1",
-  "purpose": "Pattern F(Answerability Gate) 구현 전 테스트 명세. 실행 가능한 production 테스트가 아니라, 구현 시 그대로 옮겨 쓸 케이스 정의와 현재 동작 실측 기록이다.",
+  "purpose": "Pattern F(Answerability Gate) 케이스 명세와 동작 기록. expected는 목표 상태, observed는 그 시점에 실제로 나온 값이다. F1~F4 Gate 구현 이후이므로 두 값은 Gate가 판정하는 케이스에서 일치한다. 구현 검증 자체는 tests/unit/test_pattern_f_safety_gate.py가 맡는다.",
   "contract_version": "0.1",
-  "observed_at": "2026-08-24",
-  "observed_with": "answer_question() + 실측 코퍼스(data/raw/3.공시/3.공시/corpus)",
+  "observed_at": "2026-08-31",
+  "observed_with": "answer_question() + 실측 코퍼스(data/raw/3.공시/3.공시/corpus). Gate가 판정하는 케이스(GATE_OWNED_CASE_IDS)는 코퍼스 없이도 같은 값이 나온다.",
   "policy_source": [
     "docs/mvp_scope.md 제외 항목(내부 뉴스, 주가 예측, 투자 추천, OpenDART 실시간 호출)",
     "AGENTS.md 추정 금지 규칙",
@@ -385,7 +385,7 @@
       },
       "verdict": "CORRECT",
       "risk": "LOW",
-      "note": "'내년' + '얼마나 될까'가 F4로 판정된다. Gate가 query_analyzer보다 앞이므로, Q07('작년')을 위해 상대 기간 해석을 붙여도 이 질문은 해석 단계에 도달하지 않는다. F-D6(Pattern C와 F4를 같은 PR로 묶을 것인가)의 제약이 이 순서로 해소된다. 다만 미래 '연도'만 있고 추측 어형이 없는 질문(F1-02)은 F1 소관이며 여전히 미구현이다."
+      "note": "'내년' + '얼마나 될까'가 F4로 판정된다. Gate가 query_analyzer보다 앞이므로, Q07('작년')을 위해 상대 기간 해석을 붙여도 이 질문은 해석 단계에 도달하지 않는다. F-D6(Pattern C와 F4를 같은 PR로 묶을 것인가)의 제약이 이 순서로 해소된다. 미래 시점 표현만 있고 추측 어형이 없는 질문('내년 매출 알려줘')은 F1 소관이며, 우선순위상 F4가 먼저이므로 이 질문은 그대로 F4로 남는다."
     },
     {
       "id": "F4-03",

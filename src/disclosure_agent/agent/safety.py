@@ -383,6 +383,10 @@ _F2_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # 그래서 아래 규칙에는 하한이 아예 없다. "2022년 매출"은 어떤 경로로도 F1이 되지 않으며,
 # 그 판정은 지금처럼 실제 조회 결과(F5/NOT_FOUND)에 맡긴다. 하한을 두지 않는 것이
 # 과거 방향 정책을 지키는 가장 확실한 방법이다.
+#
+# 규칙은 두 벌이다. 절대 기간("2027년", "2026년 상반기")은 수집 상한과 대조하고,
+# 미래 방향 상대기간("내년", "다음 분기")은 방향만 보고 판정한다. 뒤쪽은 연도로 옮기지
+# 않으므로 coverage를 쓰지 않는다.
 # --------------------------------------------------------------------------
 
 
@@ -498,6 +502,80 @@ def _requested_periods(question: str) -> tuple[tuple[int, int | None, str], ...]
     return tuple(periods)
 
 
+# 미래 방향 상대기간 표현.
+#
+# 절대연도가 없어도 미래를 가리키는 표현이다. 위 절대 기간 규칙만으로는 이 형태가 통과한다.
+#
+#     "삼성전자 내년 매출 알려줘"        -> query_analyzer의 missing_year로 막혔다
+#     "삼성전자 다음 분기 실적 알려줘"    -> unsupported_period로 막혔다
+#
+# 둘 다 기간 판정이 아니라 파싱 실패다. F4가 잡지 못하는 것은 추측 어형이 없기 때문이다.
+# "내년 매출 얼마나 될까?"는 예측 요구라서 F4지만, "내년 매출 알려줘"는 예측을 요구하지
+# 않는 단순 사실 조회이고, 그 사실이 수집 상한 밖에 있을 뿐이다.
+#
+# 연도로 옮기지 않는다:
+#     옮기려면 기준 시점이 필요하다. 시스템 시각을 쓰면 같은 질문이 실행 시점에 따라 다른
+#     해를 가리키고, 같은 fixture가 내년에 다른 결과를 낸다. 이 규칙이 확정하는 것은
+#     "요구 기간이 발화 시점 이후"라는 방향 하나뿐이며, F1에는 그것으로 충분하다.
+#     코퍼스는 고정된 과거 스냅샷이므로 발화 시점 이후를 가리키는 요구를 담고 있을 수 없다.
+#
+# 과거 방향 상대기간(작년·전년·지난해)은 여기 없다. 그쪽은 Q07의 relative-period resolver
+# 영역이고 최신 회계연도를 anchor로 해석되므로, 여기서 막으면 그 작업이 답할 질문을 미리
+# 없앤다. query_analyzer.RELATIVE_PERIOD_TOKENS가 같은 세 낱말만 담고 있는 것과 짝이다.
+
+# 발화 시점을 스스로 가리키는 표현. anchor를 붙일 수 없다.
+#
+# "2024년 내년"이라고 써도 '2024년의 다음 해'가 되지 않는다. 그래서 절대연도가 함께 있어도
+# 그대로 판정한다.
+_FUTURE_RELATIVE_DEICTIC: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("미래 상대기간 요구", re.compile(r"내후년|내년")),
+)
+
+# 앞의 기간을 anchor로 읽힐 수 있는 표현.
+#
+# "2024년 다음 해 매출"은 FY2025를 뜻할 수 있다. 그 해석은 코퍼스 안이므로, anchor를 무시하고
+# 미래로 단정하면 답할 수 있는 질문에 "보유하고 있지 않습니다"라고 답하게 된다. 그래서
+# 절대연도가 함께 있으면 이 규칙을 적용하지 않고 통과시킨다(→ _first_future_relative_period).
+#
+# anchored relative를 해석하지는 않는다. 이번 범위는 판정을 보류하는 것까지이고, 해석은
+# query_analyzer의 몫이다.
+#
+# '다음' 단독이나 '분기' 단독은 방아쇠가 아니다. 결합형만 본다.
+#
+# '보고서'가 뒤에 붙으면 제외한다. "다음 분기보고서 제출 예정일"은 문서를 가리키는 표현이고,
+# 제출 예정일은 공시에 기재될 수 있는 확정 일정이다. F3의 '장내매수' 예외와 같은 판단이다.
+#
+# '다음 해'는 뒤따르는 글자를 본다. 그러지 않으면 "다음 해당 공시"의 '해당'에서 '해'만
+# 떼어 읽는다.
+_FUTURE_RELATIVE_ANCHORABLE: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("미래 상대기간 요구", re.compile(r"다음\s*(?:연도|년도)")),
+    ("미래 상대기간 요구", re.compile(r"다음\s*(?:반기|분기)(?!\s*보고서)")),
+    ("미래 상대기간 요구", re.compile(r"다음\s*[해년](?=[\s.,?!]|[에의는도와과]|$)")),
+)
+
+
+def _first_future_relative_period(question: str) -> tuple[str, str] | None:
+    """
+    미래 방향 상대기간 표현을 찾는다. 없으면 None.
+
+    절대연도가 함께 있으면 anchor를 붙일 수 있는 표현은 보지 않는다. 그 조합에서 무엇을
+    뜻하는지는 anchored relative 해석이 있어야 정해지고, 이 모듈은 그것을 하지 않는다.
+    판정을 보류하면 기존 경로가 그대로 처리하지만, 미래로 단정하면 되돌릴 수 없다.
+
+    deictic 표현은 그 영향을 받지 않는다. '내년'은 앞에 무엇이 오든 발화 시점의 다음 해다.
+    """
+    deictic = _first_match(question, _FUTURE_RELATIVE_DEICTIC)
+
+    if deictic is not None:
+        return deictic
+
+    if _YEAR_PATTERN.search(question):
+        # 절대연도가 있으면 anchored relative일 수 있다. 여기서 단정하지 않는다.
+        return None
+
+    return _first_match(question, _FUTURE_RELATIVE_ANCHORABLE)
+
+
 def _first_out_of_range_period(
     question: str,
     coverage: CorpusCoverage,
@@ -517,6 +595,10 @@ def _first_out_of_range_period(
 
     반대로 하위 기간을 명시했으면 그 기간을 보고하는 문서가 있는지 없는지가 확정된다.
     "2026년 상반기"(Q16)를 담은 정기공시는 존재할 수 없다.
+
+    절대 기간에서 걸리지 않으면 미래 방향 상대기간을 본다. 순서를 이렇게 두는 이유는 절대
+    기간이 더 확정적인 근거이기 때문이다. "2027년 다음 분기 실적"에서 남길 근거 표현은
+    '다음 분기'가 아니라 '2027년'이다.
     """
     for year, end_month, expression in _requested_periods(question):
         if end_month is None:
@@ -528,7 +610,7 @@ def _first_out_of_range_period(
         if not coverage.covers(year, end_month):
             return "요구 기간이 수집 상한 밖", expression
 
-    return None
+    return _first_future_relative_period(question)
 
 
 def _first_match(

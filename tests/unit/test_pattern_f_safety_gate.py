@@ -33,7 +33,7 @@ from disclosure_agent.agent.normalization import (
     UnmappedPolicyCategoryError,
     answerability_reason_for_policy_category,
 )
-from disclosure_agent.agent.query_analyzer import YEAR_PATTERN
+from disclosure_agent.agent.query_analyzer import RELATIVE_PERIOD_TOKENS, YEAR_PATTERN
 from disclosure_agent.agent.safety import _YEAR_PATTERN as GATE_YEAR_PATTERN
 from disclosure_agent.agent.safety import (
     CATEGORY_EXTERNAL_INFORMATION,
@@ -361,6 +361,242 @@ def test_sub_year_period_is_attached_to_its_own_year() -> None:
 
 
 # --------------------------------------------------------------------------
+# 2.55 F1 — 미래 방향 상대기간
+#
+# 절대연도가 없는 미래 요구다. 이 규칙이 없으면 "내년 매출 알려줘"가 Gate를 통과해
+# query_analyzer의 missing_year로, "다음 분기 실적 알려줘"가 unsupported_period로 막힌다.
+# 둘 다 기간 판정이 아니라 파싱 실패이므로, 질문을 조금만 바꾸면 사라지는 방어다.
+#
+# F4와 나누는 기준은 추측 어형의 유무다. "내년 매출 얼마나 될까?"는 예측을 요구하므로 F4이고,
+# "내년 매출 알려줘"는 예측을 요구하지 않는 사실 조회인데 그 사실이 수집 상한 밖에 있다.
+# --------------------------------------------------------------------------
+
+F1_RELATIVE_FUTURE_QUESTIONS = [
+    "삼성전자 내년 매출 알려줘",
+    "삼성전자 내후년 매출 알려줘",
+    "삼성전자 다음 분기 실적 알려줘",
+    "다음 해 매출 알려줘",
+    "다음 연도 실적 알려줘",
+    "다음 반기 실적 알려줘",
+    "내년 영업이익 알려줘",
+]
+
+
+@pytest.mark.parametrize("question", F1_RELATIVE_FUTURE_QUESTIONS)
+def test_relative_future_period_is_refused(question: str) -> None:
+    decision = screen_question(question)
+
+    assert not decision.allowed, question
+    assert decision.category == CATEGORY_OUT_OF_CORPUS_PERIOD, question
+    assert decision.reason == REASON_OUT_OF_CORPUS_PERIOD, question
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["삼성전자 내년 매출 알려줘", "삼성전자 다음 분기 실적 알려줘"],
+)
+def test_relative_future_request_yields_the_data_range_contract(question: str) -> None:
+    """
+    상대기간도 절대기간과 같은 Contract로 나간다.
+
+    사유가 갈리면 평가에서 "2027년 매출"과 "내년 매출"이 다른 능력으로 집계된다. 둘 다
+    수집 상한 밖이라는 같은 판정이다.
+    """
+    result = router.answer_question(question, corpus_root=NONEXISTENT_CORPUS)
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.OUT_OF_DATA_RANGE
+    assert result.execution_issue is None
+    assert result.facts == []
+    assert result.evidence == []
+
+
+# F4가 이겨야 하는 형태.
+#
+# 같은 미래 시점 표현을 담고 있지만 추측 어형이 함께 있다. 우선순위가 뒤집히면 예측 요구가
+# '기간 밖'으로 집계되고, 코퍼스를 넓히면 답하게 될 질문으로 읽힌다.
+F4_WINS_OVER_RELATIVE_FUTURE = [
+    "삼성전자 내년 매출 얼마나 될까?",
+    "다음 분기 실적 전망해줘",
+    "삼성전자 내년 매출이 오를까?",
+    "다음 분기 영업이익 예상해줘",
+]
+
+
+@pytest.mark.parametrize("question", F4_WINS_OVER_RELATIVE_FUTURE)
+def test_prediction_wins_over_relative_future_period(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.category == CATEGORY_FORWARD_LOOKING, question
+    assert decision.reason == REASON_FORWARD_LOOKING_PREDICTION, question
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_reason"),
+    [
+        ("삼성전자 내년 매출 알려줘", AnswerabilityReason.OUT_OF_DATA_RANGE),
+        ("삼성전자 내년 매출 얼마나 될까?", AnswerabilityReason.OUT_OF_SCOPE_POLICY),
+        ("삼성전자 다음 분기 실적 알려줘", AnswerabilityReason.OUT_OF_DATA_RANGE),
+        ("다음 분기 실적 전망해줘", AnswerabilityReason.OUT_OF_SCOPE_POLICY),
+    ],
+)
+def test_same_horizon_splits_by_whether_a_prediction_is_requested(
+    question: str,
+    expected_reason: AnswerabilityReason,
+) -> None:
+    """
+    같은 미래 시점 표현이 요구의 성격에 따라 다른 canonical reason으로 나간다.
+
+    이 네 줄이 이번 규칙의 요지다. 시점이 아니라 '무엇을 요구했는가'가 범주를 정한다.
+    """
+    result = router.answer_question(question, corpus_root=NONEXISTENT_CORPUS)
+
+    assert result.answerability_reason is expected_reason, question
+
+
+# 과거 방향 상대기간. Q07의 relative-period resolution 영역이다.
+#
+# 이쪽을 F1으로 보내면 Q07이 답할 질문을 미리 없앤다. 최신 회계연도를 anchor로 해석되므로
+# 코퍼스 안의 값이고, "보유하고 있지 않습니다"는 거짓이 된다.
+PAST_RELATIVE_QUESTIONS = [
+    "작년 매출 알려줘",
+    "전년 실적 알려줘",
+    "지난해 실적 알려줘",
+    "한미반도체 매출이 작년보다 얼마나 늘었어?",
+    "삼성전자 전년 대비 매출 증가율 알려줘",
+]
+
+
+@pytest.mark.parametrize("question", PAST_RELATIVE_QUESTIONS)
+def test_past_relative_periods_are_left_to_the_resolver(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
+
+
+def test_gate_future_vocabulary_does_not_overlap_the_analyzer_past_vocabulary() -> None:
+    """
+    Gate의 미래 어휘와 analyzer의 과거 어휘가 겹치지 않는지 본다.
+
+    두 목록이 겹치면 같은 낱말을 한쪽은 해석하고 한쪽은 거부하게 되고, 어느 쪽이 이기는지가
+    호출 순서에 달리게 된다. 목록을 늘릴 때 이 단언이 먼저 깨진다.
+    """
+    for token in RELATIVE_PERIOD_TOKENS:
+        decision = screen_question(f"{token} 매출 알려줘")
+
+        assert decision.allowed, f"{token}은 Q07 resolver 영역이다"
+
+
+# anchor가 붙은 상대기간.
+#
+# "2024년 다음 해"는 FY2025를 뜻할 수 있고 그것은 코퍼스 안이다. 미래로 단정하면 답할 수
+# 있는 질문에 "보유하고 있지 않습니다"라고 답하게 된다. 해석하지 않고 판정을 보류한다.
+ANCHORED_RELATIVE_QUESTIONS = [
+    "2024년 다음 해 매출",
+    "2024년의 다음 연도 실적",
+    "삼성전자 2023년 다음 해 매출 알려줘",
+    "2024년 다음 분기 실적 알려줘",
+]
+
+
+@pytest.mark.parametrize("question", ANCHORED_RELATIVE_QUESTIONS)
+def test_anchored_relative_period_is_not_declared_out_of_range(question: str) -> None:
+    """
+    절대연도와 함께 쓰인 '다음 해/다음 연도'는 F1이 아니다.
+
+    Gate가 anchored relative를 해석하지 않기 때문이다. 해석하지 않는 것을 미래로 단정하면
+    silent-wrong이 된다. 판정을 보류하면 기존 경로가 그대로 처리한다.
+    """
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert CATEGORY_OUT_OF_CORPUS_PERIOD not in decision.matched_categories, question
+
+
+def test_deictic_future_is_refused_even_next_to_an_absolute_year() -> None:
+    """
+    '내년'은 anchor를 붙일 수 없으므로 절대연도가 함께 있어도 그대로 판정한다.
+
+    "2024년 내년"이라고 써도 '2024년의 다음 해'가 되지 않는다. 이 단언이 없으면 anchored
+    예외를 미래 어휘 전체로 넓히는 변경이 조용히 통과한다.
+    """
+    decision = screen_question("삼성전자 2024년 매출이랑 내년 매출 알려줘")
+
+    assert not decision.allowed
+    assert decision.category == CATEGORY_OUT_OF_CORPUS_PERIOD
+
+
+def test_out_of_range_absolute_year_still_wins_over_a_relative_expression() -> None:
+    """
+    절대 기간이 걸리면 그쪽을 근거로 남긴다.
+
+    같은 F1이지만 남는 근거 표현이 다르다. 오검출 신고를 되짚을 때 '다음 분기'보다
+    '2027년'이 정확한 근거다.
+    """
+    decision = screen_question("삼성전자 2027년 다음 분기 실적 알려줘")
+
+    assert decision.category == CATEGORY_OUT_OF_CORPUS_PERIOD
+    assert decision.matched_expressions == ("2027년",)
+
+
+# 미래 어휘와 낱말이 겹치는 정상 공시 질문.
+#
+# '향후'·'앞으로'·'차기'는 F4의 미래 시점 어휘에는 있지만 F1 상대기간 목록에는 없다.
+# 확정된 미래 일정과 계획은 공시의 기재 항목이고, 그것을 읽어 달라는 요구는 사실 조회다.
+RELATIVE_FUTURE_NEGATIVE_CONTROLS = [
+    "공시에 기재된 향후 투자계획이 뭐야?",
+    "앞으로의 설비투자 계획이 공시에 있어?",
+    "차기 이사회 안건이 공시에 나와 있어?",
+    "공시에 적힌 계약 종료 예정일이 언제야?",
+    # '다음 X'가 기간이 아니라 문서를 가리키는 형태.
+    "다음 분기보고서 제출 예정일이 언제야?",
+    "다음 반기보고서 제출 예정일 알려줘",
+    # '다음 해'로 잘못 읽힐 수 있는 형태.
+    "다음 해당 공시 알려줘",
+    "다음 해외 법인 설립 계획이 공시에 있어?",
+    # '다음'·'분기' 단독.
+    "분기 매출 알려줘",
+    "다음 페이지 내용 알려줘",
+]
+
+
+@pytest.mark.parametrize("question", RELATIVE_FUTURE_NEGATIVE_CONTROLS)
+def test_disclosure_questions_sharing_future_vocabulary_pass(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert CATEGORY_OUT_OF_CORPUS_PERIOD not in decision.matched_categories, question
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["삼성전자 내년 매출 알려줘", "삼성전자 다음 분기 실적 알려줘"],
+)
+def test_relative_future_refusal_does_not_touch_retrieval_or_parsing(
+    question: str,
+    explosive_downstream: None,
+) -> None:
+    """
+    상대기간 거부도 manifest·query planning·handler 이전에 끝난다.
+
+    이 두 질문은 Gate가 없으면 각각 missing_year와 unsupported_period로 막힌다. 둘 다
+    build_query_plan 안에서 나는 판정이므로, 폭탄이 터지지 않는다는 것이 Gate가 그보다
+    앞에서 끝냈다는 증거다.
+    """
+    result = router.answer_question(question, corpus_root=NONEXISTENT_CORPUS)
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
+    assert result.answerability_detail is not None
+    assert result.answerability_detail.stage == STAGE_ANSWERABILITY_GATE
+    assert result.facts == []
+    assert result.evidence == []
+    assert result.calculations == []
+
+
+# --------------------------------------------------------------------------
 # 2.6 F2 — 외부 정보 요구
 #
 # 코퍼스에 없는 '데이터의 종류'를 요구하는 질문이다. F1과 달리 기간과 무관하다.
@@ -626,10 +862,21 @@ def test_investment_advice_wins_over_prediction() -> None:
 
 
 def test_original_categories_survive_the_priority_rule() -> None:
-    """우선순위로 하나를 골라도 원래 걸린 범주 목록은 남는다."""
+    """
+    우선순위로 하나를 골라도 원래 걸린 범주 목록은 남는다.
+
+    '내년'이 F1(미래 상대기간)에도 걸리므로 목록은 세 범주다. 질문이 실제로 세 가지에
+    해당하기 때문이며, 고른 범주는 여전히 F3다. 목록이 판정을 바꾸지 않는다는 것을 함께
+    고정한다.
+    """
     decision = screen_question("삼성전자 내년 매출 오를까? 지금 사도 될까?")
 
-    assert decision.matched_categories == (CATEGORY_INVESTMENT_ADVICE, CATEGORY_FORWARD_LOOKING)
+    assert decision.matched_categories == (
+        CATEGORY_INVESTMENT_ADVICE,
+        CATEGORY_FORWARD_LOOKING,
+        CATEGORY_OUT_OF_CORPUS_PERIOD,
+    )
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE
 
 
 def test_policy_wins_over_data_boundaries() -> None:

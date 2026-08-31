@@ -16,6 +16,8 @@ import pytest
 
 from disclosure_agent.event.correction_fields import (
     FIELD_BOARD_RESOLUTION_DATE,
+    FIELD_DISCLOSURE_HOLD_UNTIL,
+    FIELD_REVENUE_RATIO,
     HISTORY_CANONICAL_FIELDS,
     iter_correction_aliases,
     normalize_correction_label,
@@ -109,6 +111,55 @@ def test_board_resolution_alias_uses_one_normalization_contract() -> None:
         )
         == FIELD_BOARD_RESOLUTION_DATE
     )
+
+
+@pytest.mark.parametrize(
+    ("raw_field", "canonical_field", "history_supported"),
+    [
+        ("2. 계약내역 - 계약금액(원)", FIELD_CONTRACT_AMOUNT, True),
+        ("2.계약내역 - 계약금액(원)", FIELD_CONTRACT_AMOUNT, True),
+        ("2. 계약내역 - 매출액대비(%)", FIELD_REVENUE_RATIO, False),
+        ("2.계약내역 - 매출액대비(%)", FIELD_REVENUE_RATIO, False),
+        ("매출액대비(%)", FIELD_REVENUE_RATIO, False),
+        ("매출액대비", FIELD_REVENUE_RATIO, False),
+        ("8. 공시유보 관련내용 - 유보기한", FIELD_DISCLOSURE_HOLD_UNTIL, False),
+        ("8.공시유보 관련내용 - 유보기한", FIELD_DISCLOSURE_HOLD_UNTIL, False),
+    ],
+)
+def test_corpus_single_field_aliases_are_shared_and_event_scoped(
+    raw_field: str,
+    canonical_field: str,
+    history_supported: bool,
+) -> None:
+    assert (
+        resolve_correction_field(raw_field, event_type="supply_contract")
+        == canonical_field
+    )
+    assert match_correction_field("supply_contract", raw_field) == canonical_field
+    assert resolve_field_name(raw_field, event_type="supply_contract") == (
+        canonical_field if history_supported else None
+    )
+    assert (
+        resolve_correction_field(raw_field, event_type="facility_investment")
+        is None
+    )
+    assert match_correction_field("facility_investment", raw_field) is None
+
+
+@pytest.mark.parametrize(
+    "raw_field",
+    [
+        "2. 계약내역 - 계약금액(원) - 매출액대비(%)",
+        "2.계약내역 - 계약금액(원) - 매출액대비(%)",
+        "2. 계약내역",
+        "2.계약내역",
+        "8. 공시유보 관련내용 - 유보사유 - 유보기한",
+    ],
+)
+def test_composite_corpus_labels_remain_fail_closed(raw_field: str) -> None:
+    assert resolve_correction_field(raw_field, event_type="supply_contract") is None
+    assert match_correction_field("supply_contract", raw_field) is None
+    assert resolve_field_name(raw_field, event_type="supply_contract") is None
 
 
 @pytest.mark.parametrize(

@@ -35,6 +35,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from disclosure_agent.agent.derived_metrics import (
+    UNIT_PERCENT,
+    DerivedMetric,
+    get_derived_metric_spec,
+)
 from disclosure_agent.agent.evidence import Evidence
 from disclosure_agent.agent.query_analyzer import QueryPlan
 from disclosure_agent.agent.safety import (
@@ -44,17 +49,21 @@ from disclosure_agent.agent.safety import (
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
+    ComparisonRelation,
     ExecutionStatus,
     FactAccountingScope,
     MetricConcept,
+    ResultInputType,
 )
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
     AnswerResponse,
+    CalculationResult,
     EventHistory,
     Fact,
+    ResultInputReference,
 )
-from disclosure_agent.periodic.extractor import FinancialFact
+from disclosure_agent.periodic.extractor import BASE_CURRENCY_UNIT, FinancialFact
 from disclosure_agent.retrieval.metadata_filter import FilingRef
 
 STATUS_OK = "ok"
@@ -362,6 +371,77 @@ SCOPE_OMITTED_IN_ANSWER: frozenset[FactAccountingScope] = frozenset(
 FULL_YEAR_FISCAL_PERIODS: frozenset[str] = frozenset({"FY"})
 
 
+# 우열 판정 문장이 쓸 파생 개념 표기.
+#
+# 정의(분자·분모·연산)는 agent.derived_metrics가 정본이고 여기에는 한국어 표기만 둔다. 정의를
+# 여기에 다시 적으면 같은 개념이 두 벌이 되고 한쪽만 바뀌는 날이 온다. METRIC_LABELS가 원천
+# 지표에 대해 하는 일과 같은 자리이며, 표기가 없는 개념에서 멈추는 것도 같다.
+#
+# CalculationResult에는 어떤 파생 개념이었는지가 남지 않는다. 남는 것은 operation과 입력
+# 참조뿐이라 그 둘로 대응표를 되짚어 개념을 찾는다(_derived_metric_label).
+DERIVED_METRIC_LABELS: dict[DerivedMetric, str] = {
+    DerivedMetric.OPERATING_MARGIN: "영업이익률",
+}
+
+# 계산 결과 단위의 한국어 표기.
+#
+# CalculationResult.unit은 계산 계층의 어휘("percent")다. 그대로 문장에 넣으면 한국어 문장에
+# 영문 식별자가 섞인다(METRIC_LABELS 주석과 같은 실패 모드).
+CALCULATION_UNIT_LABELS: dict[str, str] = {
+    UNIT_PERCENT: "%",
+}
+
+# Fact 정규화 단위의 한국어 표기.
+#
+# 아래 표와 짝을 이루지만 합치지 않는다. 열쇠의 출처가 다르기 때문이다:
+#     이 표          추출 계층이 Fact에 적는 어휘. periodic.extractor가 정한다.
+#     위 표          agent가 계산 결과에 적는 어휘. agent.derived_metrics가 정한다.
+#
+# 합치면 한 계층이 단위를 늘릴 때 다른 계층의 문장이 함께 바뀐다. 실제로 두 어휘에는 같은
+# 문자열이 이미 있다. "percent"는 이쪽에서 원문에 적힌 비율이고 저쪽에서 agent가 만든 비율이며,
+# 한 표에 담으면 그 구분이 사라진다.
+#
+# 원문 단위(raw_unit)는 이 표를 지나지 않는다. 그쪽은 공시에 적힌 표기("백만원")를 그대로 쓰며,
+# 사용자가 원문과 대조하는 값이므로 옮기면 대조가 불가능해진다. 옮기는 것은 정규화 단위뿐이다.
+#
+# 통화 표기를 두 개 싣는 이유:
+#     같은 재무 Fact인데 만든 쪽에 따라 값이 다르다.
+#         "KRW"  periodic.extractor.normalize_value_and_unit. Contract 수준 Fact producer이며
+#                event 계층과 Contract 예제도 같은 값을 쓴다.
+#         "원"   periodic.extractor.BASE_CURRENCY_UNIT. periodic.adapter.adapt_financial_fact가
+#                FinancialFact.base_unit을 그대로 실어 만드는 값이며, 현재 Pattern D가 지나는
+#                경로다(agent.period_retrieval.collect_period_facts).
+#
+#     어느 쪽을 정본으로 둘지는 추출 계층이 정할 일이다. 표현 계층은 그 결정을 기다리는 동안
+#     양쪽을 모두 옮길 수 있어야 하며, 한쪽만 받으면 producer가 바뀌는 날 사용자 문장에 "KRW"가
+#     그대로 실린다. 여기서 Fact의 값을 고쳐 어휘를 하나로 맞추지 않는다. 그것은 추출 계층의
+#     결정을 표현 계층이 대신 내리는 일이다.
+#
+# "shares"·"percent"는 싣지 않는다. normalize_value_and_unit이 만들지만, 그 단위를 갖는 지표는
+# METRIC_LABELS에 표기가 없어 문장이 그 앞에서 먼저 멈춘다. 도달하지 않는 표기를 미리 열면
+# 문장 템플릿을 정하지 않은 지표가 조용히 통과한다.
+FACT_NORMALIZED_UNIT_LABELS: dict[str, str] = {
+    "KRW": "원",
+    BASE_CURRENCY_UNIT: "원",
+}
+
+# 우열 관계 문장.
+#
+# ComparisonResult.relation이 정본이다. Builder는 두 값을 다시 견주지 않고 관계 이름을 문장으로
+# 옮기기만 한다(agent_patterns.md "Agent computes and judges. Builder presents.").
+#
+# 질문별 분기가 없다. Q10과 Q11은 견준 대상이 Fact인지 Calculation인지만 다르고, 그 차이는 대상
+# 표기를 만드는 자리에서 끝난다. 여기에 질문을 알아보는 분기를 두면 새 비교 질문마다 문장이 한
+# 벌씩 늘고, 관계 어휘가 어느 표를 정본으로 삼는지 알 수 없게 된다.
+#
+# equal에 이름을 넣지 않는다. 어느 쪽도 크지 않은 판정이라 한쪽을 가리키면 없는 우열이 생긴다.
+COMPARISON_RELATION_TEMPLATES: dict[ComparisonRelation, str] = {
+    ComparisonRelation.LEFT_GREATER: "{left} 쪽이 더 큽니다.",
+    ComparisonRelation.RIGHT_GREATER: "{right} 쪽이 더 큽니다.",
+    ComparisonRelation.EQUAL: "두 값은 같습니다.",
+}
+
+
 # --------------------------------------------------------------------------
 # 사유별 문장
 #
@@ -560,8 +640,9 @@ def build_answer_response(result: AgentExecutionResult) -> AnswerResponse:
     새로 고를 것이 없고, 새로 고르면 평가가 대조하는 canonical 값이 두 벌이 된다.
 
     구조화 결과는 AnswerResponse에 자리가 있는 것만 손실 없이 옮긴다. calculations와
-    warnings는 현재 AnswerResponse에 자리가 없어 실리지 않으며, 이번 범위에서 Contract를
-    고치지 않는다.
+    comparisons, warnings는 현재 AnswerResponse에 자리가 없어 실리지 않으며, 이번 범위에서
+    Contract를 고치지 않는다. 우열 판정은 자리가 생기기 전까지 문장으로만 나가고, 그 문장은
+    실행 결과에 적힌 relation을 그대로 옮긴 것이다(_comparison_sentence).
 
     Evidence를 실행 결과에서 지우지 않는다. 거부 응답에 Evidence를 붙이지 않는 원칙
     (evidence_and_answerability.md 원칙 7)은 producer가 이미 지킨다. 여기서 다시 걸러내면
@@ -741,9 +822,34 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
     """
     확보한 구조화 결과를 문장으로 옮긴다.
 
-    무엇을 확보했는지에 따라 Pattern이 갈린다. 둘 다 있거나 둘 다 없는 모양은 현재 producer가
-    만들지 않으므로 표현 방법을 정하지 않았고, 조용히 한쪽을 고르지 않는다.
+    무엇을 확보했는지에 따라 Pattern이 갈린다. 표현 방법을 정하지 않은 조합은 현재 producer가
+    만들지 않는 모양이고, 조용히 한쪽을 고르지 않는다.
+
+    우열 판정을 가장 먼저 본다:
+        ComparisonResult가 실린 결과는 "어느 쪽이 큰가"를 물은 질문의 답이다(Pattern D). 그
+        결과에는 견준 값이 Fact로 함께 실리므로(Q10은 2건, Q11은 4건), Fact를 먼저 보면 값
+        하나를 말하는 단일 Fact 문장이 여러 건 앞에서 멈춘다. 그 정지가 API에서 500이 된다.
+
+        순서만 바꾸고 단일 Fact 경로는 그대로 둔다. 우열 판정이 없는 결과(Pattern A)는 이 분기를
+        지나가지 않으므로, 값 하나를 물은 질문의 문장은 달라지지 않는다.
+
+        판정이 있는데도 Fact 문장을 고르면 질문이 요구한 판정이 사라진 채 값 하나만 답하게 되고,
+        형식은 정상인 응답이 나간다. Router가 미등록 intent를 가장 가까운 handler로 대신
+        처리하지 않는 것과 같은 이유로, 여기서도 대신 고르지 않는다.
     """
+    if result.comparisons and result.event_histories:
+        raise UnsupportedResultShapeError(
+            f"ComparisonResult {len(result.comparisons)}건과 "
+            f"EventHistory {len(result.event_histories)}건이 함께 있습니다. "
+            "두 결과를 한 문장으로 잇는 형태가 정해지지 않았습니다."
+        )
+
+    if result.comparisons:
+        return _join(
+            _comparison_sentence(result),
+            _limitation(result, partial=partial),
+        )
+
     if result.facts and result.event_histories:
         raise UnsupportedResultShapeError(
             f"Fact {len(result.facts)}건과 EventHistory {len(result.event_histories)}건이 "
@@ -866,19 +972,53 @@ def _fact_value(fact: Fact) -> str:
     짝이 하나도 완전하지 않으면 멈춘다. 남은 한쪽을 섞어 쓰면(원문 값 + 정규화 단위) 배수가
     맞지 않는 수치가 나간다.
     """
-    for value, unit in (
-        (fact.raw_value, fact.raw_unit),
-        (fact.normalized_value, fact.normalized_unit),
-    ):
-        rendered = _value_with_unit(value, unit)
+    raw = _value_with_unit(fact.raw_value, fact.raw_unit)
 
-        if rendered is not None:
-            return rendered
+    if raw is not None:
+        return raw
+
+    # 원문 짝이 완전할 때는 정규화 쪽을 보지 않는다. 정규화 단위의 표기가 정해지지 않았다는
+    # 사실이 원문으로 답할 수 있는 Fact까지 멈추게 하면, 쓰지도 않을 값 때문에 답이 사라진다.
+    normalized = _normalized_value_with_unit(fact)
+
+    if normalized is not None:
+        return normalized
 
     raise MissingAnswerSupportError(
         f"Fact {fact.fact_id!r}에 값과 단위가 모두 갖춰진 표현이 없습니다. "
         "값만 있거나 단위만 있는 상태로는 문장을 만들지 않습니다."
     )
+
+
+def _normalized_value_with_unit(fact: Fact) -> str | None:
+    """
+    Fact의 정규화 표현. 단위는 사용자 표기로 옮겨서 적는다.
+
+    정규화 단위는 추출 계층이 붙인 canonical 어휘이고 사용자 문장의 말이 아니다. 그대로 적으면
+    한국어 문장에 "2000000000KRW"가 실린다. 영문 enum 값을 문장에 넣지 않는 것과 같은 자리이며,
+    다른 점은 열쇠가 Contract enum이 아니라 추출 계층의 문자열이라는 것뿐이다.
+
+    값을 바꾸지 않는다. Fact.normalized_unit은 그대로 두고 문장에 적을 표기만 고른다. 여기서
+    Fact를 고쳐 쓰면 응답의 구조화 결과와 문장이 서로 다른 단위를 말하게 된다.
+
+    두 경우를 나눈다:
+        정규화 표현이 없음(None)      Fact가 정규화되지 않았다. 원문으로 답할 수 있으면 답한다.
+        표기가 정해지지 않음(예외)     추출 계층이 새 단위를 만들었는데 표기를 정하지 않았다.
+                                      generic 표기를 만들지 않고 멈춘다.
+    """
+    if fact.normalized_unit is None:
+        return None
+
+    label = FACT_NORMALIZED_UNIT_LABELS.get(fact.normalized_unit)
+
+    if label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 정규화 단위입니다: {fact.normalized_unit!r}. "
+            "FACT_NORMALIZED_UNIT_LABELS에 추가하십시오. 표기를 정하지 않은 채로 적으면 "
+            "사용자 문장에 추출 계층의 어휘가 그대로 실립니다."
+        )
+
+    return _value_with_unit(fact.normalized_value, label)
 
 
 def _value_with_unit(value: float | str | None, unit: str | None) -> str | None:
@@ -893,6 +1033,340 @@ def _value_with_unit(value: float | str | None, unit: str | None) -> str | None:
         return None
 
     return f"{rendered_value}{rendered_unit}"
+
+
+# --------------------------------------------------------------------------
+# 우열 판정을 실은 결과
+#
+# Pattern D가 만드는 모양이다. Agent가 이미 확정한 관계를 읽어 옮기기만 하며, 값을 다시 견주지도
+# 다시 계산하지도 않는다(agent_patterns.md "Agent와 Answer Builder의 책임 경계").
+#
+# 그 경계를 지키는 방법은 "계산하지 않기로 한다"가 아니라 "계산할 것이 남아 있지 않게 읽는다"에
+# 가깝다. relation은 ComparisonResult에서, 수치는 Fact와 CalculationResult에서 그대로 온다.
+# 이 구획에 비교 연산자도 산술 연산자도 두지 않는 것이 그 확인 방법이다.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ComparisonOperand:
+    """
+    견준 대상 한쪽의 표기.
+
+        name     관계 문장이 가리키는 이름. 현재는 기업이다.
+        subject  값 문장의 주어("<기업>의 2025년 연결 기준 매출액").
+        value    그 주어의 값. 결과에 적힌 것을 옮긴 문자열이며 여기서 만들지 않는다.
+
+    Fact와 CalculationResult를 하나의 모양으로 좁힌다. 견준 대상이 원천 값인지 파생값인지는 표기를
+    만드는 자리에서 끝나고, 관계 문장은 그 차이를 알 필요가 없다. 알게 두면 Q10과 Q11이 서로 다른
+    관계 문장을 갖게 되고 관계 어휘가 두 벌이 된다.
+    """
+
+    name: str
+    subject: str
+    value: str
+
+
+def _comparison_sentence(result: AgentExecutionResult) -> str:
+    """
+    우열 판정 1건을 문장으로 옮긴다.
+
+    관계를 다시 판정하지 않는다. ComparisonResult.relation이 정본이며, 이 함수가 값을 견주면 같은
+    판정이 두 곳에 생긴다. 두 판정이 갈리는 날 결과에 적힌 것과 다른 문장이 나가고, 그 어긋남은
+    응답 어디에도 남지 않는다. 값이 관계와 맞는지도 확인하지 않는다. 확인하려면 여기서 값을 견줘야
+    하고, 그 순간 판정이 두 곳에 생기는 것은 같다.
+
+    값도 다시 만들지 않는다. Q11의 비율을 Fact에서 다시 계산하지 않는 것이 특히 그렇다. 다시
+    계산하면 반올림 자릿수가 계산 계층과 달라질 수 있고, 그러면 답변에 실린 수치와 우열 판정의
+    근거가 된 수치가 서로 다른 값이 된다(calculator.compare_calculations).
+    """
+    if len(result.comparisons) > 1:
+        raise UnsupportedResultShapeError(
+            f"ComparisonResult가 {len(result.comparisons)}건입니다. "
+            "이번 구현은 1건만 문장으로 옮깁니다. 첫 건만 골라 답하지 않습니다."
+        )
+
+    comparison = result.comparisons[0]
+
+    if comparison.left.input_type is not comparison.right.input_type:
+        # 원천 값과 파생값을 견준 판정이다. 한 문장에서 두 대상을 같은 축으로 말할 방법이 정해지지
+        # 않았고, 한쪽 표기에 맞추면 다른 쪽이 무엇인지가 문장에서 사라진다.
+        raise UnsupportedResultShapeError(
+            f"우열 판정 {comparison.comparison_id!r}이 서로 다른 종류를 견줍니다: "
+            f"{comparison.left.input_type.value!r} vs {comparison.right.input_type.value!r}. "
+            "원천 값과 파생값을 한 문장으로 견주는 형태가 정해지지 않았습니다."
+        )
+
+    if comparison.left == comparison.right:
+        # 같은 대상을 두 번 가리킨 판정이다. 개수만 맞고 견준 것이 없으며, 그대로 문장을 만들면
+        # 한 값이 자기보다 크다는 진술이 나간다.
+        raise UnsupportedResultShapeError(
+            f"우열 판정 {comparison.comparison_id!r}의 left와 right가 같은 대상"
+            f"({comparison.left.input_id!r})을 가리킵니다. 견준 것이 없는 판정입니다."
+        )
+
+    left = _comparison_operand(result, comparison.left)
+    right = _comparison_operand(result, comparison.right)
+
+    return _join(
+        f"{left.subject}{_topic_particle(left.subject)} {left.value}, "
+        f"{right.subject}{_topic_particle(right.subject)} {right.value}입니다.",
+        _relation_clause(comparison.relation, left=left, right=right),
+    )
+
+
+def _relation_clause(
+    relation: ComparisonRelation,
+    *,
+    left: _ComparisonOperand,
+    right: _ComparisonOperand,
+) -> str:
+    """
+    관계 이름을 문장으로 옮긴다. 두 값을 보지 않는다.
+
+    값을 인자로 받지 않는 것이 이 함수의 계약이다. 받으면 "값이 관계와 맞는지" 같은 검사가 언제든
+    들어올 수 있고, 그 검사는 곧 두 번째 판정이다.
+    """
+    template = COMPARISON_RELATION_TEMPLATES.get(relation)
+
+    if template is None:
+        raise UnsupportedResultShapeError(
+            f"문장이 정해지지 않은 ComparisonRelation입니다: {relation.value!r}. "
+            "COMPARISON_RELATION_TEMPLATES에 추가하십시오."
+        )
+
+    return template.format(left=left.name, right=right.name)
+
+
+def _comparison_operand(
+    result: AgentExecutionResult,
+    reference: ResultInputReference,
+) -> _ComparisonOperand:
+    """
+    참조가 가리키는 대상을 결과 안에서 찾아 표기를 만든다.
+
+    참조를 따라가기만 하고 대상을 새로 만들지 않는다. 결과에 없는 참조를 만나면 비슷한 값을 골라
+    채우지 않는다. 그 순간 답변이 가리키는 값과 판정이 참조한 값이 달라진다.
+    """
+    if reference.input_type is ResultInputType.FACT:
+        return _fact_operand(_referenced_fact(result, reference.input_id))
+
+    if reference.input_type is ResultInputType.CALCULATION:
+        return _calculation_operand(result, _referenced_calculation(result, reference.input_id))
+
+    raise UnsupportedResultShapeError(
+        f"표기 방법이 정해지지 않은 비교 대상 종류입니다: {reference.input_type!r}."
+    )
+
+
+def _referenced_fact(result: AgentExecutionResult, fact_id: str) -> Fact:
+    """결과에 실린 Fact 중 참조가 가리키는 것. 없으면 멈춘다."""
+    for fact in result.facts:
+        if fact.fact_id == fact_id:
+            return fact
+
+    raise MissingAnswerSupportError(
+        f"참조가 가리키는 Fact {fact_id!r}가 결과에 없습니다. "
+        "근거가 끊긴 참조로 문장을 만들지 않습니다."
+    )
+
+
+def _referenced_calculation(
+    result: AgentExecutionResult,
+    calculation_id: str,
+) -> CalculationResult:
+    """결과에 실린 CalculationResult 중 참조가 가리키는 것. 없으면 멈춘다."""
+    for calculation in result.calculations:
+        if calculation.calculation_id == calculation_id:
+            return calculation
+
+    raise MissingAnswerSupportError(
+        f"참조가 가리키는 Calculation {calculation_id!r}가 결과에 없습니다. "
+        "근거가 끊긴 참조로 문장을 만들지 않습니다."
+    )
+
+
+def _fact_operand(fact: Fact) -> _ComparisonOperand:
+    """
+    원천 Fact 한 건의 표기(Q10 계열).
+
+    원문 표기와 정규화 값을 함께 적는다. 우열은 정규화 값에서 판정되고(calculator.compare_facts),
+    사용자가 공시와 대조하는 것은 원문 표기다. 한쪽만 적으면 둘 중 하나가 불가능해진다
+    (evidence_and_answerability.md Q10 "원문 단위 값과 정규화 값을 병기").
+
+    단위 표기가 다른 두 기업이 그 규칙의 이유다. 원문만 적으면 900,000천원이 1,000백만원보다 커
+    보이고, 그때 판정 문장이 값과 어긋나 읽힌다. 정규화 값만 적으면 어느 쪽도 공시에 적힌 그대로가
+    아니어서 대조할 수 없다.
+
+    두 표기가 같은 문자열이면 한 번만 적는다. 같은 값을 괄호로 한 번 더 적어 읽는 사람이 다른 값이
+    있다고 오해할 이유가 없다.
+
+    정규화 단위는 사용자 표기로 옮겨 적는다(_normalized_value_with_unit). 원문 표기는 공시에
+    적힌 그대로 두고, 옮기는 것은 정규화 쪽뿐이다.
+
+    지표·기간·기준 표기는 단일 Fact 문장과 같은 대응표를 쓴다. 같은 재무제표 축(회계연도 ×
+    연결/별도)을 전제한 문장이라 표기가 갈릴 이유가 없고, 갈리면 같은 Fact가 질문에 따라 다른
+    이름으로 불린다.
+    """
+    metric_label = _metric_label(fact.metric)
+
+    subject = (
+        f"{fact.company}의 {_period_phrase(fact)}"
+        f"{_scope_phrase(fact.accounting_scope)}{metric_label}"
+    )
+
+    normalized = _normalized_value_with_unit(fact)
+
+    if normalized is None:
+        raise MissingAnswerSupportError(
+            f"Fact {fact.fact_id!r}에 정규화 값과 단위가 갖춰져 있지 않습니다. "
+            "우열 판정은 정규화 값에서 나오므로, 그 값 없이 판정 문장을 만들지 않습니다."
+        )
+
+    raw = _value_with_unit(fact.raw_value, fact.raw_unit)
+
+    value = normalized if raw is None or raw == normalized else f"{raw}(정규화 {normalized})"
+
+    return _ComparisonOperand(name=fact.company, subject=subject, value=value)
+
+
+def _calculation_operand(
+    result: AgentExecutionResult,
+    calculation: CalculationResult,
+) -> _ComparisonOperand:
+    """
+    파생값 한 건의 표기(Q11 계열).
+
+    원천 Fact를 읽되 값을 다시 만들지 않는다. 참조를 따라가는 이유는 대상을 부르기 위해서다.
+    파생값이 어느 기업의 어느 기간·기준 값인지는 CalculationResult에 없고 입력 참조를 따라가야만
+    나온다. 참조를 따라가 이름을 읽는 것과 그 값으로 비율을 다시 만드는 것은 다른 일이다. 여기서
+    Fact에서 읽는 것은 company·fiscal_year·accounting_scope·metric뿐이고, 수치는 계산 계층이
+    확정한 calculation.value를 그대로 쓴다.
+
+    입력이 하나의 기업·기간·기준으로 모이지 않으면 멈춘다. 그런 파생값은 "누구의 무엇"인지를 한
+    구절로 부를 수 없고, 한쪽을 골라 적으면 나머지가 문장에서 사라진다. 정상 경로에서는 guard①과
+    guard②가 같은 것을 이미 확인하므로 여기서 새로 걸릴 일은 없다.
+    """
+    sources: list[Fact] = []
+
+    for item in calculation.inputs:
+        if item.input_type is not ResultInputType.FACT:
+            # 파생값을 다시 입력으로 쓴 계산이다. 개념 이름을 대응표에서 되짚는 방법이 원천 지표
+            # 조합을 전제하므로, 여러 단계를 거친 값에는 붙일 이름이 없다.
+            raise UnsupportedResultShapeError(
+                f"Calculation {calculation.calculation_id!r}이 {item.input_id!r}을 입력으로 "
+                "씁니다. 원천 Fact가 아닌 입력을 가진 파생값의 표기가 정해지지 않았습니다."
+            )
+
+        sources.append(_referenced_fact(result, item.input_id))
+
+    company = _single_source_attribute(calculation, sources, attribute="company")
+
+    scope = _single_source_attribute(calculation, sources, attribute="accounting_scope")
+
+    _single_source_attribute(calculation, sources, attribute="fiscal_year")
+
+    subject = (
+        f"{company}의 {_period_phrase(sources[0])}"
+        f"{_scope_phrase(scope)}{_derived_metric_label(calculation, sources)}"
+    )
+
+    return _ComparisonOperand(
+        name=company,
+        subject=subject,
+        value=_calculation_value(calculation),
+    )
+
+
+def _single_source_attribute(
+    calculation: CalculationResult,
+    sources: list[Fact],
+    *,
+    attribute: str,
+) -> Any:
+    """
+    파생값의 입력 Fact들이 한 값으로 모이는 속성을 읽는다. 갈리면 멈춘다.
+
+    첫 입력의 값을 그냥 쓰지 않는다. 입력이 갈려 있는데 첫 건을 고르면 그 파생값이 실제로
+    무엇에서 나왔는지가 문장에서 사라지고, 사라진 사실은 결과 어디에도 남지 않는다.
+    """
+    values = [getattr(fact, attribute) for fact in sources]
+
+    if len(set(values)) != 1:
+        raise UnsupportedResultShapeError(
+            f"Calculation {calculation.calculation_id!r}의 입력 {attribute}가 한 값으로 모이지 "
+            f"않습니다: {values}. 어느 것의 값인지 정해지지 않아 표기를 만들지 않습니다."
+        )
+
+    return values[0]
+
+
+def _derived_metric_label(calculation: CalculationResult, sources: list[Fact]) -> str:
+    """
+    파생값의 개념 표기.
+
+    CalculationResult에는 어떤 파생 개념이었는지가 남지 않는다. 연산 이름과 입력 지표의 순서로
+    대응표(agent.derived_metrics)를 되짚어 개념을 찾는다. 그 대응표가 정의의 정본이므로
+    분자·분모 조합을 이 파일에 다시 적지 않는다.
+
+    찾지 못하면 "비율" 같은 generic 표기를 만들지 않고 멈춘다. 정의를 모르는 값에 이름을 붙이면
+    다른 개념의 수치가 영업이익률로 읽힐 수 있고, 그것이 틀렸다는 사실은 문장 어디에도 남지 않는다.
+    """
+    source_metrics = tuple(fact.metric for fact in sources)
+
+    for metric in DerivedMetric:
+        spec = get_derived_metric_spec(metric)
+
+        if spec.operation != calculation.operation:
+            continue
+
+        if (spec.numerator, spec.denominator) != source_metrics:
+            continue
+
+        label = DERIVED_METRIC_LABELS.get(metric)
+
+        if label is None:
+            raise UnsupportedResultShapeError(
+                f"표기가 정해지지 않은 파생지표입니다: {metric.value!r}. "
+                "DERIVED_METRIC_LABELS에 추가하십시오."
+            )
+
+        return label
+
+    listed = ", ".join(item.value for item in source_metrics) or "없음"
+
+    raise UnsupportedResultShapeError(
+        f"대응표에 없는 파생값입니다: operation={calculation.operation!r}, 입력 지표={listed}. "
+        "이름을 확인할 수 없는 값에 표기를 붙이지 않습니다."
+    )
+
+
+def _calculation_value(calculation: CalculationResult) -> str:
+    """
+    문장에 적을 파생값. 계산 계층이 확정한 값을 그대로 옮긴다.
+
+    반올림하지도 다시 계산하지도 않는다. 저장된 값이 우열 판정의 근거이므로
+    (calculator.compare_calculations), 문장에 다른 자릿수를 적으면 답변에 실린 두 수치로
+    검산했을 때 관계가 뒤집혀 보일 수 있다.
+
+    값과 단위는 Fact와 같이 짝으로 다룬다. 단위 없는 비율은 백분율인지 배수인지 알 수 없다.
+    """
+    label = CALCULATION_UNIT_LABELS.get(calculation.unit) if calculation.unit else None
+
+    if calculation.unit is not None and label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 계산 결과 단위입니다: {calculation.unit!r}. "
+            "CALCULATION_UNIT_LABELS에 추가하십시오."
+        )
+
+    rendered = _value_with_unit(calculation.value, label)
+
+    if rendered is None:
+        raise MissingAnswerSupportError(
+            f"Calculation {calculation.calculation_id!r}에 값과 단위가 모두 갖춰진 표현이 "
+            "없습니다. 값만 있거나 단위만 있는 상태로는 문장을 만들지 않습니다."
+        )
+
+    return rendered
 
 
 def _event_history_sentence(histories: list[EventHistory], *, partial: bool) -> str:

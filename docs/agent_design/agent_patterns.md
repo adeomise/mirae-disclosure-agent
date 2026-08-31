@@ -474,6 +474,47 @@ Builder는 raw Fact를 직접 비교하지 않고, Calculation 값을 다시 비
 greater/less/equal을 새로 판단하지 않고, 새로운 계산을 수행하지 않습니다
 ([pattern_f_safety.md](pattern_f_safety.md) §8).
 
+#### 우열 판정이 실린 결과의 표현 순서
+
+`COMPLETED` + `ANSWERABLE` 결과에 `comparisons`가 있으면 Builder는 **단일 Fact 문장보다 비교
+문장을 먼저 고릅니다**(`answer_builder._supported_answer`).
+
+Pattern D의 성공 결과에는 견준 값이 Fact로 함께 실립니다(Q10은 2건, Q11은 4건). Fact를 먼저
+보면 값 하나를 말하는 단일 Fact 문장이 여러 건 앞에서 멈추고, 그 정지가 API 경계에서 500이
+됩니다. 순서만 바꾸며, 우열 판정이 없는 결과(Pattern A)의 문장은 달라지지 않습니다.
+
+문장을 만들 때 Builder가 읽는 것은 다음이 전부입니다.
+
+| 결과 모양 | 관계 | 수치 | 대상 이름 |
+|---|---|---|---|
+| Q10 (`left`/`right`가 Fact) | `ComparisonResult.relation` | `Fact`의 원문 표기와 정규화 값(병기) | `Fact.company` |
+| Q11 (`left`/`right`가 Calculation) | `ComparisonResult.relation` | `CalculationResult.value`/`unit` | 입력 Fact의 `company` |
+
+Q11에서 입력 Fact까지 따라가는 것은 그 파생값이 **누구의 어느 기간·기준 값인지**를 부르기
+위해서입니다. `CalculationResult`에는 그 정보가 없습니다. 참조를 따라가 이름을 읽는 것과 그
+값으로 비율을 다시 만드는 것은 다른 일이며, 후자는 하지 않습니다. 다시 계산하면 반올림
+자릿수가 계산 계층과 달라질 수 있고, 그때 답변에 실린 수치와 우열 판정의 근거가 된 수치가
+서로 다른 값이 됩니다.
+
+정규화 단위는 사용자 표기로 옮겨 적습니다. `Fact.normalized_unit`은 추출 계층의 어휘이고
+(`periodic.extractor`가 "KRW"를, `periodic.adapter`가 "원"을 싣습니다) 사용자 문장의 말이
+아니므로, 그대로 적으면 한국어 답변에 "2000000000KRW"가 실립니다. 옮기는 것은 문장에 적을
+표기뿐이며 `Fact.normalized_unit` 값은 그대로 응답에 나갑니다. 원문 단위(`raw_unit`)는 공시에
+적힌 표기이므로 옮기지 않습니다. 사용자가 원문과 대조하는 값이기 때문입니다.
+
+Fact 정규화 단위 대응표와 Calculation 단위 대응표는 분리합니다. 열쇠를 정하는 계층이 다르고
+(`periodic.extractor` vs `agent.derived_metrics`), 두 어휘에는 이미 같은 문자열("percent")이
+서로 다른 뜻으로 존재합니다.
+
+관계 어휘(`left_greater` / `right_greater` / `equal`)와 파생 개념 표기는 대응표로 두고, 표에
+없는 값을 만나면 generic 표기를 만들지 않고 멈춥니다. 표현 방법이 정해지지 않은 모양
+(대상 종류가 서로 다른 판정, 같은 대상을 두 번 가리킨 판정, 참조가 결과에 없는 판정,
+`ComparisonResult` 2건 이상)도 같습니다. 추측해 문장을 완성하면 형식만 정상인 답변이 나갑니다.
+
+비교 불가 판정은 이 경로를 지나지 않습니다. `NOT_COMPARABLE`은 `UNANSWERABLE`이고 그 결과에는
+`comparisons`가 실리지 않으므로(`normalization`의 `comparability` 경로), 문장은 사유별 대응표에서
+그대로 옵니다.
+
 ## 실제 데이터 사전 검토에서 필요성이 관찰된 Capability
 
 아래 항목은 참고 자료의 Tool 목록만으로는 드러나지 않았고, 질문 후보를 검증하는 과정에서

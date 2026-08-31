@@ -21,6 +21,10 @@ import pytest
 from disclosure_agent.agent.answer_builder import (
     ACCOUNTING_SCOPE_LABELS,
     ALLOWED_REASONS_BY_STATUS,
+    CALCULATION_UNIT_LABELS,
+    COMPARISON_RELATION_TEMPLATES,
+    DERIVED_METRIC_LABELS,
+    FACT_NORMALIZED_UNIT_LABELS,
     LIMITATION_MESSAGE_BY_REASON,
     METRIC_LABELS,
     POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON,
@@ -40,6 +44,11 @@ from disclosure_agent.agent.answer_builder import (
     _topic_particle,
     build_answer_response,
 )
+from disclosure_agent.agent.derived_metrics import (
+    OPERATION_RATIO,
+    UNIT_PERCENT,
+    DerivedMetric,
+)
 from disclosure_agent.agent.safety import (
     REASON_FORWARD_LOOKING_PREDICTION,
     REASON_INVESTMENT_ADVICE,
@@ -48,6 +57,7 @@ from disclosure_agent.agent.safety import (
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
+    ComparisonRelation,
     EventLinkRelation,
     EventLinkResolutionStatus,
     EventType,
@@ -55,10 +65,13 @@ from disclosure_agent.common.enums import (
     ExecutionStatus,
     FactAccountingScope,
     MetricConcept,
+    ResultInputType,
 )
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
     AnswerabilityDetail,
+    CalculationResult,
+    ComparisonResult,
     Event,
     EventHistory,
     EventLink,
@@ -67,7 +80,9 @@ from disclosure_agent.common.schemas import (
     Fact,
     FieldChange,
     RawReference,
+    ResultInputReference,
 )
+from disclosure_agent.periodic.extractor import BASE_CURRENCY_UNIT
 
 SYNTHETIC_COMPANY = "테스트반도체(주)"
 SYNTHETIC_DOC_ID = "periodic_SYNTHETIC0001"
@@ -703,6 +718,621 @@ def test_facts_and_event_histories_together_have_no_defined_wording_yet() -> Non
 
     with pytest.raises(UnsupportedResultShapeError):
         build_answer_response(result)
+
+
+# --------------------------------------------------------------------------
+# Pattern D — 우열 판정(ComparisonResult)
+#
+# 이 절이 고정하는 것:
+#     - 우열 판정이 실린 결과는 단일 Fact 문장보다 먼저 비교 문장으로 간다(Q10/Q11의 500 원인).
+#     - 관계도 값도 여기서 다시 만들지 않는다. relation과 calculation.value가 정본이다.
+#     - 표현 방법이 정해지지 않은 모양은 추측하지 않고 멈춘다.
+#
+# 합성 값의 수치는 실제 공시와 무관하다. 두 기업의 자릿수와 관계만 시험에 필요하다.
+# --------------------------------------------------------------------------
+
+LEFT_COMPANY = "합성조선(주)"
+RIGHT_COMPANY = "합성중공업(주)"
+
+# Contract 수준 Fact producer가 싣는 정규화 단위.
+#
+# periodic.extractor.normalize_value_and_unit이 만드는 값이며, event 계층과 Contract 예제도
+# 같은 값을 쓴다. 사용자 문장에 그대로 실리면 "2000000000KRW"가 된다.
+CANONICAL_NORMALIZED_UNIT = "KRW"
+
+LEFT_MARGIN_ID = "calculation_operating_margin_2025_LEFT"
+RIGHT_MARGIN_ID = "calculation_operating_margin_2025_RIGHT"
+
+
+def make_comparison_fact(
+    *,
+    fact_id: str,
+    company: str,
+    metric: MetricConcept = MetricConcept.REVENUE,
+    raw_value: str | None = "1,000",
+    raw_unit: str | None = "백만원",
+    normalized_value: float | str | None = "1000000000",
+    normalized_unit: str | None = CANONICAL_NORMALIZED_UNIT,
+    fiscal_year: int | None = 2025,
+    accounting_scope: FactAccountingScope = FactAccountingScope.CONSOLIDATED,
+) -> Fact:
+    """기업 축이 필요한 Fact. make_fact는 기업이 하나로 고정돼 있어 여기서는 쓸 수 없다."""
+    return Fact(
+        fact_id=fact_id,
+        company=company,
+        metric=metric,
+        fiscal_year=fiscal_year,
+        accounting_scope=accounting_scope,
+        raw_value=raw_value,
+        raw_unit=raw_unit,
+        normalized_value=normalized_value,
+        normalized_unit=normalized_unit,
+        evidence_ids=["evidence_SYNTHETIC_01"],
+    )
+
+
+def fact_reference(fact_id: str) -> ResultInputReference:
+    return ResultInputReference(input_type=ResultInputType.FACT, input_id=fact_id)
+
+
+def calculation_reference(calculation_id: str) -> ResultInputReference:
+    return ResultInputReference(input_type=ResultInputType.CALCULATION, input_id=calculation_id)
+
+
+def make_margin(
+    *,
+    calculation_id: str,
+    numerator: Fact,
+    denominator: Fact,
+    value: str,
+    unit: str = UNIT_PERCENT,
+) -> CalculationResult:
+    """calculator.ratio가 만드는 것과 같은 모양(분자, 분모 순서)."""
+    return CalculationResult(
+        calculation_id=calculation_id,
+        operation=OPERATION_RATIO,
+        inputs=[fact_reference(numerator.fact_id), fact_reference(denominator.fact_id)],
+        value=value,
+        unit=unit,
+        evidence_ids=["evidence_SYNTHETIC_01"],
+    )
+
+
+def q10_result(
+    *,
+    relation: ComparisonRelation = ComparisonRelation.LEFT_GREATER,
+) -> AgentExecutionResult:
+    """
+    Q10 계열의 성공 결과 모양: Fact 2 · Calculation 0 · Comparison 1.
+
+    handlers.cross_entity_compare._execute_source_metric_comparison이 만드는 것과 같은 개수이며,
+    개수의 근거는 evidence_and_answerability.md의 Calculation cardinality다.
+    """
+    left = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_LEFT_REVENUE",
+        company=LEFT_COMPANY,
+        raw_value="2,000",
+        normalized_value="2000000000",
+    )
+    right = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_RIGHT_REVENUE",
+        company=RIGHT_COMPANY,
+        raw_value="1,000",
+        normalized_value="1000000000",
+    )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=[left, right],
+        evidence=[make_evidence()],
+        comparisons=[
+            ComparisonResult(
+                comparison_id="comparison_revenue_2025_LEFT_vs_RIGHT",
+                left=fact_reference(left.fact_id),
+                right=fact_reference(right.fact_id),
+                relation=relation,
+            )
+        ],
+    )
+
+
+def q11_result(
+    *,
+    relation: ComparisonRelation = ComparisonRelation.LEFT_GREATER,
+    left_margin: str = "12.50",
+    right_margin: str = "5.00",
+) -> AgentExecutionResult:
+    """
+    Q11 계열의 성공 결과 모양: Fact 4 · Calculation 2 · Comparison 1.
+
+    원천 Fact의 값은 기업별 영업이익률이 12.50%와 5.00%가 되도록 잡았다. 기본값과 같게 두면
+    "다시 계산해도 같은 값"이 되어 재계산 여부를 시험할 수 없으므로, 그것을 보는 테스트는
+    left_margin/right_margin을 원천과 어긋나게 넘긴다.
+    """
+    left_income = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_LEFT_OPERATING_INCOME",
+        company=LEFT_COMPANY,
+        metric=MetricConcept.OPERATING_INCOME,
+        raw_value="250",
+        normalized_value="250000000",
+    )
+    left_revenue = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_LEFT_REVENUE",
+        company=LEFT_COMPANY,
+        raw_value="2,000",
+        normalized_value="2000000000",
+    )
+    right_income = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_RIGHT_OPERATING_INCOME",
+        company=RIGHT_COMPANY,
+        metric=MetricConcept.OPERATING_INCOME,
+        raw_value="50",
+        normalized_value="50000000",
+    )
+    right_revenue = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_RIGHT_REVENUE",
+        company=RIGHT_COMPANY,
+        raw_value="1,000",
+        normalized_value="1000000000",
+    )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=[left_income, left_revenue, right_income, right_revenue],
+        evidence=[make_evidence()],
+        calculations=[
+            make_margin(
+                calculation_id=LEFT_MARGIN_ID,
+                numerator=left_income,
+                denominator=left_revenue,
+                value=left_margin,
+            ),
+            make_margin(
+                calculation_id=RIGHT_MARGIN_ID,
+                numerator=right_income,
+                denominator=right_revenue,
+                value=right_margin,
+            ),
+        ],
+        comparisons=[
+            ComparisonResult(
+                comparison_id="comparison_operating_margin_2025_LEFT_vs_RIGHT",
+                left=calculation_reference(LEFT_MARGIN_ID),
+                right=calculation_reference(RIGHT_MARGIN_ID),
+                relation=relation,
+            )
+        ],
+    )
+
+
+def test_q10_shape_renders_both_values_and_the_relation() -> None:
+    """Fact 2 · Calculation 0 · Comparison 1이 하나의 답변으로 나간다."""
+    result = q10_result()
+
+    response = build_answer_response(result)
+
+    assert response.answer == (
+        f"{LEFT_COMPANY}의 2025년 연결 기준 매출액은 2,000백만원(정규화 2000000000원), "
+        f"{RIGHT_COMPANY}의 2025년 연결 기준 매출액은 1,000백만원(정규화 1000000000원)입니다. "
+        f"{LEFT_COMPANY} 쪽이 더 큽니다."
+    )
+    assert response.status is AnswerabilityStatus.ANSWERABLE
+    assert response.reason is None
+    assert len(response.facts) == 2
+    assert response.facts == result.facts
+    assert response.evidence == result.evidence
+
+
+def test_q11_shape_renders_the_derived_values_and_the_relation() -> None:
+    """Fact 4 · Calculation 2 · Comparison 1이 하나의 답변으로 나간다."""
+    result = q11_result()
+
+    response = build_answer_response(result)
+
+    assert response.answer == (
+        f"{LEFT_COMPANY}의 2025년 연결 기준 영업이익률은 12.50%, "
+        f"{RIGHT_COMPANY}의 2025년 연결 기준 영업이익률은 5.00%입니다. "
+        f"{LEFT_COMPANY} 쪽이 더 큽니다."
+    )
+    assert response.status is AnswerabilityStatus.ANSWERABLE
+    assert response.reason is None
+    assert len(response.facts) == 4
+    assert response.facts == result.facts
+
+
+def test_building_the_same_comparison_twice_yields_the_same_answer() -> None:
+    result = q11_result()
+
+    assert build_answer_response(result).answer == build_answer_response(result).answer
+
+
+@pytest.mark.parametrize("factory", [q10_result, q11_result], ids=["q10", "q11"])
+def test_comparison_is_rendered_instead_of_the_single_fact_sentence(factory) -> None:
+    """
+    우열 판정이 있으면 Fact가 여러 건이어도 단일 Fact 경로로 가지 않는다.
+
+    이 순서가 뒤집혀 있던 것이 Q10·Q11이 API에서 500으로 나가던 원인이다
+    (test_multiple_facts_are_rejected_instead_of_silently_taking_the_first이 그 정지를 고정한다).
+    판정을 무시하고 Fact 하나만 답하는 것도 같은 이유로 막는다.
+    """
+    result = factory()
+
+    answer = build_answer_response(result).answer
+
+    assert LEFT_COMPANY in answer
+    assert RIGHT_COMPANY in answer
+    assert "쪽이 더 큽니다" in answer
+
+
+@pytest.mark.parametrize(
+    ("relation", "expected_clause"),
+    [
+        (ComparisonRelation.LEFT_GREATER, f"{LEFT_COMPANY} 쪽이 더 큽니다."),
+        (ComparisonRelation.RIGHT_GREATER, f"{RIGHT_COMPANY} 쪽이 더 큽니다."),
+        (ComparisonRelation.EQUAL, "두 값은 같습니다."),
+    ],
+)
+def test_relation_is_read_from_the_result_not_recomputed_from_the_values(
+    relation: ComparisonRelation,
+    expected_clause: str,
+) -> None:
+    """
+    관계는 ComparisonResult.relation이 정본이다.
+
+    합성 입력의 왼쪽 값이 오른쪽보다 크므로, Builder가 값을 다시 견주면 세 경우 모두 왼쪽이 큰
+    문장이 나온다. 그렇게 되면 Agent가 내린 판정과 답변이 갈릴 수 있고, 그 어긋남은 응답 어디에도
+    남지 않는다(agent_patterns.md "Agent computes and judges. Builder presents.").
+    """
+    result = q10_result(relation=relation)
+
+    answer = build_answer_response(result).answer
+
+    assert answer.endswith(expected_clause)
+
+
+def test_derived_values_are_read_from_the_calculations_not_recomputed_from_the_facts() -> None:
+    """
+    Q11의 비율을 원천 Fact에서 다시 계산하지 않는다.
+
+    합성 입력의 Fact는 12.50%와 5.00%를 가리키지만 결과에 실린 파생값은 1.00%와 7.00%다. 정상
+    경로에서는 두 값이 같으므로, 어긋나게 두어야 어느 쪽을 읽었는지 드러난다. 다시 계산하면
+    반올림 자릿수가 계산 계층과 달라질 수 있고, 그때 답변에 실린 수치와 우열 판정의 근거가 된
+    수치가 서로 다른 값이 된다.
+    """
+    result = q11_result(
+        relation=ComparisonRelation.RIGHT_GREATER,
+        left_margin="1.00",
+        right_margin="7.00",
+    )
+
+    answer = build_answer_response(result).answer
+
+    assert "1.00%" in answer
+    assert "7.00%" in answer
+    assert "12.50" not in answer
+    assert "5.00" not in answer
+    assert answer.endswith(f"{RIGHT_COMPANY} 쪽이 더 큽니다.")
+
+
+def test_q11_comparison_keeps_referencing_the_existing_calculations() -> None:
+    """
+    우열 판정이 참조하는 provenance를 Builder가 바꾸지 않는다.
+
+    Comparison -> Calculation -> Fact 두 단계가 그대로 남아야 답변에 실린 비율이 어느 원천에서
+    나왔는지 되짚을 수 있다. Builder가 Fact에서 비율을 다시 만들면 그 사슬의 가운데가 끊기고,
+    답변의 수치와 결과의 수치가 서로 다른 계보를 갖는다.
+    """
+    result = q11_result()
+    before = result.model_copy(deep=True)
+
+    response = build_answer_response(result)
+
+    comparison = result.comparisons[0]
+
+    assert comparison.left == calculation_reference(LEFT_MARGIN_ID)
+    assert comparison.right == calculation_reference(RIGHT_MARGIN_ID)
+
+    left_margin, right_margin = result.calculations
+
+    assert [item.input_id for item in left_margin.inputs] == [
+        "fact_SYNTHETIC_LEFT_OPERATING_INCOME",
+        "fact_SYNTHETIC_LEFT_REVENUE",
+    ]
+    assert [item.input_id for item in right_margin.inputs] == [
+        "fact_SYNTHETIC_RIGHT_OPERATING_INCOME",
+        "fact_SYNTHETIC_RIGHT_REVENUE",
+    ]
+    assert all(item.input_type is ResultInputType.FACT for item in left_margin.inputs)
+
+    # Builder는 읽기만 한다. 계산을 더하지도, 참조를 고쳐 쓰지도 않는다.
+    assert result == before
+    assert len(result.calculations) == 2
+
+    # AnswerResponse에는 calculations/comparisons 자리가 없다. 이번 범위에서 Contract를 넓히지
+    # 않았다는 사실을 함께 고정한다.
+    payload = response.model_dump()
+
+    assert "calculations" not in payload
+    assert "comparisons" not in payload
+
+
+def test_comparison_and_event_histories_together_have_no_defined_wording_yet() -> None:
+    result = q10_result()
+    result.event_histories = [make_event_history(document_ids=["exchange_SYNTHETIC0011"])]
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_more_than_one_comparison_is_rejected_instead_of_taking_the_first() -> None:
+    result = q10_result()
+    result.comparisons = [result.comparisons[0], result.comparisons[0]]
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert "2건" in str(error.value)
+
+
+def test_comparing_a_fact_with_a_calculation_has_no_defined_wording_yet() -> None:
+    """원천 값과 파생값을 견준 판정이다. 한쪽 표기에 맞추면 다른 쪽이 무엇인지 사라진다."""
+    result = q11_result()
+    result.comparisons[0].left = fact_reference("fact_SYNTHETIC_LEFT_REVENUE")
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert "fact" in str(error.value)
+    assert "calculation" in str(error.value)
+
+
+def test_a_comparison_pointing_at_the_same_target_twice_is_rejected() -> None:
+    """개수만 맞고 견준 것이 없는 판정이다. 그대로 옮기면 한 값이 자기보다 크다는 문장이 된다."""
+    result = q10_result()
+    result.comparisons[0].right = result.comparisons[0].left
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+@pytest.mark.parametrize(
+    ("factory", "field"),
+    [(q10_result, "facts"), (q11_result, "calculations")],
+    ids=["dangling-fact", "dangling-calculation"],
+)
+def test_a_comparison_whose_target_is_missing_stops_instead_of_guessing(factory, field) -> None:
+    """참조가 가리키는 값이 결과에 없으면 비슷한 값을 골라 채우지 않는다."""
+    result = factory()
+    setattr(result, field, [])
+
+    with pytest.raises(MissingAnswerSupportError):
+        build_answer_response(result)
+
+
+def test_a_fact_without_a_normalized_pair_stops_the_comparison_sentence() -> None:
+    """우열은 정규화 값에서 판정된다. 그 값이 없으면 판정의 근거를 문장에 적을 수 없다."""
+    result = q10_result()
+    result.facts[0].normalized_value = None
+
+    with pytest.raises(MissingAnswerSupportError):
+        build_answer_response(result)
+
+
+def test_identical_raw_and_normalized_values_are_written_once() -> None:
+    """
+    같은 값을 괄호로 한 번 더 적으면 다른 값이 있다고 읽힌다.
+
+    원문이 이미 기본 단위로 적힌 공시가 이 경우다. 원문 표기("원")와 정규화 단위를 옮긴 표기가
+    같은 문자열이 되므로, 두 표기의 비교는 정규화 단위를 옮긴 뒤에 이뤄져야 한다. 옮기기 전에
+    비교하면 "2000000000원(정규화 2000000000원)"처럼 같은 값이 두 번 적힌다.
+    """
+    result = q10_result()
+
+    for fact in result.facts:
+        fact.raw_value = fact.normalized_value
+        fact.raw_unit = "원"
+
+    answer = build_answer_response(result).answer
+
+    assert "정규화" not in answer
+    assert "2000000000원" in answer
+
+
+def test_an_unregistered_calculation_unit_is_not_written_in_english() -> None:
+    result = q11_result()
+    result.calculations[0].unit = "synthetic-unit"
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert "synthetic-unit" in str(error.value)
+
+
+def test_a_calculation_outside_the_derived_metric_table_is_not_given_a_generic_name() -> None:
+    """정의를 되짚을 수 없는 값에 이름을 붙이면 다른 개념의 수치가 그 이름으로 읽힌다."""
+    result = q11_result()
+    result.calculations[0].operation = "synthetic-operation"
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert "synthetic-operation" in str(error.value)
+
+
+def test_a_calculation_built_on_another_calculation_has_no_defined_wording_yet() -> None:
+    result = q11_result()
+    result.calculations[0].inputs = [calculation_reference(RIGHT_MARGIN_ID)]
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_a_calculation_whose_inputs_span_two_companies_is_rejected() -> None:
+    """어느 기업의 값인지 한 구절로 부를 수 없다. 한쪽을 골라 적으면 나머지가 문장에서 사라진다."""
+    result = q11_result()
+    result.facts[0].company = "합성전자(주)"
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert "company" in str(error.value)
+
+
+def test_comparison_relation_table_covers_the_contract() -> None:
+    """
+    관계 어휘가 늘면 문장을 먼저 정하게 한다.
+
+    빠진 값이 있으면 _relation_clause가 실행 중단으로 떨어지고, 그 정지는 API에서 500이 된다.
+    Contract enum과 대응표를 여기서 맞춰 둔다.
+    """
+    assert set(COMPARISON_RELATION_TEMPLATES) == set(ComparisonRelation)
+
+    clauses = list(COMPARISON_RELATION_TEMPLATES.values())
+
+    assert len(set(clauses)) == len(clauses)
+
+
+def test_the_equal_relation_does_not_name_a_side() -> None:
+    """어느 쪽도 크지 않은 판정이다. 한쪽을 가리키면 없던 우열이 생긴다."""
+    template = COMPARISON_RELATION_TEMPLATES[ComparisonRelation.EQUAL]
+
+    assert "{left}" not in template
+    assert "{right}" not in template
+
+
+def test_the_canonical_normalized_unit_is_not_exposed_in_the_comparison_sentence() -> None:
+    """
+    정규화 단위는 추출 계층의 어휘이지 사용자 문장의 말이 아니다.
+
+    Q10의 비교 문장은 정규화 값을 반드시 병기하므로(우열 판정의 근거이므로) 그 단위가 그대로
+    실리면 한국어 문장에 "2000000000KRW"가 나간다. 원문 표기는 공시에 적힌 그대로 남는다.
+    """
+    result = q10_result()
+
+    assert {fact.normalized_unit for fact in result.facts} == {CANONICAL_NORMALIZED_UNIT}
+
+    response = build_answer_response(result)
+
+    assert response.answer == (
+        f"{LEFT_COMPANY}의 2025년 연결 기준 매출액은 2,000백만원(정규화 2000000000원), "
+        f"{RIGHT_COMPANY}의 2025년 연결 기준 매출액은 1,000백만원(정규화 1000000000원)입니다. "
+        f"{LEFT_COMPANY} 쪽이 더 큽니다."
+    )
+    assert CANONICAL_NORMALIZED_UNIT not in response.answer
+
+    # 구조화 결과의 값은 그대로다. 옮기는 것은 문장에 적을 표기뿐이다.
+    assert [fact.normalized_unit for fact in response.facts] == [
+        CANONICAL_NORMALIZED_UNIT,
+        CANONICAL_NORMALIZED_UNIT,
+    ]
+
+
+@pytest.mark.parametrize(
+    "normalized_unit",
+    [CANONICAL_NORMALIZED_UNIT, BASE_CURRENCY_UNIT],
+    ids=["contract-producer", "adapter-producer"],
+)
+def test_both_currency_producers_render_the_same_user_facing_unit(normalized_unit: str) -> None:
+    """
+    같은 재무 Fact인데 만든 쪽에 따라 정규화 단위가 다르다.
+
+    periodic.extractor는 "KRW"를, periodic.adapter는 BASE_CURRENCY_UNIT("원")을 싣는다. 후자가
+    현재 Pattern D가 지나는 경로이므로, 한쪽만 옮기면 지금 동작하는 경로가 멈추거나 앞으로
+    바뀔 경로에서 영문 표기가 샌다. 문장은 어느 producer에서 왔는지 알 필요가 없어야 한다.
+    """
+    result = q10_result()
+
+    for fact in result.facts:
+        fact.normalized_unit = normalized_unit
+
+    answer = build_answer_response(result).answer
+
+    assert "(정규화 2000000000원)" in answer
+    assert "(정규화 1000000000원)" in answer
+
+
+def test_the_canonical_normalized_unit_is_not_exposed_in_the_single_fact_sentence() -> None:
+    """
+    같은 규칙이 단일 Fact 문장에도 적용된다.
+
+    원문 짝이 없으면 그 문장도 정규화 표현으로 떨어진다(_fact_value). 두 자리에 서로 다른 표기
+    규칙을 두면 같은 Fact가 질문에 따라 다른 단위 이름으로 불린다.
+    """
+    result = answerable_single_fact_result(
+        raw_value=None,
+        raw_unit=None,
+        normalized_unit=CANONICAL_NORMALIZED_UNIT,
+    )
+
+    answer = build_answer_response(result).answer
+
+    assert answer.endswith("매출액은 1234000000원입니다.")
+    assert CANONICAL_NORMALIZED_UNIT not in answer
+
+
+def test_a_complete_raw_pair_is_not_blocked_by_an_unmapped_normalized_unit() -> None:
+    """
+    원문으로 답할 수 있는 Fact는 정규화 단위 표기가 없어도 답한다.
+
+    단일 Fact 문장은 원문 짝을 먼저 쓰고 정규화 쪽을 보지 않는다. 쓰지도 않을 값의 표기가
+    없다는 이유로 멈추면, 답할 수 있는 질문이 표기 대응표 때문에 사라진다.
+    """
+    result = answerable_single_fact_result(normalized_unit="synthetic-unit")
+
+    answer = build_answer_response(result).answer
+
+    assert answer.endswith("매출액은 1,234백만원입니다.")
+    assert "synthetic-unit" not in answer
+
+
+def test_an_unregistered_normalized_unit_is_not_written_as_is() -> None:
+    """
+    표기를 정하지 않은 단위는 그대로 적지 않고 멈춘다.
+
+    비교 문장은 정규화 값을 반드시 병기하므로 이 경로에서는 원문으로 우회할 수 없다. generic
+    표기를 만들면 추출 계층이 새 단위를 늘린 사실이 문장에 조용히 실린다.
+    """
+    result = q10_result()
+    result.facts[0].normalized_unit = "synthetic-unit"
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert "synthetic-unit" in str(error.value)
+
+
+def test_the_two_unit_tables_stay_separate() -> None:
+    """
+    Fact 정규화 단위와 Calculation 단위는 서로 다른 계층의 어휘다.
+
+    합치면 한 계층이 단위를 늘릴 때 다른 계층의 문장이 함께 바뀐다. 두 어휘에는 이미 같은
+    문자열("percent")이 있고, 한 표에 담으면 원문에 적힌 비율과 agent가 만든 비율의 구분이
+    사라진다.
+    """
+    assert CANONICAL_NORMALIZED_UNIT in FACT_NORMALIZED_UNIT_LABELS
+    assert BASE_CURRENCY_UNIT in FACT_NORMALIZED_UNIT_LABELS
+    assert UNIT_PERCENT in CALCULATION_UNIT_LABELS
+
+    assert UNIT_PERCENT not in FACT_NORMALIZED_UNIT_LABELS
+    assert CANONICAL_NORMALIZED_UNIT not in CALCULATION_UNIT_LABELS
+
+    for label in FACT_NORMALIZED_UNIT_LABELS.values():
+        assert label.isascii() is False
+
+
+def test_derived_metric_labels_cover_the_shared_vocabulary() -> None:
+    """
+    파생 개념이 늘면 표기를 먼저 정하게 한다.
+
+    정의는 agent.derived_metrics가 정본이고 이 파일에는 표기만 있다. 한쪽만 넓어지면 정의는
+    있는데 부를 이름이 없는 값이 우열 판정에 실린다.
+    """
+    assert set(DERIVED_METRIC_LABELS) == set(DerivedMetric)
+
+    for label in DERIVED_METRIC_LABELS.values():
+        assert label.strip()
 
 
 # --------------------------------------------------------------------------

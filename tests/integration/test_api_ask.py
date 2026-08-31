@@ -1,5 +1,6 @@
 """Integration tests for the HTTP-to-Agent service contract."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,6 +33,9 @@ from disclosure_agent.common.schemas import (
 )
 
 client = TestClient(app)
+
+CORPUS_ROOT_ENV = "DISCLOSURE_CORPUS_ROOT"
+CORPUS_MANIFEST_ENV = "DISCLOSURE_CORPUS_MANIFEST"
 
 
 @dataclass
@@ -85,6 +89,23 @@ def answerable_execution_result() -> AgentExecutionResult:
         facts=[fact],
         evidence=[evidence],
     )
+def require_actual_corpus() -> None:
+    raw_corpus_root = os.environ.get(CORPUS_ROOT_ENV)
+    if not raw_corpus_root:
+        pytest.skip(f"{CORPUS_ROOT_ENV} is not set")
+
+    corpus_root = Path(raw_corpus_root).expanduser()
+    if not corpus_root.is_dir():
+        pytest.skip(f"corpus root is not a directory: {corpus_root}")
+
+    raw_manifest = os.environ.get(CORPUS_MANIFEST_ENV)
+    manifest_path = (
+        Path(raw_manifest).expanduser()
+        if raw_manifest is not None
+        else corpus_root / "manifest.jsonl"
+    )
+    if not manifest_path.is_file():
+        pytest.skip(f"corpus manifest does not exist: {manifest_path}")
 
 
 def test_ask_returns_contract_valid_answer_with_linked_evidence() -> None:
@@ -305,3 +326,62 @@ def test_q18_runs_through_the_real_api_dependency(
     assert response.json()["reason"] == "out_of_scope_policy"
     assert response.json()["facts"] == []
     assert response.json()["evidence"] == []
+
+
+@pytest.mark.corpus
+def test_q01_runs_through_actual_corpus_http_api() -> None:
+    require_actual_corpus()
+    assert get_ask_service not in app.dependency_overrides
+
+    response = client.post(
+        "/api/ask",
+        json={"question": "한미반도체 2025년 연결 기준 매출액이 얼마야?"},
+    )
+
+    assert response.status_code == 200
+    actual = AnswerResponse.model_validate(response.json())
+    assert actual.status is AnswerabilityStatus.ANSWERABLE
+    assert actual.reason is None
+    assert len(actual.facts) == 1
+
+    fact = actual.facts[0]
+    assert fact.metric is MetricConcept.REVENUE
+    assert fact.fiscal_year == 2025
+    assert fact.accounting_scope is FactAccountingScope.CONSOLIDATED
+    assert actual.evidence
+
+    response_evidence_ids = {item.evidence_id for item in actual.evidence}
+    assert set(fact.evidence_ids) <= response_evidence_ids
+
+
+@pytest.mark.corpus
+def test_q13_runs_through_actual_corpus_http_api() -> None:
+    require_actual_corpus()
+    assert get_ask_service not in app.dependency_overrides
+
+    response = client.post(
+        "/api/ask",
+        json={
+            "question": "HD현대일렉트릭이 2024년 8월에 공시한 공급계약, 나중에 바뀐 내용 있어?"
+        },
+    )
+
+    assert response.status_code == 200
+    actual = AnswerResponse.model_validate(response.json())
+    assert actual.status is AnswerabilityStatus.ANSWERABLE
+    assert actual.reason is None
+    assert len(actual.event_histories) == 1
+
+    history = actual.event_histories[0]
+    assert history.chain_complete is True
+    assert len(actual.event_links) >= 2
+    assert actual.evidence
+
+    response_evidence_ids = {item.evidence_id for item in actual.evidence}
+    for change in history.changes:
+        for evidence_id in (
+            change.before_evidence_id,
+            change.after_evidence_id,
+        ):
+            if evidence_id is not None:
+                assert evidence_id in response_evidence_ids

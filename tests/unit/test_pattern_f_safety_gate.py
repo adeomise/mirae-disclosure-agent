@@ -903,6 +903,122 @@ def test_unsafe_compound_query_short_circuits_before_the_pipeline(
 
 
 # --------------------------------------------------------------------------
+# 2.58 쉼표는 언제 요청 경계인가
+#
+# 같은 글자가 두 가지로 쓰인다.
+#
+#     "공시에 기재된, 내년 투자계획이 뭐야?"        수식어와 대상 사이  -> 경계 아님
+#     "공시에 기재된 2025년 투자계획, 내년 매출"    두 요청 사이        -> 경계
+#
+# 쉼표를 무조건 경계로 쓰면 앞쪽이 잘려 출처 표현이 대상에서 떨어지고, 면제되어야 할 질문이
+# F1이 된다. 반대로 쉼표를 아예 무시하면 뒤쪽 요청이 앞 요청의 면제를 그대로 물려받는다.
+# --------------------------------------------------------------------------
+
+# 쉼표가 출처 관형형 바로 뒤에 오는 형태. 같은 요청이어야 한다.
+SOURCE_MODIFIER_COMMA_QUESTIONS = [
+    "공시에 기재된, 내년 투자계획이 뭐야?",
+    "회사가 밝힌, 내년 매출 목표가 얼마야?",
+    "보고서에 적힌, 다음 분기 생산계획 알려줘",
+    "사업보고서에 적힌, 내년 생산계획 알려줘",
+    "회사가 발표한, 내년 투자 예정 금액이 얼마야?",
+]
+
+
+@pytest.mark.parametrize("question", SOURCE_MODIFIER_COMMA_QUESTIONS)
+def test_comma_after_a_dangling_source_modifier_is_not_a_boundary(question: str) -> None:
+    """
+    출처 관형형 뒤의 쉼표는 요청을 나누지 않는다.
+
+    _SOURCE_BACKED가 잡는 것은 전부 관형형이라 뒤에 꾸밀 명사가 와야 한다. 조각이 관형형으로
+    끝났다면 그 명사는 쉼표 뒤에 있고, 쉼표는 수식어와 대상 사이를 끊은 것이다.
+    """
+    assert _request_units(question) == (question,), question
+
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+
+
+def test_comma_after_a_complete_request_is_a_boundary() -> None:
+    """
+    대상까지 갖춘 요청 뒤의 쉼표는 요청을 나눈다.
+
+    "공시에 기재된 2025년 투자계획"은 출처·대상·연도가 모두 있어 완결됐다. 쉼표 뒤는 새
+    요청이므로 앞 요청의 면제를 물려받지 않는다.
+    """
+    assert _request_units("공시에 기재된 2025년 투자계획, 내년 매출 알려줘") == (
+        "공시에 기재된 2025년 투자계획",
+        " 내년 매출 알려줘",
+    )
+
+
+COMMA_BOUNDARY_CASES = [
+    # 앞 요청이 완결됐으므로 뒤 요청은 독립적이다.
+    ("공시에 기재된 2025년 투자계획, 내년 매출 알려줘", CATEGORY_OUT_OF_CORPUS_PERIOD),
+    ("공시에 기재된 내년 투자계획, 다음 분기 실적 알려줘", CATEGORY_OUT_OF_CORPUS_PERIOD),
+    ("내년 매출 알려줘, 공시에 기재된 2025년 투자계획", CATEGORY_OUT_OF_CORPUS_PERIOD),
+    # 수식어와 대상 사이라 한 요청이다.
+    ("공시에 기재된, 내년 투자계획이 뭐야?", None),
+    ("회사가 밝힌, 내년 매출 목표가 얼마야?", None),
+    ("보고서에 적힌, 다음 분기 생산계획 알려줘", None),
+]
+
+
+@pytest.mark.parametrize(("question", "expected_category"), COMMA_BOUNDARY_CASES)
+def test_comma_boundary_canonical_cases(question: str, expected_category: str | None) -> None:
+    assert screen_question(question).category == expected_category, question
+
+
+def test_refusal_after_a_comma_boundary_points_at_the_unsafe_request() -> None:
+    """근거 표현은 면제되지 않은 뒤 요청의 것이어야 한다."""
+    decision = screen_question("공시에 기재된 2025년 투자계획, 내년 매출 알려줘")
+
+    assert decision.matched_expressions == ("내년",)
+
+
+def test_preserved_comma_does_not_grant_an_exemption_by_itself() -> None:
+    """
+    쉼표를 살려 한 요청으로 둔 것이 면제를 뜻하지는 않는다.
+
+    "공시에 기재된, 내년 매출 알려줘"는 한 단위로 남지만 진술 대상(계획·목표·전망…)이 없어
+    면제되지 않는다. 경계 판정과 면제 판정은 서로 다른 조건을 본다.
+
+    이 단언이 "출처 표현 뒤 쉼표는 항상 무시"로 구현하는 변경을 막는다.
+    """
+    decision = screen_question("공시에 기재된, 내년 매출 알려줘")
+
+    assert not decision.allowed
+    assert decision.category == CATEGORY_OUT_OF_CORPUS_PERIOD
+
+
+def test_comma_boundary_does_not_reintroduce_cross_request_anchoring() -> None:
+    """
+    쉼표 경계 뒤에서도 앞 절의 연도가 anchor로 새지 않는다.
+
+    "2025년 투자계획, 다음 분기 실적 알려줘"에서 앞 절의 2025는 뒤 절의 '다음 분기'를
+    anchored로 만들지 않는다. 같은 요청 안일 때의 보류는 그대로다.
+    """
+    assert screen_question("2025년 투자계획, 다음 분기 실적 알려줘").category == (
+        CATEGORY_OUT_OF_CORPUS_PERIOD
+    )
+
+    assert screen_question("2025년 다음 분기 실적 알려줘").allowed
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "공시에 기재된 2025년 투자계획 그리고 내년 매출 알려줘",
+        "공시에 기재된 2025년 투자계획도 알려주고 내년 매출도 알려줘",
+        "공시에 기재된 2025년 투자계획도 보여주고 내년 매출도 알려줘",
+    ],
+)
+def test_non_comma_separators_are_unaffected(question: str) -> None:
+    """쉼표 판정을 붙이면서 나머지 구분자 동작이 바뀌지 않았는지 본다."""
+    assert screen_question(question).category == CATEGORY_OUT_OF_CORPUS_PERIOD, question
+
+
+# --------------------------------------------------------------------------
 # 2.6 F2 — 외부 정보 요구
 #
 # 코퍼스에 없는 '데이터의 종류'를 요구하는 질문이다. F1과 달리 기간과 무관하다.

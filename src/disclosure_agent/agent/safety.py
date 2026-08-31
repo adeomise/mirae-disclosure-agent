@@ -577,12 +577,62 @@ def _is_source_backed_future_request(request: str) -> bool:
 # 하지만, 아래 _first_future_relative_period가 '안전하지 않은 요청이 하나라도 있으면 F1'로
 # 접근하므로 판정이 느슨해지는 방향은 여기 한 곳뿐이다. 알려진 한계이며 대표 질문·fixture에는
 # 해당 형태가 없다.
-_REQUEST_SEPARATOR = re.compile(
-    r"[,;]"
-    r"|그리고"
+# 요청을 잇는 표현. 쉼표는 여기 두지 않는다.
+#
+# 쉼표는 요청을 나누기도 하고 한 요청 안에서 수식어를 끊기도 한다. 두 쓰임이 갈리므로
+# 다른 구분자와 같은 자리에 둘 수 없고, _is_request_boundary_comma가 따로 판정한다.
+_REQUEST_CONNECTOR = re.compile(
+    r"그리고"
     r"|(?:알려|말해|보여|설명해|정리해|요약해|비교해|확인해)\s*주고"
     r"|비교하고"
 )
+
+_REQUEST_COMMA = re.compile(r"[,;]")
+
+# 출처 표현이 조각의 끝에 걸리는가.
+#
+# _SOURCE_BACKED가 잡는 것은 전부 관형형이다(기재된·적힌·밝힌·제시한·발표한…). 관형형은
+# 뒤에 꾸밀 명사가 와야 문장이 끝나므로, 조각이 관형형으로 끝났다면 그 명사는 쉼표 뒤에
+# 있다. 즉 쉼표가 수식어와 대상 사이를 끊은 것이지 요청을 나눈 것이 아니다.
+_TRAILING_SOURCE_MODIFIER = re.compile(rf"(?:{_SOURCE_BACKED.pattern})\s*$")
+
+
+def _is_request_boundary_comma(question: str, index: int) -> bool:
+    """
+    쉼표 하나가 요청 경계인가.
+
+    쉼표 자체만으로는 단정하지 않는다. 같은 글자가 두 가지로 쓰인다.
+
+        "공시에 기재된, 내년 투자계획이 뭐야?"        수식어와 대상 사이  -> 경계 아님
+        "공시에 기재된 2025년 투자계획, 내년 매출"    두 요청 사이        -> 경계
+
+    가르는 것은 쉼표 왼쪽이 완결됐는가 하나다. 왼쪽이 출처 관형형으로 끝났으면 꾸밀 명사가
+    아직 나오지 않았으므로 요청이 끝나지 않았다. 왼쪽이 '2025년 투자계획'까지 갔으면 그
+    요청은 대상까지 갖춰 완결됐고, 쉼표 뒤는 새 요청이다.
+
+    반대 방향(쉼표 뒤에 무엇이 오는가)은 보지 않는다. "출처 표현 뒤 쉼표는 항상 무시"나
+    "진술 대상이 뒤에 있으면 항상 같은 절" 같은 규칙은 각각 다른 구멍을 만든다. 전자는
+    "공시에 기재된 2025년 투자계획, 내년 매출"을 한 요청으로 만들고, 후자는 완결된 요청
+    뒤에 '계획'만 붙으면 무엇이든 합친다.
+
+    왼쪽만 보므로 이 판정은 쉼표 뒤 내용에 좌우되지 않는다. 면제 여부는 그 뒤에
+    _is_source_backed_future_request가 단위 안에서 따로 본다. "공시에 기재된, 내년 매출
+    알려줘"가 한 단위로 남아도 진술 대상이 없어 면제되지 않고 F1인 것은 그 때문이다.
+    """
+    return not _TRAILING_SOURCE_MODIFIER.search(question, 0, index)
+
+
+def _separator_spans(question: str) -> tuple[tuple[int, int], ...]:
+    """요청을 나누는 자리. 쉼표는 경계로 인정된 것만 담는다."""
+    spans = [(match.start(), match.end()) for match in _REQUEST_CONNECTOR.finditer(question)]
+
+    spans.extend(
+        (match.start(), match.end())
+        for match in _REQUEST_COMMA.finditer(question)
+        if _is_request_boundary_comma(question, match.start())
+    )
+
+    return tuple(sorted(spans))
 
 
 def _request_units(question: str) -> tuple[str, ...]:
@@ -599,11 +649,11 @@ def _request_units(question: str) -> tuple[str, ...]:
 
     start = 0
 
-    for separator in _REQUEST_SEPARATOR.finditer(question):
-        if separator.start() > start:
-            units.append(question[start : separator.start()])
+    for separator_start, separator_end in _separator_spans(question):
+        if separator_start > start:
+            units.append(question[start:separator_start])
 
-        start = separator.end()
+        start = max(start, separator_end)
 
     if start < len(question):
         units.append(question[start:])

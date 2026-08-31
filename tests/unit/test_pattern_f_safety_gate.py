@@ -48,7 +48,8 @@ from disclosure_agent.agent.safety import (
     STAGE_ANSWERABILITY_GATE,
     CorpusCoverage,
     PolicyDecision,
-    _is_source_backed_future_statement,
+    _is_source_backed_future_request,
+    _request_units,
     screen_question,
 )
 from disclosure_agent.common.enums import (
@@ -636,13 +637,13 @@ def test_source_backed_exclusion_needs_both_a_source_and_a_reported_object() -> 
     F1의 방아쇠가 시점 표현('내년')뿐이라 무엇을 묻는지 담고 있지 않기 때문이며, F4의
     면제가 출처 표현 하나로 갈리는 것과 다른 점이다.
     """
-    assert _is_source_backed_future_statement("공시에 기재된 내년 투자계획이 뭐야?")
+    assert _is_source_backed_future_request("공시에 기재된 내년 투자계획이 뭐야?")
 
     # 출처만 있고 진술 대상이 없다.
-    assert not _is_source_backed_future_statement("공시에 기재된 내년 매출 알려줘")
+    assert not _is_source_backed_future_request("공시에 기재된 내년 매출 알려줘")
 
     # 진술 대상만 있고 출처가 없다.
-    assert not _is_source_backed_future_statement("내년 매출 목표를 세워줘")
+    assert not _is_source_backed_future_request("내년 매출 목표를 세워줘")
 
 
 def test_source_reference_alone_does_not_exempt_a_future_value_request() -> None:
@@ -732,6 +733,173 @@ def test_source_backed_future_statement_reaches_the_pipeline() -> None:
     assert result.execution_issue is not None
     assert result.execution_issue.stage != STAGE_ANSWERABILITY_GATE
     assert result.answerability_detail is None
+
+
+# --------------------------------------------------------------------------
+# 2.57 복합 질문에서의 면제 범위
+#
+# source-backed 면제는 요청 단위마다 따로 평가된다. 질문 전체에 걸면 한 절의 출처 표현이
+# 다른 절까지 덮는다.
+#
+#     "공시에 기재된 2025년 투자계획도 알려주고, 내년 매출도 알려줘"
+#
+# 앞 절은 문서에 적힌 계획 조회이고 뒤 절은 아직 없는 실적값 요구다. 뒤 절이 함께 면제되면
+# Gate를 통과하고, query_analyzer는 '내년'을 기간 정본으로 보존하지 않으므로 남는 것은
+# '2025 + 매출'뿐이다. 두 요청 중 하나가 소리 없이 사라진 채 single_fact로 축소된다.
+# --------------------------------------------------------------------------
+
+
+def test_request_units_split_on_explicit_request_connectors() -> None:
+    """
+    나누는 자리를 값으로 고정한다.
+
+    구분자 목록을 넓히는 변경이 여기서 먼저 드러난다.
+    """
+    assert _request_units("공시에 기재된 2025년 투자계획도 알려주고, 내년 매출도 알려줘") == (
+        "공시에 기재된 2025년 투자계획도 ",
+        " 내년 매출도 알려줘",
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 대표 질문에 실제로 들어 있는 형태들. 명사·동사 연결이지 요청 연결이 아니다.
+        "한미반도체는 무슨 사업을 하고 주력 제품이 뭐야?",
+        "삼성전자 2024년 매출과 2025년 매출을 비교해줘",
+        "HD현대중공업이랑 삼성중공업 중에 2025년 영업이익률이 더 높은 곳은 어디야?",
+    ],
+)
+def test_request_units_do_not_split_noun_and_verb_connectives(question: str) -> None:
+    """
+    '하고'·'와/과'·'이랑'은 구분자가 아니다.
+
+    단순 substring split을 넣으면 여기가 깨진다. Q05의 "사업을 하고"와 Q12의
+    "LG이노텍하고"가 같은 글자를 담고 있다.
+    """
+    assert _request_units(question) == (question,)
+
+
+# 복합 질문 canonical.
+#
+# (질문, 기대 범주). None이면 통과여야 한다.
+COMPOUND_CASES = [
+    # 안전하지 않은 요청이 섞여 있으면 F1이다.
+    (
+        "공시에 기재된 2025년 투자계획도 알려주고, 내년 매출도 알려줘",
+        CATEGORY_OUT_OF_CORPUS_PERIOD,
+    ),
+    (
+        "공시에 기재된 2025년 투자계획도 알려주고 다음 분기 실적도 알려줘",
+        CATEGORY_OUT_OF_CORPUS_PERIOD,
+    ),
+    # 모든 요청이 문서에 적힌 진술 조회면 통과한다.
+    (
+        "공시에 기재된 내년 투자계획도 알려주고, 회사가 밝힌 내년 매출 목표도 알려줘",
+        None,
+    ),
+]
+
+
+@pytest.mark.parametrize(("question", "expected_category"), COMPOUND_CASES)
+def test_compound_query_is_judged_per_request(
+    question: str,
+    expected_category: str | None,
+) -> None:
+    decision = screen_question(question)
+
+    assert decision.category == expected_category, question
+
+
+# 순서와 구분자를 바꿔도 결과가 같아야 한다.
+#
+# 면제가 "앞 절에서 한 번 보면 끝"이 되면 순서에 따라 결과가 갈린다. 그런 구현은 사용자가
+# 절의 순서를 바꾸는 것만으로 Gate를 우회할 수 있다는 뜻이다.
+UNSAFE_COMPOUND_ORDERINGS = [
+    "공시에 기재된 2025년 투자계획도 알려주고, 내년 매출도 알려줘",
+    "내년 매출도 알려주고 공시에 기재된 2025년 투자계획도 알려줘",
+    "공시에 기재된 2025년 투자계획도 알려주고 내년 매출도 알려줘",
+    "공시에 기재된 2025년 투자계획, 내년 매출 알려줘",
+    "내년 매출, 공시에 기재된 2025년 투자계획 알려줘",
+    "공시에 기재된 2025년 투자계획 그리고 내년 매출 알려줘",
+    "내년 매출 그리고 공시에 기재된 2025년 투자계획 알려줘",
+    "공시에 기재된 2025년 투자계획도 보여주고 내년 매출도 알려줘",
+]
+
+
+@pytest.mark.parametrize("question", UNSAFE_COMPOUND_ORDERINGS)
+def test_unsafe_compound_query_is_refused_regardless_of_order_or_separator(
+    question: str,
+) -> None:
+    """
+    안전하지 않은 요청이 하나라도 있으면 F1이다.
+
+    절의 순서에도, 어떤 구분자를 썼는지에도 의존하지 않는다.
+    """
+    decision = screen_question(question)
+
+    assert not decision.allowed, question
+    assert decision.category == CATEGORY_OUT_OF_CORPUS_PERIOD, question
+
+
+def test_refusal_points_at_the_unsafe_request_not_the_exempted_one() -> None:
+    """
+    남는 근거 표현은 면제되지 않은 요청의 것이다.
+
+    면제된 절의 표현을 남기면 오검출 신고를 되짚을 때 엉뚱한 자리를 보게 된다.
+    """
+    decision = screen_question("공시에 기재된 내년 투자계획도 알려주고, 다음 분기 실적도 알려줘")
+
+    assert decision.category == CATEGORY_OUT_OF_CORPUS_PERIOD
+    assert decision.matched_expressions == ("다음 분기",)
+
+
+def test_anchor_exemption_does_not_reach_across_requests() -> None:
+    """
+    anchor 판정도 요청 단위 안에서만 본다.
+
+    "2025년 투자계획도 알려주고 다음 분기 실적도 알려줘"에서 앞 절의 2025는 뒤 절의
+    '다음 분기'를 anchored로 만들지 않는다. 두 표현은 서로 다른 요청에 속한다.
+
+    같은 요청 안에 있을 때의 기존 동작은 그대로다. 아래 두 번째 단언이 그것을 함께 본다.
+    """
+    across = screen_question("2025년 투자계획도 알려주고 다음 분기 실적도 알려줘")
+
+    assert across.category == CATEGORY_OUT_OF_CORPUS_PERIOD
+
+    # 같은 요청 안이면 anchored relative일 수 있으므로 판정하지 않는다.
+    assert screen_question("2025년 다음 분기 실적 알려줘").allowed
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "공시에 기재된 2025년 투자계획도 알려주고, 내년 매출도 알려줘",
+        "내년 매출도 알려주고 공시에 기재된 2025년 투자계획도 알려줘",
+    ],
+)
+def test_unsafe_compound_query_short_circuits_before_the_pipeline(
+    question: str,
+    explosive_downstream: None,
+) -> None:
+    """
+    복합 질문도 manifest·query planning·handler 이전에 끝난다.
+
+    이 질문들은 기업명·연도·지표가 온전해 Gate가 없으면 그대로 해석 단계로 넘어간다.
+    거기서 '내년'은 기간 정본으로 남지 않으므로 2025 + 매출만 남고, 두 요청 중 하나가
+    사라진 채 답이 조립된다. 폭탄이 터지지 않는다는 것이 그 경로에 닿지 않았다는 증거다.
+    """
+    result = router.answer_question(question, corpus_root=NONEXISTENT_CORPUS)
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.OUT_OF_DATA_RANGE
+    assert result.execution_issue is None
+    assert result.answerability_detail is not None
+    assert result.answerability_detail.stage == STAGE_ANSWERABILITY_GATE
+    assert result.facts == []
+    assert result.evidence == []
+    assert result.calculations == []
 
 
 # --------------------------------------------------------------------------

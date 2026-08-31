@@ -529,14 +529,18 @@ def _requested_periods(question: str) -> tuple[tuple[int, int | None, str], ...]
 # 진술이며, 그것을 읽어 달라는 요구는 미래의 실제 결과를 요구하는 것이 아니다.
 #
 # 이 낱말들은 단독으로는 아무것도 면제하지 않는다. "내년 매출 목표를 세워줘"는 '목표'를
-# 담고 있지만 문서를 가리키지 않는다. 아래 _is_source_backed_future_statement가
+# 담고 있지만 문서를 가리키지 않는다. 아래 _is_source_backed_future_request가
 # _SOURCE_BACKED와 함께일 때만 쓴다.
 _REPORTED_FUTURE_OBJECT = re.compile(r"계획|목표|전망|가이던스|예정")
 
 
-def _is_source_backed_future_statement(question: str) -> bool:
+def _is_source_backed_future_request(request: str) -> bool:
     """
-    문서에 이미 기재된 미래 진술을 조회하는 질문인가.
+    요청 하나가 문서에 이미 기재된 미래 진술을 조회하는가.
+
+    **질문 전체가 아니라 요청 단위 하나를 받는다.** 인자 이름이 question이 아닌 이유이며,
+    호출부는 _request_units가 나눠 준 조각을 넘긴다. 질문 전체를 넘기면 아래 두 조건이 서로
+    다른 절에서 하나씩 발견돼도 참이 되고, 그 순간 면제가 다른 요청까지 샌다.
 
     두 조건을 함께 요구한다.
 
@@ -554,7 +558,57 @@ def _is_source_backed_future_statement(question: str) -> bool:
     절대 기간에는 적용하지 않는다. "공시에 기재된 2027년 투자계획"은 이 함수를 거치지
     않으며, 수집 상한 대조가 그대로 판정한다. 이번 범위는 상대기간 오검출뿐이다.
     """
-    return bool(_SOURCE_BACKED.search(question) and _REPORTED_FUTURE_OBJECT.search(question))
+    return bool(_SOURCE_BACKED.search(request) and _REPORTED_FUTURE_OBJECT.search(request))
+
+
+# 한 질문 안에서 요청이 갈리는 자리.
+#
+# 한국어 절 분석기를 만들지 않는다. 여기서 필요한 것은 "이 미래 표현이 어느 요청에 속하는가"
+# 하나뿐이고, 그 판정에는 명시적인 요청 연결 표현만으로 충분하다.
+#
+# 목록을 좁게 두는 이유:
+#     '하고'를 단독으로 넣으면 정상 질문이 잘린다. "LG이노텍하고 레인보우로보틱스가"(Q12)와
+#     "무슨 사업을 하고 주력 제품이 뭐야?"(Q05)가 전부 명사·동사 연결이다. 그래서 요청을
+#     끝내는 동사에 붙은 형태만 본다.
+#
+#     '와/과'도 넣지 않았다. "매출과 영업이익"처럼 명사 나열이 훨씬 흔하다.
+#
+# 나누기에 실패하면 두 요청이 한 단위로 남는다. 그때는 면제 조건이 더 넓은 범위에서 평가되긴
+# 하지만, 아래 _first_future_relative_period가 '안전하지 않은 요청이 하나라도 있으면 F1'로
+# 접근하므로 판정이 느슨해지는 방향은 여기 한 곳뿐이다. 알려진 한계이며 대표 질문·fixture에는
+# 해당 형태가 없다.
+_REQUEST_SEPARATOR = re.compile(
+    r"[,;]"
+    r"|그리고"
+    r"|(?:알려|말해|보여|설명해|정리해|요약해|비교해|확인해)\s*주고"
+    r"|비교하고"
+)
+
+
+def _request_units(question: str) -> tuple[str, ...]:
+    """
+    질문을 요청 단위로 나눈다.
+
+    구분자 자체는 어느 쪽에도 넣지 않는다. 출처 표현도 진술 대상도 연도도 담고 있지 않아
+    판정에 쓰이지 않는다.
+
+    구분자가 없으면 질문 하나가 그대로 단위 하나다. 지금까지의 단일 질문 동작이 그대로
+    유지되는 것은 그 때문이다.
+    """
+    units: list[str] = []
+
+    start = 0
+
+    for separator in _REQUEST_SEPARATOR.finditer(question):
+        if separator.start() > start:
+            units.append(question[start : separator.start()])
+
+        start = separator.end()
+
+    if start < len(question):
+        units.append(question[start:])
+
+    return tuple(units)
 
 
 # 발화 시점을 스스로 가리키는 표현. anchor를 붙일 수 없다.
@@ -588,34 +642,67 @@ _FUTURE_RELATIVE_ANCHORABLE: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
-def _first_future_relative_period(question: str) -> tuple[str, str] | None:
+def _first_future_relative_in_request(request: str) -> tuple[str, str] | None:
     """
-    미래 방향 상대기간 표현을 찾는다. 없으면 None.
+    요청 하나 안에서 미래 방향 상대기간 표현을 찾는다. 없으면 None.
 
-    절대연도가 함께 있으면 anchor를 붙일 수 있는 표현은 보지 않는다. 그 조합에서 무엇을
-    뜻하는지는 anchored relative 해석이 있어야 정해지고, 이 모듈은 그것을 하지 않는다.
-    판정을 보류하면 기존 경로가 그대로 처리하지만, 미래로 단정하면 되돌릴 수 없다.
+    절대연도가 **같은 요청 안에** 있으면 anchor를 붙일 수 있는 표현은 보지 않는다. 그
+    조합에서 무엇을 뜻하는지는 anchored relative 해석이 있어야 정해지고, 이 모듈은 그것을
+    하지 않는다. 판정을 보류하면 기존 경로가 그대로 처리하지만, 미래로 단정하면 되돌릴 수
+    없다.
+
+    연도를 같은 요청 안에서만 보는 것이 요점이다. 질문 전체에서 찾으면 "2025년 투자계획도
+    알려주고 다음 분기 실적도 알려줘"에서 앞 절의 2025가 뒤 절의 '다음 분기'를 anchored로
+    만들어 버린다. 두 표현은 서로 다른 요청에 속하므로 anchor 관계가 성립하지 않는다.
 
     deictic 표현은 그 영향을 받지 않는다. '내년'은 앞에 무엇이 오든 발화 시점의 다음 해다.
-
-    출처를 지목하고 계획·목표를 물으면 그보다 앞서 통과시킨다. "공시에 기재된 내년
-    투자계획이 뭐야?"가 요구하는 것은 내년의 실제 결과가 아니라 지금 문서에 적혀 있는
-    진술이고, 그 진술은 코퍼스 안에 있다. deictic 표현도 여기서는 함께 면제된다.
     """
-    if _is_source_backed_future_statement(question):
-        # 문서에 이미 적힌 미래 진술을 읽어 달라는 요구다. 기간 밖이 아니다.
-        return None
-
-    deictic = _first_match(question, _FUTURE_RELATIVE_DEICTIC)
+    deictic = _first_match(request, _FUTURE_RELATIVE_DEICTIC)
 
     if deictic is not None:
         return deictic
 
-    if _YEAR_PATTERN.search(question):
-        # 절대연도가 있으면 anchored relative일 수 있다. 여기서 단정하지 않는다.
+    if _YEAR_PATTERN.search(request):
+        # 같은 요청 안에 절대연도가 있으면 anchored relative일 수 있다. 단정하지 않는다.
         return None
 
-    return _first_match(question, _FUTURE_RELATIVE_ANCHORABLE)
+    return _first_match(request, _FUTURE_RELATIVE_ANCHORABLE)
+
+
+def _first_future_relative_period(question: str) -> tuple[str, str] | None:
+    """
+    미래 방향 상대기간 요구를 찾는다. 없으면 None.
+
+    요청 단위마다 따로 판정한다. 질문 하나에 미래 표현이 여러 개 있을 수 있고, 그 각각이
+    서로 다른 성격일 수 있기 때문이다.
+
+        "공시에 기재된 2025년 투자계획도 알려주고, 내년 매출도 알려줘"
+
+    앞 요청은 문서에 적힌 계획 조회이고 뒤 요청은 아직 없는 실적값 요구다. 면제를 질문
+    전체에 걸면 앞 요청의 출처 표현이 뒤 요청까지 덮어, 답할 수 없는 요구가 통과한다.
+    그 뒤에 남는 것은 '2025 + 매출'뿐이라 single_fact로 축소되어 조용히 틀린 답이 된다.
+
+    판정 원칙은 하나다. **안전하지 않은 미래 요구가 하나라도 있으면 F1이다.**
+    모든 미래 요구가 문서에 적힌 진술 조회일 때만 통과시킨다. 부분적으로 답할 수 있다는
+    이유로 통과시키면, 답할 수 없는 쪽이 응답에서 소리 없이 사라진다.
+
+    돌려주는 근거 표현은 처음 만난 '안전하지 않은' 요구의 것이다. 면제된 요청의 표현을
+    남기면 오검출 신고를 되짚을 때 엉뚱한 자리를 보게 된다.
+    """
+    for request in _request_units(question):
+        hit = _first_future_relative_in_request(request)
+
+        if hit is None:
+            continue
+
+        if _is_source_backed_future_request(request):
+            # 이 요청은 문서에 이미 적힌 미래 진술을 읽어 달라는 것이다. 기간 밖이 아니다.
+            # 다른 요청까지 함께 면제하지 않으므로 순회를 계속한다.
+            continue
+
+        return hit
+
+    return None
 
 
 def _first_out_of_range_period(

@@ -6,6 +6,8 @@
 현재 구현 범위:
 - Pattern A (Single Fact Lookup)
 - Pattern C (Temporal Compare)
+- Pattern D (Cross-entity Compare) — 원천 지표(Q10)·파생지표(Q11) 경로.
+  거래소공시 집계 경로(Q12)는 아직 없다.
 - Pattern E (Event History)
 
 Pattern을 추가할 때:
@@ -17,5 +19,4 @@ Pattern을 추가할 때:
 
 TODO:
 - Pattern B (document_summary)
-- Pattern D (cross_entity_compare)
 """

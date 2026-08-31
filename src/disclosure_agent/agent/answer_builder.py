@@ -141,11 +141,19 @@ REASON_UNSUPPORTED_DERIVED_OPERATION = "unsupported_derived_operation"
 
 # agent.calculator가 계산을 거부한 사유.
 #
-# 둘을 나누는 이유는 성질이 다르기 때문이다. 앞쪽은 "값은 읽었지만 함께 쓸 수 없다"는
-# 판정이고, 뒤쪽은 "그 값으로는 산술 자체가 성립하지 않는다"이다. 전자만 답변 가능성
+# 앞의 셋과 마지막을 나누는 이유는 성질이 다르기 때문이다. 앞쪽은 "값은 읽었지만 함께 쓸 수
+# 없다"는 판정이고, 뒤쪽은 "그 값으로는 산술 자체가 성립하지 않는다"이다. 전자만 답변 가능성
 # 판정(NOT_COMPARABLE)으로 나가고, 후자는 대응표에 없어 실행 중단으로 남는다.
+#
+# 함께 쓸 수 없다는 판정을 다시 셋으로 나누는 이유는 어긋난 축이 다르기 때문이다.
+#     incomparable_calculation_inputs  한 파생값의 분자와 분모가 어긋났다(guard①).
+#     incomparable_periods             같은 기업의 두 기간이 어긋났다(guard②, Pattern C).
+#     incomparable_entities            같은 기간의 두 기업이 어긋났다(guard②, Pattern D).
+# canonical 사유는 셋 다 NOT_COMPARABLE 하나로 모이므로, 어느 축이었는지는 이 값으로만
+# 구분된다. 하나로 묶으면 결과만 보고 무엇을 고쳐야 하는지 알 수 없다.
 REASON_INCOMPARABLE_CALCULATION_INPUTS = "incomparable_calculation_inputs"
 REASON_INCOMPARABLE_PERIODS = "incomparable_periods"
+REASON_INCOMPARABLE_ENTITIES = "incomparable_entities"
 REASON_UNUSABLE_CALCULATION_INPUT = "unusable_calculation_input"
 
 # 확정된 내부 값을 공통 Contract 타입으로 옮기지 못한 경우.

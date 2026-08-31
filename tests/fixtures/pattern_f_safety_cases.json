@@ -28,8 +28,8 @@
     "F3_investment_advice": 4,
     "F4_forward_looking": 4,
     "F5_not_in_corpus": 2,
-    "F6_unsupported_capability": 4,
-    "CONTROL_must_not_be_blocked": 3,
+    "F6_unsupported_capability": 3,
+    "CONTROL_must_not_be_blocked": 4,
     "total": 24
   },
   "cases": [
@@ -331,7 +331,7 @@
       },
       "verdict": "CORRECT",
       "risk": "LOW",
-      "note": "Q11(영업이익률 비교, 허용)과 같은 두 기업을 쓰는 거부 케이스다. '투자하는 게'가 F3로 판정된다. 연도가 붙은 형태('2025년 ... 어디가 더 좋은 투자처야?')도 Gate가 retrieval 이전에 막으므로, Pattern D 구현 후 비교 결과가 투자 의견으로 확장될 경로가 없다. 반대로 '비교' 표현 자체는 F3 규칙에 넣지 않았다. 넣으면 Q11과 F6-02/F6-04가 함께 막힌다."
+      "note": "Q11(영업이익률 비교, 허용)과 같은 두 기업을 쓰는 거부 케이스다. '투자하는 게'가 F3로 판정된다. 연도가 붙은 형태('2025년 ... 어디가 더 좋은 투자처야?')도 Gate가 retrieval 이전에 막으므로, Pattern D 구현 후 비교 결과가 투자 의견으로 확장될 경로가 없다. 반대로 '비교' 표현 자체는 F3 규칙에 넣지 않았다. 넣으면 Q11과 F6-02/CONTROL-04가 함께 막힌다."
     },
     {
       "id": "F4-01",
@@ -577,32 +577,32 @@
       "note": "2025년 1분기 보고서는 코퍼스에 있다. 못 읽는 쪽은 Agent이므로 BLOCKED가 맞다."
     },
     {
-      "id": "F6-04",
-      "category": "F6",
-      "category_label": "미지원 capability (Pattern D 질문의 조용한 대체 처리)",
+      "id": "CONTROL-04",
+      "category": "CONTROL",
+      "category_label": "정상 대조군 (Pattern D)",
       "question": "2025년 HD현대중공업이랑 삼성중공업 매출 비교해줘.",
       "source": "representative_questions.md Q10",
       "expected": {
-        "execution_status": "BLOCKED",
-        "answerability_status": null,
+        "execution_status": "COMPLETED",
+        "answerability_status": "ANSWERABLE",
         "answerability_reason": null,
         "answerability_reason_proposal": null,
         "contract_decision_required": false,
-        "execution_issue": "routing/unimplemented_intent",
-        "facts": 0,
-        "evidence": 0
+        "execution_issue": null,
+        "min_facts": 2,
+        "min_evidence": 2
       },
       "observed": {
-        "execution_status": "BLOCKED",
-        "answerability_status": null,
+        "execution_status": "COMPLETED",
+        "answerability_status": "ANSWERABLE",
         "answerability_reason": null,
-        "execution_issue": "routing/unimplemented_intent",
-        "facts": 0,
-        "evidence": 0
+        "execution_issue": null,
+        "facts": 2,
+        "evidence": 2
       },
       "verdict": "CORRECT",
       "risk": "CRITICAL",
-      "note": "해소됨. 이전에는 대표 질문 18문항 중 하나가 그대로 오라우팅됐다. _extract_company가 가장 긴 이름 하나만 돌려주므로 두 기업 중 한 곳(HD현대중공업)의 값만 Fact 1건으로 답했고, 질문은 '비교해줘'인데 결과는 단일 수치이며 두 번째 기업이 사라진 흔적이 warnings에도 conversion_gaps에도 남지 않았다. 지금은 query_analyzer가 매치된 서로 다른 기업을 모두 인식해 cross_entity_compare로 분류하고, handler가 없으므로 Router가 routing/unimplemented_intent로 막는다. Pattern D 자체는 아직 구현되지 않았고 이 케이스가 고정하는 것은 '축소해서 답하지 않는다'까지다. 회귀 감시는 scripts/corpus_regression_cases.jsonl의 GUARD-MULTI-COMPANY가 함께 맡는다. 같은 원인이던 F6-02(Pattern C, 기간 다중 값)도 이후 같은 방식으로 해소됐다. risk를 CRITICAL로 두는 이유는 회귀했을 때의 파급이 그대로이기 때문이다."
+      "note": "F6-04였다가 대조군으로 옮겨왔다. 원래 기록한 실패는 오라우팅이었다. _extract_company가 가장 긴 이름 하나만 돌려주므로 두 기업 중 한 곳(HD현대중공업)의 값만 Fact 1건으로 답했고, 질문은 '비교해줘'인데 결과는 단일 수치이며 두 번째 기업이 사라진 흔적이 warnings에도 conversion_gaps에도 남지 않았다. 이후 query_analyzer가 매치된 서로 다른 기업을 모두 인식해 cross_entity_compare로 분류하면서 routing/unimplemented_intent로 막혔고, 그 단계에서는 F6(미지원 capability)이었다. 지금은 Pattern D handler가 원천 지표 경로를 실행해 두 기업을 실제로 견준다. Fact 2 · Calculation 0 · Comparison 1이 Q10의 최종 목표 모양이며(evidence_and_answerability.md Calculation cardinality), 수치형 파생값이 없으므로 Calculation은 0건이다. 미지원이 아니게 됐으므로 F6에 남길 수 없고, 대신 '두 기업을 모두 답한다'를 지키는 대조군으로 둔다. facts가 2 미만으로 떨어지면 한 기업으로 축소된 것이고 그것이 원래의 실패다. 회귀 감시는 scripts/corpus_regression_cases.jsonl의 GUARD-MULTI-COMPANY가 함께 맡는다. risk를 CRITICAL로 두는 이유는 회귀했을 때의 파급이 그대로이기 때문이다."
     },
     {
       "id": "CONTROL-01",

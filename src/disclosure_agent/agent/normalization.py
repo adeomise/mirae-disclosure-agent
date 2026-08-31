@@ -1,7 +1,7 @@
 """Pattern 실행 결과를 공통 실행 Contract로 옮기는 정규화 계층.
 
 역할:
-- Pattern A/C/E가 각자의 형태로 만든 내부 결과를 common.schemas.AgentExecutionResult 하나로
+- Pattern A/C/D/E가 각자의 형태로 만든 내부 결과를 common.schemas.AgentExecutionResult 하나로
   옮긴다.
 - 그 과정에서 공통 Contract에 자리가 없는 정보를 조용히 버리지 않고 conversion_gaps에
   남긴다.
@@ -30,13 +30,13 @@ execution_status와 answerability_status를 나누는 기준:
     어느 사유가 어느 쪽인지는 아래 ANSWERABILITY_BY_STOP 하나가 정한다.
 
 ExecutionStatus.FAILED에 대하여:
-    이 모듈은 FAILED를 만들지 않는다. Pattern A/C/E는 예상한 실패를 전부 BlockedInfo로
+    이 모듈은 FAILED를 만들지 않는다. Pattern A/C/D/E는 예상한 실패를 전부 BlockedInfo로
     돌려주고, 예상하지 못한 예외는 삼키지 않고 호출자에게 올린다. 그 예외를 FAILED로 바꿀지는
     API/Runtime 경계의 결정이며 여기서 앞질러 정하지 않는다.
 
 입력:
 - Pattern A의 SingleFactResult, Pattern C의 TemporalCompareResult,
-  Pattern E의 EventHistoryResult
+  Pattern D의 CrossEntityCompareResult, Pattern E의 EventHistoryResult
 
 출력:
 - AgentExecutionResult
@@ -47,9 +47,6 @@ ExecutionStatus.FAILED에 대하여:
     conversion_gaps       Contract에 실을 자리가 없어 손실되는 정보 전용.
 
     판정 근거는 손실이 아니라 진단이므로 conversion_gaps에 넣지 않는다.
-
-TODO:
-- Pattern D(ComparisonResult) 연결
 """
 
 from __future__ import annotations
@@ -62,6 +59,7 @@ from disclosure_agent.agent.answer_builder import (
     REASON_AMBIGUOUS_CANDIDATES,
     REASON_AMBIGUOUS_ROOT,
     REASON_INCOMPARABLE_CALCULATION_INPUTS,
+    REASON_INCOMPARABLE_ENTITIES,
     REASON_INCOMPARABLE_PERIODS,
     REASON_NO_MATCHING_CONTEXT,
     REASON_NO_MATCHING_FILING,
@@ -97,6 +95,9 @@ from disclosure_agent.common.schemas import (
 from disclosure_agent.periodic.adapter import adapt_financial_fact
 
 if TYPE_CHECKING:  # pragma: no cover - 순환 import를 만들지 않기 위한 타입 전용 import
+    from disclosure_agent.agent.handlers.cross_entity_compare import (
+        CrossEntityCompareResult,
+    )
     from disclosure_agent.agent.handlers.event_history import EventHistoryResult
     from disclosure_agent.agent.handlers.single_fact import SingleFactResult
     from disclosure_agent.agent.handlers.temporal_compare import TemporalCompareResult
@@ -151,7 +152,8 @@ class Answerability:
 #     unsupported_metric / unsupported_accounting_scope / unimplemented_intent 등
 #         아직 구현하지 않은 요청이다. 코퍼스에 대한 판정이 아니다.
 #     unsupported_comparison_* / unsupported_derived_operation
-#         Pattern C가 계획 입구에서 막은 것이다. 위와 같은 이유로 코퍼스를 보기 전이다.
+#         Pattern C와 Pattern D가 계획 입구에서 막은 것이다. 위와 같은 이유로 코퍼스를 보기
+#         전이다.
 #     unusable_calculation_input
 #         값은 확보했지만 그 값으로 산술이 성립하지 않는다(분모 0, 파싱 불가). 근거가 없는
 #         것이 아니므로 INSUFFICIENT_EVIDENCE가 아니고, 코퍼스에 답이 없다는 판정도 아니다.
@@ -190,14 +192,19 @@ ANSWERABILITY_BY_STOP: dict[tuple[str, str], Answerability] = {
     # 비교 가능성 판정(C9)은 코퍼스를 끝까지 읽고 값을 확보한 뒤에 내린다. 실행은 끝났고,
     # 확보한 값으로는 답할 수 없다고 판정한 것이다.
     #
-    # 두 사유가 같은 값으로 모이는 것은 의도된 것이다. 둘 다 "이 값들은 함께 쓸 수 없다"이며,
-    # 계산 입력이 어긋난 것인지 두 기간이 어긋난 것인지는 answerability_detail.reason이
-    # 구분한다(pattern_f_safety.md §5.1의 F3·F4와 같은 구조).
+    # 세 사유가 같은 값으로 모이는 것은 의도된 것이다. 셋 다 "이 값들은 함께 쓸 수 없다"이며,
+    # 계산 입력이 어긋난 것인지(guard①) 두 기간이 어긋난 것인지(Pattern C guard②) 두 기업이
+    # 어긋난 것인지(Pattern D guard②)는 answerability_detail.reason이 구분한다
+    # (pattern_f_safety.md §5.1의 F3·F4와 같은 구조).
     (STAGE_COMPARABILITY, REASON_INCOMPARABLE_CALCULATION_INPUTS): Answerability(
         AnswerabilityStatus.UNANSWERABLE,
         AnswerabilityReason.NOT_COMPARABLE,
     ),
     (STAGE_COMPARABILITY, REASON_INCOMPARABLE_PERIODS): Answerability(
+        AnswerabilityStatus.UNANSWERABLE,
+        AnswerabilityReason.NOT_COMPARABLE,
+    ),
+    (STAGE_COMPARABILITY, REASON_INCOMPARABLE_ENTITIES): Answerability(
         AnswerabilityStatus.UNANSWERABLE,
         AnswerabilityReason.NOT_COMPARABLE,
     ),
@@ -525,6 +532,77 @@ def normalize_temporal_compare_result(result: TemporalCompareResult) -> AgentExe
         facts=list(result.facts),
         evidence=list(result.evidence),
         calculations=list(result.calculations),
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------------
+# Pattern D
+# --------------------------------------------------------------------------
+
+
+def normalize_cross_entity_compare_result(
+    result: CrossEntityCompareResult,
+) -> AgentExecutionResult:
+    """
+    Pattern D의 구조화 결과를 공통 실행 Contract로 옮긴다.
+
+    Fact/Evidence/CalculationResult/ComparisonResult는 이미 Contract 타입이므로 다시 만들지
+    않고 그대로 싣는다. Pattern C와 같은 자리이며, 여기서 다시 변환하면 확보·계산 계층이
+    이미 내린 판정이 두 곳에 생긴다.
+
+    Pattern C와 다른 것은 comparisons 하나다. Q10·Q11은 최종 우열 판정을 요구하므로
+    ComparisonResult가 결과에 실린다(evidence_and_answerability.md Calculation cardinality).
+    Q08이 변화량 자체를 묻고 우열을 요구하지 않아 Pattern C가 comparisons를 비워 두는 것과
+    대비된다.
+
+    멈춘 결과에서 갈리는 세 갈래:
+        pattern_entry에서 막힌 경우
+            계획 모양이 이번 범위 밖인 경우다(unsupported_comparison_* /
+            unsupported_derived_operation). 코퍼스를 열기 전이므로 ANSWERABILITY_BY_STOP에
+            없고, BLOCKED로 나간다. 답변 가능성을 판정하지 않는 것이 규약이다. 코퍼스를
+            보지 않았으므로 답이 있는지 없는지 알지 못한다.
+
+        확보 단계에서 막힌 경우
+            filing_discovery/no_matching_filing이나 extraction/* 계열이다. 대응표가 이미
+            이 사유들을 COMPLETED + UNANSWERABLE로 옮기고 있고, Pattern D라고 다르게 볼
+            이유가 없다. 새 대응을 만들지 않고 같은 표를 쓴다.
+
+        비교 가능성(C9)에서 막힌 경우
+            comparability/incomparable_* 계열이며 COMPLETED + UNANSWERABLE + NOT_COMPARABLE로
+            나간다. 값을 다 확보한 뒤에 내린 판정이므로 실행은 끝났다.
+
+            이때 facts와 evidence는 남고 calculations와 comparisons는 남지 않는다. 무엇이
+            견줄 수 없다고 판정됐는지 보려면 그 값이 있어야 하지만, 기업별 파생값이나 우열
+            판정이 함께 남으면 받는 쪽이 guard가 막은 비교를 그대로 이어서 할 수 있다.
+            그 규칙은 _stopped_execution이 인자로 강제한다. calculations도 comparisons도
+            받지 않으므로 이 자리에서 실수로 실을 수 없다.
+
+            새 사유를 만들 때는 ANSWERABILITY_BY_STOP에 함께 등록해야 한다. 등록하지 않으면
+            비교 가능성 판정이 BLOCKED로 나가 "판정에 이르지 못하고 멈췄다"가 되고, 실제로
+            일어난 일과 달라진다.
+
+    성공 경로에 answerability_reason을 싣지 않는다. ANSWERABLE은 사유를 갖지 않으며, 그
+    규칙은 answer_builder의 ALLOWED_REASONS_BY_STATUS와 evaluation.runner의 GoldAnswer 검증이
+    이미 고정하고 있다.
+    """
+    warnings = list(result.plan.warnings)
+
+    if result.blocked is not None:
+        return _stopped_execution(
+            result.blocked,
+            warnings=warnings,
+            facts=result.facts,
+            evidence=result.evidence,
+        )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=list(result.facts),
+        evidence=list(result.evidence),
+        calculations=list(result.calculations),
+        comparisons=list(result.comparisons),
         warnings=warnings,
     )
 

@@ -7,11 +7,16 @@
     두 번째 기업이 사라졌다는 사실이 warnings에도 conversion_gaps에도 남지 않는다.
 
     지원하지 않는다고 답하는 것보다 이쪽이 위험하다. 받는 쪽이 틀렸다는 것을 알 수 없기
-    때문이다. 그래서 '조용히 틀린 답'이 아니라 'routing 단계에서 막혔다'로 답하게 한다.
+    때문이다. 그래서 '조용히 틀린 답'이 아니라 '막혔다'로 답하게 한다.
+
+막는 자리가 옮겨진 것에 대하여:
+    Pattern D handler가 등록되기 전에는 Router가 routing/unimplemented_intent로 막았다.
+    등록한 뒤에는 handler 입구(pattern_entry)가 막는다. Pattern C에서 이미 한 번 일어난
+    이동이며(GUARD-MULTI-PERIOD), 값을 하나도 만들지 않는다는 성질은 그대로다.
 
 무엇을 검증하지 않는가:
-    Pattern D(기업 간 비교)의 실제 동작은 검증하지 않는다. handler가 없기 때문이다.
-    여기서 고정하는 것은 '축소해서 답하지 않는다'까지다.
+    Pattern D(기업 간 비교)의 실제 동작은 검증하지 않는다. 수치 실행 단계가 아직 없기
+    때문이다. 여기서 고정하는 것은 '축소해서 답하지 않는다'까지다.
 
 false positive:
     조사나 구분자로 판정하지 않는다. 실제 목록에 있는 회사명이 서로 다른 자리에서
@@ -25,7 +30,6 @@ from pathlib import Path
 
 import pytest
 
-from disclosure_agent.agent.answer_builder import STAGE_ROUTING
 from disclosure_agent.agent.query_analyzer import (
     INTENT_CROSS_ENTITY_COMPARE,
     INTENT_EVENT_HISTORY,
@@ -34,7 +38,7 @@ from disclosure_agent.agent.query_analyzer import (
     UnsupportedQuestionError,
     build_query_plan,
 )
-from disclosure_agent.agent.router import REASON_UNIMPLEMENTED_INTENT, answer_question
+from disclosure_agent.agent.router import answer_question
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
@@ -100,7 +104,14 @@ def test_multi_company_event_history_question_is_also_guarded() -> None:
 
 
 # --------------------------------------------------------------------------
-# 2. Router는 routing 단계에서 막는다
+# 2. 실행 결과가 한 기업으로 줄어들지 않는다
+#
+# 정지 지점을 고정하지 않는다. Pattern D handler가 등록되기 전에는 Router가 막았고, 등록된
+# 뒤에는 handler 입구가 막았으며, 원천 지표 경로가 구현된 뒤에는 확보 단계까지 내려간다.
+# 자리는 세 번 옮겨졌지만 지켜야 하는 성질은 한 번도 바뀌지 않았다.
+#
+# 그 성질은 '두 기업 중 하나만으로 답하지 않는다'이다. 자리를 고정하면 경로가 열릴 때마다
+# 이 파일이 깨지고, 그때 성질까지 함께 지워질 수 있다.
 # --------------------------------------------------------------------------
 
 
@@ -111,7 +122,7 @@ def test_multi_company_event_history_question_is_also_guarded() -> None:
         ("테스트전자와 테스트반도체 2025년 매출 비교해줘", ("테스트전자", "테스트반도체(주)")),
     ],
 )
-def test_multi_company_question_is_blocked_end_to_end(
+def test_multi_company_question_is_never_answered_with_one_company(
     question: str,
     expected_companies: tuple[str, ...],
     synthetic_manifest_path: Path,
@@ -120,8 +131,13 @@ def test_multi_company_question_is_blocked_end_to_end(
     """
     질문 문자열부터 실행 결과까지 한 번에 본다.
 
-    facts와 evidence가 비어 있어야 한다. 하나라도 남으면 '두 기업 중 하나를 골라
-    답했다'는 뜻이고, 그것이 이 가드가 막으려는 동작이다.
+    Fact가 한 기업만 담고 있으면 '두 기업 중 하나를 골라 답했다'는 뜻이고, 그것이 이
+    가드가 막으려는 동작이다. 답을 냈다면 두 기업이 모두 있어야 하고, 내지 못했다면
+    한쪽만 남기지 않고 아무 값도 남기지 않아야 한다.
+
+    합성 코퍼스에는 두 기업의 사업보고서가 갖춰져 있지 않아 지금은 뒤쪽이다. 그것을
+    고정하지는 않는다. fixture가 갖춰지는 날 이 검사가 앞쪽으로 넘어가야 하며, 어느
+    쪽이든 축소는 일어나지 않는다.
     """
     plan = build_query_plan(question, known_companies=expected_companies)
 
@@ -133,34 +149,35 @@ def test_multi_company_question_is_blocked_end_to_end(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result.execution_status is ExecutionStatus.BLOCKED
-    assert result.facts == []
-    assert result.evidence == []
+    answered_companies = {fact.company for fact in result.facts}
 
-    # 답변 가능성은 판정하지 않는다. 코퍼스를 보지 않았으므로 답이 있는지 알지 못한다.
-    assert result.answerability_status is None
-    assert result.answerability_reason is None
+    assert len(answered_companies) != 1
 
-    issue = result.execution_issue
-
-    assert issue is not None
-    assert issue.stage == STAGE_ROUTING
-    assert issue.reason == REASON_UNIMPLEMENTED_INTENT
+    if result.answerability_status is AnswerabilityStatus.ANSWERABLE:
+        assert answered_companies == set(expected_companies)
 
 
-def test_blocked_multi_company_result_names_the_missing_capability(
+def test_unanswered_multi_company_result_records_why(
     synthetic_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
-    """무엇을 구현하면 풀리는 질문인지가 결과에 남아야 후속 작업을 고를 수 있다."""
+    """
+    답하지 못했다면 왜 그런지가 결과에 남아야 후속 작업을 고를 수 있다.
+
+    멈춘 지점은 execution_issue에, 정상적으로 끝났지만 답할 수 없다고 판정한 근거는
+    answerability_detail에 남는다. 둘 다 비어 있는 채로 값만 없으면 무엇을 고쳐야 하는지
+    알 수 없다.
+    """
     result = answer_question(
         "2025년 테스트반도체랑 테스트전자 매출 비교해줘",
         corpus_root=nfd_corpus_root,
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result.execution_issue is not None
-    assert INTENT_CROSS_ENTITY_COMPARE in result.execution_issue.detail
+    if result.answerability_status is AnswerabilityStatus.ANSWERABLE:
+        pytest.skip("합성 코퍼스가 두 기업을 모두 답할 수 있게 되면 이 검사는 필요 없다.")
+
+    assert result.execution_issue is not None or result.answerability_detail is not None
 
 
 # --------------------------------------------------------------------------
@@ -371,7 +388,12 @@ def test_multi_company_past_out_of_range_year_fails_closed(
     과거 방향은 Answerability Gate가 판정하지 않는다(pattern_f_safety.md §3.2). 사업보고서
     요약재무정보 표가 전기 비교 열을 담고 있어 수집 시작 이전 값도 사실상 조회 가능하므로,
     '기간 밖'으로 확정 거부하면 오답이 될 수 있다. 그래서 여기서 막는 것은 기간 규칙이
-    아니라 '기업이 둘'이라는 사실이고, 결과는 routing에서 BLOCKED다.
+    아니라 '기업이 둘'이라는 사실이다.
+
+    어디에서 멈추는지는 고정하지 않는다. Pattern D handler가 등록되기 전에는 routing에서
+    BLOCKED였고, 등록된 뒤에는 확보 단계까지 내려가 해당 연도의 공시가 없어 값을 만들지
+    못한다. 고정하는 것은 어느 쪽으로도 답하지 않는다는 것이며, 특히 한 기업의 값만 남지
+    않아야 한다.
 
     이 케이스가 F1 구현 뒤에도 그대로여야 한다는 것이 요지다. 하한을 두는 규칙이 들어오면
     여기가 가장 먼저 깨진다.
@@ -384,16 +406,11 @@ def test_multi_company_past_out_of_range_year_fails_closed(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.answerability_status is not AnswerabilityStatus.ANSWERABLE
     assert result.facts == []
     assert result.evidence == []
-    assert result.answerability_status is None
-
-    issue = result.execution_issue
-
-    assert issue is not None
-    assert issue.stage == STAGE_ROUTING
-    assert issue.reason == REASON_UNIMPLEMENTED_INTENT
+    assert result.calculations == []
+    assert result.comparisons == []
 
 
 def test_multi_company_future_out_of_range_year_is_refused_by_the_gate(

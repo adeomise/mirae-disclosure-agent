@@ -35,7 +35,11 @@ from disclosure_agent.agent.query_analyzer import (
     build_query_plan,
 )
 from disclosure_agent.agent.router import REASON_UNIMPLEMENTED_INTENT, answer_question
-from disclosure_agent.common.enums import ExecutionStatus
+from disclosure_agent.common.enums import (
+    AnswerabilityReason,
+    AnswerabilityStatus,
+    ExecutionStatus,
+)
 
 # 실측 코퍼스에 실제로 있는 기업명. 대표 질문 Q10이 이 둘을 묻는다.
 REAL_COMPANIES = ("HD현대중공업", "삼성중공업", "삼성전자", "SK하이닉스", "한미반도체")
@@ -348,26 +352,31 @@ def test_single_company_out_of_scope_period_is_unchanged() -> None:
 # 코퍼스 보유 기간은 정기공시 2023~2025 + 2026년 1분기다(코퍼스 data_filter.md [3] 시계열).
 # 2022는 그 이전이고 2027은 이후다. 두 연도 모두 기존 fixture가 이미 쓰고 있다
 # (GUARD-OUT-OF-RANGE-PAST, pattern_f_safety_cases.json F1-02/F1-03).
-OUT_OF_RANGE_YEARS = (2022, 2027)
+#
+# 두 방향을 한 목록으로 묶지 않는다. Answerability Gate가 미래 방향만 판정하므로
+# (pattern_f_safety.md §3.2) 결과가 갈리고, 같은 파라미터로 묶으면 그 차이가 사라진다.
+PAST_OUT_OF_RANGE_YEAR = 2022
+FUTURE_OUT_OF_RANGE_YEAR = 2027
+
+OUT_OF_RANGE_YEARS = (PAST_OUT_OF_RANGE_YEAR, FUTURE_OUT_OF_RANGE_YEAR)
 
 
-@pytest.mark.parametrize("year", OUT_OF_RANGE_YEARS)
-def test_multi_company_out_of_range_year_fails_closed(
-    year: int,
+def test_multi_company_past_out_of_range_year_fails_closed(
     synthetic_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
     """
-    코퍼스 보유 기간 밖 연도를 묻는 다중 기업 질문도 값을 만들어 내지 않는다.
+    수집 시작 이전 연도를 묻는 다중 기업 질문은 값을 만들어 내지 않는다.
 
-    연도 범위는 질문 해석 단계에서 보지 않는다. 코퍼스를 실제로 봐야 알 수 있는 판정이기
-    때문이다. 그래서 여기서 막는 것은 기간 규칙이 아니라 '기업이 둘'이라는 사실이고, 결과는
-    routing에서 BLOCKED다. 어느 쪽이든 Fact가 만들어지지 않는다는 점이 이 검사의 요지다.
+    과거 방향은 Answerability Gate가 판정하지 않는다(pattern_f_safety.md §3.2). 사업보고서
+    요약재무정보 표가 전기 비교 열을 담고 있어 수집 시작 이전 값도 사실상 조회 가능하므로,
+    '기간 밖'으로 확정 거부하면 오답이 될 수 있다. 그래서 여기서 막는 것은 기간 규칙이
+    아니라 '기업이 둘'이라는 사실이고, 결과는 routing에서 BLOCKED다.
 
-    단일 기업 같은 질문은 COMPLETED/UNANSWERABLE로 답한다(F1-02·F1-03). 다중 기업은
-    그 판정에 이르기 전에 막히므로 답변 가능성을 비운다.
+    이 케이스가 F1 구현 뒤에도 그대로여야 한다는 것이 요지다. 하한을 두는 규칙이 들어오면
+    여기가 가장 먼저 깨진다.
     """
-    question = f"{year}년 테스트반도체랑 테스트전자 매출 비교해줘"
+    question = f"{PAST_OUT_OF_RANGE_YEAR}년 테스트반도체랑 테스트전자 매출 비교해줘"
 
     result = answer_question(
         question,
@@ -385,6 +394,35 @@ def test_multi_company_out_of_range_year_fails_closed(
     assert issue is not None
     assert issue.stage == STAGE_ROUTING
     assert issue.reason == REASON_UNIMPLEMENTED_INTENT
+
+
+def test_multi_company_future_out_of_range_year_is_refused_by_the_gate(
+    synthetic_manifest_path: Path,
+    nfd_corpus_root: Path,
+) -> None:
+    """
+    수집 상한 이후 연도를 묻는 다중 기업 질문은 Gate가 먼저 판정한다.
+
+    과거 방향과 결과가 다르다. 미래 방향은 문서가 존재할 수 없어 확정 거부가 성립하므로,
+    Gate가 routing보다 앞에서 COMPLETED/UNANSWERABLE로 끝낸다(F1). 막힌 것이 아니라 답하지
+    않기로 한 것이므로 execution_issue는 비고 answerability_detail이 채워진다.
+
+    '값을 만들어 내지 않는다'는 요지는 두 방향에서 같고, 그 이유를 담는 자리만 다르다.
+    """
+    question = f"{FUTURE_OUT_OF_RANGE_YEAR}년 테스트반도체랑 테스트전자 매출 비교해줘"
+
+    result = answer_question(
+        question,
+        corpus_root=nfd_corpus_root,
+        manifest_path=synthetic_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.OUT_OF_DATA_RANGE
+    assert result.facts == []
+    assert result.evidence == []
+    assert result.execution_issue is None
 
 
 @pytest.mark.parametrize("year", OUT_OF_RANGE_YEARS)

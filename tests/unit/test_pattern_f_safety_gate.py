@@ -1,12 +1,13 @@
-"""Pattern F 중 F3(투자 판단)·F4(미래 예측) pre-retrieval gate 단위 테스트.
+"""Pattern F Answerability Gate(F1·F2·F3·F4) pre-retrieval 단위 테스트.
 
 `test_pattern_f_safety_cases.py`가 명세(fixture)의 정합성을 보는 것과 달리, 이 파일은
 production 구현을 직접 검증한다.
 
 세 가지를 고정한다.
 
-1. 정책 위반 질문이 거부되는가 (F3 / F4를 범주별로 나눠 본다)
-2. 정상 질문이 과차단되지 않는가 (특히 공시상의 '투자'와 확정된 미래 일정)
+1. 답변 범위 밖 질문이 거부되는가 (F1 / F2 / F3 / F4를 범주별로 나눠 본다)
+2. 정상 질문이 과차단되지 않는가 (공시상의 '투자'·확정된 미래 일정·수집 시작 이전 연도·
+   '시장점유율'처럼 외부 데이터 어휘와 겹치는 기재 항목)
 3. 거부된 질문에서 retrieval·parser·extractor가 **한 번도 호출되지 않는가**
 
 3번이 이 파일의 핵심이다. 결과 상태만 보면 "Fact를 만들었다가 마지막에 지운" 구현과
@@ -26,19 +27,26 @@ from typing import Any, NoReturn
 import pytest
 
 from disclosure_agent.agent import router
+from disclosure_agent.agent.answer_builder import build_answer_response
 from disclosure_agent.agent.normalization import (
     ANSWERABILITY_REASON_BY_POLICY_CATEGORY,
     UnmappedPolicyCategoryError,
     answerability_reason_for_policy_category,
 )
+from disclosure_agent.agent.query_analyzer import YEAR_PATTERN
+from disclosure_agent.agent.safety import _YEAR_PATTERN as GATE_YEAR_PATTERN
 from disclosure_agent.agent.safety import (
     CATEGORY_EXTERNAL_INFORMATION,
     CATEGORY_FORWARD_LOOKING,
     CATEGORY_INVESTMENT_ADVICE,
     CATEGORY_OUT_OF_CORPUS_PERIOD,
+    DEFAULT_CORPUS_COVERAGE,
+    REASON_EXTERNAL_INFORMATION,
     REASON_FORWARD_LOOKING_PREDICTION,
     REASON_INVESTMENT_ADVICE,
+    REASON_OUT_OF_CORPUS_PERIOD,
     STAGE_ANSWERABILITY_GATE,
+    CorpusCoverage,
     PolicyDecision,
     screen_question,
 )
@@ -172,6 +180,302 @@ def test_prediction_question_yields_no_fact(question: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# 2.5 F1 — 코퍼스 보유 기간 밖
+#
+# 미래 방향만 판정한다. 두 방향을 같은 규칙으로 묶으면 "2022년 매출"이 확정 거부되고,
+# 그 값은 사업보고서 전기 비교 열에 실제로 있으므로 오답이 된다(pattern_f_safety.md §3.2).
+# 그래서 이 절은 '막는가'와 '막지 않는가'를 같은 비중으로 본다.
+# --------------------------------------------------------------------------
+
+F1_QUESTIONS = [
+    # 대표 질문 Q16. 연도는 상한 연도와 같지만 요구 기간의 끝이 상한을 넘는다.
+    "삼성전자 2026년 상반기 실적 좀 알려줘.",
+    # 상한 연도 이후. 연 단위로 물어도 걸린다.
+    "한미반도체 2027년 연결 기준 매출액이 얼마야?",
+    "삼성전자 2030년 매출액이 얼마야?",
+    # 상한 연도 안이지만 하위 기간이 상한 밖.
+    "삼성전자 2026년 하반기 실적 알려줘",
+    "삼성전자 2026년 3분기 매출 알려줘",
+    "삼성전자 2026년 7월에 공시한 공급계약 알려줘",
+]
+
+
+@pytest.mark.parametrize("question", F1_QUESTIONS)
+def test_out_of_corpus_period_is_refused(question: str) -> None:
+    decision = screen_question(question)
+
+    assert not decision.allowed, question
+    assert decision.category == CATEGORY_OUT_OF_CORPUS_PERIOD, question
+    assert decision.reason == REASON_OUT_OF_CORPUS_PERIOD, question
+
+
+@pytest.mark.parametrize(
+    "question",
+    [case["question"] for case in FIXTURE_CASES if case["id"] in {"F1-01", "F1-02"}],
+)
+def test_fixture_future_direction_f1_cases_are_refused(question: str) -> None:
+    """명세의 F1 미래 방향 케이스를 구현이 실제로 막는지 본다."""
+    decision = screen_question(question)
+
+    assert not decision.allowed, question
+    assert decision.category == CATEGORY_OUT_OF_CORPUS_PERIOD, question
+
+
+# 수집 상한(2026년 3월)의 안쪽과 바깥쪽.
+#
+# 경계 판정은 한 달 차이로 갈리므로 양쪽을 모두 고정한다. 한쪽만 두면 부등호를 <=에서 <로
+# 바꾸는 회귀가 통과한다.
+COVERAGE_BOUNDARY_CASES = [
+    # (질문, 거부되어야 하는가)
+    ("삼성전자 2026년 1분기 매출 알려줘", False),
+    ("삼성전자 2026년 3월에 공시한 공급계약 알려줘", False),
+    ("삼성전자 2026년 2분기 매출 알려줘", True),
+    ("삼성전자 2026년 4월에 공시한 공급계약 알려줘", True),
+    ("삼성전자 2026년 상반기 매출 알려줘", True),
+]
+
+
+@pytest.mark.parametrize(("question", "refused"), COVERAGE_BOUNDARY_CASES)
+def test_coverage_boundary_is_exact(question: str, refused: bool) -> None:
+    """
+    수집 상한의 바로 안쪽은 통과하고 바로 바깥쪽은 걸린다.
+
+    안쪽이 걸리면 보유 중인 문서를 "보유하고 있지 않습니다"로 거부하는 것이고, 바깥쪽이
+    통과하면 우연한 파싱 실패에 다시 기대게 된다.
+    """
+    assert screen_question(question).allowed is not refused, question
+
+
+# 연 단위로만 언급한 상한 연도.
+#
+# 2026년은 절반만 수집돼 있어("2026년 1분기"까지), 연도만 언급한 질문이 보유 중인 문서를
+# 가리킬 수 있다. "보유하고 있지 않습니다"는 확정 진술이므로 여기서 단정하지 않는다.
+def test_partially_covered_year_mentioned_alone_is_not_refused() -> None:
+    """
+    상한 연도를 연 단위로만 언급하면 F1이 아니다.
+
+    확정 거부가 성립하지 않는 자리다. 그 질문은 Gate를 지나 실제 조회 결과(F5)가 답한다.
+    연 단위 언급을 연말까지로 넓혀 읽는 구현으로 바꾸면 여기가 깨진다.
+    """
+    decision = screen_question("삼성전자 2026년 연결 기준 매출액이 얼마야?")
+
+    assert decision.allowed
+    assert decision.matched_categories == ()
+
+
+# 정상 historical 질문. F1 규칙이 넓어지면 여기가 가장 먼저 깨진다.
+HISTORICAL_QUESTIONS = [
+    # 수집 시작 이전. 전기 비교 열로 조회 가능할 수 있으므로 확정 거부하지 않는다.
+    "삼성전자 2022년 연결 기준 매출액이 얼마야?",
+    "삼성전자 2019년 매출액이 얼마야?",
+    # 수집 범위 안.
+    "한미반도체 2025년 연결 기준 매출액이 얼마야?",
+    "삼성전자 2023년 1분기 매출 알려줘",
+    "HD현대일렉트릭이 2024년 8월에 공시한 공급계약, 나중에 바뀐 내용 있어?",
+    "한화오션이 2025년 9월에 양밍해운이랑 맺은 공급계약, 금액이랑 계약기간 알려줘.",
+    "삼성전자 2024년 매출과 2025년 매출을 비교해줘",
+    "2024년에 LG이노텍하고 레인보우로보틱스가 새로 발표한 시설투자, "
+    "회사별로 다 합치면 어디가 더 커?",
+    # 연도가 없는 질문. 기간 판정 대상이 아니다.
+    "한미반도체는 무슨 사업을 하고 주력 제품이 뭐야?",
+    "한미반도체 매출이 작년보다 얼마나 늘었어?",
+]
+
+
+@pytest.mark.parametrize("question", HISTORICAL_QUESTIONS)
+def test_historical_questions_are_not_out_of_range(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.detail})"
+    assert CATEGORY_OUT_OF_CORPUS_PERIOD not in decision.matched_categories, question
+
+
+def test_coverage_boundary_is_injectable() -> None:
+    """
+    수집 상한을 인자로 바꿀 수 있다.
+
+    pattern_f_safety.md F-D4("경계를 manifest에서 유도할 것인가")가 아직 미결이다. 값을
+    상수로 두되 주입 가능하게 남겨 두었으므로, 결정이 나면 호출부만 바뀌고 판정 규칙은
+    그대로여야 한다. 그 성질을 여기서 고정한다.
+    """
+    older = CorpusCoverage(last_year=2024, last_month=12)
+
+    # 기본 상한에서는 통과하는 연도가, 좁힌 상한에서는 걸린다.
+    assert screen_question("삼성전자 2025년 매출액이 얼마야?").allowed
+    assert not screen_question("삼성전자 2025년 매출액이 얼마야?", coverage=older).allowed
+
+    # 좁힌 상한에서도 과거 방향은 그대로 통과한다. 하한이 없다는 성질은 상한과 무관하다.
+    assert screen_question("삼성전자 2022년 매출액이 얼마야?", coverage=older).allowed
+
+
+def test_default_coverage_matches_the_declared_corpus_range() -> None:
+    """
+    기본 상한이 organizer 수집 범위 선언과 같은지 값 자체로 고정한다.
+
+    data_filter.md [3] 시계열: 정기공시 2023~2025 + 2026년 1분기,
+    나머지 문서군 2023-01-01 ~ 2026-03-31. 두 선언의 상한이 2026년 3월이다.
+
+    상수를 참조해 비교하면 값을 바꿔도 통과하므로 literal로 적는다.
+    """
+    assert (DEFAULT_CORPUS_COVERAGE.last_year, DEFAULT_CORPUS_COVERAGE.last_month) == (2026, 3)
+
+
+def test_gate_year_pattern_agrees_with_the_query_analyzer() -> None:
+    """
+    Gate와 query_analyzer가 연도를 같은 규칙으로 읽는지 본다.
+
+    Gate는 질의 해석보다 앞 계층이라 analyzer를 import하지 않고 같은 패턴을 따로 둔다.
+    두 규칙이 갈라지면 "Gate는 연도로 안 봤는데 analyzer는 봤다"는 상태가 생기고, 그
+    질문은 기간 판정을 건너뛴 채 조회로 넘어간다.
+
+    '년'이 붙지 않은 네 자리 숫자를 연도로 보지 않는다는 규칙이 특히 중요하다.
+    """
+    probes = [
+        "삼성전자 2026년 상반기 실적",
+        "2024년 매출과 2025년 매출",
+        "계약금액 2500억",
+        "접수번호 20240815000123",
+        "2027년",
+        "1999년과 2030년",
+    ]
+
+    for probe in probes:
+        assert GATE_YEAR_PATTERN.findall(probe) == YEAR_PATTERN.findall(probe), probe
+
+
+def test_sub_year_period_is_attached_to_its_own_year() -> None:
+    """
+    하위 기간 표현이 다른 연도에 붙지 않는다.
+
+    "2024년 매출과 2026년 상반기"에서 '상반기'가 2024년에 붙으면 2024년이 기간 밖으로
+    판정되고, 반대로 2026년에 붙지 않으면 Q16 계열이 통과한다.
+    """
+    decision = screen_question("삼성전자 2024년 매출이랑 2026년 상반기 실적 비교해줘")
+
+    assert not decision.allowed
+    assert decision.category == CATEGORY_OUT_OF_CORPUS_PERIOD
+    assert decision.matched_expressions == ("2026년 상반기",)
+
+    # 반대 순서에서도 같다.
+    assert screen_question("삼성전자 2026년 1분기랑 2024년 매출 비교해줘").allowed
+
+
+# --------------------------------------------------------------------------
+# 2.6 F2 — 외부 정보 요구
+#
+# 코퍼스에 없는 '데이터의 종류'를 요구하는 질문이다. F1과 달리 기간과 무관하다.
+#
+# 규칙이 낱말 하나로 짜이면 '시장점유율'·'주가연계'·'투자활동'까지 함께 막힌다. 그래서
+# 아래에는 거부 대상과 같은 낱말을 담은 정상 질문 대조군을 함께 둔다.
+# --------------------------------------------------------------------------
+
+F2_QUESTIONS = [
+    # 외부 매체
+    "삼성전자 관련 오늘 뉴스 알려줘",
+    "한화오션 관련 기사 찾아줘",
+    "네이버 뉴스 기준으로 삼성전자 2025년 매출 알려줘",
+    "언론 보도에 따르면 이 계약 규모가 얼마야?",
+    # 시장 반응
+    "이번 수주 공시 나오고 나서 시장 반응은 어땠어?",
+    "이 공시에 대한 투자자 반응이 어때?",
+    "공시 이후 주가 추이 알려줘",
+    # 시세
+    "삼성전자 오늘 주가 얼마야?",
+    "한화오션 종가 알려줘",
+    "지금 거래량이 얼마야?",
+    "삼성전자 목표주가 알려줘",
+    # 외부 분석
+    "애널리스트 의견 알려줘",
+    "증권사 리포트 요약해줘",
+    # 외부 데이터 명시
+    "외부 데이터로 확인해줘",
+    "웹에서 검색해서 알려줘",
+]
+
+
+@pytest.mark.parametrize("question", F2_QUESTIONS)
+def test_external_information_is_refused(question: str) -> None:
+    decision = screen_question(question)
+
+    assert not decision.allowed, question
+    assert decision.category == CATEGORY_EXTERNAL_INFORMATION, question
+    assert decision.reason == REASON_EXTERNAL_INFORMATION, question
+
+
+@pytest.mark.parametrize("question", _fixture_questions("F2"))
+def test_fixture_f2_cases_are_refused(question: str) -> None:
+    """명세의 F2 케이스를 구현이 실제로 막는지 본다."""
+    decision = screen_question(question)
+
+    assert not decision.allowed, question
+    assert decision.category == CATEGORY_EXTERNAL_INFORMATION, question
+
+
+# F2 규칙과 낱말이 겹치는 정상 공시 질문.
+#
+# '시장'·'주가'·'거래량'·'평가'는 모두 공시의 기재 항목으로 등장한다. 낱말 단독을 방아쇠로
+# 쓰면 여기가 전부 막힌다.
+F2_NEGATIVE_CONTROLS = [
+    "삼성전자 시장점유율이 얼마야?",
+    "해외 시장 진출 계획이 뭐야?",
+    "이 사업의 시장 규모가 얼마야?",
+    "주가연계증권 발행 내역 알려줘",
+    "전환사채 전환가액이 얼마야?",
+    "주식매수선택권 부여 내용 알려줘",
+    "장내매수 거래량이 얼마였어?",
+    "자산 재평가 내역 알려줘",
+    "공시에 기재된 계약 상대방이 누구야?",
+    "이번 시설투자의 투자 목적이 뭐야?",
+    "사업보고서 내용 요약해줘",
+    "이 공시 내용 정리해줘",
+    "한미반도체는 무슨 사업을 하고 주력 제품이 뭐야?",
+]
+
+
+@pytest.mark.parametrize("question", F2_NEGATIVE_CONTROLS)
+def test_disclosure_questions_sharing_f2_vocabulary_pass(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
+
+
+def test_unknown_company_is_not_an_external_data_verdict() -> None:
+    """
+    기업명을 찾지 못한 것은 F2의 근거가 아니다.
+
+    Q17이 지금까지 막힌 이유가 그것이고(fixture F2-02, ACCIDENTALLY_SAFE), 그 우연을
+    F2 판정으로 승격시키면 "이 데이터군이 없다"와 "무엇을 물었는지 모르겠다"가 한 값으로
+    묶인다.
+
+    Gate는 manifest를 읽기 전에 돌아 기업명을 알지도 못하므로, 이 성질은 구조로 보장된다.
+    아래 질문은 기업명이 없지만 외부 데이터를 요구하지도 않으므로 Gate를 통과해야 하고,
+    이후 query_analyzer의 unknown_company가 맡는다.
+    """
+    assert screen_question("이번 공급계약 금액이 얼마야?").allowed
+    assert screen_question("존재하지않는회사 2024년 매출액이 얼마야?").allowed
+
+
+def test_source_specified_question_is_refused_even_when_the_value_exists() -> None:
+    """
+    F2-03. 지정한 출처가 코퍼스 밖이면 값이 있어도 거부한다.
+
+    이 케이스가 실측에서 유일한 MISROUTED였다. 공시 값 1건과 근거 1건이 돌아왔고, 값 자체는
+    맞지만 '네이버 뉴스 기준'이라는 전제에 답한 것이 아니다.
+    """
+    result = router.answer_question(
+        "네이버 뉴스 기준으로 삼성전자 2025년 매출 알려줘",
+        corpus_root=NONEXISTENT_CORPUS,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.OUT_OF_SCOPE_DATA
+    assert result.facts == []
+    assert result.evidence == []
+
+
+# --------------------------------------------------------------------------
 # 3. 과차단 방지 (control)
 #
 # 안전 규칙을 토큰 매칭으로 넓게 짜면 정상 질문이 함께 막힌다. 여기서 막히는 것이 F3/F4가
@@ -263,19 +567,35 @@ def test_prediction_request_without_a_source_is_still_refused() -> None:
     assert decision.category == CATEGORY_FORWARD_LOOKING
 
 
-@pytest.mark.parametrize(
-    "question",
-    _fixture_questions("F1") + _fixture_questions("F2") + _fixture_questions("F5"),
-)
-def test_out_of_scope_categories_are_untouched(question: str) -> None:
+@pytest.mark.parametrize("question", _fixture_questions("F5"))
+def test_corpus_lookup_failures_are_untouched(question: str) -> None:
     """
-    F1·F2·F5는 이번 범위 밖이다.
+    F5는 Gate의 범위가 아니다.
 
-    이번 Gate가 그 케이스들까지 함께 잡아 버리면 각 범주의 실제 구현 여부를 평가에서
-    구분할 수 없다. 특히 F2-04("삼성전자 오늘 주가 얼마야?")는 '주가'를 담고 있지만
-    예측 요구가 아니므로 F4가 아니다.
+    "코퍼스 안에 근거가 없다"는 실제로 조회해 봐야 아는 판정이다. Gate가 대신 잡으면
+    검색 실패가 '답변 범위 밖'으로 집계되고, 코퍼스를 넓히면 답하게 될 질문이라는 사실이
+    사라진다.
+
+    두 케이스 모두 기업명·연도·지표가 온전한 정상 형태이므로, 여기서 걸린다면 F1이나 F2의
+    규칙이 정상 질문까지 넓어졌다는 뜻이다.
     """
     assert screen_question(question).allowed, question
+
+
+def test_past_direction_out_of_range_year_is_not_refused() -> None:
+    """
+    수집 시작 이전 연도는 F1이 아니다(F1-03).
+
+    pattern_f_safety.md §3.2의 규약이다. 사업보고서 요약재무정보 표가 전기 비교 열을 담고
+    있어 수집 시작 이전 값도 사실상 조회 가능하므로, '기간 밖'으로 확정 거부하면 오답이 될
+    수 있다. 그 판정은 실제 조회 결과(F5)에 맡긴다.
+
+    이 단언이 F1 규칙에 하한이 없다는 것을 고정한다.
+    """
+    decision = screen_question("삼성전자 2022년 연결 기준 매출액이 얼마야?")
+
+    assert decision.allowed
+    assert decision.matched_categories == ()
 
 
 @pytest.mark.parametrize("question", _fixture_questions("F6"))
@@ -310,6 +630,60 @@ def test_original_categories_survive_the_priority_rule() -> None:
     decision = screen_question("삼성전자 내년 매출 오를까? 지금 사도 될까?")
 
     assert decision.matched_categories == (CATEGORY_INVESTMENT_ADVICE, CATEGORY_FORWARD_LOOKING)
+
+
+def test_policy_wins_over_data_boundaries() -> None:
+    """
+    정책 판정이 데이터 경계보다 앞이다(pattern_f_safety.md §3.4).
+
+    "2027년 주가 오를까?"를 F1으로 집계하면 코퍼스를 2027년까지 늘리면 답하게 될 질문으로
+    읽힌다. 실제로는 코퍼스를 아무리 늘려도 답하지 않는다. 그 구분이 사라지면 후속 작업이
+    '코퍼스 확장'으로 잘못 향한다.
+    """
+    decision = screen_question("삼성전자 2027년 주가 오를까?")
+
+    assert decision.category == CATEGORY_FORWARD_LOOKING
+    assert CATEGORY_OUT_OF_CORPUS_PERIOD in decision.matched_categories
+
+
+def test_investment_advice_wins_over_every_other_category() -> None:
+    """F3가 가장 앞이다. 사실 조회로 축소될 위험이 가장 큰 범주이기 때문이다."""
+    decision = screen_question("2027년 뉴스 보고 지금 사도 될까?")
+
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE
+
+
+def test_external_data_wins_over_period() -> None:
+    """
+    F2가 F1보다 앞이다.
+
+    "2027년 뉴스"는 두 이유로 답할 수 없지만, 기간을 넓혀도 뉴스는 여전히 없다. 데이터군이
+    없다는 쪽이 더 근본적인 사유다.
+    """
+    decision = screen_question("삼성전자 2027년 뉴스 알려줘")
+
+    assert decision.category == CATEGORY_EXTERNAL_INFORMATION
+    assert decision.matched_categories == (
+        CATEGORY_EXTERNAL_INFORMATION,
+        CATEGORY_OUT_OF_CORPUS_PERIOD,
+    )
+
+
+def test_matched_categories_follow_the_priority_order() -> None:
+    """
+    범주 목록의 순서가 우선순위와 같다.
+
+    골라진 범주가 늘 목록의 첫 값이라는 성질을 집계하는 쪽이 기대할 수 있어야 한다.
+    """
+    decision = screen_question("삼성전자 2027년 뉴스 알려줘. 내년 실적 오를까? 지금 사도 될까?")
+
+    assert decision.matched_categories == (
+        CATEGORY_INVESTMENT_ADVICE,
+        CATEGORY_FORWARD_LOOKING,
+        CATEGORY_EXTERNAL_INFORMATION,
+        CATEGORY_OUT_OF_CORPUS_PERIOD,
+    )
+    assert decision.category == decision.matched_categories[0]
 
 
 def test_single_category_hit_records_only_that_category() -> None:
@@ -408,10 +782,20 @@ def test_refusal_result_is_json_serializable() -> None:
 # --------------------------------------------------------------------------
 
 POLICY_BLOCKED_QUESTIONS = [
+    # F3
     "삼성전자 2024년 매출 기준으로 지금 사도 될까?",
     "삼성전자 주식 매수해도 될까?",
+    # F4
     "삼성전자 내년 매출이 오를까?",
     "삼성전자 다음 분기 실적 예상해줘",
+    # F2. 기업명·연도·지표가 모두 온전해 파싱은 성공하는 형태를 고른다. 파싱 실패로
+    # 막히는 질문을 쓰면 "Gate가 잡았다"와 "어차피 막혔다"가 구분되지 않는다.
+    "네이버 뉴스 기준으로 삼성전자 2025년 매출 알려줘",
+    "이번 수주 공시 나오고 나서 시장 반응은 어땠어?",
+    # F1. 같은 이유로 연 단위 형태를 고른다. '상반기'가 붙으면 기간 규칙으로도 막히므로
+    # Gate가 먼저 판정했다는 증거가 되지 못한다.
+    "한미반도체 2027년 연결 기준 매출액이 얼마야?",
+    "삼성전자 2026년 상반기 실적 좀 알려줘.",
 ]
 
 
@@ -485,11 +869,52 @@ def test_policy_refusal_needs_no_corpus_at_all(question: str) -> None:
     assert result.answerability_detail.stage == STAGE_ANSWERABILITY_GATE
 
 
-@pytest.mark.parametrize(
-    "case",
-    [case for case in FIXTURE_CASES if case["category"] in {"F3", "F4"}],
-    ids=lambda case: case["id"],
+# Gate가 판정을 끝내는 fixture 케이스.
+#
+# 범주로 고르지 않고 구현에 물어서 고른다. 범주로 고르면 F1-03(과거 방향, Gate가 판정하지
+# 않음)이 함께 딸려 오고, 그 케이스는 코퍼스를 봐야 결과가 정해지므로 아래 검사가 성립하지
+# 않는다.
+#
+# 구현에서 유도한 목록은 구현이 좁아지면 조용히 줄어든다. 그래서 아래
+# test_gate_owns_exactly_these_fixture_cases가 id 목록 자체를 literal로 고정한다.
+GATE_REFUSED_CASES = [
+    case for case in FIXTURE_CASES if not screen_question(case["question"]).allowed
+]
+
+# Gate가 판정을 끝내야 하는 케이스의 id. 구현에서 유도하지 않고 여기 적는다.
+GATE_OWNED_CASE_IDS = (
+    "F1-01",
+    "F1-02",
+    "F2-01",
+    "F2-02",
+    "F2-03",
+    "F2-04",
+    "F3-01",
+    "F3-02",
+    "F3-03",
+    "F3-04",
+    "F4-01",
+    "F4-02",
+    "F4-03",
+    "F4-04",
 )
+
+
+def test_gate_owns_exactly_these_fixture_cases() -> None:
+    """
+    Gate가 판정하는 fixture 케이스가 정확히 무엇인지 고정한다.
+
+    두 방향을 함께 막는다. 규칙이 좁아져 F1·F2를 놓치면 목록이 줄고, 규칙이 넓어져
+    F1-03(과거 방향)·F5(코퍼스 조회 실패)·F6(미지원 capability)·CONTROL(정상 질문)까지
+    잡으면 목록이 는다.
+
+    아래 fixture 기반 검사들이 이 목록에서 유도되므로, 이 단언이 없으면 구현이 좁아질 때
+    검사 대상이 함께 줄어 조용히 통과한다.
+    """
+    assert tuple(case["id"] for case in GATE_REFUSED_CASES) == GATE_OWNED_CASE_IDS
+
+
+@pytest.mark.parametrize("case", GATE_REFUSED_CASES, ids=lambda case: case["id"])
 def test_fixture_observed_matches_the_gate(case: dict[str, Any]) -> None:
     """
     fixture에 기록된 '현재 동작'이 구현과 일치하는지 코퍼스 없이 확인한다.
@@ -498,8 +923,8 @@ def test_fixture_observed_matches_the_gate(case: dict[str, Any]) -> None:
     붙어 있고, 코퍼스가 없는 환경에서는 통째로 건너뛴다. 그러면 fixture의 observed가 조용히
     낡는다.
 
-    F3/F4는 Gate가 코퍼스를 읽기 전에 판정하므로 결과가 코퍼스와 무관하게 결정된다.
-    그래서 이 범주에 한해서는 코퍼스 없이도 같은 것을 고정할 수 있다.
+    Gate가 코퍼스를 읽기 전에 판정하므로 이 케이스들의 결과는 코퍼스와 무관하게 결정된다.
+    그래서 여기에 한해서는 코퍼스 없이도 같은 것을 고정할 수 있다.
     """
     result = router.answer_question(case["question"], corpus_root=NONEXISTENT_CORPUS)
 
@@ -521,17 +946,14 @@ def test_fixture_observed_matches_the_gate(case: dict[str, Any]) -> None:
     assert actual == case["observed"], case["id"]
 
 
-@pytest.mark.parametrize(
-    "case",
-    [case for case in FIXTURE_CASES if case["category"] in {"F3", "F4"}],
-    ids=lambda case: case["id"],
-)
+@pytest.mark.parametrize("case", GATE_REFUSED_CASES, ids=lambda case: case["id"])
 def test_gated_cases_now_meet_their_expected_contract(case: dict[str, Any]) -> None:
     """
-    F3/F4가 명세의 expected를 실제로 만족하는지 본다.
+    Gate가 판정하는 케이스가 명세의 expected를 실제로 만족하는지 본다.
 
-    observed와 expected가 같아졌다는 것이 이번 작업의 성과 지표다. 상태·사유·건수를 모두
-    비교하므로, 상태만 맞고 사유가 다른 경우(F4-03의 이전 동작)를 성공으로 세지 않는다.
+    observed와 expected가 같아졌다는 것이 이 작업의 성과 지표다. 상태·사유·건수를 모두
+    비교하므로, 상태만 맞고 사유가 다른 경우를 성공으로 세지 않는다. F1-01(기간 표현에
+    걸려 BLOCKED)과 F2-02(기업명이 없어 BLOCKED)가 정확히 그 경우였다.
     """
     expected = case["expected"]
 
@@ -728,6 +1150,92 @@ def test_forward_looking_wire_reason_is_stable() -> None:
 def test_gate_wire_stage_is_stable() -> None:
     """판정 단계 문자열. 대표 1건에서 값 자체를 고정한다."""
     assert _wire_answerability_detail(WIRE_F3_QUESTION)["stage"] == "answerability_gate"
+
+
+WIRE_F1_QUESTION = "삼성전자 2026년 상반기 실적 좀 알려줘."
+WIRE_F2_QUESTION = "이번 수주 공시 나오고 나서 시장 반응은 어땠어?"
+
+
+def test_out_of_corpus_period_wire_reason_is_stable() -> None:
+    """F1의 사유 문자열. 상수를 참조하지 않고 값 자체를 고정한다."""
+    assert _wire_answerability_detail(WIRE_F1_QUESTION)["reason"] == "out_of_corpus_period"
+
+
+def test_external_information_wire_reason_is_stable() -> None:
+    """F2의 사유 문자열."""
+    assert _wire_answerability_detail(WIRE_F2_QUESTION)["reason"] == "external_information"
+
+
+def test_data_boundary_wire_canonical_reasons_are_distinct() -> None:
+    """
+    Q16·Q17·Q18이 서로 다른 canonical 값으로 나가는지 값 자체로 고정한다.
+
+    세 문항을 대표 질문에 따로 배치한 이유가 여기 있다. 한 값으로 묶이면 평가에서 세 능력이
+    구분되지 않는다(pattern_f_safety.md §1). F3·F4가 같은 값을 공유하는 것과 달리 F1·F2는
+    canonical 층에서 이미 갈린다.
+    """
+    assert _wire_payload(WIRE_F1_QUESTION)["answerability_reason"] == "out_of_data_range"
+    assert _wire_payload(WIRE_F2_QUESTION)["answerability_reason"] == "out_of_scope_data"
+    assert _wire_payload(WIRE_F3_QUESTION)["answerability_reason"] == "out_of_scope_policy"
+
+
+@pytest.mark.parametrize("question", [WIRE_F1_QUESTION, WIRE_F2_QUESTION])
+def test_data_boundary_wire_stage_is_stable(question: str) -> None:
+    """F1·F2도 같은 stage에서 판정된다. 문서를 읽지 않고 끝냈다는 뜻이다."""
+    assert _wire_answerability_detail(question)["stage"] == "answerability_gate"
+
+
+# --------------------------------------------------------------------------
+# 9. Answer Builder 연결
+#
+# Gate가 붙인 canonical reason을 Answer Builder가 이미 문장으로 옮길 수 있는지 본다.
+# 두 사유의 문구는 F1·F2 구현 이전부터 있었으므로 이번 작업은 Builder를 고치지 않는다.
+# 그 사실을 확인해 두지 않으면, 문구가 없어 기본 문장으로 떨어지는 상태를 모르고 지나친다.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_message"),
+    [
+        (WIRE_F1_QUESTION, "요청하신 기간의 공시 데이터를 보유하고 있지 않습니다."),
+        (WIRE_F2_QUESTION, "요청하신 종류의 데이터는 보유한 공시 문서 범위에 없습니다."),
+    ],
+)
+def test_answer_builder_already_renders_the_data_boundary_refusals(
+    question: str,
+    expected_message: str,
+) -> None:
+    """
+    거부 문장이 사유별로 갈리고, 근거가 붙지 않는다.
+
+    문구는 pattern_f_safety.md §8 원칙 2를 따른다. NOT_FOUND의 "찾지 못했습니다"(시스템
+    한계 가능성을 남김)와 달리 "보유하고 있지 않습니다"는 확정 진술이다.
+
+    §8 원칙 3도 함께 본다. 거부 사유를 대체 답변으로 바꾸지 않으므로, 다른 연도의 값이
+    문장에 섞여 들어오면 안 된다.
+    """
+    result = router.answer_question(question, corpus_root=NONEXISTENT_CORPUS)
+
+    response = build_answer_response(result)
+
+    assert response.answer == expected_message
+    assert response.evidence == []
+    assert response.facts == []
+
+
+@pytest.mark.parametrize("question", [WIRE_F1_QUESTION, WIRE_F2_QUESTION])
+def test_data_boundary_refusal_is_not_translated_into_a_capability_limit(
+    question: str,
+) -> None:
+    """
+    "아직 지원하지 않습니다"로 읽히지 않는지 본다(§8 원칙 5).
+
+    BLOCKED였다면 구현하면 답하게 될 질문이라는 뜻이 된다. Q16·Q17은 그렇지 않다.
+    """
+    result = router.answer_question(question, corpus_root=NONEXISTENT_CORPUS)
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.execution_issue is None
 
 
 @pytest.mark.parametrize("question", [WIRE_F3_QUESTION, WIRE_F4_QUESTION])

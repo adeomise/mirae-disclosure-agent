@@ -112,6 +112,14 @@ REASON_AMBIGUOUS_CANDIDATES = "ambiguous_candidates"
 REASON_NO_ORIGINAL_FILING = "no_original_filing"
 REASON_AMBIGUOUS_ROOT = "ambiguous_root"
 
+# Pattern E가 계획 입구에서 만드는 사유.
+#
+# 계획이 지목한 공시 세부유형에 대응하는 이벤트 유형이 없다. 위의 두 사유와 달리 코퍼스를
+# 보기 전이므로 답변 가능성을 판정하지 않는다. 가까운 유형으로 대신 처리하면 정정 항목이
+# 다른 유형의 어휘로 조회되어 변경이 전부 이름 없이 남고, 그 결과는 "바뀐 것이 없다"와
+# 구분되지 않는다.
+REASON_UNSUPPORTED_EVENT_TYPE = "unsupported_event_type"
+
 # Pattern C가 계획 입구에서 만드는 사유.
 #
 # 넷으로 나눈 이유는 후속 작업이 서로 다르기 때문이다. 비교 대상이 하나가 아닌 것과, 기간이

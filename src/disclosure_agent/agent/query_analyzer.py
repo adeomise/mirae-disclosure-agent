@@ -156,12 +156,82 @@ DERIVED_METRIC_TOKENS: tuple[tuple[str, DerivedMetric], ...] = (
 
 MONTH_PATTERN = re.compile(r"(1[0-2]|0?[1-9])\s*월")
 
-# 거래소공시 세부유형. Q13 계열이 다루는 것만 둔다.
-# 값은 manifest의 doc_subtype 표기와 같아야 한다.
+# 거래소공시 세부유형. 값은 manifest의 doc_subtype 표기와 같아야 한다.
 EVENT_SUBTYPE_SUPPLY_CONTRACT = "단일판매공급계약체결"
+EVENT_SUBTYPE_FACILITY_INVESTMENT = "신규시설투자등"
 
-EVENT_SUBTYPE_TOKENS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("공급계약", "수주계약", "판매계약"), EVENT_SUBTYPE_SUPPLY_CONTRACT),
+
+@dataclass(frozen=True)
+class EventSubtypeRule:
+    """
+    거래소공시 세부유형 하나를 질문에서 알아보는 규칙.
+
+    두 가지 인식 경로를 둔다.
+
+    tokens
+        하나만 나와도 유형이 확정되는 표현이다. '공급계약', '시설투자'처럼 공시 유형명이
+        질문에 거의 그대로 쓰인 경우다.
+
+    target_tokens + action_tokens
+        사용자가 유형명 대신 무엇에 무엇을 했는지로 말한 경우다. Q15의 "사옥·제조시설 신축
+        투자"에는 '신규시설투자'도 '시설투자'도 연속 문자열로 들어 있지 않아 tokens만으로는
+        열리지 않는다.
+
+        둘을 함께 요구하는 것이 규약이다. '투자' 한 낱말을 tokens에 넣으면
+        투자판단관련주요경영사항, 투자자문, 투자활동 현금흐름 같은 다른 문서·다른 질문까지
+        이 유형으로 끌려온다. 대상(사옥·제조시설)과 행위(신축·증설)가 함께 있어야 신규시설투자
+        공시를 가리킨 것으로 본다.
+
+    requires_filing_anchor
+        원공시를 지목하려면 질문이 공시 시점(연도)을 밝혀야 하는가.
+
+        공급계약은 한 기업이 해마다 여러 건을 공시하므로 시점이 없으면 어느 계약인지 정할 수
+        없다. 그래서 True다. 이 값이 Q14("포드랑 맺었던 배터리 공급계약")를 계속 막는다.
+        상대방으로 계약을 특정하려면 본문 대조가 필요하고 그것은 이번 범위 밖이다.
+
+        신규시설투자는 원공시가 유일하지 않을 수 있지만, 유일하지 않을 때 handler가
+        ambiguous_root로 막는다(agent.handlers.event_history). 시점 없이도 후보를 좁혀 볼 수
+        있고 좁히지 못하면 답하지 않으므로 False로 둔다. 값을 고르는 자리가 생기지 않는다.
+    """
+
+    subtype: str
+    tokens: tuple[str, ...] = ()
+    target_tokens: tuple[str, ...] = ()
+    action_tokens: tuple[str, ...] = ()
+    requires_filing_anchor: bool = True
+
+    def matches(self, question: str) -> bool:
+        if any(token in question for token in self.tokens):
+            return True
+
+        if not self.target_tokens or not self.action_tokens:
+            return False
+
+        return any(token in question for token in self.target_tokens) and any(
+            token in question for token in self.action_tokens
+        )
+
+
+# 순서가 규약이다. 앞의 규칙이 먼저 맞으면 그것으로 확정한다. 공급계약을 앞에 두는 이유는
+# Q13 계열이 이미 그 경로로 동작하고 있기 때문이며, 한 질문이 두 유형에 모두 맞는 표현을
+# 쓰는 경우는 아직 확인된 적이 없다.
+EVENT_SUBTYPE_RULES: tuple[EventSubtypeRule, ...] = (
+    EventSubtypeRule(
+        subtype=EVENT_SUBTYPE_SUPPLY_CONTRACT,
+        tokens=("공급계약", "수주계약", "판매계약"),
+        requires_filing_anchor=True,
+    ),
+    EventSubtypeRule(
+        subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+        tokens=("신규시설투자", "시설투자"),
+        # 대상은 시설 자체를 가리키는 말만 둔다. '투자'가 붙은 다른 개념(투자판단·투자자문)과
+        # 겹치는 낱말은 넣지 않는다.
+        target_tokens=("제조시설", "생산시설", "사옥", "공장"),
+        # 행위는 시설을 새로 짓거나 늘리는 말이다. '투자'를 여기 두는 것은 대상 표현과 함께
+        # 있을 때만 읽히기 때문이다. 단독으로는 어떤 유형도 열지 못한다.
+        action_tokens=("신축", "증설", "건설", "투자"),
+        requires_filing_anchor=False,
+    ),
 )
 
 # 변경 이력을 묻는 표현. 이게 있어야 event_history로 본다.
@@ -265,8 +335,11 @@ class QueryPlan:
         if not self.companies:
             raise ValueError("companies는 최소 한 곳의 기업을 담아야 합니다.")
 
-        if not self.years:
-            raise ValueError("years는 최소 한 개의 연도를 담아야 합니다.")
+        if not self.years and not self._allows_absent_years():
+            raise ValueError(
+                "years는 최소 한 개의 연도를 담아야 합니다: "
+                f"intent={self.intent!r}, chain_policy={self.chain_policy!r}."
+            )
 
         # 원천 지표와 파생 개념을 동시에 담지 않는다.
         #
@@ -279,6 +352,31 @@ class QueryPlan:
                 f"metric={self.metric!r}, derived_metric={self.derived_metric!r}. "
                 "원천 지표와 파생 개념 중 하나만 정본입니다."
             )
+
+    def _allows_absent_years(self) -> bool:
+        """
+        연도를 하나도 담지 않고 만들 수 있는 계획인가.
+
+        event_history + full_chain 하나만이다. 이 조합에서 연도는 비교 대상 기간이 아니라
+        원공시를 지목하는 공시일 기준점이고, 기준점 없이도 기업과 공시 유형만으로 체인을
+        찾아볼 수 있다. 찾은 원공시가 여럿이면 handler가 ambiguous_root로 막으므로 값을
+        고르는 자리가 생기지 않는다.
+
+        intent별로 나누는 이유:
+            single_fact·temporal_compare·cross_entity_compare에서 연도는 답의 일부다. 그쪽에서
+            연도가 비면 어느 해를 답했는지가 결과 어디에도 남지 않는다. 전역으로 느슨하게 하면
+            Q07("매출이 작년보다 얼마나 늘었어?")처럼 지금 missing_year로 막히는 질문들이
+            연도 없이 흘러 들어간다.
+
+        어떤 공시 유형이 기준점 없이 열려도 되는가는 여기서 정하지 않는다.
+        EventSubtypeRule.requires_filing_anchor가 정하며, 이 계획을 만드는
+        _build_event_history_plan이 그 값을 보고 _require_years를 부를지 말지 고른다.
+        두 곳에 같은 규칙을 두면 어긋날 수 있어 한쪽만 정본으로 둔다.
+        """
+        return (
+            self.intent == INTENT_EVENT_HISTORY
+            and self.chain_policy == ChainPolicy.FULL_CHAIN
+        )
 
     @property
     def year(self) -> int:
@@ -593,19 +691,36 @@ def _extract_month(question: str) -> int | None:
     return int(match.group(1))
 
 
-def _extract_event_subtype(question: str) -> str:
+def _find_event_subtype_rule(question: str) -> EventSubtypeRule | None:
+    """질문이 가리키는 거래소공시 세부유형 규칙. 못 찾으면 None."""
+    for rule in EVENT_SUBTYPE_RULES:
+        if rule.matches(question):
+            return rule
+
+    return None
+
+
+def _extract_event_subtype_rule(question: str) -> EventSubtypeRule:
     """
     질문에서 거래소공시 세부유형을 찾는다.
 
-    이번 슬라이스는 공급계약만 다룬다. 모르는 유형을 조용히 넘기지 않고 거절한다.
+    이번 범위는 공급계약과 신규시설투자 둘이다. 모르는 유형을 조용히 넘기지 않고 거절한다.
+
+    세부유형 문자열이 아니라 규칙을 돌려주는 이유는, 호출부가 유형 이름뿐 아니라 그 유형이
+    공시 시점을 요구하는지(requires_filing_anchor)까지 알아야 하기 때문이다. 두 값을 각각
+    다시 조회하면 같은 질문을 두 번 해석하게 되고, 어휘가 바뀔 때 한쪽만 고쳐질 수 있다.
     """
-    for tokens, subtype in EVENT_SUBTYPE_TOKENS:
-        if any(token in question for token in tokens):
-            return subtype
+    rule = _find_event_subtype_rule(question)
+
+    if rule is not None:
+        return rule
 
     raise UnsupportedQuestionError(
         reason="unsupported_event_subtype",
-        detail="이번 범위에서 지원하는 거래소공시 유형(공급계약)을 질문에서 찾을 수 없습니다.",
+        detail=(
+            "이번 범위에서 지원하는 거래소공시 유형(공급계약, 신규시설투자)을 질문에서 "
+            "찾을 수 없습니다."
+        ),
     )
 
 
@@ -615,14 +730,14 @@ def _looks_like_event_history(question: str) -> bool:
 
     유형 표현과 이력 표현이 함께 있어야 한다. 둘 중 하나만으로 판정하면 '공급계약 금액이
     얼마야'(단일 사실)까지 이력 조회로 끌려간다.
+
+    이력 표현을 함께 요구하는 것이 Q12를 막는 두 번째 가드다. Q12("...새로 발표한 시설투자,
+    회사별로 다 합치면 어디가 더 커?")는 유형 표현을 가지고 있지만 이력 표현이 없어 여기서
+    걸린다. 첫 번째 가드는 build_query_plan의 다중 기업 판정이며, 그쪽이 먼저 실행된다.
     """
-    has_event_subtype = any(
-        token in question for tokens, _ in EVENT_SUBTYPE_TOKENS for token in tokens
+    return _find_event_subtype_rule(question) is not None and any(
+        token in question for token in HISTORY_TOKENS
     )
-
-    has_history = any(token in question for token in HISTORY_TOKENS)
-
-    return has_event_subtype and has_history
 
 
 def _build_cross_entity_compare_plan(
@@ -743,20 +858,44 @@ def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> Quer
 
     다중 기간 질문을 여기로 들이지 않는 것은 build_query_plan의 판정 순서가 맡는다. 이력
     판정이 다중 기간 판정보다 앞이라 이 builder에 먼저 도달하며, 그 순서가 규약이다.
+
+    연도가 없는 질문:
+        Q15("레인보우로보틱스 사옥·제조시설 신축 투자, 그동안 계획이 몇 번 바뀌었어?")처럼
+        공시 시점을 밝히지 않는 이력 질문이 있다. 그때 연도를 요구할지는 공시 유형이 정한다
+        (EventSubtypeRule.requires_filing_anchor).
+
+        요구하는 유형(공급계약)에서는 예전과 똑같이 missing_year로 막는다. 한 기업이 해마다
+        여러 건을 공시하므로 시점이 없으면 어느 계약인지 정할 수 없고, 상대방 이름으로
+        좁히려면 본문 대조가 필요하다. Q14가 이 자리에서 계속 막힌다.
+
+        요구하지 않는 유형(신규시설투자)에서는 years를 비운 계획을 만든다. handler가 공시일
+        창 없이 원공시 후보를 찾고, 후보가 여럿이면 ambiguous_root로 막는다. 계획도 handler도
+        후보 하나를 고르지 않는다.
     """
-    anchor, *_ = _require_years(_extract_years(question))
+    rule = _extract_event_subtype_rule(question)
+
+    years = _extract_years(question)
+
+    month = _extract_month(question)
+
+    # 월만 있고 연도가 없으면 공시일 창을 만들 수 없다. 그대로 두면 질문이 밝힌 '4월'이
+    # 계획에는 담기지만 조회에는 쓰이지 않아, 사용자가 좁힌 범위가 조용히 사라진다.
+    # 유형이 기준점을 요구하지 않더라도 이 경우는 연도를 요구한다.
+    if rule.requires_filing_anchor or month is not None:
+        years = _require_years(years)
 
     return QueryPlan(
         question=question.strip(),
         companies=companies,
-        years=(anchor,),
+        # 연도가 여럿 보여도 첫 값 하나만 기준점으로 담는다(위 설명 참조).
+        years=years[:1],
         intent=INTENT_EVENT_HISTORY,
         document_class=DOCUMENT_CLASS_EVENT,
-        document_subtype=_extract_event_subtype(question),
+        document_subtype=rule.subtype,
         # 거래소공시에는 연결·별도 구분이 없다.
         accounting_scope=QueryAccountingScope.NOT_APPLICABLE.value,
         metric=None,
-        month=_extract_month(question),
+        month=month,
         chain_policy=ChainPolicy.FULL_CHAIN,
     )
 

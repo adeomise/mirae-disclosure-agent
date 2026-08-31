@@ -53,10 +53,10 @@
 | Q09 | C | `NOT_IMPLEMENTED` | – | 다중 기간으로 인식되어 `routing/unimplemented_intent`로 BLOCKED. 서술 비교(C14)는 여전히 없음 | Pattern B/C 이후 |
 | Q10 | D | `NOT_IMPLEMENTED` | – | 오라우팅 해소됨. analyzer가 매치된 서로 다른 기업을 모두 인식해 `cross_entity_compare`로 분류하고, handler가 없으므로 `routing/unimplemented_intent`로 BLOCKED(Fact 0 · Evidence 0). 이전에는 `_extract_company`가 가장 긴 이름 하나만 골라 `COMPLETED`/`ANSWERABLE`로 한 기업 값만 답했음 | Pattern D handler 착수. 차단 동작은 회귀 fixture에 고정 완료(`GUARD-MULTI-COMPANY`) |
 | Q11 | D | `NOT_IMPLEMENTED` | – | 영업이익률 미지원으로 `query_plan/unsupported_metric` BLOCKED. Q10과 달리 지표에서 먼저 걸려 오라우팅되지 않음 | Q08과 함께 |
-| Q12 | D | `NOT_IMPLEMENTED` | – | 신규시설투자 subtype 미지원 + 집계 경로 없음. `query_plan/unsupported_metric`으로 BLOCKED | D1 확정 후. Q15 선행 |
+| Q12 | D | `NOT_IMPLEMENTED` | – | 신규시설투자 subtype은 Q15에서 지원됐으나 집계 경로가 없음. 기업이 둘이라 `cross_entity_compare`로 분류되고 handler가 없어 `routing/unimplemented_intent`로 BLOCKED. 이력 표현이 없어 Pattern E로 새지도 않음 | 거래소공시 집계 경로. D1 확정 후 |
 | Q13 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 2 · Evidence 9, `chain_complete=True` | 회귀 fixture에 고정 완료(`Q13`) |
 | Q14 | E | `NOT_IMPLEMENTED` | Synthetic(능력 일부) | 질문이 연/월을 주지 않아 `query_plan/missing_year`로 BLOCKED. 계약상대방("포드")으로 루트를 좁히는 C3 없음. 체인 미완결 → `PARTIALLY_ANSWERABLE` 경로는 `tests/integration/test_pattern_e.py`에서 합성 검증됨 | 계약상대방 기반 루트 확정. 공시유보(`WITHHELD_IN_SOURCE`)는 Contract 미결정 |
-| Q15 | E | `NOT_IMPLEMENTED` | Synthetic(능력 일부) | 연도 없음 + 신규시설투자 subtype 미지원으로 BLOCKED. 다중 정정 정렬·필드별 궤적은 합성 fixture로 검증됨 | `EVENT_SUBTYPE_TOKENS`에 신규시설투자 추가. D1 확정 후 |
+| Q15 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 3 · Evidence 8, `chain_complete=True`. 질문에 연도가 없어도 신규시설투자는 공시일 창 없이 루트를 찾음(`requires_filing_anchor=False`). **"몇 번 바뀌었나"를 정정 3건으로 셀지 FieldChange 4건으로 셀지는 미정** — producer는 둘 다 보존하며 세는 규칙은 answer-builder 결정 | 회귀 fixture에 고정 완료(`Q15`). lifecycle은 `future` 유지 — active 전환은 "몇 번" 세는 규칙 확정과 함께 |
 | Q16 | F | `PARTIAL` | Actual | 거부되긴 하나 사유가 다름. `query_plan/unsupported_period`(분기·반기 미지원)로 BLOCKED이며 **기간 밖 판정이 아님**. 연 단위로 물으면(`삼성전자 2027년 매출액이 얼마야?`) 이 차단이 사라지고 `COMPLETED`/`UNANSWERABLE`/`not_found`(`filing_discovery`/`no_matching_filing`)로 답합니다 — 검색 실패이지 기간 밖 판정이 아님 | F1 Gate 구현. 사유 코드는 확정됨(`OUT_OF_DATA_RANGE`, PR #29) |
 | Q17 | F | `PARTIAL` | Actual | `query_plan/unknown_company`로 BLOCKED. 기업명이 없어서 막힌 것이지 "시장 반응은 보유 문서군이 아니다"라는 판정이 아님 | F2 Gate 구현. 사유 코드는 확정됨(`OUT_OF_SCOPE_DATA`, PR #29) |
 | Q18 | F | `PASS_ACTUAL` | Actual | 없음. F3 Gate가 retrieval 이전에 판정. `COMPLETED`/`UNANSWERABLE`/`out_of_scope_policy`, `answerability_detail`=`answerability_gate`/`investment_advice`, Fact 0 · Evidence 0. 이전에는 `query_plan/missing_year`(연도 부재)로 막힌 우연한 방어였고 **`삼성전자 2024년 매출 기준으로 지금 사도 될까?`는 그대로 통과**했으나, 그 형태도 같은 결과로 거부됨 | 판정 동작은 `tests/unit/test_pattern_f_safety_gate.py`에 고정 완료 |
@@ -65,9 +65,9 @@
 
 | 상태 | 문항 수 | 문항 |
 |---|---|---|
-| `PASS_ACTUAL` | 3 | Q01 Q13 Q18 |
+| `PASS_ACTUAL` | 4 | Q01 Q13 Q15 Q18 |
 | `PARTIAL` | 2 | Q16 Q17 |
-| `NOT_IMPLEMENTED` | 13 | Q02~Q12 Q14 Q15 |
+| `NOT_IMPLEMENTED` | 12 | Q02~Q12 Q14 |
 | `PASS_SYNTHETIC_ONLY` | 0 | – |
 | `BLOCKED_BY_DATA` | 0 | – |
 | `BLOCKED_BY_CONTRACT` | 0 | – |
@@ -102,7 +102,7 @@
 | B 문서 요약 | Q04 Q05 Q06 | 0/3. handler 없음 |
 | C 시계열 비교 | Q07 Q08 Q09 | 0/3. **상대 기간 해석과 Pattern F가 충돌** |
 | D 기업 간 비교 | Q10 Q11 Q12 | 0/3. handler 없음. Q10 오라우팅은 해소되어 `routing`에서 BLOCKED |
-| E 정정·후속 추적 | Q13 Q14 Q15 | 1/3 실측 통과. 공급계약 + 연/월 지정 형태만 |
+| E 정정·후속 추적 | Q13 Q14 Q15 | 2/3 실측 통과. 공급계약(연/월 지정)과 신규시설투자(연도 없음). 한 질문이 두 유형에 맞으면 고르지 않고 `query_plan/ambiguous_event_subtype`으로 BLOCKED |
 | F 답변 불가 | Q16 Q17 Q18 | 1/3 정상 판정. Q18은 F3 Gate가 retrieval 이전에 판정. Q16·Q17은 여전히 우연히 거부됨(F1·F2 미구현) |
 
 ## Q01 계열 실측 스윕

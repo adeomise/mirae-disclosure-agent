@@ -212,9 +212,17 @@ class EventSubtypeRule:
         )
 
 
-# 순서가 규약이다. 앞의 규칙이 먼저 맞으면 그것으로 확정한다. 공급계약을 앞에 두는 이유는
-# Q13 계열이 이미 그 경로로 동작하고 있기 때문이며, 한 질문이 두 유형에 모두 맞는 표현을
-# 쓰는 경우는 아직 확인된 적이 없다.
+# 선언 순서는 우선순위가 아니다.
+#
+# 예전에는 앞의 규칙이 먼저 맞으면 그것으로 확정했다. 그 방식은 한 질문이 두 유형에 모두
+# 맞을 때 뒤의 유형을 조용히 버린다. "2024년 공급계약 이후 공장 증설 투자 계획이 바뀌었어?"가
+# 그 경우이며, 계획에는 공급계약만 남고 시설투자를 함께 물었다는 사실이 계획에도 결과에도
+# 남지 않는다. companies·years를 하나로 줄이지 않는 것과 같은 종류의 축소다.
+#
+# 그래서 지금은 모든 규칙을 평가하고, 둘 이상 맞으면 고르지 않고 막는다
+# (_extract_event_subtype_rule 참조). 순서가 결과에 영향을 주지 않으므로 규칙을 추가할 때
+# 자리를 고민할 필요가 없다. 순서가 남기는 것은 진단 문자열에 유형이 나열되는 차례뿐이며,
+# 그 차례가 고정돼 있어야 같은 질문이 늘 같은 detail을 낸다.
 EVENT_SUBTYPE_RULES: tuple[EventSubtypeRule, ...] = (
     EventSubtypeRule(
         subtype=EVENT_SUBTYPE_SUPPLY_CONTRACT,
@@ -691,35 +699,68 @@ def _extract_month(question: str) -> int | None:
     return int(match.group(1))
 
 
-def _find_event_subtype_rule(question: str) -> EventSubtypeRule | None:
-    """질문이 가리키는 거래소공시 세부유형 규칙. 못 찾으면 None."""
-    for rule in EVENT_SUBTYPE_RULES:
-        if rule.matches(question):
-            return rule
+def _find_event_subtype_rules(question: str) -> tuple[EventSubtypeRule, ...]:
+    """
+    질문에 맞는 거래소공시 세부유형 규칙을 전부 찾는다. 없으면 빈 튜플.
 
-    return None
+    첫 매치에서 멈추지 않는다. 멈추면 두 유형을 함께 가리킨 질문에서 뒤의 유형이 사라진
+    채로 계획이 만들어지고, 사라졌다는 사실이 어디에도 남지 않는다. _extract_companies가
+    기업에 대해, _extract_years가 기간에 대해 하는 일과 같다.
+
+    돌아오는 순서는 EVENT_SUBTYPE_RULES의 선언 순서다. 우선순위가 아니라 진단 문자열의
+    나열 차례를 고정하기 위한 것이다.
+    """
+    return tuple(rule for rule in EVENT_SUBTYPE_RULES if rule.matches(question))
 
 
 def _extract_event_subtype_rule(question: str) -> EventSubtypeRule:
     """
-    질문에서 거래소공시 세부유형을 찾는다.
+    질문에서 거래소공시 세부유형 하나를 확정한다.
 
-    이번 범위는 공급계약과 신규시설투자 둘이다. 모르는 유형을 조용히 넘기지 않고 거절한다.
+    확정하지 못하는 두 경우를 서로 다른 사유로 거절한다. 후속 작업이 다르기 때문이다.
+
+        0건  unsupported_event_subtype
+             이번 범위가 다루지 않는 유형이다. 어휘를 넓히면 풀린다.
+
+        2건+ ambiguous_event_subtype
+             질문이 두 유형을 함께 가리킨다. 어휘를 넓혀도 풀리지 않는다. 어느 쪽을 묻는지
+             되묻거나, 두 유형의 이력을 함께 답하는 경로를 만들어야 풀린다.
+
+    2건 이상에서 하나를 고르지 않는 이유:
+        고르면 나머지 유형을 물었다는 사실이 계획에도 결과에도 남지 않는다. 그렇게 만든 답은
+        형식이 맞고 근거까지 갖췄지만 질문의 절반에만 답한 것이며, 받는 쪽이 그것을 알 방법이
+        없다. QueryPlan이 companies와 years를 하나로 줄이지 않는 것과 같은 이유다.
+
+        선언 순서로 고르는 것은 근거가 아니다. 순서는 이 파일을 쓴 사람이 정한 것이지 질문이
+        정한 것이 아니다.
 
     세부유형 문자열이 아니라 규칙을 돌려주는 이유는, 호출부가 유형 이름뿐 아니라 그 유형이
     공시 시점을 요구하는지(requires_filing_anchor)까지 알아야 하기 때문이다. 두 값을 각각
     다시 조회하면 같은 질문을 두 번 해석하게 되고, 어휘가 바뀔 때 한쪽만 고쳐질 수 있다.
     """
-    rule = _find_event_subtype_rule(question)
+    matched = _find_event_subtype_rules(question)
 
-    if rule is not None:
-        return rule
+    if len(matched) == 1:
+        return matched[0]
+
+    if not matched:
+        raise UnsupportedQuestionError(
+            reason="unsupported_event_subtype",
+            detail=(
+                "이번 범위에서 지원하는 거래소공시 유형(공급계약, 신규시설투자)을 질문에서 "
+                "찾을 수 없습니다."
+            ),
+        )
+
+    # 후보를 detail에 남긴다. 무엇과 무엇 사이에서 막혔는지가 없으면, 질문을 어떻게 고쳐야
+    # 답할 수 있는지 알 수 없다. 나열 차례는 선언 순서라 같은 질문이면 늘 같은 문자열이다.
+    listed = ", ".join(rule.subtype for rule in matched)
 
     raise UnsupportedQuestionError(
-        reason="unsupported_event_subtype",
+        reason="ambiguous_event_subtype",
         detail=(
-            "이번 범위에서 지원하는 거래소공시 유형(공급계약, 신규시설투자)을 질문에서 "
-            "찾을 수 없습니다."
+            f"질문이 거래소공시 유형 {len(matched)}종({listed})을 함께 가리키고 있어 "
+            "어느 유형의 이력인지 특정할 수 없습니다. 한 유형을 골라 답하지 않습니다."
         ),
     )
 
@@ -734,8 +775,13 @@ def _looks_like_event_history(question: str) -> bool:
     이력 표현을 함께 요구하는 것이 Q12를 막는 두 번째 가드다. Q12("...새로 발표한 시설투자,
     회사별로 다 합치면 어디가 더 커?")는 유형 표현을 가지고 있지만 이력 표현이 없어 여기서
     걸린다. 첫 번째 가드는 build_query_plan의 다중 기업 판정이며, 그쪽이 먼저 실행된다.
+
+    유형이 둘 이상 맞는 질문도 여기서는 통과시킨다. 막는 자리는 계획을 만드는
+    _extract_event_subtype_rule이며, 그래야 ambiguous_event_subtype으로 막힌다. 여기서
+    걸러 내면 그 질문이 단일 사실 경로로 흘러 '지표를 모르겠다'로 막히고, 실제 원인인
+    유형 모호성이 결과에서 사라진다.
     """
-    return _find_event_subtype_rule(question) is not None and any(
+    return bool(_find_event_subtype_rules(question)) and any(
         token in question for token in HISTORY_TOKENS
     )
 

@@ -19,6 +19,18 @@
     ResolvedEventState도 만들지 않는다. 질문이 묻는 것은 최종 상태 하나가 아니라 변경
     이력 전체이고, 그 정본은 EventHistory.changes다.
 
+"몇 번"이 무엇을 세는가에 대하여(미결):
+    Q15의 체인에는 정정 공시 3건과 이름 붙은 FieldChange 4건이 있다. 사용자에게 "몇 번
+    바뀌었다"고 말할 때 세어야 하는 것이 3인지 4인지는 이 PR에서 정하지 않는다.
+
+    두 값 모두 결과에 그대로 남아 있다. 정정 건수는 EventHistory.document_ids에서 원공시
+    하나를 뺀 수이고(= EventLink 수), 필드 변경 건수는 EventHistory.changes의 길이다.
+    producer가 둘 중 하나를 미리 접어 버리면 나중에 어느 쪽으로 답하기로 정하든 되돌릴 수
+    없으므로, 여기서는 둘 다 보존하는 것까지만 고정한다.
+
+    세는 규칙을 정하는 일은 answer-builder/HCX 쪽 결정이며 evaluation lifecycle을 future
+    에서 active로 옮기는 작업과 함께 다룬다. 그때까지 이 파일은 어느 쪽도 주장하지 않는다.
+
 실제 공시 값에 대하여:
     합성 fixture에는 실제 접수번호·수치를 쓰지 않는다. 실측 코퍼스를 읽는 테스트는
     `corpus` 마크로 분리하고, 코퍼스가 없으면 건너뛴다.
@@ -42,6 +54,7 @@ from disclosure_agent.agent.handlers.event_history import (
 )
 from disclosure_agent.agent.query_analyzer import (
     EVENT_SUBTYPE_FACILITY_INVESTMENT,
+    EVENT_SUBTYPE_RULES,
     EVENT_SUBTYPE_SUPPLY_CONTRACT,
     INTENT_EVENT_HISTORY,
     QueryPlan,
@@ -87,6 +100,34 @@ SYNTHETIC_Q15 = "테스트반도체 사옥·제조시설 신축 투자, 그동�
 
 # 대조군. 같은 Pattern E이지만 공급계약이고 시점을 밝힌다(Q13 모양).
 SYNTHETIC_Q13 = "테스트반도체 2025년 8월에 공시한 공급계약, 나중에 바뀐 내용 있어?"
+
+# 두 유형을 함께 가리키는 질문. 리뷰가 지적한 first-match silent narrowing의 재현 케이스다.
+#
+#   공급계약        -> 단일판매공급계약체결
+#   공장 + 증설·투자 -> 신규시설투자등
+#   바뀌었어         -> 이력 질문
+#
+# 예전 구현은 선언 순서상 앞인 공급계약으로 조용히 좁혔다. 시설투자를 함께 물었다는 사실이
+# 계획에도 결과에도 남지 않았다.
+AMBIGUOUS_SUBTYPE_QUESTION = (
+    "레인보우로보틱스 2024년 공급계약 이후 공장 증설 투자 계획이 바뀌었어?"
+)
+
+SYNTHETIC_AMBIGUOUS_SUBTYPE_QUESTION = (
+    "테스트반도체 2025년 공급계약 이후 공장 증설 투자 계획이 바뀌었어?"
+)
+
+
+def _matched_subtypes(question: str) -> tuple[str, ...]:
+    """
+    공개 어휘로 계산한 매치 결과.
+
+    production의 matcher(_find_event_subtype_rules)는 비공개이므로 같은 공개 규칙
+    (EVENT_SUBTYPE_RULES와 EventSubtypeRule.matches)으로 다시 센다. 이 helper가 고정하는
+    것은 '어휘가 이 질문에 몇 종을 매치시키는가'이고, 그 매치 수를 production이 어떻게
+    처리하는가는 아래 계획·실행 단계 테스트가 따로 고정한다.
+    """
+    return tuple(rule.subtype for rule in EVENT_SUBTYPE_RULES if rule.matches(question))
 
 ROOT_RECEIPT_NO = "SYNTHETIC0101"
 
@@ -461,7 +502,171 @@ def test_q12_wording_without_the_second_company_still_lacks_a_history_question()
 
 
 # --------------------------------------------------------------------------
-# 3. 이벤트 유형 대응 — 계획의 세부유형이 EventType을 정한다
+# 3. 유형이 둘 이상 맞는 질문 — 순서로 고르지 않는다
+#
+# 어휘를 넓힐 때의 위험은 두 가지다. 하나는 엉뚱한 질문까지 열리는 것이고(위 2절), 다른
+# 하나는 한 질문이 두 유형에 맞을 때 하나로 조용히 좁혀지는 것이다. 이 절이 뒤쪽을 맡는다.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "question", [AMBIGUOUS_SUBTYPE_QUESTION, SYNTHETIC_AMBIGUOUS_SUBTYPE_QUESTION]
+)
+def test_ambiguous_question_matches_exactly_two_subtypes(question: str) -> None:
+    """
+    이 질문이 실제로 두 유형에 맞는지부터 고정한다.
+
+    아래 테스트들이 '둘 이상 맞을 때 막힌다'를 검증하는데, 어휘가 바뀌어 한 종만 맞게 되면
+    그 테스트들은 여전히 통과하면서 아무것도 검증하지 않게 된다. 전제를 따로 못박는다.
+
+    선언 순서대로 나열된다. 순서는 우선순위가 아니라 진단 문자열의 나열 차례다.
+    """
+    assert _matched_subtypes(question) == (
+        EVENT_SUBTYPE_SUPPLY_CONTRACT,
+        EVENT_SUBTYPE_FACILITY_INVESTMENT,
+    )
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        (SYNTHETIC_Q13, (EVENT_SUBTYPE_SUPPLY_CONTRACT,)),
+        (SYNTHETIC_Q15, (EVENT_SUBTYPE_FACILITY_INVESTMENT,)),
+        (Q15, (EVENT_SUBTYPE_FACILITY_INVESTMENT,)),
+        (Q14, (EVENT_SUBTYPE_SUPPLY_CONTRACT,)),
+    ],
+)
+def test_single_subtype_questions_match_exactly_one(
+    question: str, expected: tuple[str, ...]
+) -> None:
+    """대조군. 기존 질문들은 한 종만 맞아야 하며, 그래서 예전처럼 계획이 만들어진다."""
+    assert _matched_subtypes(question) == expected
+
+
+@pytest.mark.parametrize(
+    ("question", "known_companies"),
+    [
+        (AMBIGUOUS_SUBTYPE_QUESTION, REAL_COMPANIES),
+        (SYNTHETIC_AMBIGUOUS_SUBTYPE_QUESTION, KNOWN_COMPANIES),
+    ],
+)
+def test_ambiguous_subtype_question_is_rejected_at_planning(
+    question: str, known_companies: tuple[str, ...]
+) -> None:
+    """
+    두 유형에 맞으면 계획을 만들지 않는다.
+
+    사유를 unsupported_event_subtype과 나누는 것이 규약이다. 그쪽은 어휘를 넓히면 풀리고,
+    이쪽은 넓혀도 풀리지 않는다. 후속 작업이 다르므로 같은 사유로 뭉개지 않는다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(question, known_companies=known_companies)
+
+    assert error.value.reason == "ambiguous_event_subtype"
+
+
+def test_ambiguous_subtype_rejection_names_both_candidates() -> None:
+    """
+    무엇과 무엇 사이에서 막혔는지가 남아야 한다.
+
+    후보를 적지 않으면 질문을 어떻게 고쳐야 답할 수 있는지 알 수 없고, '유형을 못 찾았다'와
+    구분되지도 않는다. 새 노출 경로를 만들지는 않는다. detail은 missing_year 등이 이미 쓰고
+    있는 진단 자리 그대로다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(AMBIGUOUS_SUBTYPE_QUESTION, known_companies=REAL_COMPANIES)
+
+    detail = error.value.detail
+
+    assert EVENT_SUBTYPE_SUPPLY_CONTRACT in detail
+    assert EVENT_SUBTYPE_FACILITY_INVESTMENT in detail
+
+
+def test_ambiguous_subtype_question_is_not_narrowed_to_either_subtype(
+    facility_manifest_path: Path,
+    facility_corpus_root: Path,
+) -> None:
+    """
+    값을 하나도 만들지 않는다.
+
+    예전 구현은 여기서 공급계약 계획을 만들어 실행까지 갔다. 코퍼스 사정에 따라서는
+    근거를 갖춘 COMPLETED/ANSWERABLE이 나올 수 있었고, 그러면 시설투자를 함께 물은 질문에
+    공급계약 이력만 답한 결과가 된다. 받는 쪽이 그것을 알 방법이 없다.
+    """
+    result = answer_question(
+        SYNTHETIC_AMBIGUOUS_SUBTYPE_QUESTION,
+        corpus_root=facility_corpus_root,
+        manifest_path=facility_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.answerability_status is None
+
+    assert result.facts == []
+    assert result.evidence == []
+    assert result.event_histories == []
+    assert result.event_links == []
+    assert result.resolved_event_states == []
+
+    assert result.execution_issue is not None
+    assert result.execution_issue.reason == "ambiguous_event_subtype"
+    # 계획 단계에서 막힌다. 코퍼스를 보기 전이므로 답변 가능성을 판정하지 않는다.
+    assert result.execution_issue.stage == "query_plan"
+
+
+def test_ambiguous_subtype_question_never_reaches_retrieval(
+    facility_manifest_path: Path,
+    facility_corpus_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    '값이 없다'가 아니라 '코퍼스를 열지 않았다'를 고정한다.
+
+    앞의 테스트는 결과가 비어 있음을 보지만, 조회를 하고서 아무것도 못 찾은 경우와 구분되지
+    않는다. 조회 함수를 폭발물로 바꿔 두면 그 구분이 생긴다. 호출되면 테스트가 깨진다.
+    """
+
+    def _explode(**_kwargs: object) -> None:
+        raise AssertionError(
+            "유형이 모호한 질문에서 공시 조회가 실행됐습니다. 계획 단계에서 막혀야 합니다."
+        )
+
+    monkeypatch.setattr(
+        "disclosure_agent.agent.handlers.event_history.list_event_filings", _explode
+    )
+
+    result = answer_question(
+        SYNTHETIC_AMBIGUOUS_SUBTYPE_QUESTION,
+        corpus_root=facility_corpus_root,
+        manifest_path=facility_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue is not None
+    assert result.execution_issue.reason == "ambiguous_event_subtype"
+
+
+def test_unambiguous_questions_still_reach_retrieval(
+    facility_manifest_path: Path,
+    facility_corpus_root: Path,
+    parsed_documents: None,
+) -> None:
+    """
+    대조군. 위 테스트가 '아무것도 실행되지 않는다'를 고정하므로, 한 종만 맞는 질문은
+    반대로 끝까지 실행돼야 한다. 둘을 함께 두어야 가드가 과하게 걸린 경우를 잡는다.
+    """
+    result = answer_question(
+        SYNTHETIC_Q15,
+        corpus_root=facility_corpus_root,
+        manifest_path=facility_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert len(result.event_histories) == 1
+
+
+# --------------------------------------------------------------------------
+# 4. 이벤트 유형 대응 — 계획의 세부유형이 EventType을 정한다
 # --------------------------------------------------------------------------
 
 
@@ -518,7 +723,7 @@ def test_unsupported_document_subtype_is_blocked_before_reading_the_corpus(
 
 
 # --------------------------------------------------------------------------
-# 4. 체인 — 원공시 1건 + 정정 3건
+# 5. 체인 — 원공시 1건 + 정정 3건
 # --------------------------------------------------------------------------
 
 
@@ -680,8 +885,29 @@ def test_ambiguous_facility_root_is_not_silently_narrowed(
 
 
 # --------------------------------------------------------------------------
-# 5. 실측 코퍼스 — 대표 질문 원문
+# 6. 실측 코퍼스 — 대표 질문 원문
 # --------------------------------------------------------------------------
+
+# 실측 체인이 밝힌 변경 궤적 전체.
+#
+# 건수만 세지 않고 값까지 못박는 이유:
+#     "투자금액이 2번 바뀌었다"는 궤적이 통째로 어긋나도 통과한다. 중간 판본이 빠지거나
+#     before/after가 뒤집혀도 개수는 그대로다. 이 이력의 쓸모는 "얼마에서 얼마로"에 있으므로
+#     그 사슬을 그대로 고정한다. 앞 변경의 after가 다음 변경의 before와 이어지는 것까지
+#     여기서 함께 보인다.
+#
+# 표기에 대하여:
+#     원문 문자열 그대로다. 쉼표를 지우거나 숫자로 바꾸지 않는다. event.diff가 값을 해석하지
+#     않는다는 규약(값의 해석은 diff의 책임이 아니다) 때문이며, producer가 실제로 내놓는
+#     canonical 형태가 이것이다. 여기서 임의로 정규화해 적으면 테스트가 production과 다른
+#     계약을 주장하게 된다.
+ACTUAL_Q15_CHANGES: list[tuple[str, str, str]] = [
+    (FIELD_INVESTMENT_AMOUNT, "27,850,000,000", "28,178,420,000"),
+    (FIELD_INVESTMENT_AMOUNT, "28,178,420,000", "28,533,520,000"),
+    (FIELD_INVESTMENT_END_DATE, "2025-12-15", "2026-03-31"),
+    (FIELD_INVESTMENT_END_DATE, "2026-03-31", "2026-03-27"),
+]
+
 
 
 @pytest.mark.corpus
@@ -714,13 +940,38 @@ def test_q15_is_answered_in_the_actual_corpus() -> None:
     # gold(evaluation/gold_answers.jsonl q15)의 min_evidence_count.
     assert len(result.evidence) >= 2
 
-    # 투자금액과 투자기간 종료일의 변경 궤적이 모두 남아 있어야 한다.
-    changed_fields = [change.field_name for change in history.changes]
-
-    assert changed_fields.count(FIELD_INVESTMENT_AMOUNT) == 2
-    assert changed_fields.count(FIELD_INVESTMENT_END_DATE) == 2
+    assert [
+        (change.field_name, change.before, change.after) for change in history.changes
+    ] == ACTUAL_Q15_CHANGES
 
     assert result.resolved_event_states == []
+
+
+@pytest.mark.corpus
+def test_ambiguous_subtype_question_is_fail_closed_in_the_actual_corpus() -> None:
+    """
+    실측 코퍼스에서도 값이 만들어지지 않아야 한다.
+
+    합성 코퍼스만으로는 부족하다. 예전 구현이 이 질문에 무엇을 돌려주었는지는 그 기업이
+    2024년에 낸 공급계약 건수에 달려 있었고, 그것은 코퍼스마다 다르다. 원공시가 하나뿐인
+    기업이었다면 근거까지 갖춘 ANSWERABLE이 나왔을 것이다. 그 우연에 기대지 않는다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    result = answer_question(AMBIGUOUS_SUBTYPE_QUESTION, corpus_root=corpus_root)
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.answerability_status is None
+    assert result.event_histories == []
+    assert result.event_links == []
+    assert result.evidence == []
+    assert result.facts == []
+
+    assert result.execution_issue is not None
+    assert result.execution_issue.reason == "ambiguous_event_subtype"
 
 
 @pytest.mark.corpus

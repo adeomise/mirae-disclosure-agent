@@ -21,8 +21,10 @@ import pytest
 from disclosure_agent.agent.answer_builder import (
     ACCOUNTING_SCOPE_LABELS,
     ALLOWED_REASONS_BY_STATUS,
+    CALCULATION_UNIT_LABELS,
     COMPARISON_RELATION_TEMPLATES,
     DERIVED_METRIC_LABELS,
+    FACT_NORMALIZED_UNIT_LABELS,
     LIMITATION_MESSAGE_BY_REASON,
     METRIC_LABELS,
     POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON,
@@ -80,6 +82,7 @@ from disclosure_agent.common.schemas import (
     RawReference,
     ResultInputReference,
 )
+from disclosure_agent.periodic.extractor import BASE_CURRENCY_UNIT
 
 SYNTHETIC_COMPANY = "테스트반도체(주)"
 SYNTHETIC_DOC_ID = "periodic_SYNTHETIC0001"
@@ -731,6 +734,12 @@ def test_facts_and_event_histories_together_have_no_defined_wording_yet() -> Non
 LEFT_COMPANY = "합성조선(주)"
 RIGHT_COMPANY = "합성중공업(주)"
 
+# Contract 수준 Fact producer가 싣는 정규화 단위.
+#
+# periodic.extractor.normalize_value_and_unit이 만드는 값이며, event 계층과 Contract 예제도
+# 같은 값을 쓴다. 사용자 문장에 그대로 실리면 "2000000000KRW"가 된다.
+CANONICAL_NORMALIZED_UNIT = "KRW"
+
 LEFT_MARGIN_ID = "calculation_operating_margin_2025_LEFT"
 RIGHT_MARGIN_ID = "calculation_operating_margin_2025_RIGHT"
 
@@ -743,7 +752,7 @@ def make_comparison_fact(
     raw_value: str | None = "1,000",
     raw_unit: str | None = "백만원",
     normalized_value: float | str | None = "1000000000",
-    normalized_unit: str | None = "원",
+    normalized_unit: str | None = CANONICAL_NORMALIZED_UNIT,
     fiscal_year: int | None = 2025,
     accounting_scope: FactAccountingScope = FactAccountingScope.CONSOLIDATED,
 ) -> Fact:
@@ -1112,12 +1121,18 @@ def test_a_fact_without_a_normalized_pair_stops_the_comparison_sentence() -> Non
 
 
 def test_identical_raw_and_normalized_values_are_written_once() -> None:
-    """같은 값을 괄호로 한 번 더 적으면 다른 값이 있다고 읽힌다."""
+    """
+    같은 값을 괄호로 한 번 더 적으면 다른 값이 있다고 읽힌다.
+
+    원문이 이미 기본 단위로 적힌 공시가 이 경우다. 원문 표기("원")와 정규화 단위를 옮긴 표기가
+    같은 문자열이 되므로, 두 표기의 비교는 정규화 단위를 옮긴 뒤에 이뤄져야 한다. 옮기기 전에
+    비교하면 "2000000000원(정규화 2000000000원)"처럼 같은 값이 두 번 적힌다.
+    """
     result = q10_result()
 
     for fact in result.facts:
         fact.raw_value = fact.normalized_value
-        fact.raw_unit = fact.normalized_unit
+        fact.raw_unit = "원"
 
     answer = build_answer_response(result).answer
 
@@ -1185,6 +1200,126 @@ def test_the_equal_relation_does_not_name_a_side() -> None:
 
     assert "{left}" not in template
     assert "{right}" not in template
+
+
+def test_the_canonical_normalized_unit_is_not_exposed_in_the_comparison_sentence() -> None:
+    """
+    정규화 단위는 추출 계층의 어휘이지 사용자 문장의 말이 아니다.
+
+    Q10의 비교 문장은 정규화 값을 반드시 병기하므로(우열 판정의 근거이므로) 그 단위가 그대로
+    실리면 한국어 문장에 "2000000000KRW"가 나간다. 원문 표기는 공시에 적힌 그대로 남는다.
+    """
+    result = q10_result()
+
+    assert {fact.normalized_unit for fact in result.facts} == {CANONICAL_NORMALIZED_UNIT}
+
+    response = build_answer_response(result)
+
+    assert response.answer == (
+        f"{LEFT_COMPANY}의 2025년 연결 기준 매출액은 2,000백만원(정규화 2000000000원), "
+        f"{RIGHT_COMPANY}의 2025년 연결 기준 매출액은 1,000백만원(정규화 1000000000원)입니다. "
+        f"{LEFT_COMPANY} 쪽이 더 큽니다."
+    )
+    assert CANONICAL_NORMALIZED_UNIT not in response.answer
+
+    # 구조화 결과의 값은 그대로다. 옮기는 것은 문장에 적을 표기뿐이다.
+    assert [fact.normalized_unit for fact in response.facts] == [
+        CANONICAL_NORMALIZED_UNIT,
+        CANONICAL_NORMALIZED_UNIT,
+    ]
+
+
+@pytest.mark.parametrize(
+    "normalized_unit",
+    [CANONICAL_NORMALIZED_UNIT, BASE_CURRENCY_UNIT],
+    ids=["contract-producer", "adapter-producer"],
+)
+def test_both_currency_producers_render_the_same_user_facing_unit(normalized_unit: str) -> None:
+    """
+    같은 재무 Fact인데 만든 쪽에 따라 정규화 단위가 다르다.
+
+    periodic.extractor는 "KRW"를, periodic.adapter는 BASE_CURRENCY_UNIT("원")을 싣는다. 후자가
+    현재 Pattern D가 지나는 경로이므로, 한쪽만 옮기면 지금 동작하는 경로가 멈추거나 앞으로
+    바뀔 경로에서 영문 표기가 샌다. 문장은 어느 producer에서 왔는지 알 필요가 없어야 한다.
+    """
+    result = q10_result()
+
+    for fact in result.facts:
+        fact.normalized_unit = normalized_unit
+
+    answer = build_answer_response(result).answer
+
+    assert "(정규화 2000000000원)" in answer
+    assert "(정규화 1000000000원)" in answer
+
+
+def test_the_canonical_normalized_unit_is_not_exposed_in_the_single_fact_sentence() -> None:
+    """
+    같은 규칙이 단일 Fact 문장에도 적용된다.
+
+    원문 짝이 없으면 그 문장도 정규화 표현으로 떨어진다(_fact_value). 두 자리에 서로 다른 표기
+    규칙을 두면 같은 Fact가 질문에 따라 다른 단위 이름으로 불린다.
+    """
+    result = answerable_single_fact_result(
+        raw_value=None,
+        raw_unit=None,
+        normalized_unit=CANONICAL_NORMALIZED_UNIT,
+    )
+
+    answer = build_answer_response(result).answer
+
+    assert answer.endswith("매출액은 1234000000원입니다.")
+    assert CANONICAL_NORMALIZED_UNIT not in answer
+
+
+def test_a_complete_raw_pair_is_not_blocked_by_an_unmapped_normalized_unit() -> None:
+    """
+    원문으로 답할 수 있는 Fact는 정규화 단위 표기가 없어도 답한다.
+
+    단일 Fact 문장은 원문 짝을 먼저 쓰고 정규화 쪽을 보지 않는다. 쓰지도 않을 값의 표기가
+    없다는 이유로 멈추면, 답할 수 있는 질문이 표기 대응표 때문에 사라진다.
+    """
+    result = answerable_single_fact_result(normalized_unit="synthetic-unit")
+
+    answer = build_answer_response(result).answer
+
+    assert answer.endswith("매출액은 1,234백만원입니다.")
+    assert "synthetic-unit" not in answer
+
+
+def test_an_unregistered_normalized_unit_is_not_written_as_is() -> None:
+    """
+    표기를 정하지 않은 단위는 그대로 적지 않고 멈춘다.
+
+    비교 문장은 정규화 값을 반드시 병기하므로 이 경로에서는 원문으로 우회할 수 없다. generic
+    표기를 만들면 추출 계층이 새 단위를 늘린 사실이 문장에 조용히 실린다.
+    """
+    result = q10_result()
+    result.facts[0].normalized_unit = "synthetic-unit"
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert "synthetic-unit" in str(error.value)
+
+
+def test_the_two_unit_tables_stay_separate() -> None:
+    """
+    Fact 정규화 단위와 Calculation 단위는 서로 다른 계층의 어휘다.
+
+    합치면 한 계층이 단위를 늘릴 때 다른 계층의 문장이 함께 바뀐다. 두 어휘에는 이미 같은
+    문자열("percent")이 있고, 한 표에 담으면 원문에 적힌 비율과 agent가 만든 비율의 구분이
+    사라진다.
+    """
+    assert CANONICAL_NORMALIZED_UNIT in FACT_NORMALIZED_UNIT_LABELS
+    assert BASE_CURRENCY_UNIT in FACT_NORMALIZED_UNIT_LABELS
+    assert UNIT_PERCENT in CALCULATION_UNIT_LABELS
+
+    assert UNIT_PERCENT not in FACT_NORMALIZED_UNIT_LABELS
+    assert CANONICAL_NORMALIZED_UNIT not in CALCULATION_UNIT_LABELS
+
+    for label in FACT_NORMALIZED_UNIT_LABELS.values():
+        assert label.isascii() is False
 
 
 def test_derived_metric_labels_cover_the_shared_vocabulary() -> None:

@@ -189,6 +189,13 @@ def test_completed_non_answerable_agent_result_returns_200(
     assert response.json()["reason"] == reason.value
 
 
+# Contract 수준 Fact producer가 싣는 정규화 단위.
+#
+# periodic.extractor.normalize_value_and_unit이 만드는 값이다. 사용자 문장에 그대로 실리면
+# "2000000000KRW"가 된다.
+CANONICAL_NORMALIZED_UNIT = "KRW"
+
+
 def comparison_fact(
     *,
     fact_id: str,
@@ -206,7 +213,7 @@ def comparison_fact(
         raw_value=raw_value,
         raw_unit="백만원",
         normalized_value=normalized_value,
-        normalized_unit="원",
+        normalized_unit=CANONICAL_NORMALIZED_UNIT,
         evidence_ids=["synthetic-evidence-1"],
     )
 
@@ -359,6 +366,42 @@ def test_q10_shaped_comparison_result_returns_200() -> None:
     assert "합성조선(주)" in payload["answer"]
     assert "합성중공업(주)" in payload["answer"]
     assert payload["answer"].endswith("합성조선(주) 쪽이 더 큽니다.")
+    assert "(정규화 2000000000원)" in payload["answer"]
+
+
+def test_the_canonical_normalized_unit_never_reaches_the_user_facing_answer() -> None:
+    """
+    정규화 단위는 추출 계층의 어휘다. 문장에 그대로 실리면 한국어 답변에 "KRW"가 나간다.
+
+    검사 대상은 응답 전체가 아니라 answer 필드다. facts[].normalized_unit은 "KRW" 그대로
+    남아야 한다. Builder는 표현 계층이며 구조화 결과의 값을 고치지 않는다. 두 곳을 함께 검사하면
+    "문장에서 옮긴다"와 "값을 바꾼다"가 구분되지 않는다.
+    """
+    result = source_metric_comparison_result()
+
+    assert {fact.normalized_unit for fact in result.facts} == {CANONICAL_NORMALIZED_UNIT}
+
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "synthetic canonical unit"})
+
+    assert response.status_code == 200
+
+    payload = response.json()
+
+    assert payload["status"] == "ANSWERABLE"
+    assert CANONICAL_NORMALIZED_UNIT not in payload["answer"]
+    assert "(정규화 2000000000원)" in payload["answer"]
+    assert "(정규화 1000000000원)" in payload["answer"]
+
+    # 원문 표기는 공시에 적힌 그대로 남는다. 옮기는 것은 정규화 쪽뿐이다.
+    assert "2,000백만원" in payload["answer"]
+
+    # 구조화 결과는 Agent가 실은 값 그대로다.
+    assert [fact["normalized_unit"] for fact in payload["facts"]] == [
+        CANONICAL_NORMALIZED_UNIT,
+        CANONICAL_NORMALIZED_UNIT,
+    ]
 
 
 def test_q11_shaped_comparison_result_returns_200() -> None:

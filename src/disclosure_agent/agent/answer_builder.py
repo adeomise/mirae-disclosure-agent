@@ -63,7 +63,7 @@ from disclosure_agent.common.schemas import (
     Fact,
     ResultInputReference,
 )
-from disclosure_agent.periodic.extractor import FinancialFact
+from disclosure_agent.periodic.extractor import BASE_CURRENCY_UNIT, FinancialFact
 from disclosure_agent.retrieval.metadata_filter import FilingRef
 
 STATUS_OK = "ok"
@@ -386,10 +386,43 @@ DERIVED_METRIC_LABELS: dict[DerivedMetric, str] = {
 # 계산 결과 단위의 한국어 표기.
 #
 # CalculationResult.unit은 계산 계층의 어휘("percent")다. 그대로 문장에 넣으면 한국어 문장에
-# 영문 식별자가 섞인다(METRIC_LABELS 주석과 같은 실패 모드). Fact의 단위는 공시 원문 표기를
-# 그대로 쓰므로 이 표를 지나지 않는다.
+# 영문 식별자가 섞인다(METRIC_LABELS 주석과 같은 실패 모드).
 CALCULATION_UNIT_LABELS: dict[str, str] = {
     UNIT_PERCENT: "%",
+}
+
+# Fact 정규화 단위의 한국어 표기.
+#
+# 아래 표와 짝을 이루지만 합치지 않는다. 열쇠의 출처가 다르기 때문이다:
+#     이 표          추출 계층이 Fact에 적는 어휘. periodic.extractor가 정한다.
+#     위 표          agent가 계산 결과에 적는 어휘. agent.derived_metrics가 정한다.
+#
+# 합치면 한 계층이 단위를 늘릴 때 다른 계층의 문장이 함께 바뀐다. 실제로 두 어휘에는 같은
+# 문자열이 이미 있다. "percent"는 이쪽에서 원문에 적힌 비율이고 저쪽에서 agent가 만든 비율이며,
+# 한 표에 담으면 그 구분이 사라진다.
+#
+# 원문 단위(raw_unit)는 이 표를 지나지 않는다. 그쪽은 공시에 적힌 표기("백만원")를 그대로 쓰며,
+# 사용자가 원문과 대조하는 값이므로 옮기면 대조가 불가능해진다. 옮기는 것은 정규화 단위뿐이다.
+#
+# 통화 표기를 두 개 싣는 이유:
+#     같은 재무 Fact인데 만든 쪽에 따라 값이 다르다.
+#         "KRW"  periodic.extractor.normalize_value_and_unit. Contract 수준 Fact producer이며
+#                event 계층과 Contract 예제도 같은 값을 쓴다.
+#         "원"   periodic.extractor.BASE_CURRENCY_UNIT. periodic.adapter.adapt_financial_fact가
+#                FinancialFact.base_unit을 그대로 실어 만드는 값이며, 현재 Pattern D가 지나는
+#                경로다(agent.period_retrieval.collect_period_facts).
+#
+#     어느 쪽을 정본으로 둘지는 추출 계층이 정할 일이다. 표현 계층은 그 결정을 기다리는 동안
+#     양쪽을 모두 옮길 수 있어야 하며, 한쪽만 받으면 producer가 바뀌는 날 사용자 문장에 "KRW"가
+#     그대로 실린다. 여기서 Fact의 값을 고쳐 어휘를 하나로 맞추지 않는다. 그것은 추출 계층의
+#     결정을 표현 계층이 대신 내리는 일이다.
+#
+# "shares"·"percent"는 싣지 않는다. normalize_value_and_unit이 만들지만, 그 단위를 갖는 지표는
+# METRIC_LABELS에 표기가 없어 문장이 그 앞에서 먼저 멈춘다. 도달하지 않는 표기를 미리 열면
+# 문장 템플릿을 정하지 않은 지표가 조용히 통과한다.
+FACT_NORMALIZED_UNIT_LABELS: dict[str, str] = {
+    "KRW": "원",
+    BASE_CURRENCY_UNIT: "원",
 }
 
 # 우열 관계 문장.
@@ -939,19 +972,53 @@ def _fact_value(fact: Fact) -> str:
     짝이 하나도 완전하지 않으면 멈춘다. 남은 한쪽을 섞어 쓰면(원문 값 + 정규화 단위) 배수가
     맞지 않는 수치가 나간다.
     """
-    for value, unit in (
-        (fact.raw_value, fact.raw_unit),
-        (fact.normalized_value, fact.normalized_unit),
-    ):
-        rendered = _value_with_unit(value, unit)
+    raw = _value_with_unit(fact.raw_value, fact.raw_unit)
 
-        if rendered is not None:
-            return rendered
+    if raw is not None:
+        return raw
+
+    # 원문 짝이 완전할 때는 정규화 쪽을 보지 않는다. 정규화 단위의 표기가 정해지지 않았다는
+    # 사실이 원문으로 답할 수 있는 Fact까지 멈추게 하면, 쓰지도 않을 값 때문에 답이 사라진다.
+    normalized = _normalized_value_with_unit(fact)
+
+    if normalized is not None:
+        return normalized
 
     raise MissingAnswerSupportError(
         f"Fact {fact.fact_id!r}에 값과 단위가 모두 갖춰진 표현이 없습니다. "
         "값만 있거나 단위만 있는 상태로는 문장을 만들지 않습니다."
     )
+
+
+def _normalized_value_with_unit(fact: Fact) -> str | None:
+    """
+    Fact의 정규화 표현. 단위는 사용자 표기로 옮겨서 적는다.
+
+    정규화 단위는 추출 계층이 붙인 canonical 어휘이고 사용자 문장의 말이 아니다. 그대로 적으면
+    한국어 문장에 "2000000000KRW"가 실린다. 영문 enum 값을 문장에 넣지 않는 것과 같은 자리이며,
+    다른 점은 열쇠가 Contract enum이 아니라 추출 계층의 문자열이라는 것뿐이다.
+
+    값을 바꾸지 않는다. Fact.normalized_unit은 그대로 두고 문장에 적을 표기만 고른다. 여기서
+    Fact를 고쳐 쓰면 응답의 구조화 결과와 문장이 서로 다른 단위를 말하게 된다.
+
+    두 경우를 나눈다:
+        정규화 표현이 없음(None)      Fact가 정규화되지 않았다. 원문으로 답할 수 있으면 답한다.
+        표기가 정해지지 않음(예외)     추출 계층이 새 단위를 만들었는데 표기를 정하지 않았다.
+                                      generic 표기를 만들지 않고 멈춘다.
+    """
+    if fact.normalized_unit is None:
+        return None
+
+    label = FACT_NORMALIZED_UNIT_LABELS.get(fact.normalized_unit)
+
+    if label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 정규화 단위입니다: {fact.normalized_unit!r}. "
+            "FACT_NORMALIZED_UNIT_LABELS에 추가하십시오. 표기를 정하지 않은 채로 적으면 "
+            "사용자 문장에 추출 계층의 어휘가 그대로 실립니다."
+        )
+
+    return _value_with_unit(fact.normalized_value, label)
 
 
 def _value_with_unit(value: float | str | None, unit: str | None) -> str | None:
@@ -1133,6 +1200,9 @@ def _fact_operand(fact: Fact) -> _ComparisonOperand:
     두 표기가 같은 문자열이면 한 번만 적는다. 같은 값을 괄호로 한 번 더 적어 읽는 사람이 다른 값이
     있다고 오해할 이유가 없다.
 
+    정규화 단위는 사용자 표기로 옮겨 적는다(_normalized_value_with_unit). 원문 표기는 공시에
+    적힌 그대로 두고, 옮기는 것은 정규화 쪽뿐이다.
+
     지표·기간·기준 표기는 단일 Fact 문장과 같은 대응표를 쓴다. 같은 재무제표 축(회계연도 ×
     연결/별도)을 전제한 문장이라 표기가 갈릴 이유가 없고, 갈리면 같은 Fact가 질문에 따라 다른
     이름으로 불린다.
@@ -1144,7 +1214,7 @@ def _fact_operand(fact: Fact) -> _ComparisonOperand:
         f"{_scope_phrase(fact.accounting_scope)}{metric_label}"
     )
 
-    normalized = _value_with_unit(fact.normalized_value, fact.normalized_unit)
+    normalized = _normalized_value_with_unit(fact)
 
     if normalized is None:
         raise MissingAnswerSupportError(

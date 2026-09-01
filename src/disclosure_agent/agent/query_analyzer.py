@@ -1044,6 +1044,19 @@ def _build_cross_entity_compare_plan(
     accounting_scope, scope_explicit = _extract_accounting_scope(question)
     metric, derived_metric = _resolve_requested_metrics(question)
 
+    # 상대 기간 표현을 읽었다는 사실은 옮기지 않더라도 계획에 남긴다.
+    #
+    # 이 판정은 다중 기업 분기가 기간 분기보다 먼저 일어나기 때문에 여기에 있다. 남기지
+    # 않으면 "HD현대중공업이랑 삼성중공업 2025년 매출이 전년보다 어때"의 계획에는 years=(2025,)
+    # 만 남고, 상대 기간을 봤다는 기록이 어디에도 없다. 그러면 이 계획을 실행하는 쪽은 기간이
+    # 하나라고 읽어 2025년만 견준 답을 돌려주고, 사라진 기간이 결과에 남지 않는다.
+    #
+    # 옮기지는 않는다. 기업이 둘이면 D8의 기준(해당 기업의 최신 사업보고서 회계연도)이 기업마다
+    # 다를 수 있고, 문장 안의 절대연도와 둘 중 무엇을 기준으로 삼을지도 정해진 바 없다. 둘 중
+    # 하나를 골라 옮기면 고른 쪽이 조용히 답이 된다. 그래서 anchor_year는 비워 두며, 그 계획은
+    # has_unresolved_relative_period가 참이 되어 실행하는 쪽이 years만으로 답하지 않는다.
+    relative_expression = _match_previous_year_expression(question)
+
     return QueryPlan(
         question=question.strip(),
         companies=companies,
@@ -1053,6 +1066,14 @@ def _build_cross_entity_compare_plan(
         metric=metric,
         derived_metric=derived_metric,
         accounting_scope_explicit=scope_explicit,
+        relative_period=(
+            RelativePeriod(
+                expression=relative_expression,
+                offset=PREVIOUS_YEAR_OFFSET,
+            )
+            if relative_expression is not None
+            else None
+        ),
     )
 
 

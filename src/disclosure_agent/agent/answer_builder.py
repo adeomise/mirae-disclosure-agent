@@ -54,11 +54,14 @@ from disclosure_agent.common.enums import (
     FactAccountingScope,
     MetricConcept,
     ResultInputType,
+    SectionScope,
+    SummaryItemType,
 )
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
     AnswerResponse,
     CalculationResult,
+    DocumentSummary,
     EventHistory,
     Fact,
     ResultInputReference,
@@ -79,6 +82,14 @@ STAGE_FILING_DISCOVERY = "filing_discovery"
 STAGE_PARSING = "parsing"
 STAGE_EXTRACTION = "extraction"
 STAGE_EVIDENCE = "evidence"
+
+# 질문이 지정한 범위를 문서 안의 Section 하나로 옮기는 단계(C4 Section Navigation).
+#
+# extraction과 나누는 이유:
+#     extraction은 확정된 위치에서 값을 읽지 못한 것이고, 이 단계는 읽을 위치 자체를 정하지
+#     못한 것이다. 후속 작업이 다르다. 앞쪽은 추출 규칙을, 뒤쪽은 Section 대응 규칙을 고쳐야
+#     한다. 같은 사유로 뭉개면 결과만 보고 어느 쪽인지 알 수 없다.
+STAGE_SECTION_NAVIGATION = "section_navigation"
 
 # handler가 계획을 받아 들고 "이 모양은 내가 실행할 수 없다"고 판정한 단계.
 #
@@ -111,6 +122,13 @@ STAGE_CONTRACT_ADAPTATION = "contract_adaptation"
 # 대응표가 정하며, 그 표의 key가 흩어진 문자열 리터럴이면 대조할 수 없다.
 REASON_NO_MATCHING_FILING = "no_matching_filing"
 REASON_PARSE_FAILED = "parse_failed"
+
+# 조건에 맞는 공시가 여럿이라 1건으로 확정하지 못한 경우.
+#
+# Pattern E의 ambiguous_root와 나눈다. 그쪽은 이력 체인의 뿌리를 고르지 못한 것이고, 이쪽은
+# 요약·조회 대상 문서 자체를 고르지 못한 것이다. canonical 사유는 둘 다 AMBIGUOUS_MATCH로
+# 모이므로, 어느 판정이었는지는 이 값으로만 구분된다.
+REASON_AMBIGUOUS_FILING = "ambiguous_filing"
 
 # periodic.extractor가 올리는 ExtractionBlockedError.reason 중 agent가 다시 해석하는 것.
 REASON_NO_METRIC_ACODE = "no_metric_acode"
@@ -155,6 +173,15 @@ REASON_INCOMPARABLE_CALCULATION_INPUTS = "incomparable_calculation_inputs"
 REASON_INCOMPARABLE_PERIODS = "incomparable_periods"
 REASON_INCOMPARABLE_ENTITIES = "incomparable_entities"
 REASON_UNUSABLE_CALCULATION_INPUT = "unusable_calculation_input"
+
+# Section 탐색 단계(STAGE_SECTION_NAVIGATION)의 사유는 여기 적지 않는다.
+#
+# 그 판정을 내리는 곳은 periodic.sections이고, 값도 그 모듈이 정본으로 가지고 있다
+# (REASON_UNSUPPORTED_SECTION_SCOPE / REASON_NO_MATCHING_SECTION / REASON_AMBIGUOUS_SECTION /
+# REASON_EMPTY_SECTION). 같은 문자열을 여기에 한 벌 더 적으면 한쪽만 고쳤을 때
+# agent.normalization의 대응표가 조용히 빗나가고, 그때 정지 사유는 "실행 중단"으로 떨어진다.
+# 위쪽 사유들이 여기 모여 있는 이유는 그 값을 만드는 계층이 여럿이라 대조할 자리가 필요해서인데,
+# Section 탐색 사유는 만드는 계층이 하나뿐이라 그 자리가 필요하지 않다.
 
 # 확정된 내부 값을 공통 Contract 타입으로 옮기지 못한 경우.
 REASON_UNCONVERTIBLE_FACT = "unconvertible_fact"
@@ -387,6 +414,23 @@ FULL_YEAR_FISCAL_PERIODS: frozenset[str] = frozenset({"FY"})
 #
 # CalculationResult에는 어떤 파생 개념이었는지가 남지 않는다. 남는 것은 operation과 입력
 # 참조뿐이라 그 둘로 대응표를 되짚어 개념을 찾는다(_derived_metric_label).
+# 요약 범위의 한글 표기.
+#
+# SectionScope enum 값을 그대로 문장에 넣지 않는다. 한국어 문장에 facility_investment가
+# 섞이고, 그 상태로도 테스트가 통과한다. 표기가 없는 값은 문장으로 옮기지 않고 막는다.
+SECTION_SCOPE_LABELS: dict[SectionScope, str] = {
+    SectionScope.FINANCIAL_STATEMENT: "재무제표",
+    SectionScope.BUSINESS_OVERVIEW: "사업 개요",
+    SectionScope.PRODUCTS: "주요 제품 및 서비스",
+    SectionScope.FACILITY_INVESTMENT: "설비 투자",
+}
+
+# 요약 항목 종류의 한글 표기. 같은 이유로 대응표를 둔다.
+SUMMARY_ITEM_TYPE_LABELS: dict[SummaryItemType, str] = {
+    SummaryItemType.PARAGRAPH: "본문",
+    SummaryItemType.TABLE: "표",
+}
+
 DERIVED_METRIC_LABELS: dict[DerivedMetric, str] = {
     DerivedMetric.OPERATING_MARGIN: "영업이익률",
 }
@@ -646,7 +690,7 @@ STATUSES_ALLOWING_NO_REASON: frozenset[AnswerabilityStatus] = frozenset(
 
 # 근거를 붙이면 안 되는 거부 사유.
 #
-# pattern_f_safety.md §4 "F1~F4는 facts와 evidence가 비어 있어야 합니다"와
+# pattern_f_safety.md §3 "F1~F4는 facts와 evidence가 비어 있어야 합니다"와
 # evidence_and_answerability.md 원칙 7이 근거다. 거부 응답에 원문 근거가 붙으면 부분 답변으로
 # 읽히고, 투자 판단 질문에 지표를 제시한 것과 같아진다(§8 원칙 4).
 #
@@ -887,6 +931,23 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
         형식은 정상인 응답이 나간다. Router가 미등록 intent를 가장 가까운 handler로 대신
         처리하지 않는 것과 같은 이유로, 여기서도 대신 고르지 않는다.
     """
+    if result.document_summaries and (
+        result.facts or result.comparisons or result.event_histories
+    ):
+        raise UnsupportedResultShapeError(
+            f"DocumentSummary {len(result.document_summaries)}건이 Fact "
+            f"{len(result.facts)}건 / ComparisonResult {len(result.comparisons)}건 / "
+            f"EventHistory {len(result.event_histories)}건과 함께 있습니다. "
+            "단일 문서 요약은 Fact도 계산도 만들지 않으므로 이 조합을 만드는 producer가 "
+            "없습니다(evidence_and_answerability.md 유형별 최소 요건)."
+        )
+
+    if result.document_summaries:
+        return _join(
+            _document_summary_sentence(result.document_summaries),
+            _limitation(result, partial=partial),
+        )
+
     if result.comparisons and result.event_histories:
         raise UnsupportedResultShapeError(
             f"ComparisonResult {len(result.comparisons)}건과 "
@@ -927,9 +988,96 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
         )
 
     raise MissingAnswerSupportError(
-        "답할 수 있다고 판정됐지만 facts/events/event_histories가 모두 비어 있습니다. "
-        "근거 없이 문장을 만들지 않습니다."
+        "답할 수 있다고 판정됐지만 facts/events/event_histories/document_summaries가 모두 "
+        "비어 있습니다. 근거 없이 문장을 만들지 않습니다."
     )
+
+
+def _document_summary_sentence(summaries: list[DocumentSummary]) -> str:
+    """
+    DocumentSummary 1건을 문장으로 옮긴다.
+
+    여러 건이면 막는다. Pattern B는 문서 1건의 지정 범위를 정리하는 Pattern이고, 여러 문서를
+    한 문장으로 잇는 형태는 정해지지 않았다. 첫 건만 고르면 나머지 문서를 요약했다는 사실이
+    사라진다(_single_fact_sentence와 같은 이유).
+
+    구조화 결과에 적힌 것만 말한다:
+        문서와 범위는 DocumentSummary가, 항목 수는 items가 정한다. 요약문을 여기서 새로
+        쓰지 않는다. 이 모듈은 확정된 결과를 표현만 하며, 원문에서 새 서술을 만드는 일은
+        이 경계 밖이다.
+
+    항목 이름을 나열하지 않는다:
+        앞의 몇 건만 적으면 그 몇 건이 나머지보다 중요하다는 뜻이 된다. 항목 순서는 원문
+        배치일 뿐 중요도가 아니므로 그 주장은 결과가 보장하지 않는다. Q04의 해당 Section이
+        실제로 그렇다. 앞쪽에 원재료 관련 본문이 오고 투자 내용은 뒤에 있어, 앞 몇 건을
+        내세우면 질문이 묻지 않은 쪽이 답의 머리에 온다.
+
+        순서를 다시 정해 고르지도 않는다. 그러려면 어떤 항목이 질문에 더 가까운지 판정하는
+        규칙이 필요하고, 그것은 확정된 결과를 표현만 하는 이 모듈의 일이 아니다. 그래서 어느
+        범위를 얼마나 확보했는지만 말한다. 항목 이름은 DocumentSummary.items에, 원문 발췌는
+        Evidence에 그대로 남아 있으므로 나열하지 않아도 사라지는 것이 없다.
+
+    범위와 내용을 한 문장으로 붙이지 않는다:
+        "설비 투자 관련 내용 15건"이라고 적으면 15건 전부가 설비 투자 내용이라는 뜻이 된다.
+        확보 단위는 Section이고 그 Section에는 요청 범위 밖의 내용도 함께 들어 있다
+        (periodic.sections의 TODO). 그래서 "어느 범위를 골랐는가"와 "그 범위에 무엇이 얼마나
+        있는가"를 나눠 적는다.
+    """
+    if len(summaries) > 1:
+        raise UnsupportedResultShapeError(
+            f"DocumentSummary가 {len(summaries)}건입니다. 단일 문서 요약은 문서 1건을 "
+            "대상으로 하며, 여러 문서를 한 문장으로 잇는 형태는 정해지지 않았습니다."
+        )
+
+    summary = summaries[0]
+
+    scope_label = SECTION_SCOPE_LABELS.get(summary.section_scope)
+
+    if scope_label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 section_scope입니다: {summary.section_scope.value!r}. "
+            "SECTION_SCOPE_LABELS에 추가하십시오."
+        )
+
+    counts = _summary_item_counts(summary)
+
+    location = " > ".join(summary.section_path) if summary.section_path else summary.report_name
+
+    selected = (
+        f"{scope_label} 범위에 해당하는 부분은 "
+        f"{summary.company} {summary.report_name}의 '{location}'입니다."
+    )
+
+    collected = f"이 범위의 내용은 {len(summary.items)}건({counts})입니다."
+
+    return _join(selected, collected)
+
+
+def _summary_item_counts(summary: DocumentSummary) -> str:
+    """요약 항목을 종류별로 세어 '본문 9건, 표 6건' 형태로 적는다."""
+    parts: list[str] = []
+
+    for item_type, label in SUMMARY_ITEM_TYPE_LABELS.items():
+        count = sum(1 for item in summary.items if item.item_type is item_type)
+
+        if count:
+            parts.append(f"{label} {count}건")
+
+    unknown = sorted(
+        {
+            item.item_type.value
+            for item in summary.items
+            if item.item_type not in SUMMARY_ITEM_TYPE_LABELS
+        }
+    )
+
+    if unknown:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 요약 항목 종류입니다: {unknown}. "
+            "SUMMARY_ITEM_TYPE_LABELS에 추가하십시오."
+        )
+
+    return ", ".join(parts)
 
 
 def _single_fact_sentence(facts: list[Fact]) -> str:

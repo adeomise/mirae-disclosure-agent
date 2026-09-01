@@ -67,6 +67,8 @@ SUPPORTED_EXPECTATION_KEYS: frozenset[str] = frozenset(
         "min_event_links",
         "event_histories",
         "chain_complete",
+        "document_summaries",
+        "min_document_summary_items",
         "calculations",
         "comparisons",
         "calculation_units",
@@ -289,6 +291,23 @@ def _check_evidence_linkage(failures: list[str], result: AgentExecutionResult) -
                 f"references unknown evidence {dangling}"
             )
 
+    for summary in result.document_summaries:
+        for item in summary.items:
+            if not item.evidence_ids:
+                failures.append(
+                    f"evidence_linkage: summary item '{item.item_id}' "
+                    "has no evidence_ids"
+                )
+                continue
+
+            dangling = sorted(set(item.evidence_ids) - known)
+
+            if dangling:
+                failures.append(
+                    f"evidence_linkage: summary item '{item.item_id}' "
+                    f"references unknown evidence {dangling}"
+                )
+
     for history in result.event_histories:
         for change in history.changes:
             for side in ("before_evidence_id", "after_evidence_id"):
@@ -446,6 +465,24 @@ def check_expectations(
                 result.event_histories[0].chain_complete,
             )
 
+    if "document_summaries" in expect:
+        _check_exact_count(
+            failures,
+            "document_summaries",
+            expect["document_summaries"],
+            len(result.document_summaries),
+        )
+
+    if "min_document_summary_items" in expect:
+        # 항목 수는 문서 구조에 종속되므로 최소만 둔다. 실제 공시 값을 적지 않는다는
+        # 규칙과 별개로, 개수를 못박으면 같은 질문이 코퍼스가 바뀔 때마다 FAIL이 된다.
+        _check_at_least(
+            failures,
+            "min_document_summary_items",
+            expect["min_document_summary_items"],
+            sum(len(summary.items) for summary in result.document_summaries),
+        )
+
     if "calculations" in expect:
         _check_exact_count(
             failures, "calculations", expect["calculations"], len(result.calculations)
@@ -503,6 +540,15 @@ def summarize_result(result: AgentExecutionResult) -> dict[str, Any]:
         "event_histories": len(result.event_histories),
         "chain_complete": (
             result.event_histories[0].chain_complete if result.event_histories else None
+        ),
+        "document_summaries": len(result.document_summaries),
+        # 항목 수는 건수이지 값이 아니다. 범위가 번지거나 좁아진 것이 개수로 먼저 드러난다.
+        "document_summary_items": sum(
+            len(summary.items) for summary in result.document_summaries
+        ),
+        # 어느 범위를 요약했는지만 남긴다. 분류이므로 실제 공시 내용을 적지 않는다.
+        "document_summary_scopes": sorted(
+            {_enum_value(summary.section_scope) for summary in result.document_summaries}
         ),
         "calculations": len(result.calculations),
         "comparisons": len(result.comparisons),
@@ -642,6 +688,12 @@ def _render_text(summary: dict[str, Any]) -> str:
         if actual is not None:
             units = ",".join(unit or "-" for unit in actual["calculation_units"])
 
+            items = (
+                f"({actual['document_summary_items']} items)"
+                if actual["document_summaries"]
+                else ""
+            )
+
             lines.append(
                 "         "
                 f"exec={actual['execution_status']} "
@@ -651,6 +703,7 @@ def _render_text(summary: dict[str, Any]) -> str:
                 f"scope={','.join(actual['fact_accounting_scope']) or '-'} "
                 f"evidence={actual['evidence']} "
                 f"links={actual['event_links']} histories={actual['event_histories']} "
+                f"summaries={actual['document_summaries']}{items} "
                 f"calc={actual['calculations']}{f'({units})' if units else ''} "
                 f"comparisons={actual['comparisons']}"
             )

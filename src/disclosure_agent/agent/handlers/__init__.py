@@ -5,6 +5,8 @@
 
 현재 구현 범위:
 - Pattern A (Single Fact Lookup)
+- Pattern B (Section Summary) — 정기공시 단건 요약(Q04) 경로. 기간을 밝히지 않은 요약(Q05)과
+  거래소공시 단건 요약(Q06)은 각각 D5-a·D5가 미정이라 아직 열려 있지 않다.
 - Pattern C (Temporal Compare)
 - Pattern D (Cross-entity Compare) — 원천 지표(Q10)·파생지표(Q11) 경로.
   거래소공시 집계 경로(Q12)는 아직 없다.
@@ -18,5 +20,5 @@ Pattern을 추가할 때:
   intent만 보므로 그 자리가 아니다(handlers/temporal_compare.py 참조).
 
 TODO:
-- Pattern B (document_summary)
+- Pattern B의 Q05·Q06 경로. 기본 문서 선택 정책(D5-a)과 판본 선택 정책(D5)이 정해진 뒤에 연다.
 """

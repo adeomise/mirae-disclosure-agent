@@ -56,11 +56,36 @@ class ChainPolicy(StrEnum):
     FULL_CHAIN = "full_chain"
 
 
+class SectionScope(StrEnum):
+    """Document-internal scope a question asks to be summarized.
+
+    docs/agent_design/query_plan.md의 ``section_scope`` 어휘를 따른다. 다만
+    ``whole_document``는 담지 않는다. Pattern B는 지정 범위를 찾지 못했을 때 문서 전체
+    요약으로 대체하지 않으므로(docs/agent_design/retrieval_strategy.md Pattern B의
+    Fallback), 그 값을 만들 자리가 없다. 값이 있으면 fallback이 생겼을 때 조용히 쓰인다.
+    """
+
+    FINANCIAL_STATEMENT = "financial_statement"
+    BUSINESS_OVERVIEW = "business_overview"
+    PRODUCTS = "products"
+    FACILITY_INVESTMENT = "facility_investment"
+
+
+class SummaryItemType(StrEnum):
+    """Structural kind of one document-summary content unit."""
+
+    PARAGRAPH = "paragraph"
+    TABLE = "table"
+
+
 class EvidenceLocationType(StrEnum):
     """Supported source locations for evidence."""
 
     TABLE = "table"
     EVENT_FIELD = "event_field"
+    # 본문 단락. 표도 번호 필드도 아닌 서술 근거의 자리다. Pattern B의 요약 항목 중
+    # 단락에서 온 것이 여기에 해당한다.
+    TEXT = "text"
 
 
 class EventType(StrEnum):

@@ -6,8 +6,9 @@
 현재 구현 범위:
 - QueryPlan.intent 하나만 보고 handler를 고른다. 문서군이나 질문 문자열을 다시 들여다보지
   않는다. 라우팅 근거를 한 곳에 모아 두어야 어떤 질문이 어디로 갔는지 재현할 수 있다.
-- 등록된 intent는 single_fact(Pattern A), event_history(Pattern E),
-  temporal_compare(Pattern C), cross_entity_compare(Pattern D) 넷이다.
+- 등록된 intent는 single_fact(Pattern A), document_summary(Pattern B),
+  event_history(Pattern E), temporal_compare(Pattern C), cross_entity_compare(Pattern D)
+  다섯이다.
 - 등록되지 않은 intent는 조용히 다른 경로로 넘기지 않고 blocked 결과로 답한다.
 
 지원하지 않는 요청에 대한 메모:
@@ -19,6 +20,8 @@
   이 모듈의 규약이고, 계획의 모양은 그 Pattern이 안다. temporal_compare와
   cross_entity_compare가 그 경우이며, Pattern C·D가 다루지 못하는 계획은 handler 입구에서
   pattern_entry로 막힌다. 막는 자리가 옮겨졌을 뿐 축소해서 답하지 않는 것은 같다.
+  document_summary도 같다. Pattern B는 정기공시 단건 요약만 실행하고, 거래소공시 요약과
+  기간을 밝히지 않은 요약은 handler 입구에서 막힌다.
 
 Pattern 추가 방법:
 - agent/handlers/에 모듈을 만들고 아래 HANDLERS에 한 줄 등록한다.
@@ -38,7 +41,6 @@ Pattern 추가 방법:
 - AgentExecutionResult. 라우팅 단계에서 막힌 경우도 같은 타입으로 답한다.
 
 TODO:
-- Pattern B(document_summary) 등록
 - 복합 질문의 처리 순서 정의
 """
 
@@ -55,6 +57,7 @@ from disclosure_agent.agent.answer_builder import (
 from disclosure_agent.agent.handlers.cross_entity_compare import (
     handle_cross_entity_compare,
 )
+from disclosure_agent.agent.handlers.document_summary import handle_document_summary
 from disclosure_agent.agent.handlers.event_history import handle_event_history
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
 from disclosure_agent.agent.handlers.temporal_compare import handle_temporal_compare
@@ -65,6 +68,7 @@ from disclosure_agent.agent.normalization import (
 )
 from disclosure_agent.agent.query_analyzer import (
     INTENT_CROSS_ENTITY_COMPARE,
+    INTENT_DOCUMENT_SUMMARY,
     INTENT_TEMPORAL_COMPARE,
     KNOWN_INTENTS,
     QueryPlan,
@@ -90,13 +94,14 @@ REASON_UNKNOWN_INTENT = "unknown_intent"
 # QueryPlan.intent가 문자열이어도 조회된다.
 Handler = Callable[..., AgentExecutionResult]
 
-# temporal_compare와 cross_entity_compare는 Contract v0.1의 Intent에 아직 없어
-# query_analyzer의 문자열 상수를 쓴다. Router가 dispatch하는 것은
+# document_summary, temporal_compare, cross_entity_compare는 Contract v0.1의 Intent에 아직
+# 없어 query_analyzer의 문자열 상수를 쓴다. Router가 dispatch하는 것은
 # agent.query_analyzer.QueryPlan이고 그 intent는 문자열이므로, 이 key를 등록하기 위해 공유
 # Contract의 enum을 넓힐 이유가 없다.
 HANDLERS: dict[str, Handler] = {
     Intent.SINGLE_FACT: handle_single_fact,
     Intent.EVENT_HISTORY: handle_event_history,
+    INTENT_DOCUMENT_SUMMARY: handle_document_summary,
     INTENT_TEMPORAL_COMPARE: handle_temporal_compare,
     INTENT_CROSS_ENTITY_COMPARE: handle_cross_entity_compare,
 }

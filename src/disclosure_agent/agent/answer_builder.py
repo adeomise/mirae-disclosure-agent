@@ -913,8 +913,10 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
         )
 
     if result.event_histories:
+        # partial은 _limitation에만 넘긴다. 완결 여부는 _event_history_sentence가
+        # history.chain_complete에서 직접 읽는다.
         return _join(
-            _event_history_sentence(result.event_histories, partial=partial),
+            _event_history_sentence(result.event_histories),
             _limitation(result, partial=partial),
         )
 
@@ -1419,9 +1421,20 @@ def _calculation_value(calculation: CalculationResult) -> str:
     return rendered
 
 
-def _event_history_sentence(histories: list[EventHistory], *, partial: bool) -> str:
+def _event_history_sentence(histories: list[EventHistory]) -> str:
     """
     EventHistory 1건을 문장으로 옮긴다.
+
+    완결 여부는 history.chain_complete만 본다. 판정 상태(PARTIALLY_ANSWERABLE)는 보지
+    않는다:
+        둘은 다른 축이다. 체인 완결은 "이력을 끝까지 봤는가"이고, 판정의 부분성은
+        "질문에 다 답했는가"다. WITHHELD_IN_SOURCE가 그 둘을 갈라 놓는다. 체인은 끝까지
+        확보했는데 그 안의 일부 field만 원문에서 유보된 결과가 성립하고(open_decisions.md
+        D9), 그것이 PARTIALLY_ANSWERABLE + chain_complete=True다.
+
+        상태로 완결 여부를 정하면 그 결과가 "관련 공시 N건까지 확인했습니다"로 나간다.
+        끝까지 확인한 이력을 중간에서 멈춘 것처럼 말하는 문장이며, 같은 응답에 실려 나가는
+        chain_complete=True와도 어긋난다. 무엇이 남았는지는 _limitation이 사유로 말한다.
 
     구조화 결과에 적힌 것만 말한다. 공시 건수는 document_ids에서, 변경 건수는 changes에서
     센다.
@@ -1451,7 +1464,9 @@ def _event_history_sentence(histories: list[EventHistory], *, partial: bool) -> 
             "확인한 공시가 없는 이력을 문장으로 만들지 않습니다."
         )
 
-    if partial:
+    incomplete = not history.chain_complete
+
+    if incomplete:
         # 체인을 다 보지 못했다. "변경이 없었다"는 확정 진술을 붙이지 않는다.
         sentence = f"관련 공시 {document_count}건까지 확인했습니다."
 
@@ -1466,7 +1481,7 @@ def _event_history_sentence(histories: list[EventHistory], *, partial: bool) -> 
     if change_count:
         return f"{sentence} 확인된 변경 항목은 {change_count}건입니다."
 
-    if partial:
+    if incomplete:
         return sentence
 
     return f"{sentence} 확인된 변경 항목은 없습니다."

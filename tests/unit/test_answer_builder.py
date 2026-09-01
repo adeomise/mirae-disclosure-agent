@@ -2045,6 +2045,174 @@ def test_withholding_does_not_force_an_incomplete_chain() -> None:
     assert response.event_histories[0].chain_complete is True
 
 
+# --------------------------------------------------------------------------
+# 체인 완결 서술과 판정 부분성은 서로 다른 축이다
+#
+# 아래 둘은 짝이다. 같은 PARTIALLY_ANSWERABLE인데 이력 서술이 서로 반대여야 한다.
+# 한쪽만 두면 판정 상태로 완결 여부를 정하는 구현이 다시 들어와도 통과한다.
+# --------------------------------------------------------------------------
+
+
+def test_withheld_partial_answer_keeps_the_complete_chain_narrative() -> None:
+    """
+    유보는 체인을 미완결로 만들지 않는다(D9).
+
+    체인은 끝까지 확보했고 그 안의 일부 field만 원문에서 유보된 결과다. 이력 서술은 완결
+    문장이어야 하고, 유보 사실은 그 뒤 limitation이 따로 말한다.
+
+    상태만 보고 서술을 고르면 "관련 공시 N건까지 확인했습니다"가 나간다. 끝까지 확인한
+    이력을 중간에서 멈춘 것처럼 말하는 문장이며, 같은 응답에 실려 나가는
+    chain_complete=True와 정면으로 어긋난다.
+    """
+    history = make_event_history(
+        document_ids=["exchange_SYNTHETIC0011", "exchange_SYNTHETIC0012"],
+        changes=[FieldChange(field_name="contract_amount")],
+        chain_complete=True,
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.WITHHELD_IN_SOURCE,
+        event_histories=[history],
+        evidence=[make_evidence("evidence_SYNTHETIC_event")],
+    )
+
+    response = build_answer_response(result)
+
+    assert response.answer == (
+        "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 1건입니다. "
+        + LIMITATION_MESSAGE_BY_REASON[AnswerabilityReason.WITHHELD_IN_SOURCE]
+    )
+
+    # 미완결 어휘가 섞이지 않는다.
+    assert "까지 확인했습니다" not in response.answer
+    assert (
+        LIMITATION_MESSAGE_BY_REASON[AnswerabilityReason.INCOMPLETE_CHAIN]
+        not in response.answer
+    )
+
+    # 판정과 이력은 그대로 실려 나간다.
+    assert response.status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert response.reason is AnswerabilityReason.WITHHELD_IN_SOURCE
+    assert response.event_histories == [history]
+    assert response.event_histories[0].chain_complete is True
+
+
+def test_incomplete_chain_partial_answer_keeps_the_incomplete_narrative() -> None:
+    """
+    같은 PARTIALLY_ANSWERABLE이라도 체인이 미완결이면 서술이 달라진다.
+
+    위 유보 테스트와 짝이다. 완결 여부를 history에서 읽게 바꾼 뒤에도 미완결 경로가 그대로
+    남아 있어야 한다. "변경이 없었다"는 확정 진술은 여전히 붙이지 않는다.
+    """
+    history = make_event_history(
+        document_ids=["exchange_SYNTHETIC0011", "exchange_SYNTHETIC0012"],
+        changes=[FieldChange(field_name="contract_amount")],
+        chain_complete=False,
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.INCOMPLETE_CHAIN,
+        event_histories=[history],
+        evidence=[make_evidence("evidence_SYNTHETIC_event")],
+    )
+
+    response = build_answer_response(result)
+
+    assert response.answer == (
+        "관련 공시 2건까지 확인했습니다. 확인된 변경 항목은 1건입니다. "
+        + LIMITATION_MESSAGE_BY_REASON[AnswerabilityReason.INCOMPLETE_CHAIN]
+    )
+
+    # 완결 어휘와 유보 문장이 섞이지 않는다.
+    assert "이어지는 이력을 확인했습니다" not in response.answer
+    assert (
+        LIMITATION_MESSAGE_BY_REASON[AnswerabilityReason.WITHHELD_IN_SOURCE]
+        not in response.answer
+    )
+    assert "변경된 내용은 확인되지 않았습니다" not in response.answer
+
+    assert response.status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert response.reason is AnswerabilityReason.INCOMPLETE_CHAIN
+    assert response.event_histories[0].chain_complete is False
+
+
+def test_the_two_partial_narratives_do_not_converge() -> None:
+    """
+    두 PARTIALLY_ANSWERABLE의 이력 서술이 같은 문장으로 수렴하지 않는다.
+
+    수렴하면 완결 여부가 문장에서 사라지고, 판정 상태 하나로 서술을 고르는 구현으로 되돌아가도
+    위 두 테스트만으로는 잡히지 않는다. 두 서술을 직접 맞대어 고정한다.
+    """
+    documents = ["exchange_SYNTHETIC0011", "exchange_SYNTHETIC0012"]
+    changes = [FieldChange(field_name="contract_amount")]
+
+    def answer_for(reason: AnswerabilityReason, *, chain_complete: bool) -> str:
+        result = AgentExecutionResult(
+            execution_status=ExecutionStatus.COMPLETED,
+            answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+            answerability_reason=reason,
+            event_histories=[
+                make_event_history(
+                    document_ids=documents,
+                    changes=changes,
+                    chain_complete=chain_complete,
+                )
+            ],
+            evidence=[make_evidence("evidence_SYNTHETIC_event")],
+        )
+        return build_answer_response(result).answer
+
+    withheld = answer_for(
+        AnswerabilityReason.WITHHELD_IN_SOURCE, chain_complete=True
+    )
+    incomplete = answer_for(
+        AnswerabilityReason.INCOMPLETE_CHAIN, chain_complete=False
+    )
+
+    assert withheld != incomplete
+
+    # 이력 서술만 떼어 내도 다르다. 뒤에 붙는 limitation이 달라서 갈리는 것이 아니다.
+    withheld_narrative = withheld.replace(
+        LIMITATION_MESSAGE_BY_REASON[AnswerabilityReason.WITHHELD_IN_SOURCE], ""
+    )
+    incomplete_narrative = incomplete.replace(
+        LIMITATION_MESSAGE_BY_REASON[AnswerabilityReason.INCOMPLETE_CHAIN], ""
+    )
+
+    assert withheld_narrative != incomplete_narrative
+
+
+def test_withholding_on_an_incomplete_chain_reports_both_axes() -> None:
+    """
+    두 축은 함께 성립할 수 있다.
+
+    체인도 미완결이고 확보한 부분에 유보도 있는 결과다. 이력 서술은 미완결을 따르고
+    limitation은 유보를 말한다. 한쪽이 다른 쪽을 덮어쓰지 않는 것을 고정한다.
+    """
+    history = make_event_history(
+        document_ids=["exchange_SYNTHETIC0011", "exchange_SYNTHETIC0012"],
+        changes=[FieldChange(field_name="contract_amount")],
+        chain_complete=False,
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.WITHHELD_IN_SOURCE,
+        event_histories=[history],
+        evidence=[make_evidence("evidence_SYNTHETIC_event")],
+    )
+
+    response = build_answer_response(result)
+
+    assert response.answer == (
+        "관련 공시 2건까지 확인했습니다. 확인된 변경 항목은 1건입니다. "
+        + LIMITATION_MESSAGE_BY_REASON[AnswerabilityReason.WITHHELD_IN_SOURCE]
+    )
+    assert response.event_histories[0].chain_complete is False
+
+
 def test_withheld_result_may_still_carry_the_evidence_of_the_withholding() -> None:
     """
     유보 사실 자체의 근거는 지우지 않는다.

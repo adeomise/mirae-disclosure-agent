@@ -492,6 +492,7 @@ def test_answerability_reason_values_include_pattern_f_contract_extensions() -> 
         "AMBIGUOUS_MATCH": "ambiguous_match",
         "NOT_FOUND": "not_found",
         "INSUFFICIENT_EVIDENCE": "insufficient_evidence",
+        "WITHHELD_IN_SOURCE": "withheld_in_source",
         "NOT_COMPARABLE": "not_comparable",
         "OUT_OF_DATA_RANGE": "out_of_data_range",
         "OUT_OF_SCOPE_DATA": "out_of_scope_data",
@@ -526,6 +527,48 @@ def test_not_comparable_is_completed_unanswerable_canonical_reason() -> None:
     assert result.answerability_reason not in {
         AnswerabilityReason.NOT_FOUND,
         AnswerabilityReason.INSUFFICIENT_EVIDENCE,
+    }
+
+
+@pytest.mark.parametrize(
+    "status",
+    [AnswerabilityStatus.PARTIALLY_ANSWERABLE, AnswerabilityStatus.UNANSWERABLE],
+)
+def test_withheld_in_source_serializes_on_both_of_its_statuses(
+    status: AnswerabilityStatus,
+) -> None:
+    """
+    공시유보는 두 상태에 실린다(open_decisions.md D9).
+
+    질문에 필요한 field 일부만 유보면 PARTIALLY_ANSWERABLE, 핵심 field 전체가 유보면
+    UNANSWERABLE이다. 어느 쪽인지는 유보 범위가 정하며 사유 값은 같다.
+    """
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=status,
+        answerability_reason=AnswerabilityReason.WITHHELD_IN_SOURCE,
+    )
+
+    payload = result.model_dump(mode="json")
+
+    assert payload["execution_status"] == "COMPLETED"
+    assert payload["answerability_status"] == status.value
+    assert payload["answerability_reason"] == "withheld_in_source"
+    assert payload["execution_issue"] is None
+
+
+def test_withheld_in_source_is_not_collapsed_into_a_missing_data_reason() -> None:
+    """
+    유보는 데이터 부재가 아니다(evidence_and_answerability.md).
+
+    문서도 항목도 있고 값만 비공개다. 부재 계열 사유로 근사하면 검색 실패·범위 밖·원문
+    비공개가 한 지표로 묶여 세 실패의 원인이 구분되지 않는다.
+    """
+    assert AnswerabilityReason.WITHHELD_IN_SOURCE not in {
+        AnswerabilityReason.NOT_FOUND,
+        AnswerabilityReason.INSUFFICIENT_EVIDENCE,
+        AnswerabilityReason.OUT_OF_DATA_RANGE,
+        AnswerabilityReason.OUT_OF_SCOPE_DATA,
     }
 
 

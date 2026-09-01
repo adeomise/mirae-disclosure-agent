@@ -496,6 +496,14 @@ UNAVAILABLE_MESSAGE_BY_REASON: dict[AnswerabilityReason, str] = {
     AnswerabilityReason.INCOMPLETE_CHAIN: (
         "정정 이력의 일부를 확정하지 못해 답변을 확정할 수 없습니다."
     ),
+    # 공시는 찾았고 항목도 있는데 값만 원문에서 공개되지 않았다. "찾지 못했다"(NOT_FOUND)와
+    # 다르므로 질문을 좁히라고 안내하지 않는다. 좁혀도 원문에 값이 없다.
+    #
+    # 유보된 값을 0·미공개·없음으로 바꾸지 않는다. 그렇게 쓰면 원문에 없는 값을 만든 것이 되고,
+    # 뒤에 정정공시로 값이 공개됐을 때 앞선 답변이 틀린 사실을 말한 것이 된다.
+    AnswerabilityReason.WITHHELD_IN_SOURCE: (
+        "공시는 확인했지만 질문에 필요한 정보가 원문에서 공개되지 않았습니다."
+    ),
 }
 
 # Contract에는 있지만 사용자 문구가 아직 확정되지 않아 Answer Builder가 지원하지 않는 사유.
@@ -533,9 +541,17 @@ POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON: dict[str, str] = {
 UNRESOLVED_WITHOUT_REASON_MESSAGE = "대상을 하나로 확정하지 못해 답변을 확정할 수 없습니다."
 
 # 일부만 답할 수 있을 때 확보분 뒤에 붙는 한계 문장.
+#
+# UNAVAILABLE_MESSAGE_BY_REASON과 뜻은 같고 자리가 다르다. 이쪽은 확보분 문장 뒤에 붙는
+# 종속절이라 "다만"으로 시작해야 하고, 저쪽은 답변 전체가 되는 독립 문장이다. 한 문자열을
+# 두 자리에 함께 쓰면 둘 중 한쪽의 문장이 어그러진다. INCOMPLETE_CHAIN이 이미 같은 사유를
+# 두 표현으로 나눠 들고 있고, 여기서도 그 방식을 따른다.
 LIMITATION_MESSAGE_BY_REASON: dict[AnswerabilityReason, str] = {
     AnswerabilityReason.INCOMPLETE_CHAIN: (
         "다만 이력의 일부를 보유 공시 안에서 확정하지 못해 전체 이력은 확인하지 못했습니다."
+    ),
+    AnswerabilityReason.WITHHELD_IN_SOURCE: (
+        "다만 질문에 필요한 일부 항목은 원문에서 공개되지 않아 확인하지 못했습니다."
     ),
 }
 
@@ -559,29 +575,47 @@ LIMITATION_WITHOUT_REASON_MESSAGE = "다만 요청하신 내용의 일부는 확
 #     ANSWERABLE            사유를 싣지 않는다. evaluation.runner의 GoldAnswer 검증이
 #                           "ANSWERABLE cases must not define a failure reason"으로
 #                           같은 규칙을 이미 고정하고 있다.
-#     PARTIALLY_ANSWERABLE  INCOMPLETE_CHAIN. execution_result_mapping.md §3의 체인 미완결
-#                           행이 유일한 producer다.
+#     PARTIALLY_ANSWERABLE  INCOMPLETE_CHAIN / WITHHELD_IN_SOURCE. 앞은
+#                           execution_result_mapping.md §3의 체인 미완결 행이 producer다.
+#                           뒤는 open_decisions.md D9가 정한 "필요한 field 일부만 유보"
+#                           경로이며, 체인 완결 여부와 독립된 축이다.
 #     UNRESOLVED            AMBIGUOUS_MATCH / AMBIGUOUS_LINK. 둘 다 "후보를 하나로 좁히지
 #                           못했다"이며, normalization의 ANSWERABILITY_BY_STOP이 만드는
 #                           것은 AMBIGUOUS_MATCH다. AMBIGUOUS_LINK는
 #                           evidence_and_answerability.md가 "정정 대상 문서를 1건으로
 #                           확정할 수 없음"으로 정의한 같은 계열이라 함께 허용한다.
-#     UNANSWERABLE          위 세 사유를 뺀 나머지. 세 사유는 정의상 다른 상태의 것이며,
+#     UNANSWERABLE          위 사유들 중 다른 상태에만 속하는 것을 뺀 나머지. 그 사유들이
 #                           UNANSWERABLE로 실리면 "답이 없다"와 "확정하지 못했다"가 한
 #                           지표로 묶인다(normalization의 AMBIGUOUS_MATCH 주석 참조).
+#                           WITHHELD_IN_SOURCE는 빼지 않는다. 핵심 field 전체가 유보되면
+#                           확보분이 없어 UNANSWERABLE이고, 일부만 유보되면
+#                           PARTIALLY_ANSWERABLE이다(D9). 두 상태에 모두 실릴 수 있는
+#                           유일한 사유이며, 어느 쪽인지는 유보 범위가 정한다.
 _UNRESOLVED_REASONS: frozenset[AnswerabilityReason] = frozenset(
     {AnswerabilityReason.AMBIGUOUS_MATCH, AnswerabilityReason.AMBIGUOUS_LINK}
 )
 
+# PARTIALLY_ANSWERABLE에만 실리는 사유. UNANSWERABLE 집합을 만들 때 뺀다.
+#
+# 이것은 "PARTIALLY_ANSWERABLE에서 허용되는 사유"가 아니라 "PARTIALLY_ANSWERABLE에서만
+# 허용되는 사유"다. 허용 집합은 아래에서 WITHHELD_IN_SOURCE를 더해 만든다. 두 집합이 다른
+# 이유는 WITHHELD_IN_SOURCE가 두 상태에 걸쳐 있기 때문이고, 이 파일에서 배타성과 허용이
+# 갈리는 유일한 자리다.
+#
+# 그래서 WITHHELD_IN_SOURCE를 여기 넣지 않는 것이 요점이다. 넣으면 "핵심 field 전체가 유보"
+# (D9 case B)가 UNANSWERABLE로 나가지 못하고 Builder에서 멈춘다.
+_PARTIAL_ONLY_REASONS: frozenset[AnswerabilityReason] = frozenset(
+    {AnswerabilityReason.INCOMPLETE_CHAIN}
+)
+
 ALLOWED_REASONS_BY_STATUS: dict[AnswerabilityStatus, frozenset[AnswerabilityReason]] = {
     AnswerabilityStatus.ANSWERABLE: frozenset(),
-    AnswerabilityStatus.PARTIALLY_ANSWERABLE: frozenset(
-        {AnswerabilityReason.INCOMPLETE_CHAIN}
-    ),
+    AnswerabilityStatus.PARTIALLY_ANSWERABLE: _PARTIAL_ONLY_REASONS
+    | {AnswerabilityReason.WITHHELD_IN_SOURCE},
     AnswerabilityStatus.UNRESOLVED: _UNRESOLVED_REASONS,
     AnswerabilityStatus.UNANSWERABLE: frozenset(AnswerabilityReason)
     - _UNRESOLVED_REASONS
-    - {AnswerabilityReason.INCOMPLETE_CHAIN}
+    - _PARTIAL_ONLY_REASONS
     - UNMAPPED_ANSWERABILITY_REASONS,
 }
 
@@ -776,8 +810,16 @@ def _require_consistent_chain(
     EventHistory가 없는 결과는 보지 않는다. 이 불변식의 근거는 Pattern E의
     _judge_answerability 하나이며, Fact 기반 PARTIALLY 같은 다른 조합은 아직 producer도
     문서도 없어 여기서 판정하지 않는다.
+
+    WITHHELD_IN_SOURCE도 보지 않는다. 체인 완결과 원문 유보는 서로 독립된 축이라
+    (open_decisions.md D9) 체인이 완결된 채로 일부 field만 유보된 결과가 성립한다. 그런
+    결과에 chain_complete=False를 요구하면, 완결된 체인을 미완결로 적어야 판정을 통과하게
+    된다.
     """
     if not result.event_histories:
+        return
+
+    if result.answerability_reason is AnswerabilityReason.WITHHELD_IN_SOURCE:
         return
 
     expected = CHAIN_COMPLETE_BY_STATUS.get(status)
@@ -796,10 +838,10 @@ def _require_consistent_chain(
             "(execution_result_mapping.md §3)."
         )
 
-    # PARTIALLY_ANSWERABLE의 사유가 INCOMPLETE_CHAIN인지는 여기서 보지 않는다.
-    # ALLOWED_REASONS_BY_STATUS가 그 상태에 INCOMPLETE_CHAIN만 허용하고
-    # STATUSES_ALLOWING_NO_REASON이 사유를 비우는 것도 막으므로, 이 지점에 도달한 결과는
-    # 이미 그 사유를 달고 있다.
+    # PARTIALLY_ANSWERABLE의 사유가 무엇인지는 여기서 보지 않는다.
+    # ALLOWED_REASONS_BY_STATUS가 그 상태에 INCOMPLETE_CHAIN과 WITHHELD_IN_SOURCE만
+    # 허용하고 STATUSES_ALLOWING_NO_REASON이 사유를 비우는 것도 막으므로, 위의 유보 예외를
+    # 지나 이 지점에 도달한 결과는 INCOMPLETE_CHAIN을 달고 있다.
 
 
 def _build_answer(result: AgentExecutionResult, status: AnswerabilityStatus) -> str:
@@ -871,8 +913,10 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
         )
 
     if result.event_histories:
+        # partial은 _limitation에만 넘긴다. 완결 여부는 _event_history_sentence가
+        # history.chain_complete에서 직접 읽는다.
         return _join(
-            _event_history_sentence(result.event_histories, partial=partial),
+            _event_history_sentence(result.event_histories),
             _limitation(result, partial=partial),
         )
 
@@ -1377,9 +1421,20 @@ def _calculation_value(calculation: CalculationResult) -> str:
     return rendered
 
 
-def _event_history_sentence(histories: list[EventHistory], *, partial: bool) -> str:
+def _event_history_sentence(histories: list[EventHistory]) -> str:
     """
     EventHistory 1건을 문장으로 옮긴다.
+
+    완결 여부는 history.chain_complete만 본다. 판정 상태(PARTIALLY_ANSWERABLE)는 보지
+    않는다:
+        둘은 다른 축이다. 체인 완결은 "이력을 끝까지 봤는가"이고, 판정의 부분성은
+        "질문에 다 답했는가"다. WITHHELD_IN_SOURCE가 그 둘을 갈라 놓는다. 체인은 끝까지
+        확보했는데 그 안의 일부 field만 원문에서 유보된 결과가 성립하고(open_decisions.md
+        D9), 그것이 PARTIALLY_ANSWERABLE + chain_complete=True다.
+
+        상태로 완결 여부를 정하면 그 결과가 "관련 공시 N건까지 확인했습니다"로 나간다.
+        끝까지 확인한 이력을 중간에서 멈춘 것처럼 말하는 문장이며, 같은 응답에 실려 나가는
+        chain_complete=True와도 어긋난다. 무엇이 남았는지는 _limitation이 사유로 말한다.
 
     구조화 결과에 적힌 것만 말한다. 공시 건수는 document_ids에서, 변경 건수는 changes에서
     센다.
@@ -1409,7 +1464,9 @@ def _event_history_sentence(histories: list[EventHistory], *, partial: bool) -> 
             "확인한 공시가 없는 이력을 문장으로 만들지 않습니다."
         )
 
-    if partial:
+    incomplete = not history.chain_complete
+
+    if incomplete:
         # 체인을 다 보지 못했다. "변경이 없었다"는 확정 진술을 붙이지 않는다.
         sentence = f"관련 공시 {document_count}건까지 확인했습니다."
 
@@ -1424,7 +1481,7 @@ def _event_history_sentence(histories: list[EventHistory], *, partial: bool) -> 
     if change_count:
         return f"{sentence} 확인된 변경 항목은 {change_count}건입니다."
 
-    if partial:
+    if incomplete:
         return sentence
 
     return f"{sentence} 확인된 변경 항목은 없습니다."

@@ -17,6 +17,17 @@ CORPUS_MANIFEST_ENV = "DISCLOSURE_CORPUS_MANIFEST"
 Q10 = "2025년 HD현대중공업이랑 삼성중공업 매출 비교해줘."
 Q11 = "HD현대중공업이랑 삼성중공업 중에 2025년 영업이익률이 더 높은 곳은 어디야?"
 
+Q10_FACT_IDENTITIES = {
+    ("에이치디현대중공업(주)", "revenue", 2025),
+    ("삼성중공업(주)", "revenue", 2025),
+}
+Q11_FACT_IDENTITIES = {
+    ("에이치디현대중공업(주)", "revenue", 2025),
+    ("에이치디현대중공업(주)", "operating_income", 2025),
+    ("삼성중공업(주)", "revenue", 2025),
+    ("삼성중공업(주)", "operating_income", 2025),
+}
+
 client = TestClient(app)
 
 
@@ -43,12 +54,16 @@ def _assert_answerable_with_resolved_fact_evidence(
     response_payload: object,
     *,
     expected_fact_count: int,
+    expected_fact_identities: set[tuple[str, str, int]],
 ) -> None:
     actual = AnswerResponse.model_validate(response_payload)
 
     assert actual.status is AnswerabilityStatus.ANSWERABLE
     assert actual.reason is None
     assert len(actual.facts) == expected_fact_count
+    assert {
+        (fact.company, fact.metric.value, fact.fiscal_year) for fact in actual.facts
+    } == expected_fact_identities
     assert actual.evidence
 
     response_evidence_ids = {item.evidence_id for item in actual.evidence}
@@ -59,15 +74,16 @@ def _assert_answerable_with_resolved_fact_evidence(
 
 @pytest.mark.corpus
 @pytest.mark.parametrize(
-    ("question", "expected_fact_count"),
+    ("question", "expected_fact_count", "expected_fact_identities"),
     [
-        pytest.param(Q10, 2, id="q10-revenue-comparison"),
-        pytest.param(Q11, 4, id="q11-operating-margin-comparison"),
+        pytest.param(Q10, 2, Q10_FACT_IDENTITIES, id="q10-revenue-comparison"),
+        pytest.param(Q11, 4, Q11_FACT_IDENTITIES, id="q11-operating-margin-comparison"),
     ],
 )
 def test_pattern_d_questions_run_through_actual_corpus_http_api(
     question: str,
     expected_fact_count: int,
+    expected_fact_identities: set[tuple[str, str, int]],
 ) -> None:
     _require_actual_corpus()
     assert get_ask_service not in app.dependency_overrides
@@ -78,4 +94,5 @@ def test_pattern_d_questions_run_through_actual_corpus_http_api(
     _assert_answerable_with_resolved_fact_evidence(
         response.json(),
         expected_fact_count=expected_fact_count,
+        expected_fact_identities=expected_fact_identities,
     )

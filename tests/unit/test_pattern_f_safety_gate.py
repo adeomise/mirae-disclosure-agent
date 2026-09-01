@@ -1261,8 +1261,9 @@ def test_unsupported_capability_cases_are_untouched(question: str) -> None:
     """
     F6은 Router가 담당한다. Gate가 대신 잡으면 '미지원'이 '정책 거부'로 바뀐다.
 
-    F6-04(Q10, 기업 간 비교)가 여기 포함된다. 다른 브랜치의 multi-company guard 작업과
-    판정이 겹치지 않아야 한다.
+    Q10(기업 간 비교)은 여기서 빠졌다. Pattern D가 실행하게 되면서 F6-04에서 CONTROL-04로
+    옮겨졌고, 지금은 test_fixture_control_cases_pass_the_gate가 같은 질문을 본다. 어느 쪽에
+    있든 Gate가 건드리지 않아야 한다는 것은 같다.
     """
     assert screen_question(question).allowed, question
 

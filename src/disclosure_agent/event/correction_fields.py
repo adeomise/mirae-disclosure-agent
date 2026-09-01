@@ -18,6 +18,8 @@ FIELD_COUNTERPARTY = "counterparty"
 FIELD_SUPPLY_REGION = "supply_region"
 FIELD_CONTRACT_DETAIL = "contract_detail"
 FIELD_CONTRACT_NAME = "contract_name"
+FIELD_REVENUE_RATIO = "revenue_ratio"
+FIELD_DISCLOSURE_HOLD_UNTIL = "disclosure_hold_until"
 FIELD_INVESTMENT_AMOUNT = "investment_amount"
 FIELD_INVESTMENT_END_DATE = "investment_end_date"
 FIELD_INVESTMENT_TYPE = "investment_type"
@@ -44,7 +46,8 @@ HISTORY_CANONICAL_FIELDS = frozenset(
 
 CORRECTION_FIELD_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
     EVENT_SUPPLY_CONTRACT: {
-        FIELD_CONTRACT_AMOUNT: ("계약금액",),
+        FIELD_CONTRACT_AMOUNT: ("계약금액", "계약내역 - 계약금액"),
+        FIELD_REVENUE_RATIO: ("매출액대비", "계약내역 - 매출액대비"),
         FIELD_CONTRACT_START_DATE: ("계약기간 시작일", "시작일"),
         FIELD_CONTRACT_END_DATE: ("계약기간 종료일", "종료일"),
         FIELD_CONTRACT_PERIOD: ("계약기간",),
@@ -57,6 +60,7 @@ CORRECTION_FIELD_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
             "세부내용",
         ),
         FIELD_CONTRACT_NAME: ("체결계약명",),
+        FIELD_DISCLOSURE_HOLD_UNTIL: ("공시유보 관련내용 - 유보기한",),
         FIELD_NOTES: ("기타 투자판단과 관련한 중요사항",),
     },
     EVENT_FACILITY_INVESTMENT: {
@@ -75,6 +79,9 @@ TRAILING_PARENTHETICAL_PATTERN = re.compile(r"\([^()]*\)$")
 BRACKET_PATTERN = re.compile(r"[()（）\[\]]")
 SEPARATOR_PATTERN = re.compile(r"[\s ·ㆍ・,\.\-_/]+")
 
+UNSAFE_SOURCE_COMPOSITE = "source_composite"
+UNSAFE_AMBIGUOUS_CONTAINER = "ambiguous_container"
+
 
 def normalize_correction_label(raw_field: str | None) -> str:
     """Normalize correction aliases and lookup labels with the same contract."""
@@ -86,6 +93,35 @@ def normalize_correction_label(raw_field: str | None) -> str:
     value = TRAILING_PARENTHETICAL_PATTERN.sub("", value)
     value = BRACKET_PATTERN.sub("", value)
     return SEPARATOR_PATTERN.sub("", value)
+
+
+# Actual-corpus correction rows whose source structure cannot be represented by the
+# current one-change/one-field history model. Keep this policy event-scoped: the same
+# raw text in another event type is not evidence that it has the same semantics.
+LATEST_STATE_BLOCKING_CORRECTIONS: dict[str, dict[str, str]] = {
+    EVENT_SUPPLY_CONTRACT: {
+        normalize_correction_label(
+            "2. 계약내역 - 계약금액(원) - 매출액대비(%)"
+        ): UNSAFE_SOURCE_COMPOSITE,
+        normalize_correction_label("2. 계약내역"): UNSAFE_AMBIGUOUS_CONTAINER,
+        normalize_correction_label(
+            "8. 공시유보 관련내용 - 유보사유 - 유보기한"
+        ): UNSAFE_SOURCE_COMPOSITE,
+        normalize_correction_label(
+            "5. 계약기간 - 시작일 - 종료일"
+        ): UNSAFE_SOURCE_COMPOSITE,
+    }
+}
+
+
+def classify_latest_state_blocking_correction(
+    raw_field: str | None,
+    *,
+    event_type: str,
+) -> str | None:
+    """Classify only corrections known to make latest-state resolution unsafe."""
+    normalized = normalize_correction_label(raw_field)
+    return LATEST_STATE_BLOCKING_CORRECTIONS.get(event_type, {}).get(normalized)
 
 
 def iter_correction_aliases() -> Iterator[tuple[str, str, str]]:

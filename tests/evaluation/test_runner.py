@@ -8,6 +8,12 @@ from pathlib import Path
 
 import pytest
 
+from disclosure_agent.common.enums import (
+    AnswerabilityReason,
+    AnswerabilityStatus,
+    ExecutionStatus,
+)
+
 REPOSITORY_ROOT = Path(__file__).parents[2]
 RUNNER_PATH = REPOSITORY_ROOT / "evaluation" / "runner.py"
 RUNNER_SPEC = importlib.util.spec_from_file_location("evaluation_runner", RUNNER_PATH)
@@ -18,10 +24,12 @@ RUNNER_SPEC.loader.exec_module(runner)
 
 EvaluationDataset = runner.EvaluationDataset
 GoldAnswer = runner.GoldAnswer
+AgentExecutionResult = runner.AgentExecutionResult
 PredictionCase = runner.PredictionCase
 QuestionCase = runner.QuestionCase
 compare_prediction = runner.compare_prediction
 evaluate_predictions = runner.evaluate_predictions
+execute_agent_cases = runner.execute_agent_cases
 load_dataset = runner.load_dataset
 load_predictions = runner.load_predictions
 
@@ -46,10 +54,59 @@ def test_default_dataset_reports_deterministic_metrics() -> None:
         "case_count": 21,
         "synthetic_case_count": 3,
         "paired_case_count": 21,
-        "answerable_cases_requiring_evidence": 17,
+        "answerable_cases_requiring_evidence": 16,
         "unanswerable_cases_without_fact": 4,
-        "event_history_case_count": 4,
+        "event_history_case_count": 3,
     }
+
+
+def test_data_root_does_not_enable_live_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+
+    completed = run_runner()
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["mode"] == "case_validation"
+
+
+def test_live_mode_requires_explicit_corpus_root() -> None:
+    completed = run_runner("--run-agent")
+
+    assert completed.returncode != 0
+    assert "--corpus-root is required with --run-agent" in completed.stderr
+
+
+def test_corpus_root_without_live_mode_is_rejected(tmp_path: Path) -> None:
+    completed = run_runner("--corpus-root", str(tmp_path))
+
+    assert completed.returncode != 0
+    assert "--corpus-root and --manifest require --run-agent" in completed.stderr
+
+
+def test_live_mode_rejects_invalid_corpus_root(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-corpus"
+
+    completed = run_runner("--run-agent", "--corpus-root", str(missing))
+
+    assert completed.returncode != 0
+    assert f"corpus root is not a directory: {missing}" in completed.stderr
+
+
+def test_live_mode_rejects_invalid_explicit_manifest(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-manifest.jsonl"
+
+    completed = run_runner(
+        "--run-agent",
+        "--corpus-root",
+        str(tmp_path),
+        "--manifest",
+        str(missing),
+    )
+
+    assert completed.returncode != 0
+    assert f"manifest is not a file: {missing}" in completed.stderr
 
 
 def test_default_dataset_registers_q01_through_q18_once() -> None:
@@ -204,13 +261,31 @@ def test_narrative_future_gold_does_not_require_zero_facts() -> None:
 def test_event_history_gold_records_only_supported_structural_invariants() -> None:
     gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
 
-    # Remaining comparator gaps: Q14 final-state content and Q15 change
-    # cardinality cannot be asserted until content comparison and corpus-verified
-    # cardinality are available. Do not substitute guessed values or link counts.
-    assert gold_by_id["q14"].counts.event_histories == 1
-    assert gold_by_id["q14"].counts.event_links is None
+    # Remaining comparator gap: Q15 change cardinality cannot be asserted until
+    # corpus-verified cardinality is available. Do not substitute guessed values
+    # or link counts.
     assert gold_by_id["q15"].counts.event_histories == 1
     assert gold_by_id["q15"].counts.event_links is None
+
+
+def test_q14_gold_requires_ambiguity_instead_of_one_chosen_history() -> None:
+    """
+    Q14 질문은 루트 계약을 구분할 조건을 담고 있지 않다(open_decisions.md D8).
+
+    같은 기업·같은 제출일·같은 계약상대방으로 원공시가 2건 이상이면 어느 계약의 이력인지
+    질문만으로 정해지지 않는다. 후속 정정·해지 체인이 한쪽에만 있다는 이유로 루트를 역으로
+    고르면, 다른 계약의 이력을 그 계약의 이력이라고 말하게 된다.
+
+    그래서 gold는 EventHistory 1건을 요구하지 않는다. 요구하면 "하나를 골라라"가 정답이
+    되어 위 판단이 뒤집힌다.
+    """
+    gold = {gold.case_id: gold for gold in load_dataset().gold_answers}["q14"]
+
+    assert gold.execution_status is ExecutionStatus.COMPLETED
+    assert gold.status is AnswerabilityStatus.UNRESOLVED
+    assert gold.reason is AnswerabilityReason.AMBIGUOUS_MATCH
+    assert gold.counts.event_histories == 0
+    assert gold.event_history is None
 
 
 def test_runner_rejects_answerable_case_without_evidence(tmp_path: Path) -> None:
@@ -336,6 +411,132 @@ def dataset(*pairs: tuple[QuestionCase, GoldAnswer]) -> EvaluationDataset:
         questions=tuple(item[0] for item in pairs),
         gold_answers=tuple(item[1] for item in pairs),
     )
+
+
+def test_execute_agent_cases_preserves_result_and_only_runs_active_regressions(
+    tmp_path: Path,
+) -> None:
+    active = regression_question("active")
+    future = regression_question("future", lifecycle="future")
+    contract = QuestionCase(
+        case_id="contract",
+        question="[SYNTHETIC] contract",
+        synthetic=True,
+        evaluation_mode="contract",
+    )
+    evaluation = dataset(
+        (active, answerable_gold("active")),
+        (
+            future,
+            GoldAnswer(
+                case_id="future",
+                status="UNANSWERABLE",
+                reason="not_found",
+                min_evidence_count=0,
+            ),
+        ),
+        (
+            contract,
+            GoldAnswer(
+                case_id="contract",
+                status="UNANSWERABLE",
+                reason="not_found",
+                min_evidence_count=0,
+            ),
+        ),
+    )
+    manifest = tmp_path / "custom-manifest.jsonl"
+    calls: list[tuple[str, Path, Path | None]] = []
+
+    def fake_answer_question(
+        question: str, *, corpus_root: Path, manifest_path: Path | None
+    ) -> AgentExecutionResult:
+        calls.append((question, corpus_root, manifest_path))
+        return AgentExecutionResult.model_validate(
+            {
+                "execution_status": "COMPLETED",
+                "answerability_status": "ANSWERABLE",
+                "facts": [
+                    {
+                        "fact_id": "synthetic-fact",
+                        "company": "Synthetic Company",
+                        "metric": "revenue",
+                        "accounting_scope": "consolidated",
+                        "evidence_ids": ["synthetic-evidence"],
+                    }
+                ],
+                "evidence": [
+                    {
+                        "evidence_id": "synthetic-evidence",
+                        "doc_id": "synthetic-document",
+                        "location_type": "table",
+                    }
+                ],
+            }
+        )
+
+    predictions = execute_agent_cases(
+        evaluation,
+        corpus_root=tmp_path,
+        manifest_path=manifest,
+        answer_question_fn=fake_answer_question,
+    )
+
+    assert calls == [(active.question, tmp_path, manifest)]
+    assert len(predictions) == 1
+    assert predictions[0].case_id == "active"
+    assert predictions[0].execution_status.value == "COMPLETED"
+    assert predictions[0].answerability_status.value == "ANSWERABLE"
+    assert len(predictions[0].facts) == 1
+    assert len(predictions[0].evidence) == 1
+
+
+def test_live_agent_mismatch_reports_the_failing_case(tmp_path: Path) -> None:
+    evaluation = dataset(
+        (regression_question("live-case"), answerable_gold("live-case"))
+    )
+
+    def blocked_agent(_question: str, **_: object) -> AgentExecutionResult:
+        return AgentExecutionResult.model_validate(
+            {
+                "execution_status": "BLOCKED",
+                "answerability_status": "UNRESOLVED",
+                "answerability_reason": "insufficient_evidence",
+            }
+        )
+
+    predictions = execute_agent_cases(
+        evaluation,
+        corpus_root=tmp_path,
+        answer_question_fn=blocked_agent,
+    )
+    summary = evaluate_predictions(evaluation, predictions)
+
+    assert summary["failed_case_count"] == 1
+    assert summary["failures"][0]["case_id"] == "live-case"
+    assert any(
+        reason.startswith("execution_status:")
+        for reason in summary["failures"][0]["reasons"]
+    )
+
+
+def test_live_agent_exception_identifies_the_case(tmp_path: Path) -> None:
+    evaluation = dataset(
+        (regression_question("exploding-case"), answerable_gold("exploding-case"))
+    )
+
+    def exploding_agent(_question: str, **_: object) -> AgentExecutionResult:
+        raise ValueError("synthetic failure")
+
+    with pytest.raises(
+        RuntimeError,
+        match="exploding-case: live Agent execution failed: ValueError: synthetic failure",
+    ):
+        execute_agent_cases(
+            evaluation,
+            corpus_root=tmp_path,
+            answer_question_fn=exploding_agent,
+        )
 
 
 def load_single_case(

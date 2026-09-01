@@ -16,7 +16,12 @@ import pytest
 
 from disclosure_agent.event.correction_fields import (
     FIELD_BOARD_RESOLUTION_DATE,
+    FIELD_DISCLOSURE_HOLD_UNTIL,
+    FIELD_REVENUE_RATIO,
     HISTORY_CANONICAL_FIELDS,
+    UNSAFE_AMBIGUOUS_CONTAINER,
+    UNSAFE_SOURCE_COMPOSITE,
+    classify_latest_state_blocking_correction,
     iter_correction_aliases,
     normalize_correction_label,
     resolve_correction_field,
@@ -108,6 +113,116 @@ def test_board_resolution_alias_uses_one_normalization_contract() -> None:
             event_type="facility_investment",
         )
         == FIELD_BOARD_RESOLUTION_DATE
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw_field", "canonical_field", "history_supported"),
+    [
+        ("2. 계약내역 - 계약금액(원)", FIELD_CONTRACT_AMOUNT, True),
+        ("2.계약내역 - 계약금액(원)", FIELD_CONTRACT_AMOUNT, True),
+        ("2. 계약내역 - 매출액대비(%)", FIELD_REVENUE_RATIO, False),
+        ("2.계약내역 - 매출액대비(%)", FIELD_REVENUE_RATIO, False),
+        ("매출액대비(%)", FIELD_REVENUE_RATIO, False),
+        ("매출액대비", FIELD_REVENUE_RATIO, False),
+        ("8. 공시유보 관련내용 - 유보기한", FIELD_DISCLOSURE_HOLD_UNTIL, False),
+        ("8.공시유보 관련내용 - 유보기한", FIELD_DISCLOSURE_HOLD_UNTIL, False),
+    ],
+)
+def test_corpus_single_field_aliases_are_shared_and_event_scoped(
+    raw_field: str,
+    canonical_field: str,
+    history_supported: bool,
+) -> None:
+    assert (
+        resolve_correction_field(raw_field, event_type="supply_contract")
+        == canonical_field
+    )
+    assert match_correction_field("supply_contract", raw_field) == canonical_field
+    assert resolve_field_name(raw_field, event_type="supply_contract") == (
+        canonical_field if history_supported else None
+    )
+    assert (
+        resolve_correction_field(raw_field, event_type="facility_investment")
+        is None
+    )
+    assert match_correction_field("facility_investment", raw_field) is None
+
+
+@pytest.mark.parametrize(
+    "raw_field",
+    [
+        "2. 계약내역 - 계약금액(원) - 매출액대비(%)",
+        "2.계약내역 - 계약금액(원) - 매출액대비(%)",
+        "2. 계약내역",
+        "2.계약내역",
+        "8. 공시유보 관련내용 - 유보사유 - 유보기한",
+    ],
+)
+def test_composite_corpus_labels_remain_fail_closed(raw_field: str) -> None:
+    assert resolve_correction_field(raw_field, event_type="supply_contract") is None
+    assert match_correction_field("supply_contract", raw_field) is None
+    assert resolve_field_name(raw_field, event_type="supply_contract") is None
+
+
+@pytest.mark.parametrize(
+    ("raw_field", "category"),
+    [
+        (
+            "2. 계약내역 - 계약금액(원) - 매출액대비(%)",
+            UNSAFE_SOURCE_COMPOSITE,
+        ),
+        (
+            "2.계약내역 - 계약금액(원) - 매출액대비(%)",
+            UNSAFE_SOURCE_COMPOSITE,
+        ),
+        ("2. 계약내역", UNSAFE_AMBIGUOUS_CONTAINER),
+        ("2.계약내역", UNSAFE_AMBIGUOUS_CONTAINER),
+        (
+            "8. 공시유보 관련내용 - 유보사유 - 유보기한",
+            UNSAFE_SOURCE_COMPOSITE,
+        ),
+        ("5.계약기간 - 시작일 - 종료일", UNSAFE_SOURCE_COMPOSITE),
+    ],
+)
+def test_latest_state_blocking_policy_uses_exact_normalized_labels(
+    raw_field: str,
+    category: str,
+) -> None:
+    assert (
+        classify_latest_state_blocking_correction(
+            raw_field,
+            event_type="supply_contract",
+        )
+        == category
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_field",
+    [
+        "기타 투자판단과 관련한 중요사항",
+        "완전히 모르는 정정항목",
+        "계약금액",
+    ],
+)
+def test_ordinary_unsupported_fields_are_not_latest_state_blocking(raw_field: str) -> None:
+    assert (
+        classify_latest_state_blocking_correction(
+            raw_field,
+            event_type="supply_contract",
+        )
+        is None
+    )
+
+
+def test_latest_state_blocking_policy_is_event_scoped() -> None:
+    assert (
+        classify_latest_state_blocking_correction(
+            "2. 계약내역 - 계약금액(원) - 매출액대비(%)",
+            event_type="facility_investment",
+        )
+        is None
     )
 
 

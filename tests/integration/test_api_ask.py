@@ -7,6 +7,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from disclosure_agent.agent.answer_builder import (
+    REASON_INCOMPARABLE_ENTITIES,
+    STAGE_COMPARABILITY,
+)
 from disclosure_agent.agent.derived_metrics import OPERATION_RATIO, UNIT_PERCENT
 from disclosure_agent.api.dependencies import get_ask_service
 from disclosure_agent.api.main import app
@@ -28,6 +32,7 @@ from disclosure_agent.common.enums import (
 )
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
+    AnswerabilityDetail,
     AnswerResponse,
     AskRequest,
     CalculationResult,
@@ -95,6 +100,58 @@ def answerable_execution_result() -> AgentExecutionResult:
         facts=[fact],
         evidence=[evidence],
     )
+NOT_COMPARABLE_MESSAGE = "확보한 값들의 기준, 단위 또는 개념이 서로 달라 직접 비교할 수 없습니다."
+
+# 진단 어휘가 응답 본문으로 새는지 보려면 그 문자열이 눈에 띄어야 한다.
+NOT_COMPARABLE_DIAGNOSTIC_DETAIL = (
+    "SYNTHETIC-DIAGNOSTIC: 두 기업의 정규화 단위가 다릅니다: 원 / 천원"
+)
+
+
+def not_comparable_execution_result() -> AgentExecutionResult:
+    """
+    비교 가능성 판정에서 멈춘 Pattern D 결과 하나.
+
+    확보는 정상이었으므로 facts와 evidence가 남고, 파생값과 우열 판정은 남지 않는다
+    (normalization._stopped_execution). 거부 응답에 근거를 붙이지 못하게 막는 사유 목록에
+    NOT_COMPARABLE은 없다. 무엇이 견줄 수 없다고 판정됐는지 보려면 그 값이 있어야 하기
+    때문이며, 이 테스트가 그 구조를 HTTP 경계까지 그대로 확인한다.
+    """
+    evidence = [
+        Evidence(
+            evidence_id=f"synthetic-evidence-{index}",
+            doc_id=f"synthetic-doc-{index}",
+            location_type=EvidenceLocationType.TABLE,
+        )
+        for index in (1, 2)
+    ]
+    facts = [
+        Fact(
+            fact_id=f"synthetic-fact-{index}",
+            company=f"Synthetic Company {index}",
+            metric=MetricConcept.REVENUE,
+            fiscal_year=2025,
+            accounting_scope=FactAccountingScope.CONSOLIDATED,
+            raw_value="1000",
+            raw_unit="synthetic-currency",
+            evidence_ids=[item.evidence_id],
+        )
+        for index, item in enumerate(evidence, start=1)
+    ]
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=AnswerabilityReason.NOT_COMPARABLE,
+        answerability_detail=AnswerabilityDetail(
+            stage=STAGE_COMPARABILITY,
+            reason=REASON_INCOMPARABLE_ENTITIES,
+            detail=NOT_COMPARABLE_DIAGNOSTIC_DETAIL,
+        ),
+        facts=facts,
+        evidence=evidence,
+    )
+
+
 def require_actual_corpus() -> None:
     raw_corpus_root = os.environ.get(CORPUS_ROOT_ENV)
     if not raw_corpus_root:
@@ -190,6 +247,9 @@ def test_completed_answerable_agent_result_returns_200() -> None:
     [
         (AnswerabilityStatus.UNANSWERABLE, AnswerabilityReason.NOT_FOUND),
         (AnswerabilityStatus.UNRESOLVED, AnswerabilityReason.AMBIGUOUS_MATCH),
+        # 핵심 required field 전체가 원문에서 유보된 경우(open_decisions.md D9 case B).
+        # 판정이 정상적으로 끝난 결과이므로 500이 아니라 200으로 나가야 한다.
+        (AnswerabilityStatus.UNANSWERABLE, AnswerabilityReason.WITHHELD_IN_SOURCE),
     ],
 )
 def test_completed_non_answerable_agent_result_returns_200(
@@ -499,6 +559,90 @@ def test_not_comparable_result_still_returns_200_with_the_unavailable_sentence()
     assert payload["status"] == "UNANSWERABLE"
     assert payload["reason"] == "not_comparable"
     assert "쪽이 더 큽니다" not in payload["answer"]
+
+
+def test_not_comparable_result_returns_200_with_the_user_facing_sentence() -> None:
+    """
+    비교 불가 판정은 실행 실패가 아니다.
+
+    실행은 COMPLETED로 끝났고 답할 수 없다고 판정한 것뿐이므로 200으로 나가야 한다.
+    422/500 봉투로 나가면 받는 쪽이 재시도할 오류로 읽고, 판정 자체가 응답에서 사라진다.
+
+    확보한 근거는 그대로 실린다. AnswerResponse에 facts와 evidence 자리가 있고
+    build_answer_response가 판정과 무관하게 그것을 옮기므로, 무엇이 견줄 수 없다고
+    판정됐는지가 응답에 남는다.
+
+    진단 어휘는 실리지 않는다. 사용자 문장은 canonical 사유 하나가 정하며, 어느 축이
+    어긋났는지(incomparable_entities)와 그 원문 detail은 내부 진단이다. AnswerResponse에는
+    answerability_detail 자리가 아예 없고, 그 사실을 응답 본문 전체로 확인한다.
+    """
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(
+        not_comparable_execution_result()
+    )
+
+    response = client.post("/api/ask", json={"question": "synthetic not comparable"})
+
+    assert response.status_code == 200
+
+    payload = response.json()
+
+    assert payload["status"] == AnswerabilityStatus.UNANSWERABLE.value
+    assert payload["reason"] == AnswerabilityReason.NOT_COMPARABLE.value
+    assert payload["answer"] == NOT_COMPARABLE_MESSAGE
+
+    # 오류 봉투가 아니다. 두 키는 BLOCKED/FAILED 응답에만 있다.
+    assert "execution_status" not in payload
+    assert "error" not in payload
+
+    # 확보한 값이 살아 있어야 무엇을 견주려 했는지 되짚을 수 있다.
+    expected = not_comparable_execution_result()
+
+    assert [fact["fact_id"] for fact in payload["facts"]] == [
+        fact.fact_id for fact in expected.facts
+    ]
+    assert [item["evidence_id"] for item in payload["evidence"]] == [
+        item.evidence_id for item in expected.evidence
+    ]
+    assert payload["facts"][0]["evidence_ids"] == [payload["evidence"][0]["evidence_id"]]
+
+    # 파생값과 우열 판정은 producer가 이미 지웠고, AnswerResponse에는 자리도 없다.
+    assert "calculations" not in payload
+    assert "comparisons" not in payload
+
+    # 내부 진단은 사용자 문장에도 응답 어디에도 없다.
+    assert REASON_INCOMPARABLE_ENTITIES not in payload["answer"]
+    assert STAGE_COMPARABILITY not in payload["answer"]
+    assert NOT_COMPARABLE_DIAGNOSTIC_DETAIL not in response.text
+    assert REASON_INCOMPARABLE_ENTITIES not in response.text
+
+
+def test_partially_withheld_agent_result_returns_200_with_the_confirmed_part() -> None:
+    """
+    D9 case A — 일부 field만 유보. 확보분을 실어 200으로 나간다.
+
+    Builder가 이 조합에서 멈추면 API가 500을 내고, 실제로는 답할 수 있었던 부분까지
+    서버 오류로 사라진다.
+    """
+    confirmed = answerable_execution_result()
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.WITHHELD_IN_SOURCE,
+        facts=confirmed.facts,
+        evidence=confirmed.evidence,
+    )
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "synthetic withheld"})
+
+    assert response.status_code == 200
+
+    payload = response.json()
+
+    assert payload["status"] == "PARTIALLY_ANSWERABLE"
+    assert payload["reason"] == "withheld_in_source"
+    assert len(payload["facts"]) == 1
+    assert payload["answer"]
 
 
 @pytest.mark.parametrize(

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from disclosure_agent.agent.router import answer_question
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
@@ -141,6 +143,9 @@ class EvaluationDataset:
     gold_answers: tuple[GoldAnswer, ...]
 
 
+AgentExecutor = Callable[..., AgentExecutionResult]
+
+
 def _read_jsonl(
     path: Path, *, allow_empty: bool = False
 ) -> list[dict[str, object]]:
@@ -261,6 +266,48 @@ def evaluate_dataset(dataset: EvaluationDataset) -> dict[str, int | str]:
             item.event_history is not None for item in dataset.gold_answers
         ),
     }
+
+
+def _active_regression_questions(
+    dataset: EvaluationDataset,
+) -> tuple[QuestionCase, ...]:
+    return tuple(
+        question
+        for question in dataset.questions
+        if question.evaluation_mode == "regression" and question.lifecycle == "active"
+    )
+
+
+def execute_agent_cases(
+    dataset: EvaluationDataset,
+    *,
+    corpus_root: Path,
+    manifest_path: Path | None = None,
+    answer_question_fn: AgentExecutor = answer_question,
+) -> tuple[PredictionCase, ...]:
+    """Execute scored cases through the public Agent entry point."""
+    predictions: list[PredictionCase] = []
+    for question in _active_regression_questions(dataset):
+        try:
+            result = answer_question_fn(
+                question.question,
+                corpus_root=corpus_root,
+                manifest_path=manifest_path,
+            )
+            predictions.append(
+                PredictionCase.model_validate(
+                    {
+                        "case_id": question.case_id,
+                        **result.model_dump(mode="python"),
+                    }
+                )
+            )
+        except Exception as error:
+            raise RuntimeError(
+                f"{question.case_id}: live Agent execution failed: "
+                f"{type(error).__name__}: {error}"
+            ) from error
+    return tuple(predictions)
 
 
 def _fact_matches(expected: ExpectedFact, actual: Fact) -> bool:
@@ -434,11 +481,7 @@ def evaluate_predictions(
         raise ValueError(f"unknown prediction case_id: {unknown}")
 
     gold_index = _index_unique(dataset.gold_answers, label="gold")
-    active = [
-        question
-        for question in dataset.questions
-        if question.evaluation_mode == "regression" and question.lifecycle == "active"
-    ]
+    active = _active_regression_questions(dataset)
     future = [
         question
         for question in dataset.questions
@@ -473,14 +516,52 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--questions", type=Path, default=DEFAULT_QUESTIONS_PATH)
     parser.add_argument("--gold", type=Path, default=DEFAULT_GOLD_PATH)
-    parser.add_argument("--predictions", type=Path)
+    execution_mode = parser.add_mutually_exclusive_group()
+    execution_mode.add_argument("--predictions", type=Path)
+    execution_mode.add_argument(
+        "--run-agent",
+        action="store_true",
+        help="execute active regression cases through the real Agent",
+    )
+    parser.add_argument(
+        "--corpus-root",
+        type=Path,
+        help="explicit corpus directory required by --run-agent",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        help="optional manifest path passed to the Agent in live mode",
+    )
     args = parser.parse_args()
+    if args.run_agent:
+        if args.corpus_root is None:
+            parser.error("--corpus-root is required with --run-agent")
+        args.corpus_root = args.corpus_root.expanduser()
+        if not args.corpus_root.is_dir():
+            parser.error(f"corpus root is not a directory: {args.corpus_root}")
+        if args.manifest is not None:
+            args.manifest = args.manifest.expanduser()
+            if not args.manifest.is_file():
+                parser.error(f"manifest is not a file: {args.manifest}")
+    elif args.corpus_root is not None or args.manifest is not None:
+        parser.error("--corpus-root and --manifest require --run-agent")
+
     dataset = load_dataset(args.questions, args.gold)
     summary: dict[str, Any]
-    if args.predictions is None:
-        summary = evaluate_dataset(dataset)
-    else:
+    if args.predictions is not None:
         summary = evaluate_predictions(dataset, load_predictions(args.predictions))
+    elif args.run_agent:
+        predictions = execute_agent_cases(
+            dataset,
+            corpus_root=args.corpus_root,
+            manifest_path=args.manifest,
+        )
+        summary = evaluate_predictions(dataset, predictions)
+        summary["mode"] = "live_agent_evaluation"
+        summary["real_agent_execution"] = "ENABLED"
+    else:
+        summary = evaluate_dataset(dataset)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     if summary.get("failed_case_count", 0):
         raise SystemExit(1)

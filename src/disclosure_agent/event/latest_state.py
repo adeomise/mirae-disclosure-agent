@@ -15,6 +15,10 @@ from disclosure_agent.common.schemas import (
 )
 from disclosure_agent.event.adapter import EventAdapterResult
 from disclosure_agent.event.contract_adapter import build_event_id
+from disclosure_agent.event.correction_fields import (
+    classify_latest_state_blocking_correction,
+)
+from disclosure_agent.event.exceptions import UnsupportedCompositeCorrectionError
 from disclosure_agent.event.linker import ChainEntry, FilingChain
 
 
@@ -72,6 +76,15 @@ def resolve_latest_event_state(
 
         for change in entry.changes:
             if change.field is None:
+                category = classify_latest_state_blocking_correction(
+                    change.raw_field,
+                    event_type=root_event.event_type.value,
+                )
+                if category is not None:
+                    raise UnsupportedCompositeCorrectionError(
+                        source_doc_id=source_doc_id,
+                        category=category,
+                    )
                 continue
             if change.field not in fields:
                 raise ValueError(

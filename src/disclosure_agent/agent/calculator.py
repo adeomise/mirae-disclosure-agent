@@ -3,6 +3,14 @@
 역할:
 - 이미 선택된 Fact와 Calculation에서 수치형 파생 결과를 Python으로 산출한다.
 - 계산 직전에 입력이 함께 쓸 수 있는 값인지 판정한다(C9 Comparability Validation).
+- 확정된 두 파생값의 대소 관계를 판정한다(Comparison Judgment).
+
+관계 판정을 여기서 하는 이유:
+    ComparisonResult는 수치형 파생 결과가 아니며 Calculation 개수에 더해지지 않는다
+    (evidence_and_answerability.md Calculation cardinality). 그럼에도 이 모듈에 두는 것은,
+    두 값의 대소를 가리려면 저장된 문자열을 다시 Decimal로 읽어야 하고, 그 규칙은 이미
+    이 파일에 있기 때문이다. handler에 두면 같은 파싱 규칙이 두 벌이 되고, 한쪽이 float로
+    비교하기 시작하는 순간 같은 두 값이 다르다고 판정된다.
 
 무엇을 모르는가:
     질문 해석 결과(QueryPlan)도, 코퍼스도, 파생지표 대응표도 모른다. 무엇을 계산할지 고르는
@@ -21,15 +29,40 @@ LLM이 수치를 만들지 않는다:
     규칙을 만족하지 못하면 값을 추측하지 않고 예외로 멈춘다.
 
 두 guard의 구분:
-    guard①  validate_calculation_inputs      Numeric Calculation 직전.
-                                             잘못된 Fact로 파생값을 만드는 것을 막는다.
-    guard②  validate_temporal_comparability  두 파생값을 함께 쓰기 직전.
-                                             서로 견줄 수 없는 두 값을 견주는 것을 막는다.
+    guard①  validate_calculation_inputs          Numeric Calculation 직전.
+                                                 잘못된 Fact로 파생값을 만드는 것을 막는다.
+    guard②  validate_temporal_comparability      두 파생값을 함께 쓰기 직전(기간 축).
+    guard②  validate_cross_entity_comparability  두 파생값을 함께 쓰기 직전(기업 축).
+    guard②  validate_cross_entity_fact_comparability
+                                                 두 원천 Fact를 함께 쓰기 직전(기업 축).
 
-    둘 다 C9 하나이며 적용 시점만 다르다
+    넷 다 C9 하나이며 적용 시점만 다르다
     (docs/agent_design/agent_patterns.md#comparability-validation의-적용-지점).
     연도별 guard①이 각각 통과해도 연도 사이의 어긋남은 남으므로, guard②를 건너뛰면
     2024년 연결 기준과 2025년 별도 기준의 차이가 조용히 나간다.
+
+guard②이 축마다 따로 있는 이유:
+    두 함수가 요구하는 것이 정반대인 항목이 있다. 시계열 비교는 같은 기업의 다른 두 연도를
+    요구하고, 기업 간 비교는 다른 두 기업의 같은 연도를 요구한다. 한 함수에 플래그로
+    묶으면 그 플래그가 반대로 설정된 호출 하나가 같은 기업을 견주거나 같은 연도를
+    시계열로 읽게 되고, 그 결과도 그럴듯하다. 공통 항목은 모듈 내부 primitive로 공유한다
+    (agent_patterns.md Pattern D 검증 조건: "동일 기업(1)은 Pattern C 전용이며 상속되지
+    않는다").
+
+기업 축 guard②가 입력 타입마다 둘인 이유:
+    Q11·Q12는 기업별 Calculation 2건을 견주고, Q10은 Calculation 없이 원천 Fact 2건을 바로
+    견준다(evidence_and_answerability.md Calculation cardinality: Q10은 Calculation 0).
+    두 경로가 판정하는 축은 같지만 판정할 것이 담긴 자리가 다르다.
+
+        Calculation 경로  단위·연산은 CalculationResult에, 기업·기간·기준은 원천 Fact에.
+        Fact 경로         전부 Fact 하나에 있다. 대신 Calculation에만 있는 연산·분모 개념은
+                          판정할 대상 자체가 없다.
+
+    한 함수가 두 입력 타입을 모두 받으면 "이 인자는 이쪽 경로에서만 의미가 있다"는 분기가
+    함수 안에 쌓이고, 그 분기를 잘못 탄 호출 하나가 단위 검사를 건너뛴다. Q10은 guard①을
+    지나지 않아 단위 정규화 성공을 확인하는 자리가 guard② 하나뿐이므로
+    (agent_patterns.md "Q10처럼 Calculation 없이 Fact를 바로 견주는 경로에서는 여기가 유일한
+    guard"), 그 자리를 건너뛰면 천원과 원이 그대로 견줘진다.
 
 입력:
 - Contract의 Fact / CalculationResult
@@ -48,16 +81,19 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 
 from disclosure_agent.agent.answer_builder import (
     REASON_INCOMPARABLE_CALCULATION_INPUTS,
+    REASON_INCOMPARABLE_ENTITIES,
     REASON_INCOMPARABLE_PERIODS,
     REASON_UNUSABLE_CALCULATION_INPUT,
 )
 from disclosure_agent.common.enums import (
+    ComparisonRelation,
     FactAccountingScope,
     MetricConcept,
     ResultInputType,
 )
 from disclosure_agent.common.schemas import (
     CalculationResult,
+    ComparisonResult,
     Fact,
     ResultInputReference,
 )
@@ -68,9 +104,13 @@ __all__ = [
     "OPERATION_RATIO",
     "QUANTUM",
     "UNIT_PERCENTAGE_POINT",
+    "compare_calculations",
+    "compare_facts",
     "diff",
     "ratio",
     "validate_calculation_inputs",
+    "validate_cross_entity_comparability",
+    "validate_cross_entity_fact_comparability",
     "validate_temporal_comparability",
 ]
 
@@ -104,6 +144,12 @@ ROUNDING = ROUND_HALF_UP
 # 호출자가 전역 decimal context를 바꿔 두면 같은 입력이 다른 값을 낸다. 계산이 결정적이어야
 # 한다는 것이 이 모듈의 전제이므로 context를 국소적으로 고정한다.
 PRECISION = 28
+
+# 비율 Calculation 하나가 갖는 입력 건수. 분자와 분모다.
+#
+# ratio가 그 순서로 적고 _ratio_denominator가 그 순서를 되짚는다. 두 곳이 같은 값을 봐야
+# 하므로 상수로 둔다.
+RATIO_INPUT_COUNT = 2
 
 
 class CalculationBlockedError(RuntimeError):
@@ -283,7 +329,195 @@ def validate_calculation_inputs(
 
 # --------------------------------------------------------------------------
 # guard② — 비교 가능성 검증
+#
+# 축마다 함수가 따로 있고, 두 함수가 똑같이 요구하는 항목만 아래 primitive가 나눠 갖는다.
+# 공통 항목까지 각자 적으면 한쪽에만 검사가 추가되는 날이 오고, 그때 어느 쪽이 정본인지 알
+# 수 없다. 반대로 축마다 다른 항목(같은 기업인가 / 다른 기업인가, 다른 연도인가 / 같은
+# 연도인가)을 한 함수에 플래그로 묶으면, 플래그가 반대로 설정된 호출 하나가 조용히 통과한다.
 # --------------------------------------------------------------------------
+
+
+def _require_sources(
+    left_sources: Sequence[Fact],
+    right_sources: Sequence[Fact],
+    *,
+    reason: str,
+) -> None:
+    """원천 Fact 없이는 어느 항목도 판정할 수 없다."""
+    if not left_sources or not right_sources:
+        raise CalculationBlockedError(
+            reason,
+            "원천 Fact가 없는 파생값은 비교 가능성을 판정할 수 없습니다.",
+        )
+
+
+def _require_single_scope(
+    sources: Sequence[Fact],
+    *,
+    reason: str,
+    subject: str,
+) -> FactAccountingScope:
+    """두 파생값이 같은 회계기준에서 나왔는지 본다. 확정된 기준 하나를 돌려준다."""
+    scopes = {fact.accounting_scope for fact in sources}
+
+    if len(scopes) > 1:
+        raise CalculationBlockedError(
+            reason,
+            f"{subject}의 회계기준이 다릅니다: "
+            f"{', '.join(sorted(scope.value for scope in scopes))}. "
+            "연결 기준과 별도 기준의 비율은 견줄 수 없습니다.",
+        )
+
+    return scopes.pop()
+
+
+def _require_same_source_metrics(
+    left_sources: Sequence[Fact],
+    right_sources: Sequence[Fact],
+    *,
+    reason: str,
+    subject: str,
+) -> None:
+    """
+    같은 파생 개념에서 나왔는지를 원천 지표 구성으로 본다.
+
+    CalculationResult에는 어느 파생 개념이었는지가 없다. 값·단위·연산·참조뿐이므로, 두 비율이
+    같은 정의에서 나왔는지는 그 비율을 만든 원천 지표 집합으로만 확인할 수 있다. 분자·분모가
+    다르면 이름만 같고 정의가 다른 두 비율을 견주게 된다.
+    """
+    left_metrics = {fact.metric for fact in left_sources}
+    right_metrics = {fact.metric for fact in right_sources}
+
+    if left_metrics != right_metrics:
+        raise CalculationBlockedError(
+            reason,
+            f"{subject}의 원천 지표 구성이 다릅니다: "
+            f"{', '.join(sorted(metric.value for metric in left_metrics))} / "
+            f"{', '.join(sorted(metric.value for metric in right_metrics))}",
+        )
+
+
+def _require_same_operation(
+    left: CalculationResult,
+    right: CalculationResult,
+    *,
+    reason: str,
+    subject: str,
+) -> None:
+    """연산이 다르면 두 값이 같은 것을 재고 있지 않다."""
+    if left.operation != right.operation:
+        raise CalculationBlockedError(
+            reason,
+            f"{subject}의 연산이 다릅니다: {left.operation} / {right.operation}",
+        )
+
+
+def _require_expected_unit(
+    left: CalculationResult,
+    right: CalculationResult,
+    *,
+    expected_unit: str,
+    reason: str,
+    subject: str,
+) -> None:
+    """
+    두 값의 단위가 서로 같고, 호출자가 대응표에서 읽어 온 단위와도 같은지 본다.
+
+    "서로 같다"만 보지 않는 이유는 둘 다 같은 값으로 잘못 만들어진 경우를 통과시키기
+    때문이다. 기대 단위를 인자로 받는 이유는 이 파일이 파생 개념을 모르기 때문이며,
+    영업이익률의 결과 단위가 percent라는 사실은 agent.derived_metrics의 대응표에만 있다.
+    """
+    if left.unit != expected_unit or right.unit != expected_unit:
+        raise CalculationBlockedError(
+            reason,
+            f"{subject}의 단위가 {expected_unit}가 아닙니다: "
+            f"{left.unit!r} / {right.unit!r}",
+        )
+
+
+def _require_single_fiscal_year(
+    left_sources: Sequence[Fact],
+    right_sources: Sequence[Fact],
+    *,
+    reason: str,
+) -> tuple[set[int | None], set[int | None]]:
+    """
+    각 파생값이 회계연도 하나에서 나왔는지 본다.
+
+    한쪽이 여러 연도의 Fact에서 나왔다면 그 값은 기간별 값이 아니고, 그것을 다른 기간이나
+    다른 기업과 견주면 무엇과 무엇을 견줬는지 결과에 남지 않는다.
+    """
+    left_years = {fact.fiscal_year for fact in left_sources}
+    right_years = {fact.fiscal_year for fact in right_sources}
+
+    if len(left_years) > 1 or len(right_years) > 1:
+        raise CalculationBlockedError(
+            reason,
+            "한 파생값이 여러 회계연도의 Fact에서 나왔습니다. "
+            "기간별 값이 아니면 견줄 수 없습니다.",
+        )
+
+    return left_years, right_years
+
+
+def _require_single_company(
+    sources: Sequence[Fact],
+    *,
+    reason: str,
+    subject: str,
+) -> str:
+    """한 파생값이 기업 하나에서 나왔는지 본다. 확정된 기업명을 돌려준다."""
+    companies = {fact.company for fact in sources}
+
+    if len(companies) > 1:
+        raise CalculationBlockedError(
+            reason,
+            f"{subject}이 여러 기업의 Fact에서 나왔습니다: "
+            f"{', '.join(sorted(companies))}. "
+            "기업이 섞인 값은 어느 기업의 값도 아닙니다.",
+        )
+
+    return companies.pop()
+
+
+def _ratio_denominator(
+    calculation: CalculationResult,
+    sources: Sequence[Fact],
+    *,
+    reason: str,
+    subject: str,
+) -> Fact:
+    """
+    비율 Calculation이 실제로 분모로 쓴 Fact를 참조에서 되짚는다.
+
+    호출자가 넘긴 sources의 순서를 믿지 않는다. 순서로 고르면 sources를 뒤집어 넘긴 호출
+    하나가 분자를 분모로 읽고, 그래도 검사는 통과한다. ratio가 inputs를 분자·분모 순서로
+    적어 두므로 그 참조를 따라간다.
+    """
+    if len(calculation.inputs) != RATIO_INPUT_COUNT:
+        raise CalculationBlockedError(
+            reason,
+            f"{subject}의 비율 Calculation 입력이 {RATIO_INPUT_COUNT}건이 아닙니다: "
+            f"{len(calculation.inputs)}건. 분모를 특정할 수 없습니다.",
+        )
+
+    reference = calculation.inputs[1]
+
+    if reference.input_type is not ResultInputType.FACT:
+        raise CalculationBlockedError(
+            reason,
+            f"{subject}의 비율 분모가 Fact 참조가 아닙니다: {reference.input_type.value}.",
+        )
+
+    denominator = {fact.fact_id: fact for fact in sources}.get(reference.input_id)
+
+    if denominator is None:
+        raise CalculationBlockedError(
+            reason,
+            f"{subject}의 비율 분모 {reference.input_id!r}를 원천 Fact에서 찾지 못했습니다.",
+        )
+
+    return denominator
 
 
 def validate_temporal_comparability(
@@ -306,14 +540,13 @@ def validate_temporal_comparability(
         guard①은 한 연도 안에서 분자와 분모의 기준이 같은지만 본다. 2024년이 연결이고
         2025년이 별도여도 각 연도의 검사는 통과한다. 연도 사이의 어긋남은 여기서만 잡힌다.
 
+    이 함수 전용 조건은 둘이다. 같은 기업이어야 하고, 두 회계연도가 서로 달라야 한다. 둘 다
+    기업 간 비교에서는 반대이므로 validate_cross_entity_comparability를 따로 둔다.
+
     Raises:
         CalculationBlockedError: 규칙 하나라도 어긋난 경우.
     """
-    if not left_sources or not right_sources:
-        raise CalculationBlockedError(
-            REASON_INCOMPARABLE_PERIODS,
-            "원천 Fact가 없는 파생값은 비교 가능성을 판정할 수 없습니다.",
-        )
+    _require_sources(left_sources, right_sources, reason=REASON_INCOMPARABLE_PERIODS)
 
     sources = (*left_sources, *right_sources)
 
@@ -326,51 +559,30 @@ def validate_temporal_comparability(
             "시계열 비교는 같은 기업의 두 기간을 견줍니다.",
         )
 
-    scopes = {fact.accounting_scope for fact in sources}
+    _require_single_scope(sources, reason=REASON_INCOMPARABLE_PERIODS, subject="두 기간")
 
-    if len(scopes) > 1:
-        raise CalculationBlockedError(
-            REASON_INCOMPARABLE_PERIODS,
-            f"두 기간의 회계기준이 다릅니다: "
-            f"{', '.join(sorted(scope.value for scope in scopes))}. "
-            "연결 기준과 별도 기준의 비율은 견줄 수 없습니다.",
-        )
+    _require_same_source_metrics(
+        left_sources,
+        right_sources,
+        reason=REASON_INCOMPARABLE_PERIODS,
+        subject="두 기간",
+    )
 
-    # 같은 파생 개념에서 나왔는지는 원천 지표 구성으로 본다. 분자·분모가 다르면 이름만 같고
-    # 정의가 다른 두 비율을 견주게 된다.
-    left_metrics = {fact.metric for fact in left_sources}
-    right_metrics = {fact.metric for fact in right_sources}
+    _require_same_operation(
+        left, right, reason=REASON_INCOMPARABLE_PERIODS, subject="두 기간"
+    )
 
-    if left_metrics != right_metrics:
-        raise CalculationBlockedError(
-            REASON_INCOMPARABLE_PERIODS,
-            f"두 기간의 원천 지표 구성이 다릅니다: "
-            f"{', '.join(sorted(metric.value for metric in left_metrics))} / "
-            f"{', '.join(sorted(metric.value for metric in right_metrics))}",
-        )
+    _require_expected_unit(
+        left,
+        right,
+        expected_unit=expected_unit,
+        reason=REASON_INCOMPARABLE_PERIODS,
+        subject="두 기간",
+    )
 
-    if left.operation != right.operation:
-        raise CalculationBlockedError(
-            REASON_INCOMPARABLE_PERIODS,
-            f"두 기간의 연산이 다릅니다: {left.operation} / {right.operation}",
-        )
-
-    if left.unit != expected_unit or right.unit != expected_unit:
-        raise CalculationBlockedError(
-            REASON_INCOMPARABLE_PERIODS,
-            f"두 기간의 단위가 {expected_unit}가 아닙니다: "
-            f"{left.unit!r} / {right.unit!r}",
-        )
-
-    left_years = {fact.fiscal_year for fact in left_sources}
-    right_years = {fact.fiscal_year for fact in right_sources}
-
-    if len(left_years) > 1 or len(right_years) > 1:
-        raise CalculationBlockedError(
-            REASON_INCOMPARABLE_PERIODS,
-            "한 파생값이 여러 회계연도의 Fact에서 나왔습니다. "
-            "기간별 값이 아니면 변화량을 만들 수 없습니다.",
-        )
+    left_years, right_years = _require_single_fiscal_year(
+        left_sources, right_sources, reason=REASON_INCOMPARABLE_PERIODS
+    )
 
     if left_years == right_years:
         raise CalculationBlockedError(
@@ -378,6 +590,247 @@ def validate_temporal_comparability(
             f"두 파생값의 회계연도가 같습니다: {left_years.pop()}. "
             "같은 기간끼리는 변화량이 정의되지 않습니다.",
         )
+
+
+def validate_cross_entity_comparability(
+    *,
+    left: CalculationResult,
+    right: CalculationResult,
+    left_sources: Sequence[Fact],
+    right_sources: Sequence[Fact],
+    expected_unit: str,
+) -> None:
+    """
+    두 기업의 파생값을 함께 쓰기 직전에 견줄 수 있는지 본다.
+
+    validate_temporal_comparability를 그대로 쓰지 않는 이유:
+        그쪽은 "같은 기업"을 요구한다. 기업 간 비교에서는 서로 다른 두 기업이 정상 입력이므로
+        그 조건을 상속하면 정상 질문이 전부 막힌다(agent_patterns.md Pattern D 검증 조건,
+        evidence_and_answerability.md "동일 기업(1)은 Pattern C temporal comparison 전용").
+        회계연도 조건도 정반대다. 시계열은 서로 달라야 하고 기업 간 비교는 같아야 한다.
+
+    기업별 guard①으로는 잡히지 않는 것:
+        guard①은 한 기업 안에서 분자와 분모의 기업·기간·기준·단위가 맞는지만 본다. A사가
+        연결이고 B사가 별도여도, A사가 2025년이고 B사가 2024년이어도 각 기업의 검사는
+        통과한다. 기업 사이의 어긋남은 여기서만 잡힌다.
+
+    분모 개념을 따로 보는 이유(Pattern D 전용 조건 7):
+        원천 지표 구성 검사는 집합으로 본다. 분자와 분모가 뒤바뀐 두 비율은 그 집합이 같아서
+        통과하고, 뒤집힌 비율도 그럴듯한 백분율이다. 어느 Fact가 분모였는지는 Calculation의
+        참조에만 남아 있으므로 그 참조를 따라간다.
+
+    결산월 일치(조건 5)는 아직 보지 않는다:
+        Fact에도 Evidence에도 결산월을 담을 자리가 없고, manifest의 base_month는 확보 계층이
+        공시를 고를 때 쓰고 결과에 싣지 않는다. 없는 값을 추측해 검사하면 통과 여부가 실제
+        결산월과 무관해지므로, 자리가 생길 때까지 검사하지 않는 사실을 남긴다.
+
+    Raises:
+        CalculationBlockedError: 규칙 하나라도 어긋난 경우.
+    """
+    _require_sources(left_sources, right_sources, reason=REASON_INCOMPARABLE_ENTITIES)
+
+    # 판정 순서는 좁히는 순서를 따른다. 누구를 -> 언제 -> 어떤 기준으로 -> 무엇을 -> 어떻게.
+    left_company = _require_single_company(
+        left_sources, reason=REASON_INCOMPARABLE_ENTITIES, subject="좌측 파생값"
+    )
+
+    right_company = _require_single_company(
+        right_sources, reason=REASON_INCOMPARABLE_ENTITIES, subject="우측 파생값"
+    )
+
+    if left_company == right_company:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_ENTITIES,
+            f"두 파생값의 기업이 같습니다: {left_company}. "
+            "기업 간 비교는 서로 다른 두 기업을 견줍니다.",
+        )
+
+    left_years, right_years = _require_single_fiscal_year(
+        left_sources, right_sources, reason=REASON_INCOMPARABLE_ENTITIES
+    )
+
+    if left_years != right_years:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_ENTITIES,
+            f"두 기업의 회계연도가 다릅니다: {left_years.pop()} / {right_years.pop()}. "
+            "기업 간 비교는 같은 기간의 두 기업을 견줍니다.",
+        )
+
+    sources = (*left_sources, *right_sources)
+
+    scope = _require_single_scope(
+        sources, reason=REASON_INCOMPARABLE_ENTITIES, subject="두 기업"
+    )
+
+    # 기준을 확정하지 못한 값끼리는 "같다"고 말할 수 없다. 두 기업이 모두 unknown이면 위
+    # 검사는 통과하지만, 한쪽이 연결이고 다른 쪽이 별도일 가능성이 그대로 남는다.
+    #
+    # guard①이 기업별로 이미 막는다. 그래도 여기서 다시 보는 이유는, 이 함수가 guard①을
+    # 거치지 않은 입력으로도 불릴 수 있고 그때 이 검사가 유일한 방어선이기 때문이다.
+    if scope is FactAccountingScope.UNKNOWN:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_ENTITIES,
+            "회계기준을 확정하지 못한 Fact에서 나온 파생값은 견주지 않습니다. "
+            "연결과 별도를 섞어도 그럴듯한 값이 나옵니다.",
+        )
+
+    _require_same_source_metrics(
+        left_sources,
+        right_sources,
+        reason=REASON_INCOMPARABLE_ENTITIES,
+        subject="두 기업",
+    )
+
+    _require_same_operation(
+        left, right, reason=REASON_INCOMPARABLE_ENTITIES, subject="두 기업"
+    )
+
+    _require_expected_unit(
+        left,
+        right,
+        expected_unit=expected_unit,
+        reason=REASON_INCOMPARABLE_ENTITIES,
+        subject="두 기업",
+    )
+
+    # 분모 개념 검사는 비율에만 적용된다. 집계(Q12)처럼 분모가 없는 연산에는 확인할 것이
+    # 없고, 없는 것을 요구하면 그 연산을 붙이는 쪽이 이 guard 전체를 우회하게 된다.
+    #
+    # 위에서 두 연산이 같다는 것을 이미 확인했으므로 한쪽만 본다.
+    if left.operation != OPERATION_RATIO:
+        return
+
+    left_denominator = _ratio_denominator(
+        left, left_sources, reason=REASON_INCOMPARABLE_ENTITIES, subject="좌측 파생값"
+    )
+
+    right_denominator = _ratio_denominator(
+        right, right_sources, reason=REASON_INCOMPARABLE_ENTITIES, subject="우측 파생값"
+    )
+
+    if left_denominator.metric is not right_denominator.metric:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_ENTITIES,
+            f"두 기업의 분모 개념이 다릅니다: "
+            f"{left_denominator.metric.value} / {right_denominator.metric.value}. "
+            "분모가 다른 두 비율은 이름이 같아도 같은 지표가 아닙니다.",
+        )
+
+
+def validate_cross_entity_fact_comparability(
+    *,
+    left: Fact,
+    right: Fact,
+    expected_metric: MetricConcept,
+    expected_fiscal_year: int,
+) -> None:
+    """
+    두 기업의 원천 Fact를 함께 쓰기 직전에 견줄 수 있는지 본다(Q10).
+
+    이 경로에서 guard가 하나뿐인 이유:
+        Q10은 수치형 파생값을 만들지 않으므로 guard①을 지나지 않는다. 단위 정규화 성공(C8)을
+        확인하는 자리가 여기 하나이며, 기업 간 단위 표기 차이는 실측 코퍼스에서 실제로
+        관찰된다(한쪽은 천원 표기, 다른 쪽은 원 표기). 이 검사를 건너뛰면 자릿수가 세 자리
+        어긋난 값끼리 견주고, 그 우열 판정도 그럴듯하다
+        (agent_patterns.md Pattern D 검증 조건 4, representative_questions.md 유형 4).
+
+    요청한 지표와 회계연도를 함께 받는 이유:
+        두 Fact가 서로 일치하는 것만으로는 부족하다. 둘 다 2024년 값이면 서로는 일치하지만
+        2025년을 물은 질문에는 답하지 않은 결과가 되고, 그 사실이 결과 어디에도 남지 않는다.
+        확보 계층이 요청한 조합을 그대로 돌려주므로 정상 경로에서는 어긋나지 않지만, 확보
+        계약이 바뀌었을 때 그 사실이 조용한 오답이 아니라 정지 지점으로 드러나야 한다.
+
+        Calculation 경로가 expected_unit을 받는 것과 같은 자리다. 그쪽은 대응표가 정한 결과
+        단위를 받고, 이쪽은 계획이 요청한 지표와 기간을 받는다. 어느 쪽도 이 파일이 정하지
+        않는다.
+
+    연산과 분모 개념은 판정하지 않는다. 원천 Fact에는 그 둘이 없다. 없는 것을 요구하면 이
+    경로가 guard를 우회해야만 실행되고, 우회하는 순간 단위 검사도 함께 사라진다.
+
+    결산월 일치(조건 5)는 아직 보지 않는다. Fact에도 Evidence에도 결산월을 담을 자리가 없고,
+    manifest의 base_month는 확보 계층이 공시를 고를 때 쓰고 결과에 싣지 않는다. 없는 값을
+    추측해 검사하면 통과 여부가 실제 결산월과 무관해진다. Calculation 경로가 같은 이유로
+    남겨 둔 것과 같은 항목이다.
+
+    Raises:
+        CalculationBlockedError: 규칙 하나라도 어긋난 경우.
+    """
+    # 판정 순서는 좁히는 순서를 따른다. 누구를 -> 무엇을 -> 언제 -> 어떤 기준으로 ->
+    # 어떤 단위로 -> 어떤 값으로. Calculation 경로와 같은 순서다.
+    if left.company == right.company:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_ENTITIES,
+            f"두 Fact의 기업이 같습니다: {left.company}. "
+            "기업 간 비교는 서로 다른 두 기업을 견줍니다.",
+        )
+
+    if left.metric is not right.metric:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_ENTITIES,
+            f"두 기업의 지표가 다릅니다: {left.metric.value} / {right.metric.value}",
+        )
+
+    # 서로 같은 것만 보지 않는다. 둘 다 같은 값으로 잘못 확보된 경우를 통과시키기 때문이며,
+    # _require_expected_unit이 Calculation 경로에서 기대 단위를 함께 보는 것과 같은 이유다.
+    if left.metric is not expected_metric:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_ENTITIES,
+            f"질문이 요청한 지표는 {expected_metric.value}인데 "
+            f"{left.metric.value}를 받았습니다.",
+        )
+
+    if left.fiscal_year != right.fiscal_year:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_ENTITIES,
+            f"두 기업의 회계연도가 다릅니다: {left.fiscal_year} / {right.fiscal_year}. "
+            "기업 간 비교는 같은 기간의 두 기업을 견줍니다.",
+        )
+
+    if left.fiscal_year != expected_fiscal_year:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_ENTITIES,
+            f"질문이 요청한 회계연도는 {expected_fiscal_year}인데 "
+            f"{left.fiscal_year} 회계연도의 값을 받았습니다.",
+        )
+
+    scope = _require_single_scope(
+        (left, right), reason=REASON_INCOMPARABLE_ENTITIES, subject="두 기업"
+    )
+
+    # 기준을 확정하지 못한 값끼리는 "같다"고 말할 수 없다. 두 기업이 모두 unknown이면 위
+    # 검사는 통과하지만, 한쪽이 연결이고 다른 쪽이 별도일 가능성이 그대로 남는다.
+    if scope is FactAccountingScope.UNKNOWN:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_ENTITIES,
+            "회계기준을 확정하지 못한 Fact로는 견주지 않습니다. "
+            "연결과 별도를 섞어도 그럴듯한 대소 관계가 나옵니다.",
+        )
+
+    if left.normalized_unit is None or right.normalized_unit is None:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_ENTITIES,
+            "정규화 단위가 없는 Fact로는 견주지 않습니다: "
+            f"{left.fact_id!r}={left.normalized_unit!r} "
+            f"{right.fact_id!r}={right.normalized_unit!r}",
+        )
+
+    if left.normalized_unit != right.normalized_unit:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_ENTITIES,
+            f"두 기업의 정규화 단위가 다릅니다: "
+            f"{left.normalized_unit} / {right.normalized_unit}. "
+            "정규화에 실패한 값끼리 견주면 자릿수가 어긋난 우열이 나갑니다.",
+        )
+
+    # 값 자체가 쓸 수 있는지는 마지막에 본다. 판정 직전에 확인하지 않으면 대소를 가리는
+    # 자리에서 터지고, 그때는 어느 입력이 문제였는지가 결과에 남지 않는다.
+    #
+    # 여기서 나가는 사유는 위와 다르다. unusable_calculation_input은 "그 값으로는 산술이
+    # 성립하지 않는다"이고 대응표에 없으므로 실행 중단으로 남는다. 코퍼스에 답이 없다는
+    # 판정이 아니기 때문이며, guard①이 같은 자리에서 같은 사유를 쓰는 것과 같다.
+    _decimal(left.normalized_value, label=f"좌측 Fact {left.fact_id!r}")
+
+    _decimal(right.normalized_value, label=f"우측 Fact {right.fact_id!r}")
 
 
 # --------------------------------------------------------------------------
@@ -466,4 +919,114 @@ def diff(
         value=str(_quantize(value)),
         unit=UNIT_PERCENTAGE_POINT,
         evidence_ids=_merged_evidence_ids(old.evidence_ids, new.evidence_ids),
+    )
+
+
+# --------------------------------------------------------------------------
+# 관계 판정
+#
+# 입력 타입마다 함수가 따로 있고(Calculation 2건 / Fact 2건), 대소를 가리는 규칙 자체는
+# 아래 primitive 하나가 갖는다. 규칙을 각자 적으면 한쪽이 '같다'를 다루는 방식만 달라지는
+# 날이 오고, 그때 어느 쪽이 정본인지 알 수 없다.
+# --------------------------------------------------------------------------
+
+
+def _relation(left: Decimal, right: Decimal) -> ComparisonRelation:
+    """
+    두 값의 대소 관계.
+
+    같으면 equal이다. 표기가 달라도 값이 같으면 같다("100"과 "100.00"). Decimal의 비교가
+    이미 그 규칙이므로 문자열을 맞추지 않는다.
+
+    not_comparable·unknown 같은 값을 돌려주지 않는다. ComparisonResult는 비교가 정상적으로
+    성공한 경우에만 존재하며, 견줄 수 없다는 판정은 guard②가 예외로 올린다
+    (agent_patterns.md Comparison Judgment와 ComparisonResult).
+    """
+    if left > right:
+        return ComparisonRelation.LEFT_GREATER
+
+    if left < right:
+        return ComparisonRelation.RIGHT_GREATER
+
+    return ComparisonRelation.EQUAL
+
+
+def compare_calculations(
+    *,
+    comparison_id: str,
+    left: CalculationResult,
+    right: CalculationResult,
+) -> ComparisonResult:
+    """
+    확정된 두 파생값의 대소 관계를 판정한다.
+
+    비교 가능성 검증은 하지 않는다. 호출자가 guard②를 먼저 부르며, 두 판정을 한 함수에 섞으면
+    "검증만 하고 판정은 하지 않는" 경로를 시험할 수 없다. ratio가 guard①과 나뉘어 있는 것과
+    같은 자리다.
+
+    저장된 값에서 판정한다. 반올림 전 중간값으로 가리면 답변에 실린 두 수치로 검산했을 때
+    관계가 뒤집혀 보일 수 있다. 11.5895와 11.5894처럼 저장 자릿수에서 갈리는 두 값이 그
+    경우이며, diff가 같은 이유로 저장된 값에서 빼는 것과 같다.
+
+    수치형 파생 결과를 만들지 않는다:
+        두 값의 차이를 계산하지 않는다. Q11은 "어디가 더 높은가"를 물을 뿐 차이 수치를 묻지
+        않으며, 묻지 않은 값을 만들면 Calculation 개수가 대응표와 어긋난다
+        (evidence_and_answerability.md Calculation cardinality: Q11은 Calculation 2건).
+        차이를 물은 질문이 생기면 그때 diff가 그 값을 만들고, 그 결과는 Calculation으로 센다.
+
+    evidence_ids를 담지 않는다. ComparisonResult에 그 자리가 없으며, 근거는 이 판정이
+    참조하는 두 Calculation이 이미 들고 있다.
+    """
+    left_value = _decimal(left.value, label=f"좌측 Calculation {left.calculation_id!r}")
+
+    right_value = _decimal(
+        right.value, label=f"우측 Calculation {right.calculation_id!r}"
+    )
+
+    return ComparisonResult(
+        comparison_id=comparison_id,
+        left=_calculation_reference(left),
+        right=_calculation_reference(right),
+        relation=_relation(left_value, right_value),
+    )
+
+
+def compare_facts(
+    *,
+    comparison_id: str,
+    left: Fact,
+    right: Fact,
+) -> ComparisonResult:
+    """
+    확정된 두 원천 Fact의 대소 관계를 판정한다(Q10).
+
+    비교 가능성 검증은 하지 않는다. 호출자가 validate_cross_entity_fact_comparability를 먼저
+    부르며, 두 판정을 한 함수에 섞으면 "검증만 하고 판정은 하지 않는" 경로를 시험할 수 없다.
+    compare_calculations가 guard②와 나뉘어 있는 것과 같은 자리다.
+
+    정규화 값에서 판정한다. 원문 값(raw_value)으로 가리면 단위 표기가 다른 두 기업에서
+    자릿수가 어긋난 우열이 나온다. 원문 표기를 답변에 병기하는 일은 answer_builder의 몫이고,
+    이 판정이 보는 것은 정규화를 마친 값이다(agent_patterns.md Pattern D 출력 요구사항).
+
+    수치형 파생 결과를 만들지 않는다:
+        두 값의 차이를 계산하지 않는다. Q10은 "비교해줘"라고 물을 뿐 차이 수치를 묻지 않으며,
+        묻지 않은 값을 만들면 Calculation 개수가 대응표와 어긋난다
+        (evidence_and_answerability.md Calculation cardinality: Q10은 Calculation 0).
+
+    evidence_ids를 담지 않는다. ComparisonResult에 그 자리가 없으며, 근거는 이 판정이
+    참조하는 두 Fact가 이미 들고 있다.
+    """
+    left_value = _decimal(
+        left.normalized_value, label=f"좌측 Fact {left.fact_id!r}"
+    )
+
+    right_value = _decimal(
+        right.normalized_value, label=f"우측 Fact {right.fact_id!r}"
+    )
+
+    return ComparisonResult(
+        comparison_id=comparison_id,
+        left=_fact_reference(left),
+        right=_fact_reference(right),
+        relation=_relation(left_value, right_value),
     )

@@ -151,6 +151,36 @@ def test_facility_investment_correction_fields_are_canonicalized(tmp_path: Path)
     assert changes[0]["after"] == "2025-04-01"
     assert changes[1]["raw_unit"] == "원"
 
+
+def test_supply_contract_single_field_corpus_aliases_are_canonicalized(
+    tmp_path: Path,
+) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <span>정정신고(보고)</span><span>단일판매ㆍ공급계약 체결</span>
+        <table id="XFormD8_Form0_RepeatTable0">
+          <tr><td>정정항목</td><td>정정전</td><td>정정후</td></tr>
+          <tr><td>2. 계약내역 - 계약금액(원)</td><td>1</td><td>2</td></tr>
+          <tr><td>2.계약내역 - 매출액대비(%)</td><td>3</td><td>4</td></tr>
+          <tr><td>8. 공시유보 관련내용 - 유보기한</td><td>A</td><td>B</td></tr>
+        </table>
+        """,
+    )
+
+    changes = extract_event(document)["correction"]["changes"]
+
+    assert [change["canonical_field"] for change in changes] == [
+        "contract_amount",
+        "revenue_ratio",
+        "disclosure_hold_until",
+    ]
+    assert [(change["before"], change["after"]) for change in changes] == [
+        ("1", "2"),
+        ("3", "4"),
+        ("A", "B"),
+    ]
+
 def test_parser_does_not_treat_parenthetical_label_as_unit(
     tmp_path: Path,
 ) -> None:

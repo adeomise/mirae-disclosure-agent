@@ -26,7 +26,6 @@ from pathlib import Path
 import pytest
 
 from disclosure_agent.agent import query_analyzer
-from disclosure_agent.agent.answer_builder import STAGE_ROUTING
 from disclosure_agent.agent.derived_metrics import (
     DerivedMetric,
     get_derived_metric_spec,
@@ -42,11 +41,14 @@ from disclosure_agent.agent.query_analyzer import (
     build_query_plan,
 )
 from disclosure_agent.agent.router import (
-    REASON_UNIMPLEMENTED_INTENT,
     answer_question,
     supported_intents,
 )
-from disclosure_agent.common.enums import ExecutionStatus, MetricConcept
+from disclosure_agent.common.enums import (
+    AnswerabilityStatus,
+    ExecutionStatus,
+    MetricConcept,
+)
 
 CORPUS_ROOT_ENV = "DISCLOSURE_CORPUS_ROOT"
 
@@ -335,28 +337,41 @@ def test_single_period_metric_questions_still_stop_at_the_query_plan(
 # --------------------------------------------------------------------------
 # 6. 실행 — 같은 대응표를 쓰는 두 Pattern의 상태가 다르다
 #
-# Pattern C(기간 축)는 등록됐고 Pattern D(기업 축)는 아직 없다. 대응표는 하나이지만 그것을
-# 읽어 실행하는 쪽은 Pattern마다 따로 붙는다는 것을 여기서 고정한다.
+# 두 축 모두 handler가 등록됐고 같은 대응표(agent.derived_metrics)에서 영업이익률을 읽는다.
+# 다만 그것을 확보하는 축이 다르다. Pattern C는 한 기업의 두 기간을, Pattern D는 두 기업의
+# 한 기간을 모은다. 대응표는 하나이지만 그것을 읽어 실행하는 쪽은 Pattern마다 따로 붙는다는
+# 것을 여기서 고정한다.
 #
-# Pattern C가 실제로 만드는 값과 개수는 tests/integration/test_pattern_c.py가 맡는다. 이
-# 파일은 대응표와 계획을 보는 자리이므로 실행 결과의 세부까지 다시 재지 않는다.
+# 각 Pattern이 실제로 만드는 값과 개수는 tests/integration/test_pattern_c.py와 Pattern D의
+# 전용 테스트가 맡는다. 이 파일은 대응표와 계획을 보는 자리이므로 실행 결과의 세부까지 다시
+# 재지 않는다.
 # --------------------------------------------------------------------------
 
 
-def test_only_the_temporal_axis_gained_a_handler() -> None:
-    """계획을 담게 됐다고 두 Pattern이 함께 실행 가능해진 것은 아니다."""
-    assert supported_intents() == ("event_history", "single_fact", "temporal_compare")
+def test_both_comparison_axes_are_routable() -> None:
+    """두 축 모두 handler가 붙었다. 실행 범위가 같아진 것은 아니다."""
+    assert supported_intents() == (
+        "cross_entity_compare",
+        "event_history",
+        "single_fact",
+        "temporal_compare",
+    )
 
 
-def test_cross_entity_derived_metric_question_is_still_blocked_at_routing(
+def test_cross_entity_derived_metric_question_invents_no_value_without_sources(
     synthetic_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
     """
-    같은 파생 개념이라도 기업 축 비교는 아직 실행되지 않는다.
+    기업 축 비교도 대응표를 원천 지표로 펼쳐 기업마다 확보한다.
 
-    facts와 evidence가 비어 있어야 한다. 하나라도 남으면 계산 없이 원천 값 하나를 골라
-    답했다는 뜻이다.
+    합성 코퍼스에는 영업이익 본표가 없어 확보가 끝나지 않는다. 그때 값을 하나도 만들지
+    않는다는 것이 여기서 고정하는 성질이다. 하나라도 남으면 확보하지 못한 기업을 빼고
+    남은 한 곳으로 답했다는 뜻이다.
+
+    정지 단계는 고정하지 않는다. 확보가 어디에서 멈추는지는 합성 fixture가 무엇을 담고
+    있느냐에 달렸고, 그 자리가 옮겨져도 '값을 만들지 않는다'는 성질은 그대로여야 한다.
+    Pattern D 자체의 정지 지점은 그 Pattern의 전용 테스트가 맡는다.
     """
     result = answer_question(
         f"{SYNTHETIC_COMPANY}랑 테스트전자 중에 2025년 영업이익률이 더 높은 곳은 어디야?",
@@ -364,47 +379,40 @@ def test_cross_entity_derived_metric_question_is_still_blocked_at_routing(
         manifest_path=synthetic_manifest_path,
     )
 
-    assert result.execution_status is ExecutionStatus.BLOCKED
-    assert result.answerability_status is None
+    assert result.answerability_status is not AnswerabilityStatus.ANSWERABLE
     assert result.facts == []
     assert result.evidence == []
     assert result.calculations == []
-
-    issue = result.execution_issue
-
-    assert issue is not None
-    assert issue.stage == STAGE_ROUTING
-    assert issue.reason == REASON_UNIMPLEMENTED_INTENT
+    assert result.comparisons == []
 
 
 @pytest.mark.corpus
-def test_q08_is_answered_and_q11_is_still_blocked_in_the_actual_corpus() -> None:
+def test_both_axes_answer_the_same_derived_metric_in_the_actual_corpus() -> None:
     """
-    대표 질문 원문 그대로 실행해 두 축의 상태 차이를 본다.
+    대표 질문 원문 그대로 실행해 두 축이 같은 대응표로 각각 답하는지 본다.
 
-    Q08은 계산까지 끝나고, Q11은 Pattern D가 없어 routing에서 막힌다. 막힌 쪽에 값이 하나도
-    없어야 한다는 것이 이 파일이 계속 지키는 성질이다.
+    Q08은 한 기업의 두 기간을, Q11은 두 기업의 한 기간을 견준다. 무엇을 확보하고 무엇을
+    나눌지는 둘 다 agent.derived_metrics의 같은 항목에서 나온다.
+
+    개수는 여기서 재지 않는다. Q08의 Calculation 3건과 Q11의 Calculation 2건 · Comparison
+    1건은 각 Pattern의 전용 테스트가 고정한다. 이 파일이 보는 것은 '대응표 하나가 두 축
+    모두를 먹인다'까지다.
     """
     corpus_root = _resolve_corpus_root()
 
     if corpus_root is None:
         pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
 
-    answered = answer_question(Q08, corpus_root=corpus_root)
+    temporal = answer_question(Q08, corpus_root=corpus_root)
 
-    assert answered.execution_status is ExecutionStatus.COMPLETED
-    assert answered.execution_issue is None
-    assert answered.calculations
+    assert temporal.execution_status is ExecutionStatus.COMPLETED
+    assert temporal.execution_issue is None
+    assert temporal.calculations
 
-    blocked = answer_question(Q11, corpus_root=corpus_root)
+    cross_entity = answer_question(Q11, corpus_root=corpus_root)
 
-    assert blocked.execution_status is ExecutionStatus.BLOCKED
-    assert blocked.facts == []
-    assert blocked.evidence == []
-    assert blocked.calculations == []
-
-    issue = blocked.execution_issue
-
-    assert issue is not None
-    assert issue.stage == STAGE_ROUTING
-    assert issue.reason == REASON_UNIMPLEMENTED_INTENT
+    assert cross_entity.execution_status is ExecutionStatus.COMPLETED
+    assert cross_entity.execution_issue is None
+    assert cross_entity.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert cross_entity.calculations
+    assert cross_entity.comparisons

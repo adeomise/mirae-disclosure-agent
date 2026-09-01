@@ -41,9 +41,12 @@ Agent가 **답하지 않아야 할 질문에 답하지 않게** 하고, 거부�
 - 자연어 거부 문장 생성 — 이 문서가 다루는 것은 판정과 그 Contract 표현까지입니다. 거부 문장
   자체는 `answer_builder.build_answer_response`가 결정론적으로 만들며, 지켜야 할 원칙은 §8에
   있습니다
-- 응답 단계의 PII 필터링(C15) — [open_decisions.md](open_decisions.md) D6에 걸려 있습니다
-- 공시유보(`WITHHELD_IN_SOURCE`) 처리 — Pattern E/A 실행 중의 부분 거부이며 Parser 결과에
-  의존합니다
+- 응답 단계의 PII 필터링(C15) — 정책은 [open_decisions.md](open_decisions.md) **D6-a에서
+  확정**됐습니다(보유 ACODE allowlist · downstream 비승격 · fail-closed). 구현은 Q03 extractor
+  PR의 몫이며 Pattern F Gate가 아닙니다
+- 공시유보(`WITHHELD_IN_SOURCE`) 처리 — Contract 자리와 판정 의미는 **D9에서 확정**됐습니다.
+  판정 자체는 Pattern E/A 실행 중의 부분 거부이고 Parser 결과에 의존하므로 여전히 본 문서
+  범위 밖입니다
 - HyperCLOVA X 프롬프트 수준의 방어 — 결정론적 Gate가 먼저입니다
 
 ## 3. Safety / Information-limit taxonomy
@@ -189,16 +192,19 @@ Pattern F가 필요로 하던 세 값은 PR #29에서 추가됐습니다. **F-D1
 | `OUT_OF_DATA_RANGE` | F1 (미래 방향) | **있음** (PR #29) | **구현됨** (`agent/safety.py`) |
 | `OUT_OF_SCOPE_DATA` | F2 | **있음** (PR #29) | **구현됨** (`agent/safety.py`) |
 | `OUT_OF_SCOPE_POLICY` | F3, F4 | **있음** (PR #29) | **구현됨** (`agent/safety.py`) |
-| `WITHHELD_IN_SOURCE` | Pattern A/E 실행 중 부분 거부 | 없음 | – |
-| `NOT_COMPARABLE` | Pattern C/D 실행 중 | 없음 | – |
+| `WITHHELD_IN_SOURCE` | Pattern A/E 실행 중 부분 거부 | **있음** (D9) | 미구현 |
+| `NOT_COMPARABLE` | Pattern C/D 실행 중 | **있음** | **구현됨** (`agent/normalization.py`) |
 
 **본 문서와 테스트 명세는 Contract에 없는 값을 임의로 만들어 쓰지 않습니다.** `NOT_FOUND`로
 근사하지도 않습니다. `NOT_FOUND`는 "문서는 있는데 찾지 못했다"(미확정)이고
 `OUT_OF_DATA_RANGE`는 "보유 범위 밖이라 있을 수 없다"(확정)이므로, 근사하는 순간 두 실패가
 한 지표로 묶여 `evidence_and_answerability.md`가 세운 구분이 무너집니다.
 
-대응 값이 아직 없는 범주(`WITHHELD_IN_SOURCE` · `NOT_COMPARABLE`)에는
-`agent/normalization.py`의 대응표 규약을 그대로 씁니다.
+**대응 값이 없는 범주는 현재 없습니다.** 위 다섯 사유 모두 `AnswerabilityReason`에 자리가
+있습니다. `WITHHELD_IN_SOURCE`만 아직 production 판정이 없으며, 그것은 Contract 문제가 아니라
+Parser 쪽 미구현입니다.
+
+새 범주가 생겨 대응 값이 없을 때에는 `agent/normalization.py`의 대응표 규약을 그대로 씁니다.
 
 > 대응하는 Contract enum이 없으면 `answerability_reason`을 비우고, 판정 근거는
 > `answerability_detail`에 원문 그대로 남긴다. Contract에 값이 생기면 대응표 한 줄만 바뀐다.
@@ -388,7 +394,7 @@ F3·F4 구현에서 실제로 그렇게 했고(8개 케이스), F1·F2 구현(�
 | **F-D2** | 정책 거부를 `COMPLETED`로 볼 것인가 `BLOCKED`로 볼 것인가 | 팀원 3 | ~~본 문서는 `COMPLETED`를 제안합니다~~ **해소.** F1~F4 Answerability Gate 판정은 `ExecutionStatus.COMPLETED` + `AnswerabilityStatus.UNANSWERABLE`로 확정됐습니다. Gate가 판정을 끝냈고 막힌 것이 아니기 때문입니다 |
 | **F-D3** | 거부 사유가 겹칠 때의 우선순위 | 팀 | §3.4를 제안값으로 둡니다. 평가 채점이 사유 코드를 요구하면 확정이 필요합니다 |
 | **F-D4** | 코퍼스 기간 경계를 manifest에서 유도할 것인가 별도 메타데이터로 둘 것인가 | 팀원 1·3 | **미결.** 상수로 박으면 코퍼스 갱신 시 확정 진술이 거짓이 됩니다. 현재 F1 구현은 `safety.DEFAULT_CORPUS_COVERAGE`(2026년 3월)를 쓰되 `screen_question(coverage=...)` 인자로 뽑아 두었습니다. Gate가 manifest 조회보다 앞이어야 한다는 §3.4 때문에 여기서 파일을 열 수 없으므로, 유도한 경계를 호출부가 주입하는 형태가 됩니다. 결정이 나도 판정 규칙은 바뀌지 않습니다 |
-| **F-D5** | `WITHHELD_IN_SOURCE`(공시유보)를 Pattern F가 다룰 것인가 | 팀원 1 | Q14·Q02 계열. Event Parser 결과에 의존하며 본 문서 범위 밖입니다 |
+| **F-D5** | `WITHHELD_IN_SOURCE`(공시유보)를 Pattern F가 다룰 것인가 | 팀원 1 | **해소.** [open_decisions.md](open_decisions.md) D9가 사유를 Contract에 넣고 상태 대응(일부 유보 → `PARTIALLY_ANSWERABLE`, 전체 유보 → `UNANSWERABLE`)을 확정했습니다. 판정 지점은 Pattern F Gate가 아니라 Pattern A/E 실행 중이므로 본 문서 범위 밖입니다 |
 | **F-D6** | Pattern C의 상대 기간 해석과 F4의 미래 차단을 같은 PR로 묶을 것인가 | 팀 | ~~"내년"을 해석 가능하게 만드는 순간 F4-02가 통과합니다~~ **해소.** Gate가 `build_query_plan`보다 앞이므로 F4-02는 상대 기간 해석에 도달하지 않습니다. 두 작업을 같은 PR로 묶을 필요가 없어졌습니다 |
 | **F-D7** | 안전 판정을 규칙 기반으로만 둘 것인가 LLM 판정을 더할 것인가 | 팀 | 현재 파이프라인은 결정론적입니다. 규칙 기반 Gate를 먼저 완성한 뒤 재판단할 것을 제안합니다 |
 

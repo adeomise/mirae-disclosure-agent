@@ -1,8 +1,8 @@
 # Fact·Evidence와 답변 가능성
 
 18개 대표 질문을 기준으로 Fact와 Evidence의 책임을 나누고, 답변 가능·불가능 판정 체계를
-정리합니다. **본 문서는 초안이며 확정 규범이 아닙니다.** 아래 상태·사유 코드 목록과 최소 요건은
-팀 검토를 거쳐 확정합니다.
+정리합니다. **아래 상태·사유 코드 목록은 확정됐으며** `common/enums.py`가 정본입니다. 최소 요건
+표는 아직 초안이고 `Pending` 표시가 있는 행은 팀 검토를 거쳐 확정합니다.
 
 문서군 표기는 [query_plan.md](query_plan.md)의 대응을 따르고, 문서 내부 구조는 **Section**으로
 표기합니다. Capability 이름은 [agent_patterns.md](agent_patterns.md)를 정본으로 사용합니다.
@@ -53,7 +53,7 @@ Fact는 "무엇이 사실인가"를, Evidence는 "그것을 어디서 확인할 
 | 4 기업 간 파생지표 (Q11) | 4 | 2~4 | 확정 | 기업별 비율 **Calculation 2** → Comparison Judgment → ComparisonResult 1건 |
 | 4 기업 간 집계 (Q12) | 기업별 투자 건 수만큼 (합계 3 이상) | **합산에 포함된 투자 건별 1 이상**. 값을 확정한 정정공시가 있으면 그 문서도 포함 | 확정 | 기업별 합계 **Calculation 2** → Comparison Judgment → ComparisonResult 1건. 합계는 해당 기업의 건별 Fact 전부 참조 |
 | 5 단일 필드 정정 (Q13) | 2 (변경 전·후) | 2 이상 (원공시와 정정공시) | 확정 | 변경점은 두 Fact 모두 참조 |
-| 5 최종 상태 (Q14) | 3 이상 | 3 이상 (체인 전 문서) | 확정 | 상태 판정은 체인 전체 참조 |
+| 5 최종 상태 (Q14) | 3 이상 | 3 이상 (체인 전 문서) | 확정 | 상태 판정은 체인 전체 참조. **루트가 1건으로 확정된 경우의 요건**이며, 현재 Q14 질문처럼 루트가 복수면 이 요건에 닿지 않고 `UNRESOLVED`로 판정한다(D8) |
 | 5 다중 변경 (Q15) | 4 이상 | 체인 전 문서 | 확정 | 필드별 궤적은 해당 필드가 등장한 모든 문서 참조 |
 | 6 답변 불가능 (Q16~Q18) | 0 | 0 | 확정 | 계산 없음 |
 
@@ -154,8 +154,17 @@ Evidence    = 원본과 정정 공시 전량
 | 상태 | 의미 | 해당 문항 |
 |---|---|---|
 | `ANSWERABLE` | 요구 정보를 확보했고 Evidence가 완비됨 | Q01~Q13, Q15 |
-| `PARTIALLY_ANSWERABLE` | 일부만 확보. 확보분은 답하고 미확보분을 명시 | Q14의 일부, 체인 미완결 사례, Q12에서 일부 건의 최신값 미확정 시 |
+| `PARTIALLY_ANSWERABLE` | 일부만 확보. 확보분은 답하고 미확보분을 명시 | 체인 미완결 사례, 질문에 필요한 일부 field가 원문에서 유보된 경우(D9 case A), Q12에서 일부 건의 최신값 미확정 시 |
+| `UNRESOLVED` | 후보를 찾았으나 하나로 좁히지 못함. "정보가 없다"와 다름 | Q14, 루트 이벤트가 복수인 사례 |
 | `UNANSWERABLE` | 답변 불가 | Q16 Q17 Q18 |
+
+`UNRESOLVED`는 Contract v0.1의 네 번째 상태입니다. `UNANSWERABLE`과 뭉치지 않습니다. 전자는
+질문을 좁히면 풀리고 후자는 좁혀도 풀리지 않으므로, 사용자가 할 수 있는 다음 행동이 다릅니다.
+
+**Q14는 `UNRESOLVED` + `AMBIGUOUS_MATCH`입니다.** 같은 기업·같은 제출일·같은 계약상대방으로
+원공시가 2건 이상이고 질문이 둘을 구분할 조건을 담고 있지 않기 때문입니다. 후속 정정·해지
+체인이 한쪽에만 있다는 이유로 루트를 역으로 고르지 않습니다
+([open_decisions.md](open_decisions.md) D8).
 
 **Comparability Validation 실패** — 비교 가능성 항목은 각각 필요한 연산 직전에 확인하며, Pattern
 전용 항목은 그 Pattern에서만 적용합니다(동일 기업은 Pattern C 전용, 결산월 일치는 Pattern D 전용)
@@ -168,7 +177,7 @@ stage/detail에 매핑할지는 **별도 Contract PR에서 확정**합니다.
 
 ## 사유 코드
 
-아래 목록은 18문항에서 도출한 최소 집합이며 **확정본이 아닙니다**.
+아래 목록은 18문항에서 도출한 최소 집합입니다. 모두 `AnswerabilityReason`에 자리가 있습니다.
 
 | 코드 | 의미 | 대표 문항 | 판정 근거 |
 |---|---|---|---|
@@ -176,11 +185,34 @@ stage/detail에 매핑할지는 **별도 Contract PR에서 확정**합니다.
 | `OUT_OF_SCOPE_DATA` | 요구하는 데이터 종류가 코퍼스에 없음 | Q17 | 보유 문서군 목록과 대조 |
 | `OUT_OF_SCOPE_POLICY` | 정책상 지원하지 않음 | Q18 | `docs/mvp_scope.md` 제외 항목 |
 | `WITHHELD_IN_SOURCE` | 원문에 항목은 있으나 공시유보로 미기재 | Q14, Q02 계열 | 필드값이 비어 있고 유보 사유가 기재됨 |
-| `AMBIGUOUS_LINK` | 정정 대상 문서를 1건으로 확정할 수 없음 | Q14 | 연결 대상 후보가 복수 |
+| `AMBIGUOUS_MATCH` | 질문이 가리키는 대상 자체를 1건으로 좁히지 못함 | Q14 | 조건에 맞는 루트 후보가 복수 |
+| `AMBIGUOUS_LINK` | 루트는 확정됐으나 정정 대상 문서를 1건으로 확정할 수 없음 | Q13~Q15 계열 | 연결 대상 후보가 복수 |
 | `INCOMPLETE_CHAIN` | 체인의 루트가 보유 범위 밖 | Q15 유사 사례, Q12 집계 시 | 역참조 대상이 코퍼스 기간 이전 |
 | `NOT_COMPARABLE` | 비교 전제 불충족 | Q10 실패 시 | 기준·단위·개념·계정 체계 검증 실패 |
 | `NOT_FOUND` | 문서는 있으나 해당 정보를 찾지 못함 | 전 문항 공통 | 아래 절 참조 |
 | `INSUFFICIENT_EVIDENCE` | 값은 얻었으나 Evidence 연결 실패 | 전 문항 공통 | 답변을 차단 |
+
+**`AMBIGUOUS_MATCH`와 `AMBIGUOUS_LINK`를 혼동하지 않습니다.** 전자는 질문 → root event 자체를
+특정하지 못한 것이고, 후자는 root는 특정됐는데 correction 연결이 모호한 것입니다. 섞으면 질문을
+좁혀야 풀리는 실패와 링크 해석을 고쳐야 풀리는 실패가 한 지표로 묶입니다
+([open_decisions.md](open_decisions.md) D8).
+
+### `WITHHELD_IN_SOURCE`의 상태 대응
+
+유보의 **범위**가 상태를 가르고 사유 값은 같습니다([open_decisions.md](open_decisions.md) D9).
+
+| | 상황 | 상태 | 사유 |
+|---|---|---|---|
+| A | 질문에 필요한 **일부** field가 유보 | `PARTIALLY_ANSWERABLE` | `WITHHELD_IN_SOURCE` |
+| B | 핵심 required field **전체**가 유보 | `UNANSWERABLE` | `WITHHELD_IN_SOURCE` |
+| C | 후속 정정에서 값이 공개됨 | `ANSWERABLE` | 없음 |
+
+C에서도 과거에 유보였다는 이력은 `EventHistory`·`Evidence`에 보존합니다. 원칙 7(거부 응답에
+Evidence를 붙이지 않음)은 여기에 적용하지 않습니다. 유보는 판정 대상이 확정된 상태이고, 어느
+공시에서 유보였는지가 답변의 근거 자체이기 때문입니다.
+
+`chain_complete`와 유보는 **독립된 축**입니다. 체인을 전부 확보하고도 그 안의 일부 field가 유보일
+수 있으므로, 유보를 이유로 `chain_complete=False`를 적지 않습니다.
 
 ## `NOT_FOUND`와 `OUT_OF_DATA_RANGE`의 구분
 
@@ -225,18 +257,23 @@ stage/detail에 매핑할지는 **별도 Contract PR에서 확정**합니다.
   연도와 그 전년도를 비교 열로 함께 담고 있는 것으로 관찰되어, 수집 시작 연도 이전 값도 사실상
   조회 가능합니다. Q16을 최신 기간 이후 방향으로 설계한 이유입니다.
 - **공시유보는 데이터 부재가 아닙니다.** 항목 자체는 존재하고 값만 비공개인 상태이므로
-  `WITHHELD_IN_SOURCE`로 별도 구분합니다. 이 값을 다른 문서에서 추정해 채우지 않습니다.
+  `WITHHELD_IN_SOURCE`로 별도 구분합니다. 이 값을 다른 문서에서 추정해 채우지 않고,
+  0·미공개·없음으로 바꾸지도 않습니다(D9).
 - **체인 미완결과 연결 모호는 서로 다릅니다.** 전자는 문서가 코퍼스 밖에 있는 것이고, 후자는 코퍼스
   안에 있으나 어느 것인지 특정하지 못하는 것입니다.
 - **집계에서 제외한 항목은 반드시 드러내야 합니다.** Q12처럼 여러 건을 합산할 때 최신값을 확정하지
   못한 건이 있으면 임의 값으로 채우지 않고 제외 사실과 사유를 함께 제시합니다.
-- **지분공시(Q03)에는 개인 식별정보가 포함될 수 있습니다.** Gold·Evidence 작성 시 개인 식별정보가
-  포함되지 않아야 하며, Agent 응답 단계의 처리 수준은 **팀 정책 확인이 필요합니다**
-  ([open_decisions.md](open_decisions.md) D6).
+- **지분공시(Q03)에는 개인 식별정보가 포함될 수 있습니다.** 처리 수준은
+  [open_decisions.md](open_decisions.md) **D6-a에서 확정**됐습니다. 사전에 허용된 보유 관련
+  ACODE(`THS_STK_CNT`, `THS_STK_RT`)만 구조화하며, PII는 Fact·Evidence·구조화 출력·로그·경고·
+  예외 detail 어디에도 승격하지 않습니다. allowlist field를 결정론적으로 특정할 수 없으면
+  fail-closed 하고, 주변 label로 의미를 추정해 범위를 넓히지 않습니다.
 
 ## 미결정 사항
 
 - 시계열 질문의 근거 문서 건수 요건은 [open_decisions.md](open_decisions.md)의 D4 Pending입니다.
 - `docs/data_contracts.md` Draft와 본 문서의 Fact·Evidence 구성 차이는 DC1~DC3에 기록했습니다.
-- 답변 가능성 상태와 사유 코드를 응답 구조에 담을지는 DC6 Pending입니다.
+- 답변 가능성 상태와 사유 코드를 응답 구조에 담을지는 DC6 Pending입니다. 다만 위 상태·사유
+  목록 자체는 `common/enums.py`의 `AnswerabilityStatus`·`AnswerabilityReason`에 모두 자리가
+  있습니다.
 - `PARTIALLY_ANSWERABLE`의 부분 정답 채점 기준은 팀원 3의 평가 설계와 함께 확정해야 합니다.

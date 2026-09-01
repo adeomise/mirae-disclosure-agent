@@ -15,6 +15,9 @@ from typing import Any
 import pytest
 
 from disclosure_agent.agent import router
+from disclosure_agent.agent.handlers.cross_entity_compare import (
+    handle_cross_entity_compare,
+)
 from disclosure_agent.agent.handlers.event_history import handle_event_history
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
 from disclosure_agent.agent.handlers.temporal_compare import handle_temporal_compare
@@ -82,9 +85,20 @@ def test_temporal_compare_intent_resolves_to_pattern_c_handler() -> None:
     assert router.resolve_handler(INTENT_TEMPORAL_COMPARE) is handle_temporal_compare
 
 
+def test_cross_entity_compare_intent_resolves_to_pattern_d_handler() -> None:
+    """
+    Pattern D도 문자열 intent로 등록된다.
+
+    temporal_compare와 같은 이유이며, 이 key를 등록하려고 공유 Contract의 Intent enum을
+    넓히지 않는다.
+    """
+    assert router.resolve_handler(INTENT_CROSS_ENTITY_COMPARE) is handle_cross_entity_compare
+
+
 def test_supported_intents_reports_only_registered_handlers() -> None:
-    """Pattern A / C / E 셋이 등록돼 있다."""
+    """Pattern A / C / D / E 넷이 등록돼 있다."""
     assert router.supported_intents() == (
+        INTENT_CROSS_ENTITY_COMPARE,
         INTENT_EVENT_HISTORY,
         INTENT_SINGLE_FACT,
         INTENT_TEMPORAL_COMPARE,
@@ -131,7 +145,6 @@ def test_dispatch_passes_plan_and_context_to_handler(
     "intent",
     [
         INTENT_DOCUMENT_SUMMARY,
-        INTENT_CROSS_ENTITY_COMPARE,
         INTENT_UNANSWERABLE_CHECK,
     ],
 )
@@ -142,9 +155,10 @@ def test_known_but_unimplemented_intent_is_blocked(
     """
     설계 어휘에는 있으나 handler가 없는 intent는 구현 대기로 구분해 막는다.
 
-    temporal_compare는 이 목록에서 빠졌다. handler가 등록됐기 때문이며, 그 Pattern이 다루지
-    못하는 계획을 막는 자리는 Router가 아니라 handler 입구다
-    (tests/integration/test_pattern_c.py 3절).
+    temporal_compare와 cross_entity_compare는 이 목록에서 빠졌다. handler가 등록됐기
+    때문이며, 그 Pattern들이 다루지 못하는 계획을 막는 자리는 Router가 아니라 handler
+    입구다(tests/integration/test_pattern_c.py 3절,
+    tests/unit/test_pattern_d_entry_guard.py).
     """
     plan = dataclasses.replace(single_fact_plan, intent=intent)
 
@@ -184,7 +198,7 @@ def test_blocked_route_does_not_judge_answerability(single_fact_plan: QueryPlan)
 
     UNANSWERABLE로 채우면 '코퍼스에 답이 없다'는 확정 진술이 되어 사실과 달라진다.
     """
-    plan = dataclasses.replace(single_fact_plan, intent=INTENT_CROSS_ENTITY_COMPARE)
+    plan = dataclasses.replace(single_fact_plan, intent=INTENT_UNANSWERABLE_CHECK)
 
     result = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
@@ -193,7 +207,7 @@ def test_blocked_route_does_not_judge_answerability(single_fact_plan: QueryPlan)
 
 
 def test_blocked_detail_lists_currently_supported_intents(single_fact_plan: QueryPlan) -> None:
-    plan = dataclasses.replace(single_fact_plan, intent=INTENT_CROSS_ENTITY_COMPARE)
+    plan = dataclasses.replace(single_fact_plan, intent=INTENT_DOCUMENT_SUMMARY)
 
     result = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
@@ -211,14 +225,14 @@ def test_register_handler_makes_a_new_intent_routable(
     isolated_registry: dict[str, Any],
 ) -> None:
     """아직 없는 Pattern은 handler 등록만으로 붙을 수 있어야 한다."""
-    plan = dataclasses.replace(single_fact_plan, intent=INTENT_CROSS_ENTITY_COMPARE)
+    plan = dataclasses.replace(single_fact_plan, intent=INTENT_DOCUMENT_SUMMARY)
 
     before = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
     assert before.execution_status is ExecutionStatus.BLOCKED
 
     router.register_handler(
-        INTENT_CROSS_ENTITY_COMPARE,
+        INTENT_DOCUMENT_SUMMARY,
         lambda plan, **context: AgentExecutionResult(
             execution_status=ExecutionStatus.COMPLETED,
             warnings=[plan.intent],
@@ -228,12 +242,13 @@ def test_register_handler_makes_a_new_intent_routable(
     after = router.dispatch(plan, corpus_root="unused", manifest_path="unused")
 
     assert after.execution_status is ExecutionStatus.COMPLETED
-    assert after.warnings == [INTENT_CROSS_ENTITY_COMPARE]
+    assert after.warnings == [INTENT_DOCUMENT_SUMMARY]
 
 
 def test_registry_is_restored_between_tests() -> None:
     """isolated_registry가 실제로 되돌리는지 확인한다."""
     assert router.supported_intents() == (
+        INTENT_CROSS_ENTITY_COMPARE,
         INTENT_EVENT_HISTORY,
         INTENT_SINGLE_FACT,
         INTENT_TEMPORAL_COMPARE,

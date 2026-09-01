@@ -90,6 +90,15 @@ enum에 없는 값이면 `ValueError`가 올라옵니다. 값을 추측해 채�
 있는 사유로 옮긴 것입니다. 무엇을 연결하지 못했는지는 `EventLink.resolution_status`와
 `conversion_gaps`에 이미 남아 있습니다.
 
+**위 표는 현재 producer가 실제로 만드는 조합만 담습니다.** `AnswerabilityReason` 전체를 덮지
+않습니다. `WITHHELD_IN_SOURCE`는 Contract와 Answer Builder 대응이 있지만
+([open_decisions.md](open_decisions.md) D9) 유보를 감지하는 producer가 아직 없어 이 표에 행이
+없습니다. 감지 경로가 생기면 상태 대응(일부 유보 → `PARTIALLY_ANSWERABLE`, 전체 유보 →
+`UNANSWERABLE`)과 함께 행을 추가합니다.
+
+`WITHHELD_IN_SOURCE`가 실린 결과에는 `chain_complete` 불변식을 적용하지 않습니다. 체인 완결과
+원문 유보는 독립된 축이므로, 완결된 체인 안의 일부 field만 유보인 결과가 성립합니다.
+
 ## 4. `AMBIGUOUS_MATCH`와 `AMBIGUOUS_LINK`를 섞지 않는 이유
 
 `AMBIGUOUS_LINK`는 [evidence_and_answerability.md](evidence_and_answerability.md)에서

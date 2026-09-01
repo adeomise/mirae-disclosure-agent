@@ -119,6 +119,10 @@ class AnswerabilityReason(StrEnum):
     AMBIGUOUS_MATCH = "ambiguous_match"
     NOT_FOUND = "not_found"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    # 문서도 항목도 있는데 값만 원문에서 공개되지 않은 상태다(공시유보 등).
+    # NOT_FOUND(찾지 못함)·INSUFFICIENT_EVIDENCE(근거 연결 실패)와 구분한다. 셋을 뭉치면
+    # 검색 실패와 원문 비공개가 한 지표로 묶인다.
+    WITHHELD_IN_SOURCE = "withheld_in_source"
     NOT_COMPARABLE = "not_comparable"
     OUT_OF_DATA_RANGE = "out_of_data_range"
     OUT_OF_SCOPE_DATA = "out_of_scope_data"

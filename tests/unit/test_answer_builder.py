@@ -1911,6 +1911,166 @@ def test_reason_sentences_are_distinct() -> None:
     assert len(set(messages)) == len(messages)
 
 
+# --------------------------------------------------------------------------
+# WITHHELD_IN_SOURCE — 원문에서 값이 공개되지 않은 경우 (open_decisions.md D9)
+#
+# 유보는 데이터 부재가 아니다. 문서도 항목도 있고 값만 비공개다. 그래서 Builder는 이 판정을
+# 받아도 멈추지 않고, 유보된 값을 0·미공개·없음 같은 대체 값으로 바꾸지도 않는다.
+# --------------------------------------------------------------------------
+
+
+def test_partially_withheld_answer_states_the_limitation_without_inventing_a_value() -> None:
+    """
+    D9 case A — 질문에 필요한 field 일부가 유보.
+
+    확보분은 답하고 유보분은 밝힌다. 확보한 Fact를 지우지도, 유보된 값을 채우지도 않는다.
+    """
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.WITHHELD_IN_SOURCE,
+        facts=[make_fact()],
+        evidence=[make_evidence()],
+    )
+
+    response = build_answer_response(result)
+
+    assert response.status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert response.reason is AnswerabilityReason.WITHHELD_IN_SOURCE
+    assert response.answer.endswith(
+        LIMITATION_MESSAGE_BY_REASON[AnswerabilityReason.WITHHELD_IN_SOURCE]
+    )
+    assert response.facts == [make_fact()]
+    for substitute in ("0원", "미공개", "없음", "0입니다"):
+        assert substitute not in response.answer
+
+
+def test_fully_withheld_answer_is_returned_instead_of_failing_the_builder() -> None:
+    """D9 case B — 핵심 required field 전체가 유보. 확보분이 없어 UNANSWERABLE이다."""
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=AnswerabilityReason.WITHHELD_IN_SOURCE,
+    )
+
+    response = build_answer_response(result)
+
+    assert response.status is AnswerabilityStatus.UNANSWERABLE
+    assert response.reason is AnswerabilityReason.WITHHELD_IN_SOURCE
+    assert response.answer == (
+        UNAVAILABLE_MESSAGE_BY_REASON[AnswerabilityReason.WITHHELD_IN_SOURCE]
+    )
+
+
+def test_withheld_answer_is_not_worded_as_a_search_failure() -> None:
+    """
+    "찾지 못했다"로 쓰면 사용자가 질문을 좁히면 된다고 읽는다.
+
+    좁혀도 원문에 값이 없다. 두 사유의 다음 행동이 다르므로 문장도 달라야 한다.
+    """
+    withheld = UNAVAILABLE_MESSAGE_BY_REASON[AnswerabilityReason.WITHHELD_IN_SOURCE]
+
+    assert withheld != UNAVAILABLE_MESSAGE_BY_REASON[AnswerabilityReason.NOT_FOUND]
+    assert withheld != UNAVAILABLE_MESSAGE_BY_REASON[AnswerabilityReason.OUT_OF_DATA_RANGE]
+    assert "찾지 못했" not in withheld
+
+
+def test_withheld_in_source_is_the_only_reason_shared_by_two_statuses() -> None:
+    """
+    유보 범위가 상태를 가르고 사유는 같다(D9 case A/B).
+
+    다른 사유가 두 상태에 함께 실리면 "일부만 답했다"와 "답하지 못했다"의 경계가 사유
+    하나로는 읽히지 않게 된다.
+    """
+    partial = ALLOWED_REASONS_BY_STATUS[AnswerabilityStatus.PARTIALLY_ANSWERABLE]
+    unanswerable = ALLOWED_REASONS_BY_STATUS[AnswerabilityStatus.UNANSWERABLE]
+
+    assert partial & unanswerable == {AnswerabilityReason.WITHHELD_IN_SOURCE}
+
+
+@pytest.mark.parametrize(
+    "status",
+    [AnswerabilityStatus.ANSWERABLE, AnswerabilityStatus.UNRESOLVED],
+)
+def test_withheld_in_source_does_not_leak_into_unrelated_statuses(
+    status: AnswerabilityStatus,
+) -> None:
+    """
+    ANSWERABLE은 사유를 싣지 않고, UNRESOLVED는 대상을 좁히지 못한 판정이다.
+
+    유보는 대상을 확정한 뒤 그 값이 비공개인 상태이므로 어느 쪽도 아니다.
+    """
+    assert (
+        AnswerabilityReason.WITHHELD_IN_SOURCE not in ALLOWED_REASONS_BY_STATUS[status]
+    )
+
+
+def test_unresolved_with_a_withheld_reason_fails_fast() -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNRESOLVED,
+        answerability_reason=AnswerabilityReason.WITHHELD_IN_SOURCE,
+    )
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert AnswerabilityReason.WITHHELD_IN_SOURCE.value in str(error.value)
+
+
+def test_withholding_does_not_force_an_incomplete_chain() -> None:
+    """
+    체인 완결과 원문 유보는 독립된 축이다(D9).
+
+    체인을 전부 확보하고도 그 안의 일부 field가 유보일 수 있다. 이 결과에
+    chain_complete=False를 요구하면 완결된 체인을 미완결로 적어야 통과하게 된다.
+    """
+    history = make_event_history(
+        document_ids=["exchange_SYNTHETIC0011", "exchange_SYNTHETIC0012"],
+        changes=[FieldChange(field_name="contract_amount")],
+        chain_complete=True,
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.WITHHELD_IN_SOURCE,
+        event_histories=[history],
+        evidence=[make_evidence("evidence_SYNTHETIC_event")],
+    )
+
+    response = build_answer_response(result)
+
+    assert response.status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert response.event_histories == [history]
+    assert response.event_histories[0].chain_complete is True
+
+
+def test_withheld_result_may_still_carry_the_evidence_of_the_withholding() -> None:
+    """
+    유보 사실 자체의 근거는 지우지 않는다.
+
+    REFUSAL_REASONS_WITHOUT_SUPPORTING_PAYLOAD에 이 사유를 넣지 않은 이유다. 넣으면 "어느
+    공시에서 유보였는지"를 보여 줄 수 없고, 뒤에 정정으로 값이 공개됐을 때 그 이력을 대조할
+    근거도 남지 않는다.
+    """
+    assert (
+        AnswerabilityReason.WITHHELD_IN_SOURCE
+        not in REFUSAL_REASONS_WITHOUT_SUPPORTING_PAYLOAD
+    )
+
+    evidence = make_evidence("evidence_SYNTHETIC_withheld")
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=AnswerabilityReason.WITHHELD_IN_SOURCE,
+        evidence=[evidence],
+    )
+
+    response = build_answer_response(result)
+
+    assert response.evidence == [evidence]
+
+
 def test_policy_refusal_table_covers_the_gate_categories() -> None:
     """safety.py가 만드는 두 사유는 반드시 고유한 문장을 가진다."""
     assert set(POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON) == {

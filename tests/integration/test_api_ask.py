@@ -247,6 +247,9 @@ def test_completed_answerable_agent_result_returns_200() -> None:
     [
         (AnswerabilityStatus.UNANSWERABLE, AnswerabilityReason.NOT_FOUND),
         (AnswerabilityStatus.UNRESOLVED, AnswerabilityReason.AMBIGUOUS_MATCH),
+        # 핵심 required field 전체가 원문에서 유보된 경우(open_decisions.md D9 case B).
+        # 판정이 정상적으로 끝난 결과이므로 500이 아니라 200으로 나가야 한다.
+        (AnswerabilityStatus.UNANSWERABLE, AnswerabilityReason.WITHHELD_IN_SOURCE),
     ],
 )
 def test_completed_non_answerable_agent_result_returns_200(
@@ -611,6 +614,35 @@ def test_not_comparable_result_returns_200_with_the_user_facing_sentence() -> No
     assert STAGE_COMPARABILITY not in payload["answer"]
     assert NOT_COMPARABLE_DIAGNOSTIC_DETAIL not in response.text
     assert REASON_INCOMPARABLE_ENTITIES not in response.text
+
+
+def test_partially_withheld_agent_result_returns_200_with_the_confirmed_part() -> None:
+    """
+    D9 case A — 일부 field만 유보. 확보분을 실어 200으로 나간다.
+
+    Builder가 이 조합에서 멈추면 API가 500을 내고, 실제로는 답할 수 있었던 부분까지
+    서버 오류로 사라진다.
+    """
+    confirmed = answerable_execution_result()
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.WITHHELD_IN_SOURCE,
+        facts=confirmed.facts,
+        evidence=confirmed.evidence,
+    )
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "synthetic withheld"})
+
+    assert response.status_code == 200
+
+    payload = response.json()
+
+    assert payload["status"] == "PARTIALLY_ANSWERABLE"
+    assert payload["reason"] == "withheld_in_source"
+    assert len(payload["facts"]) == 1
+    assert payload["answer"]
 
 
 @pytest.mark.parametrize(

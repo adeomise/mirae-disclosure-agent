@@ -44,3 +44,27 @@ future extensions; their collection counts can already be checked.
 
 Local prediction and evaluation result files belong under `results/` and must not
 contain source documents or secrets.
+
+## Opt-in live Agent evaluation
+
+Live mode executes the active regression cases through the public Agent entry point
+and evaluates the returned `AgentExecutionResult` objects with the same deterministic
+comparator:
+
+```text
+uv run python -m evaluation.runner --run-agent --corpus-root path/to/corpus
+```
+
+If the manifest is not at the corpus root's default `manifest.jsonl` location, pass
+it explicitly:
+
+```text
+uv run python -m evaluation.runner --run-agent --corpus-root path/to/corpus --manifest path/to/manifest.jsonl
+```
+
+Live execution never activates from `DATA_ROOT` or another environment variable.
+`--run-agent` and an existing `--corpus-root` directory are both required. Contract
+cases remain validation-only, and future regression cases remain outside the score
+denominator. A returned blocked or failed execution retains its Agent status and
+reason for comparison; an unexpected exception identifies the failing case and
+terminates the command with a nonzero exit code.

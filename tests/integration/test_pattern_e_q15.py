@@ -833,6 +833,15 @@ def test_facility_history_reaches_the_common_execution_contract(
     assert len(result.event_links) == 3
     assert len(result.evidence) >= 2
 
+    evidence_by_id = {item.evidence_id: item for item in result.evidence}
+    for change in result.event_histories[0].changes:
+        assert change.before_evidence_id is not None
+        assert change.after_evidence_id == change.before_evidence_id
+        evidence = evidence_by_id[change.before_evidence_id]
+        assert evidence.raw_text is not None
+        assert f"before: {change.before}" in evidence.raw_text
+        assert f"after: {change.after}" in evidence.raw_text
+
 
 def test_ambiguous_facility_root_is_not_silently_narrowed(
     tmp_path: Path,

@@ -79,7 +79,11 @@ from disclosure_agent.common.schemas import (
     EventLink,
     Evidence,
 )
-from disclosure_agent.event.contract_adapter import ContractGap, to_event_history
+from disclosure_agent.event.contract_adapter import (
+    ContractGap,
+    build_change_evidence_id,
+    to_event_history,
+)
 from disclosure_agent.event.linker import FilingChain, FilingLike, build_filing_chain
 from disclosure_agent.event.parser import parse_exchange_document
 from disclosure_agent.retrieval.metadata_filter import FilingNotFoundError, list_event_filings
@@ -180,8 +184,8 @@ def build_event_evidence(chain: FilingChain) -> tuple[Evidence, ...]:
     만들면 이력의 출발점이 근거 없이 남는다.
 
     거래소공시는 Section 구조가 없으므로 location_type은 event_field를 쓴다.
-    raw_text에는 원문 필드 표기를 그대로 남긴다. Contract FieldChange가 원문 라벨을 담지
-    못하는 것과 달리 Evidence는 담을 수 있어, 원문 대조 경로가 여기서는 끊기지 않는다.
+    변경 행의 raw_text에는 원문 필드 표기와 before/after 값을 함께 남긴다. 셋은 parser가
+    보존한 같은 정정 행에서 왔으며, 별도의 셀 위치를 추론하지 않는다.
     """
     evidence: list[Evidence] = []
 
@@ -207,11 +211,15 @@ def build_event_evidence(chain: FilingChain) -> tuple[Evidence, ...]:
 
             evidence.append(
                 Evidence(
-                    evidence_id=f"evidence_{doc_id}_{change.field}",
+                    evidence_id=build_change_evidence_id(doc_id, change.field),
                     doc_id=doc_id,
                     location_type=EvidenceLocationType.EVENT_FIELD,
                     field_name=change.field,
-                    raw_text=change.raw_field,
+                    raw_text=(
+                        f"raw_field: {change.raw_field}\n"
+                        f"before: {change.before}\n"
+                        f"after: {change.after}"
+                    ),
                 )
             )
 

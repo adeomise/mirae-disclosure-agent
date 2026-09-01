@@ -11,8 +11,11 @@
     하나만 바뀐다.
 
 conversion_gaps에 대하여:
-    Contract v0.1은 원문 필드명과 변경의 출처 문서를 담을 자리가 없다.
-    이들을 그냥 버리면 "정보가 없다"와 "형식에 못 담았다"가 구분되지 않는다.
+    Contract v0.1은 원문 필드명을 담을 자리가 없다. 이를 그냥 버리면 "정보가 없다"와
+    "형식에 못 담았다"가 구분되지 않는다.
+
+    변경의 출처 문서는 FieldChange의 before/after_evidence_id가 같은 행 단위 Evidence를
+    가리키고, 그 Evidence가 doc_id를 보존하므로 Contract에 흡수되었다.
 
     ambiguous 후보 목록은 EventLink.candidate_doc_ids로 Contract에 흡수되었으므로 더 이상
     gap으로 남기지 않는다.
@@ -79,7 +82,6 @@ TARGET_CONTRACT_VERSION = "0.1"
 #
 # ambiguous 후보 목록은 EventLink.candidate_doc_ids가 흡수했으므로 목록에서 뺐다.
 GAP_RAW_FIELD_NAME = "raw_field_name"
-GAP_CHANGE_SOURCE_DOCUMENT = "change_source_document"
 
 # 팀 결정이 있어야 변환할 수 있는 것. Contract 구조는 이미 있다.
 GAP_PENDING_RESOLUTION_STATUS = "pending_resolution_status"
@@ -93,7 +95,6 @@ GAP_UNRESOLVED_LINKS = "unresolved_links"
 # 이 표에 있는 gap은 임시 호환 항목이며 영구 정책이 아니다.
 PLANNED_CONTRACT_FIELDS: dict[str, str] = {
     GAP_RAW_FIELD_NAME: "FieldChange.raw_field",
-    GAP_CHANGE_SOURCE_DOCUMENT: "FieldChange.before_evidence_id / after_evidence_id",
 }
 
 
@@ -196,6 +197,11 @@ def build_link_id(source_doc_id: str, relation: EventLinkRelation) -> str:
     링크를 둘 이상 갖지 않는다는 전제에서 만든 임시 규칙이며 팀 확인이 필요하다.
     """
     return f"link_{source_doc_id}_{relation.value}"
+
+
+def build_change_evidence_id(source_doc_id: str, canonical_field: str) -> str:
+    """매핑된 정정 행 하나를 가리키는 결정론적 Evidence ID."""
+    return f"evidence_{source_doc_id}_{canonical_field}"
 
 
 # --------------------------------------------------------------------------
@@ -339,12 +345,17 @@ def to_field_change(
             ),
         )
 
+    evidence_id = build_change_evidence_id(source_doc_id, change.field)
+
     converted = FieldChange(
         field_name=change.field,
         before=change.before,
         after=change.after,
         # diff는 값을 해석하지 않으므로 단위를 알지 못한다. 손실이 아니라 미보유다.
         unit=None,
+        # before와 after는 같은 정정 원문 행에서 왔으므로 같은 행 근거를 가리킨다.
+        before_evidence_id=evidence_id,
+        after_evidence_id=evidence_id,
     )
 
     gaps = (
@@ -355,15 +366,6 @@ def to_field_change(
             detail=(
                 f"원문 라벨 '{change.raw_field}'을 담을 자리가 없습니다. "
                 "원문 대조가 끊깁니다."
-            ),
-        ),
-        ContractGap(
-            kind=GAP_CHANGE_SOURCE_DOCUMENT,
-            subject=change.field,
-            dropped={"source_doc_id": source_doc_id},
-            detail=(
-                "이 변경이 어느 문서에서 나왔는지 담을 자리가 없습니다. "
-                "EventHistory.changes가 평탄한 목록이라 문서별 귀속이 사라집니다."
             ),
         ),
     )

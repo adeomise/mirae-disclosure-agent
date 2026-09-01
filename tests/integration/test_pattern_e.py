@@ -310,8 +310,8 @@ def test_evidence_covers_every_document_in_the_chain(complete_chain) -> None:
     )
 
 
-def test_evidence_keeps_the_source_field_label(complete_chain) -> None:
-    """Contract FieldChange는 원문 라벨을 못 담지만 Evidence.raw_text는 담는다."""
+def test_change_evidence_supports_before_and_after_values(complete_chain) -> None:
+    """행 단위 Evidence가 원문 라벨과 before/after를 함께 보존한다."""
     manifest_path, corpus_root = complete_chain
 
     plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
@@ -320,11 +320,24 @@ def test_evidence_keeps_the_source_field_label(complete_chain) -> None:
         plan, corpus_root=corpus_root, manifest_path=manifest_path
     )
 
-    labels = {
-        item.raw_text for item in result.evidence if item.field_name is not None
+    evidence_by_id = {item.evidence_id: item for item in result.evidence}
+    raw_field_by_name = {
+        FIELD_CONTRACT_END_DATE: "계약기간 종료일",
+        FIELD_CONTRACT_AMOUNT: "계약금액(원)",
     }
 
-    assert labels == {"계약기간 종료일", "계약금액(원)"}
+    assert result.history is not None
+    for change in result.history.changes:
+        assert change.before_evidence_id is not None
+        assert change.after_evidence_id is not None
+        assert change.before_evidence_id == change.after_evidence_id
+
+        evidence = evidence_by_id[change.before_evidence_id]
+        assert evidence.doc_id in result.history.document_ids
+        assert evidence.raw_text is not None
+        assert f"before: {change.before}" in evidence.raw_text
+        assert f"after: {change.after}" in evidence.raw_text
+        assert f"raw_field: {raw_field_by_name[change.field_name]}" in evidence.raw_text
 
 
 def test_no_natural_language_answer_is_invented(complete_chain) -> None:

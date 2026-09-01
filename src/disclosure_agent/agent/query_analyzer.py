@@ -65,6 +65,7 @@ from disclosure_agent.agent.derived_metrics import DerivedMetric
 from disclosure_agent.common.enums import (
     ChainPolicy,
     Intent,
+    MetricConcept,
     QueryAccountingScope,
     SectionScope,
 )
@@ -83,6 +84,7 @@ __all__ = [
     "ANCHOR_SOURCE_LATEST_ANNUAL_FILING",
     "DOCUMENT_CLASS_PERIODIC",
     "DOCUMENT_SUBTYPE_ANNUAL",
+    "INTENT_CONTRACT_FACT",
     "INTENT_CROSS_ENTITY_COMPARE",
     "INTENT_DOCUMENT_SUMMARY",
     "INTENT_EVENT_HISTORY",
@@ -116,6 +118,15 @@ DOCUMENT_SUBTYPE_ANNUAL = "annual"
 INTENT_SINGLE_FACT = Intent.SINGLE_FACT.value
 INTENT_EVENT_HISTORY = Intent.EVENT_HISTORY.value
 
+# 거래소공시 단건 사실 조회(Q02). Contract v0.1의 Intent에는 아직 없다.
+#
+# single_fact를 재사용하지 않는 이유:
+#     Router는 intent 하나만 보고 handler를 고른다. single_fact로 담으면 이 계획이 정기공시
+#     Pattern A handler로 들어가 계약 질문에 회계 지표 경로가 실행된다. 그 답은 형식이 맞아
+#     틀렸다는 사실이 드러나지 않는다. 별도 이름이면 handler가 등록될 때까지
+#     unimplemented_intent로 막힌다.
+INTENT_CONTRACT_FACT = "contract_fact"
+
 INTENT_DOCUMENT_SUMMARY = "document_summary"
 INTENT_TEMPORAL_COMPARE = "temporal_compare"
 INTENT_CROSS_ENTITY_COMPARE = "cross_entity_compare"
@@ -123,6 +134,7 @@ INTENT_UNANSWERABLE_CHECK = "unanswerable_check"
 
 KNOWN_INTENTS: tuple[str, ...] = (
     INTENT_SINGLE_FACT,
+    INTENT_CONTRACT_FACT,
     INTENT_DOCUMENT_SUMMARY,
     INTENT_TEMPORAL_COMPARE,
     INTENT_CROSS_ENTITY_COMPARE,
@@ -359,6 +371,35 @@ SECTION_SCOPE_TOKENS: tuple[tuple[SectionScope, tuple[str, ...]], ...] = (
     (SectionScope.FACILITY_INVESTMENT, ("설비", "시설투자")),
 )
 
+# --------------------------------------------------------------------------
+# 거래소공시 단건 사실 조회(Q02)의 어휘
+# --------------------------------------------------------------------------
+
+# 계약 사실 조회(Q02)가 요구하는 문서 필드 표기.
+#
+# 값이 MetricConcept인 이유:
+#     event.adapter의 CONTRACT_FIELD_BY_METRIC이 같은 어휘로 문서 필드를 찾는다. 여기서
+#     문자열을 따로 쓰면 같은 개념에 두 벌의 이름이 생기고, 한쪽이 바뀔 때 조용히 끊어진다.
+#
+# 맨 낱말("금액", "기간")을 함께 두는 이유:
+#     "계약 금액과 기간은?"처럼 앞의 '계약'을 한 번만 쓰는 표현이 실제로 온다. 다만 이
+#     낱말들만으로는 판정하지 않는다. _looks_like_contract_fact가 질문에 '계약'이 있는지를
+#     먼저 보므로, 매출 질문의 '금액'이 이 경로로 끌려오지 않는다.
+CONTRACT_AMOUNT_TOKENS = ("계약금액", "계약 금액", "금액")
+CONTRACT_PERIOD_TOKENS = ("계약기간", "계약 기간", "기간")
+
+# 계약 상대방을 가리키는 표현. "<상대방>과/와 체결한 계약" 형태만 읽는다.
+#
+# 라틴 문자 이름을 따로 두는 이유는 "Yang Ming"처럼 공백이 들어간 표기가 실제로 오기
+# 때문이다. 한글 이름은 조사 앞까지만 읽는다.
+#
+# 넓게 잡지 않는다. 상대방을 추정해 넣으면 그 이름으로 문서를 고르게 되고, 틀린 상대방으로
+# 고른 계약은 형식이 맞아 틀렸다는 사실이 드러나지 않는다.
+COUNTERPARTY_PATTERN = re.compile(
+    r"([A-Za-z][A-Za-z0-9&.\-]*(?:\s+[A-Za-z][A-Za-z0-9&.\-]*)*|[가-힣]{2,})"
+    r"\s*(?:과|와)\s*(?:체결|계약|맺)"
+)
+
 
 class UnsupportedQuestionError(ValueError):
     """이번 슬라이스가 결정론적으로 처리할 수 없는 질문."""
@@ -485,6 +526,28 @@ class QueryPlan:
     # 대응표에서 전부 파생되므로, 계획에 함께 담으면 같은 질문에 대응표와 계획이 서로 다른
     # 답을 갖는 순간이 생긴다.
     derived_metric: DerivedMetric | None = None
+    # 질문이 요구한 문서 필드. 거래소공시 단건 사실 조회(Q02)가 쓴다.
+    #
+    # metric을 튜플로 바꾸지 않고 자리를 따로 둔 이유:
+    #     metric은 "이 계획이 답할 값 하나"라는 뜻으로 이미 여러 Pattern이 읽고 있다. 그것을
+    #     복수로 바꾸면 읽는 쪽이 전부 "첫 값" 또는 "전부"를 다시 정해야 하고, 어느 쪽을
+    #     골랐는지는 계획에 남지 않는다.
+    #
+    #     그리고 이 자리에 담기는 것은 회계 지표가 아니라 한 문서에서 함께 읽어야 하는 필드
+    #     묶음이다. 계약금액·시작일·종료일은 서로 다른 지표가 아니라 한 계약을 서술하는 세
+    #     값이며, 하나라도 빠지면 질문에 답한 것이 아니다.
+    #
+    # metric·derived_metric과 서로 배타다(__post_init__ 참조).
+    requested_fields: tuple[MetricConcept, ...] = ()
+    # 질문이 지목한 계약 상대방. 없으면 None이며 추정하지 않는다.
+    #
+    # companies에 담지 않는 이유:
+    #     companies는 답의 주체가 되는 대상 기업이고 company property가 그 첫 값을 돌려준다.
+    #     상대방을 그 자리에 담으면 두 기업을 물은 질문으로 보이거나 상대방이 주체가 된다.
+    #
+    # 이 값으로 문서를 고르는 일은 여기서 하지 않는다. 실제 후보 대조는 retrieval 계층이
+    # 맡는다(agent.event_retrieval.select_contract_filing).
+    counterparty: str | None = None
     # 질문이 월까지 지정한 경우. Q13처럼 원공시를 월 단위로 지목할 때 쓴다.
     month: int | None = None
     # 정정·후속 문서를 어디까지 볼 것인가. 값은 Contract v0.1의 ChainPolicy를 따른다.
@@ -552,6 +615,29 @@ class QueryPlan:
                 "metric과 derived_metric을 함께 담을 수 없습니다: "
                 f"metric={self.metric!r}, derived_metric={self.derived_metric!r}. "
                 "원천 지표와 파생 개념 중 하나만 정본입니다."
+            )
+
+        # MetricConcept은 StrEnum이라 낱개로 넘겨도 문자열로 순회된다. 그대로 두면
+        # CONTRACT_AMOUNT 하나가 글자 수만큼의 필드로 늘어난다. companies를 막는 것과 같다.
+        if isinstance(self.requested_fields, str):
+            raise TypeError(
+                "requested_fields는 MetricConcept 하나가 아니라 튜플이어야 합니다: "
+                f"{self.requested_fields!r}"
+            )
+
+        # requested_fields는 metric·derived_metric과 함께 담기지 않는다.
+        #
+        # 셋이 공존할 수 있으면 이 계획을 읽는 쪽이 무엇을 답해야 하는지 스스로 골라야 하고,
+        # 무엇을 골랐는지는 계획 어디에도 남지 않는다. 위의 metric/derived_metric 규칙과
+        # 같은 이유이며, 세 정본이 공존할 수 있는 상태 자체를 만들지 않는다.
+        if self.requested_fields and (
+            self.metric is not None or self.derived_metric is not None
+        ):
+            raise ValueError(
+                "requested_fields는 metric·derived_metric과 함께 담을 수 없습니다: "
+                f"requested_fields={self.requested_fields!r}, metric={self.metric!r}, "
+                f"derived_metric={self.derived_metric!r}. "
+                "질문이 요구한 값의 정본은 하나여야 합니다."
             )
 
     def _allows_absent_years(self) -> bool:
@@ -1243,6 +1329,127 @@ def _build_document_summary_plan(question: str, companies: tuple[str, ...]) -> Q
     )
 
 
+def _find_contract_fields(question: str) -> tuple[MetricConcept, ...]:
+    """
+    질문이 요구한 계약 문서 필드를 읽는다. 없으면 빈 튜플이며 추측하지 않는다.
+
+    계약기간이 두 필드가 되는 이유:
+        기간은 시작일과 종료일이 함께 있어야 서술된다. 한쪽만 담으면 "2025-09-16부터"까지만
+        답하고 언제 끝나는지를 물었다는 사실이 결과 어디에도 남지 않는다.
+
+    돌아오는 차례는 이 함수가 고정한다. 질문에 적힌 차례를 따르지 않는 이유는, 같은 질문을
+    다르게 쓴 두 표현이 서로 다른 계획을 만들면 그 차이가 답의 차이로 새어 나가기 때문이다.
+    """
+    fields: list[MetricConcept] = []
+
+    if any(token in question for token in CONTRACT_AMOUNT_TOKENS):
+        fields.append(MetricConcept.CONTRACT_AMOUNT)
+
+    if any(token in question for token in CONTRACT_PERIOD_TOKENS):
+        fields.append(MetricConcept.CONTRACT_START_DATE)
+        fields.append(MetricConcept.CONTRACT_END_DATE)
+
+    return tuple(fields)
+
+
+def _extract_counterparty(question: str, company: str) -> str | None:
+    """
+    질문이 지목한 계약 상대방. 없으면 None이며 추정하지 않는다.
+
+    질문에 적힌 문자열을 그대로 쓴다. 정규화하거나 코퍼스의 이름으로 바꾸지 않는다. 그 대조는
+    실제 후보 문서를 여는 retrieval 계층이 하며, 여기서 미리 바꾸면 같은 이름에 대한 판정이
+    두 벌이 된다.
+
+    대상 기업과 같은 이름이면 상대방으로 읽지 않는다. "한화오션과 체결한"처럼 쓰인 문장에서
+    주체를 상대방 자리에 담으면, 그 이름으로 후보를 좁혀 아무 문서도 찾지 못한다.
+    """
+    match = COUNTERPARTY_PATTERN.search(question)
+
+    if not match:
+        return None
+
+    found = match.group(1).strip()
+
+    if not found:
+        return None
+
+    if normalize_company_name(found) == normalize_company_name(company):
+        return None
+
+    return found
+
+
+def _looks_like_contract_fact(question: str) -> bool:
+    """
+    거래소공시 계약 1건의 값을 묻는 질문인가.
+
+    '계약'과 요구 필드 표기가 함께 있어야 한다. 둘 중 하나만으로 판정하면 '계약 이력'까지
+    이 경로로 끌려오거나, 매출 질문의 '금액'이 계약 질문이 된다.
+
+    이력 표현은 여기서 보지 않는다. build_query_plan이 _looks_like_event_history를 먼저
+    판정하므로, 정정·변경을 묻는 질문은 이 자리에 도달하지 않는다. 두 곳에서 같은 규칙을
+    세면 어긋날 수 있어 순서 하나로 가른다.
+    """
+    return "계약" in question and bool(_find_contract_fields(question))
+
+
+def _build_contract_fact_plan(
+    question: str,
+    companies: tuple[str, ...],
+    years: tuple[int, ...],
+) -> QueryPlan:
+    """
+    Q02 계열 공급계약 단건 사실 조회 계획을 만든다.
+
+    세부유형을 공급계약으로 고정하는 이유:
+        계약금액·계약기간은 공급계약 공시의 어휘다. 다만 질문이 다른 유형을 함께 가리키면
+        고르지 않고 막는다. 시설투자 공시에도 금액과 기간이 적히므로, 한쪽을 골라 담으면
+        다른 유형을 물었다는 사실이 계획에서 사라진다.
+
+    연도를 요구하는 이유:
+        한 기업이 해마다 여러 건의 공급계약을 공시한다. 시점이 없으면 어느 계약인지 정할 수
+        없고, 상대방만으로 좁히는 경로는 아직 없다. EventSubtypeRule.requires_filing_anchor가
+        공급계약에 대해 True인 것과 같은 판단이다.
+
+    counterparty가 None이어도 계획을 만든다:
+        상대방 없이 후보가 여럿이면 막는 일은 retrieval 계층이 한다. 여기서 미리 거절하면
+        후보가 하나뿐이라 답할 수 있는 질문까지 함께 막힌다.
+    """
+    matched = _find_event_subtype_rules(question)
+
+    other = tuple(
+        rule.subtype for rule in matched if rule.subtype != EVENT_SUBTYPE_SUPPLY_CONTRACT
+    )
+
+    if other:
+        listed = ", ".join((EVENT_SUBTYPE_SUPPLY_CONTRACT, *other))
+
+        raise UnsupportedQuestionError(
+            reason="ambiguous_event_subtype",
+            detail=(
+                f"질문이 여러 공시 유형을 함께 가리키고 있습니다: {listed}. "
+                "어느 유형의 계약인지 특정할 수 없습니다. 한 유형을 골라 답하지 않습니다."
+            ),
+        )
+
+    years = _require_years(years)
+
+    return QueryPlan(
+        question=question.strip(),
+        companies=companies,
+        years=years[:1],
+        intent=INTENT_CONTRACT_FACT,
+        document_class=DOCUMENT_CLASS_EVENT,
+        document_subtype=EVENT_SUBTYPE_SUPPLY_CONTRACT,
+        # 거래소공시에는 연결·별도 구분이 없다.
+        accounting_scope=QueryAccountingScope.NOT_APPLICABLE.value,
+        metric=None,
+        requested_fields=_find_contract_fields(question),
+        counterparty=_extract_counterparty(question, companies[0]),
+        month=_extract_month(question),
+    )
+
+
 def _build_cross_entity_compare_plan(
     question: str,
     companies: tuple[str, ...],
@@ -1664,6 +1871,23 @@ def build_query_plan(
             expression=relative_expression,
             fiscal_year_anchors=fiscal_year_anchors,
         )
+
+    # 계약 단건 사실 조회(Q02)를 가른다.
+    #
+    # 위치가 규약이다. 세 경계 사이에 있어야 한다.
+    #
+    #   이력 판정보다 뒤       '공급계약 금액이 어떻게 바뀌었어?'는 이력 질문이다. 앞에 두면
+    #                          실제로 답하고 있던 Pattern E 질문을 가로챈다.
+    #
+    #   Pattern C·상대기간보다 뒤  기간이 둘인 계약 질문은 기간 축이 먼저다. 앞에 두면 두
+    #                          기간을 물은 질문이 단일 계약 조회로 축소된다.
+    #
+    #   지표 판정보다 앞       계약금액·계약기간은 _extract_metric의 어휘(매출액)에 없다.
+    #                          뒤에 두면 이 질문들이 전부 unsupported_metric으로 막히고,
+    #                          막힌 이유가 '계약 조회 미지원'이 아니라 '지표를 모르겠다'로
+    #                          바뀐다.
+    if _looks_like_contract_fact(question):
+        return _build_contract_fact_plan(question, companies, years)
 
     _require_years(years)
 

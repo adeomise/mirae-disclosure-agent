@@ -51,7 +51,9 @@ from disclosure_agent.agent.normalization import (
 )
 from disclosure_agent.agent.query_analyzer import (
     INTENT_CROSS_ENTITY_COMPARE,
+    PREVIOUS_YEAR_OFFSET,
     QueryPlan,
+    RelativePeriod,
     build_query_plan,
 )
 from disclosure_agent.common.enums import (
@@ -590,3 +592,103 @@ def test_entity_comparability_reason_is_registered_in_the_table() -> None:
 
     assert outcome.status is AnswerabilityStatus.UNANSWERABLE
     assert outcome.reason is AnswerabilityReason.NOT_COMPARABLE
+
+
+# --------------------------------------------------------------------------
+# 9. 해석하지 않은 상대 기간은 계획이 답한다
+#
+# 이 절이 지키는 것은 판정의 출처다. 예전 구현은 plan.question에 "전년"이 들어 있는지를
+# 부분문자열로 봤다. 그 방식은 두 방향으로 틀린다. 계획에 기록이 없으면 막지 못하고,
+# 해석에 성공한 계획도 글자가 남아 있다는 이유로 막는다.
+# --------------------------------------------------------------------------
+
+
+def test_unresolved_relative_period_is_blocked_at_the_entry() -> None:
+    """
+    절대연도 하나에 해석하지 않은 상대 기간이 붙은 계획은 값을 만들지 않는다.
+
+    개수 검사만으로는 걸리지 않는다. years에는 절대연도 하나만 남아 있기 때문이다. 통과시키면
+    "2025년 매출이 전년보다 어때"가 2025년만 견준 답으로 돌아가고, 사라진 기간이 결과 어디에도
+    남지 않는다.
+    """
+    plan = _plan(
+        relative_period=RelativePeriod(
+            expression="전년",
+            offset=PREVIOUS_YEAR_OFFSET,
+        )
+    )
+
+    assert plan.has_unresolved_relative_period
+
+    blocked = _unsupported_plan(plan)
+
+    assert blocked is not None
+    assert blocked.stage == STAGE_PATTERN_ENTRY
+    assert blocked.reason == REASON_UNSUPPORTED_COMPARISON_PERIOD
+
+
+def test_the_verdict_comes_from_the_plan_not_from_the_question_text() -> None:
+    """
+    질문 문자열에 상대 기간 어휘가 남아 있어도, 계획이 해석을 마쳤으면 막지 않는다.
+
+    부분문자열 판정으로 되돌아가면 여기가 깨진다. "작년"은 옮긴 뒤에도 질문에 그대로 남아
+    있으므로, 글자로 판정하면 옮기기 전과 옮긴 뒤를 가릴 수 없다. 그때는 답할 수 있는 질문을
+    막는 쪽으로 틀린다.
+
+    이 계획은 기준 연도가 정해져 있어 해석이 끝난 상태다. 기간 축이 여럿이라는 이유로 막히는
+    것은 years가 답할 몫이며, 여기서는 그 축을 건드리지 않는다.
+    """
+    plan = _plan(
+        question=f"{LEFT_COMPANY}랑 {RIGHT_COMPANY} 작년 매출 비교해줘",
+        relative_period=RelativePeriod(
+            expression="작년",
+            offset=PREVIOUS_YEAR_OFFSET,
+            anchor_year=FISCAL_YEAR,
+            anchor_source="latest_annual_filing",
+        ),
+    )
+
+    assert "작년" in plan.question
+    assert not plan.has_unresolved_relative_period
+    assert _unsupported_plan(plan) is None
+
+
+def test_the_analyzer_records_the_relative_period_on_a_cross_entity_plan() -> None:
+    """
+    막는 쪽이 읽는 값을 실제로 채우는 자리가 있어야 한다.
+
+    query_analyzer는 다중 기업 판정을 기간 판정보다 먼저 한다. 그래서 이 기록을
+    _build_cross_entity_compare_plan이 직접 남기지 않으면, 위 guard가 읽을 값이 늘 비어 있고
+    검사는 조용히 통과한다. guard와 그 값을 채우는 자리를 함께 고정한다.
+    """
+    plan = build_query_plan(
+        "HD현대중공업이랑 삼성중공업 2025년 매출이 전년보다 어때?",
+        known_companies=("HD현대중공업", "삼성중공업"),
+    )
+
+    assert plan.intent == INTENT_CROSS_ENTITY_COMPARE
+    assert plan.years == (2025,)
+    assert plan.relative_period is not None
+    assert plan.relative_period.expression == "전년"
+    assert not plan.relative_period.resolved
+    assert plan.has_unresolved_relative_period
+
+
+def test_a_plain_cross_entity_plan_records_no_relative_period() -> None:
+    """
+    상대 기간 어휘가 없는 질문에는 그 기록이 붙지 않는다.
+
+    Q10과 Q11이 이 모양이다. 여기에 값이 붙으면 두 대표 질문이 전부 입구에서 막힌다.
+    """
+    for question in (
+        "HD현대중공업과 삼성중공업의 2025년 매출액을 비교해줘.",
+        "HD현대중공업과 삼성중공업 중 2025년 영업이익률이 더 높은 곳은 어디야?",
+    ):
+        plan = build_query_plan(
+            question,
+            known_companies=("HD현대중공업", "삼성중공업"),
+        )
+
+        assert plan.relative_period is None
+        assert not plan.has_unresolved_relative_period
+        assert _unsupported_plan(plan) is None

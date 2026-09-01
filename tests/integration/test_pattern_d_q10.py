@@ -62,7 +62,9 @@ from disclosure_agent.agent.handlers.cross_entity_compare import (
 from disclosure_agent.agent.period_retrieval import PeriodFactCollection
 from disclosure_agent.agent.query_analyzer import (
     INTENT_CROSS_ENTITY_COMPARE,
+    PREVIOUS_YEAR_OFFSET,
     QueryPlan,
+    RelativePeriod,
     build_query_plan,
 )
 from disclosure_agent.common.enums import (
@@ -709,8 +711,19 @@ def _cross_entity_plan(**overrides) -> QueryPlan:
         # 기업 축과 기간 축이 함께 여럿이다.
         ({"years": (2024, 2025)}, REASON_UNSUPPORTED_COMPARISON_PERIOD),
         # 절대연도 하나 + 해석하지 않은 상대 기간. 개수만 보면 통과한다.
+        #
+        # 상대 기간은 질문 문자열이 아니라 계획에 담아 준다. 막는 쪽이 읽는 정본이
+        # QueryPlan.has_unresolved_relative_period이기 때문이며, 그 값을 채우는 자리는
+        # query_analyzer._build_cross_entity_compare_plan이다. 문자열로만 두면 실제
+        # 계획과 다른 모양을 검증하게 된다.
         (
-            {"question": f"{COMPANY_LEFT}랑 {COMPANY_RIGHT} 2025년 매출이 전년보다 어때"},
+            {
+                "question": f"{COMPANY_LEFT}랑 {COMPANY_RIGHT} 2025년 매출이 전년보다 어때",
+                "relative_period": RelativePeriod(
+                    expression="전년",
+                    offset=PREVIOUS_YEAR_OFFSET,
+                ),
+            },
             REASON_UNSUPPORTED_COMPARISON_PERIOD,
         ),
         # 이번 범위 밖의 원천 지표.

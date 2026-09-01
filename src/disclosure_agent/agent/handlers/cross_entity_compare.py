@@ -120,7 +120,7 @@ from disclosure_agent.agent.derived_metrics import (
 )
 from disclosure_agent.agent.normalization import normalize_cross_entity_compare_result
 from disclosure_agent.agent.period_retrieval import collect_period_facts
-from disclosure_agent.agent.query_analyzer import RELATIVE_PERIOD_TOKENS, QueryPlan
+from disclosure_agent.agent.query_analyzer import QueryPlan
 from disclosure_agent.common.enums import MetricConcept
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
@@ -288,25 +288,6 @@ def source_metrics_for(plan: QueryPlan) -> tuple[MetricConcept, ...]:
     )
 
 
-def _has_unresolved_relative_period(plan: QueryPlan) -> bool:
-    """
-    계획에 해석하지 않은 상대 기간 표현이 함께 있는가.
-
-    질문 문자열을 다시 본다. 계획에 그 사실이 남아 있지 않기 때문이다. query_analyzer는
-    다중 기업 판정을 기간 판정보다 먼저 하므로, 기업이 둘인 질문은 상대 기간 표현을 보기 전에
-    이 Pattern으로 분류된다. 그래서 years에도 warnings에도 기록이 없다
-    (시계열 계획은 반대로 warnings에 남는다: _build_temporal_compare_plan).
-
-    어휘는 query_analyzer가 가진 것을 그대로 쓴다. 여기서 토큰을 다시 적으면 같은 판정에
-    두 벌의 어휘가 생기고, 한쪽만 넓어지는 날이 온다.
-
-    해석하지 않고 있는지만 본다. "전년"을 연도로 옮기려면 기준 시점(as_of) 정책을 먼저
-    정해야 하며 그것은 이 Pattern의 범위가 아니다. 이 판정은 답을 만들기 위한 것이 아니라
-    축소된 답을 만들지 않기 위한 것이므로, 있다는 사실만으로 충분하다.
-    """
-    return any(token in plan.question for token in RELATIVE_PERIOD_TOKENS)
-
-
 def _unsupported_plan(plan: QueryPlan) -> BlockedInfo | None:
     """
     이번 구현이 실행할 수 있는 계획인지 본다. 실행할 수 없으면 정지 지점을 돌려준다.
@@ -359,11 +340,14 @@ def _unsupported_plan(plan: QueryPlan) -> BlockedInfo | None:
             ),
         )
 
-    if _has_unresolved_relative_period(plan):
+    if plan.has_unresolved_relative_period:
         # 해석하지 않은 상대 기간 표현("전년")이 절대연도 하나에 붙은 계획이다. 위 개수
-        # 검사만으로는 걸리지 않는다. query_analyzer가 다중 기업 판정을 기간 판정보다 먼저
-        # 하므로, 그 계획에는 상대 기간을 봤다는 기록이 years에도 warnings에도 남지 않기
-        # 때문이다(query_analyzer.build_query_plan).
+        # 검사만으로는 걸리지 않는다. 기간이 둘이라는 사실이 years에 남지 않기 때문이다.
+        #
+        # 판정은 계획에게 묻는다. 질문 문자열을 다시 읽으면 해석에 성공한 계획도 "작년"이라는
+        # 글자가 남아 있다는 이유로 막히고, 그때는 답할 수 있는 질문을 막는 쪽으로 틀린다
+        # (QueryPlan.has_unresolved_relative_period). 그 기록을 남기는 자리는
+        # query_analyzer._build_cross_entity_compare_plan이다.
         #
         # 개수만 보고 통과시키면 "HD현대중공업이랑 삼성중공업 2025년 매출이 전년보다 어때"
         # 같은 질문이 2025년만 견준 답으로 돌아가고, 사라진 기간이 결과 어디에도 남지 않는다.

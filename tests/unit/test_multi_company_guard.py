@@ -11,12 +11,15 @@
 
 막는 자리가 옮겨진 것에 대하여:
     Pattern D handler가 등록되기 전에는 Router가 routing/unimplemented_intent로 막았다.
-    등록한 뒤에는 handler 입구(pattern_entry)가 막는다. Pattern C에서 이미 한 번 일어난
-    이동이며(GUARD-MULTI-PERIOD), 값을 하나도 만들지 않는다는 성질은 그대로다.
+    등록한 뒤에는 handler 입구(pattern_entry)가 이번 구현이 다루지 못하는 모양만 막고,
+    다루는 모양은 실제로 두 기업을 견준다. Pattern C에서 이미 한 번 일어난 이동이며
+    (GUARD-MULTI-PERIOD), 축소해서 답하지 않는다는 성질은 두 경우 모두 그대로다.
 
 무엇을 검증하지 않는가:
-    Pattern D(기업 간 비교)의 실제 동작은 검증하지 않는다. 수치 실행 단계가 아직 없기
-    때문이다. 여기서 고정하는 것은 '축소해서 답하지 않는다'까지다.
+    Pattern D의 실행 결과(파생값·우열 판정·provenance)는 검증하지 않는다. 그쪽은
+    tests/integration/test_pattern_d_q10.py와 test_pattern_d_q11.py가 맡는다. 여기서
+    고정하는 것은 '축소해서 답하지 않는다'까지이며, 그래서 아래 검사는 막혔는지 답했는지를
+    묻지 않고 한 기업만 남지 않았다는 것만 본다. 어느 쪽으로 끝나든 그 성질은 같아야 한다.
 
 false positive:
     조사나 구분자로 판정하지 않는다. 실제 목록에 있는 회사명이 서로 다른 자리에서

@@ -13,6 +13,7 @@ from disclosure_agent.common.schemas import Event, EventHistory, Evidence
 from disclosure_agent.event.adapter import EventAdapterResult, adapt_extracted_event
 from disclosure_agent.event.contract_adapter import to_event_history
 from disclosure_agent.event.diff import FieldChange
+from disclosure_agent.event.exceptions import UnsupportedCompositeCorrectionError
 from disclosure_agent.event.extractor import extract_event
 from disclosure_agent.event.latest_state import resolve_latest_event_state
 from disclosure_agent.event.linker import ChainEntry, FilingChain, build_filing_chain
@@ -170,6 +171,37 @@ def _synthetic_inputs():
     return documents[root.doc_id].event, history, chain, documents
 
 
+def _inputs_with_unmapped_change(
+    raw_field: str,
+    *,
+    event_type: EventType,
+):
+    root_event, history, chain, documents = _synthetic_inputs()
+    entries = tuple(
+        ChainEntry(
+            filing=entry.filing,
+            is_correction=entry.is_correction,
+            link=entry.link,
+            changes=(FieldChange(None, raw_field, "before", "after"),)
+            if entry.filing.receipt_no == "SECOND"
+            else entry.changes,
+        )
+        for entry in chain.entries
+        if entry.filing.receipt_no != "FIRST"
+    )
+    chain = FilingChain(root_receipt_no=chain.root_receipt_no, entries=entries)
+    for result in documents.values():
+        result.event = result.event.model_copy(update={"event_type": event_type})
+    root_event = documents["exchange_ROOT"].event
+    history = history.model_copy(
+        update={
+            "event_id": f"event_{event_type.value}_exchange_ROOT",
+            "document_ids": ["exchange_ROOT", "exchange_SECOND"],
+        }
+    )
+    return root_event, history, chain, documents
+
+
 def test_resolves_each_field_from_its_explicit_change_source() -> None:
     root_event, history, chain, documents = _synthetic_inputs()
 
@@ -202,6 +234,91 @@ def test_resolves_each_field_from_its_explicit_change_source() -> None:
     )
 
     assert "지원하지 않는 필드" not in state.fields
+
+
+@pytest.mark.parametrize(
+    ("raw_field", "category"),
+    [
+        (
+            "2. 계약내역 - 계약금액(원) - 매출액대비(%)",
+            "source_composite",
+        ),
+        ("2.계약내역", "ambiguous_container"),
+    ],
+)
+def test_known_unsafe_supply_correction_blocks_latest_state(
+    raw_field: str,
+    category: str,
+) -> None:
+    root_event, history, chain, documents = _inputs_with_unmapped_change(
+        raw_field,
+        event_type=EventType.SUPPLY_CONTRACT,
+    )
+
+    with pytest.raises(
+        UnsupportedCompositeCorrectionError,
+        match=rf"exchange_SECOND.*{category}",
+    ):
+        resolve_latest_event_state(
+            root_event=root_event,
+            history=history,
+            chain=chain,
+            documents=documents,
+        )
+
+
+def test_source_composite_cannot_confirm_stale_contract_amount_as_latest() -> None:
+    root_event, history, chain, documents = _inputs_with_unmapped_change(
+        "2. 계약내역 - 계약금액(원) - 매출액대비(%)",
+        event_type=EventType.SUPPLY_CONTRACT,
+    )
+    old_value = "OLD_VALUE"
+    root_result = documents["exchange_ROOT"]
+    root_result.event = root_result.event.model_copy(
+        update={"attributes": {"contract_amount": old_value}}
+    )
+    root_event = root_result.event
+
+    with pytest.raises(UnsupportedCompositeCorrectionError):
+        state = resolve_latest_event_state(
+            root_event=root_event,
+            history=history,
+            chain=chain,
+            documents=documents,
+        )
+        assert state.fields["contract_amount"].value != old_value
+
+
+@pytest.mark.parametrize(
+    ("raw_field", "event_type"),
+    [
+        ("기타 투자판단과 관련한 중요사항", EventType.SUPPLY_CONTRACT),
+        ("완전히 모르는 정정항목", EventType.SUPPLY_CONTRACT),
+        (
+            "2. 계약내역 - 계약금액(원) - 매출액대비(%)",
+            EventType.FACILITY_INVESTMENT,
+        ),
+    ],
+)
+def test_nonblocking_unmapped_change_keeps_existing_resolution_behavior(
+    raw_field: str,
+    event_type: EventType,
+) -> None:
+    root_event, history, chain, documents = _inputs_with_unmapped_change(
+        raw_field,
+        event_type=event_type,
+    )
+
+    state = resolve_latest_event_state(
+        root_event=root_event,
+        history=history,
+        chain=chain,
+        documents=documents,
+    )
+
+    assert state.fields["investment_amount"].value == 100
+    assert state.fields["investment_amount"].source_doc_id == "exchange_ROOT"
+
 
 
 def test_missing_normalized_correction_field_fails_closed() -> None:

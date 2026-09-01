@@ -79,6 +79,9 @@ TRAILING_PARENTHETICAL_PATTERN = re.compile(r"\([^()]*\)$")
 BRACKET_PATTERN = re.compile(r"[()（）\[\]]")
 SEPARATOR_PATTERN = re.compile(r"[\s ·ㆍ・,\.\-_/]+")
 
+UNSAFE_SOURCE_COMPOSITE = "source_composite"
+UNSAFE_AMBIGUOUS_CONTAINER = "ambiguous_container"
+
 
 def normalize_correction_label(raw_field: str | None) -> str:
     """Normalize correction aliases and lookup labels with the same contract."""
@@ -90,6 +93,35 @@ def normalize_correction_label(raw_field: str | None) -> str:
     value = TRAILING_PARENTHETICAL_PATTERN.sub("", value)
     value = BRACKET_PATTERN.sub("", value)
     return SEPARATOR_PATTERN.sub("", value)
+
+
+# Actual-corpus correction rows whose source structure cannot be represented by the
+# current one-change/one-field history model. Keep this policy event-scoped: the same
+# raw text in another event type is not evidence that it has the same semantics.
+LATEST_STATE_BLOCKING_CORRECTIONS: dict[str, dict[str, str]] = {
+    EVENT_SUPPLY_CONTRACT: {
+        normalize_correction_label(
+            "2. 계약내역 - 계약금액(원) - 매출액대비(%)"
+        ): UNSAFE_SOURCE_COMPOSITE,
+        normalize_correction_label("2. 계약내역"): UNSAFE_AMBIGUOUS_CONTAINER,
+        normalize_correction_label(
+            "8. 공시유보 관련내용 - 유보사유 - 유보기한"
+        ): UNSAFE_SOURCE_COMPOSITE,
+        normalize_correction_label(
+            "5. 계약기간 - 시작일 - 종료일"
+        ): UNSAFE_SOURCE_COMPOSITE,
+    }
+}
+
+
+def classify_latest_state_blocking_correction(
+    raw_field: str | None,
+    *,
+    event_type: str,
+) -> str | None:
+    """Classify only corrections known to make latest-state resolution unsafe."""
+    normalized = normalize_correction_label(raw_field)
+    return LATEST_STATE_BLOCKING_CORRECTIONS.get(event_type, {}).get(normalized)
 
 
 def iter_correction_aliases() -> Iterator[tuple[str, str, str]]:

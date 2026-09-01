@@ -72,6 +72,7 @@ from disclosure_agent.common.enums import Intent
 from disclosure_agent.common.schemas import AgentExecutionResult
 from disclosure_agent.retrieval.metadata_filter import (
     FilingNotFoundError,
+    latest_annual_fiscal_year_by_company,
     list_company_names,
     load_manifest,
 )
@@ -216,13 +217,28 @@ def answer_question(
     )
 
     try:
-        known_companies = list_company_names(load_manifest(resolved_manifest))
+        manifest_records = load_manifest(resolved_manifest)
 
     except FilingNotFoundError as error:
         return blocked_execution(STAGE_FILING_DISCOVERY, error.reason, error.detail)
 
+    known_companies = list_company_names(manifest_records)
+
+    # 상대 기간("작년")을 옮길 기준 연도도 같은 manifest에서 유도해 넘긴다.
+    #
+    # query_analyzer가 직접 읽지 않는 이유는 known_companies와 같다. 질의 해석 계층은 코퍼스를
+    # 열지 않으며, 그 덕분에 manifest 없이도 전부 시험할 수 있다.
+    #
+    # manifest를 두 번 읽지 않는다. 두 번 읽으면 그 사이에 파일이 바뀌었을 때 기업 목록과 기준
+    # 연도가 서로 다른 코퍼스를 가리키게 되고, 그 어긋남은 결과만 봐서는 드러나지 않는다.
+    fiscal_year_anchors = latest_annual_fiscal_year_by_company(manifest_records)
+
     try:
-        plan = build_query_plan(question, known_companies=known_companies)
+        plan = build_query_plan(
+            question,
+            known_companies=known_companies,
+            fiscal_year_anchors=fiscal_year_anchors,
+        )
 
     except UnsupportedQuestionError as error:
         return blocked_execution(STAGE_QUERY_PLAN, error.reason, error.detail)

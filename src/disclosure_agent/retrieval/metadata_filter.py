@@ -69,6 +69,13 @@ DOCUMENT_CLASS_BY_DOC_GROUP: dict[str, str] = {
     for document_class, doc_group in DOC_GROUP_BY_DOCUMENT_CLASS.items()
 }
 
+# manifest의 정기공시 세부유형 표기 중 사업보고서.
+#
+# agent 계층의 DOCUMENT_SUBTYPE_ANNUAL과 값이 같지만 가져다 쓰지 않는다. retrieval은 agent를
+# import하지 않으며(tests/unit/test_layering.py), 이 값의 출처는 설계 어휘가 아니라 manifest의
+# doc_subtype 표기다.
+DOC_SUBTYPE_ANNUAL = "annual"
+
 # 기간 조건을 manifest의 어느 필드로 판정할지.
 PERIOD_KIND_FISCAL = "fiscal"  # 회계기간. base_year
 PERIOD_KIND_FILING = "filing"  # 공시일. rcept_dt
@@ -250,6 +257,89 @@ def list_company_names(records: list[dict[str, Any]]) -> tuple[str, ...]:
             names.setdefault(unicodedata.normalize("NFC", name), None)
 
     return tuple(names)
+
+
+def latest_annual_fiscal_year_by_company(
+    records: list[dict[str, Any]],
+) -> dict[str, int]:
+    """
+    기업별로 코퍼스에 사업보고서가 존재하는 가장 최신 회계연도를 돌려준다.
+
+    키는 normalize_company_name을 거친 표기다. 질의 해석 계층이 질문에서 읽은 기업명으로
+    바로 찾을 수 있어야 하고, 그쪽도 같은 정규화 함수를 쓴다.
+
+    이 값의 쓰임은 상대 기간 해석의 기준 연도(anchor)다
+    (docs/agent_design/open_decisions.md D8). "작년"을 절대연도로 옮기려면 기준이 있어야 하고,
+    그 기준을 시스템 시각에서 가져오면 같은 질문이 실행한 날에 따라 다른 해를 가리킨다.
+
+    무엇을 보고 정하는가:
+        정기공시(periodic) · 사업보고서(annual) · base_year 하나뿐이다.
+
+        분기·반기보고서를 함께 보지 않는다. 이 코퍼스에는 70개사 전부 FY2026 분기보고서가
+        있고 사업보고서는 FY2025가 최신이다. 문서군을 좁히지 않고 base_year의 최댓값을 취하면
+        anchor가 2026이 되어, 존재하지 않는 FY2026 사업보고서를 찾다가 실패한다.
+
+        요청 지표가 그 문서에서 실제로 읽히는지는 보지 않는다. 그것을 보기 시작하면 추출에
+        실패한 해가 조용히 건너뛰어지고, "2025년 매출을 못 읽었으니 2024년을 최신으로 치자"가
+        된다. 그 결과는 근거를 갖춘 채로 질문과 다른 기간을 답하는 형태이며, 추출 실패보다
+        나쁘다. anchor는 문서의 존재만으로 정하고, 값이 없으면 뒤 단계가 NOT_FOUND로 답한다.
+
+    정정공시를 제외하지 않는 이유:
+        [기재정정]사업보고서도 그 회계연도의 사업보고서다. 여기서 묻는 것은 "그 해의 사업보고서가
+        코퍼스에 있는가"이지 "어느 판본을 읽을 것인가"가 아니다. 판본 선택은 D5이며 이 함수가
+        정하지 않는다.
+
+        제외하면 실제로 갈린다. 이 코퍼스에서 한화솔루션의 FY2025 사업보고서는 정정본 한 건만
+        있으므로, 정정본을 빼면 그 기업만 anchor가 2024가 되고 나머지 69개사는 2025가 된다.
+        같은 질문이 기업에 따라 다른 해를 가리키는 것은 정책이 아니라 사고다.
+
+    base_year가 정수가 아닌 레코드는 건너뛴다. 문자열을 정수로 바꿔 받아들이지 않는 이유는,
+    표기가 흔들리는 manifest에서 anchor를 만들어 내는 것보다 anchor 없이 막히는 쪽이 낫기
+    때문이다. 값이 없으면 호출자가 fail-closed로 처리한다.
+    """
+    doc_group = DOC_GROUP_BY_DOCUMENT_CLASS[DOCUMENT_CLASS_PERIODIC]
+
+    anchors: dict[str, int] = {}
+
+    for record in records:
+        if record.get("doc_group") != doc_group:
+            continue
+
+        if record.get("doc_subtype") != DOC_SUBTYPE_ANNUAL:
+            continue
+
+        base_year = record.get("base_year")
+
+        # bool은 int의 하위 타입이라 isinstance(True, int)가 참이다. 회계연도 자리에 True가
+        # 들어오면 1이 되어 조용히 섞인다.
+        if not isinstance(base_year, int) or isinstance(base_year, bool):
+            continue
+
+        name = normalize_company_name(record.get("corp_name", ""))
+
+        if not name:
+            continue
+
+        if base_year > anchors.get(name, base_year - 1):
+            anchors[name] = base_year
+
+    return anchors
+
+
+def latest_annual_fiscal_year(
+    records: list[dict[str, Any]],
+    *,
+    company: str,
+) -> int | None:
+    """
+    기업 한 곳의 상대 기간 기준 연도(anchor)를 돌려준다. 없으면 None이며 추측하지 않는다.
+
+    판정 규칙은 latest_annual_fiscal_year_by_company 하나가 갖는다. 여기서 같은 조건을 다시
+    적으면 두 벌이 되고, 나중에 한쪽만 넓어지는 날이 온다.
+    """
+    return latest_annual_fiscal_year_by_company(records).get(
+        normalize_company_name(company)
+    )
 
 
 def _matches_period(

@@ -42,5 +42,24 @@ Evidence reference integrity. Expected Fact fields that are omitted are not
 compared. Event, EventLink, EventHistory, and Calculation content rubrics remain
 future extensions; their collection counts can already be checked.
 
+## Corpus-dependent gold values
+
+Some representative gold values depend on what the current corpus contains, not only on
+the question text. `q07` ("한미반도체 매출이 작년보다 얼마나 늘었어?") is the clearest case.
+
+Its relative period is resolved against a fiscal-year anchor: the latest fiscal year for
+which the company has an annual report in the corpus. The system clock is never used, and
+the anchor never moves because a metric could not be extracted
+(`docs/agent_design/open_decisions.md` D8). In the current corpus snapshot 한미반도체 has
+annual reports for FY2023, FY2024 and FY2025, so the anchor is **FY2025** and the gold
+Facts are pinned to **FY2024 and FY2025**.
+
+If the corpus later gains an FY2026 annual report, the same question means FY2025 vs
+FY2026. Keep the question text as it is and move the expected fiscal years; Q07 validates
+relative-period resolution itself, not a particular pair of years.
+
+`as_of_date` and `corpus_snapshot` on `QuestionCase` stay `null`. No explicit as-of
+contract exists yet, and `q07` deliberately exercises the default anchor path.
+
 Local prediction and evaluation result files belong under `results/` and must not
 contain source documents or secrets.

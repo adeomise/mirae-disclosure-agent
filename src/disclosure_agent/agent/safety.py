@@ -519,9 +519,9 @@ def _requested_periods(question: str) -> tuple[tuple[int, int | None, str], ...]
 #     "요구 기간이 발화 시점 이후"라는 방향 하나뿐이며, F1에는 그것으로 충분하다.
 #     코퍼스는 고정된 과거 스냅샷이므로 발화 시점 이후를 가리키는 요구를 담고 있을 수 없다.
 #
-# 과거 방향 상대기간(작년·전년·지난해)은 여기 없다. 그쪽은 Q07의 relative-period resolver
-# 영역이고 최신 회계연도를 anchor로 해석되므로, 여기서 막으면 그 작업이 답할 질문을 미리
-# 없앤다. query_analyzer.RELATIVE_PERIOD_TOKENS가 같은 세 낱말만 담고 있는 것과 짝이다.
+# 과거 방향 상대기간(작년·전년·전년도·지난해)은 여기 없다. 그쪽은 Q07의 relative-period
+# resolver 영역이고 최신 회계연도를 anchor로 해석되므로, 여기서 막으면 그 작업이 답할 질문을
+# 미리 없앤다. query_analyzer.RELATIVE_PERIOD_TOKENS가 같은 네 낱말만 담고 있는 것과 짝이다.
 
 # 문서에 이미 기재된 미래 진술을 가리키는 낱말.
 #

@@ -314,12 +314,20 @@ def test_same_year_twice_is_not_a_multi_period_question() -> None:
     assert plan.year == 2024
 
 
-def test_relative_period_question_still_reports_missing_year() -> None:
+def test_relative_period_question_without_anchor_is_fail_closed() -> None:
     """
-    상대기간 질문은 이 가드가 다루지 않는다.
+    상대기간 질문은 기준 연도를 주지 않으면 막힌다.
 
-    Q07("작년보다")은 연도를 하나도 읽지 못해 막힌다. 답을 축소하지 않으므로 silent-wrong이
-    아니며, 상대기간 해석은 Pattern C 구현 범위다. 이 케이스는 그 경계를 고정한다.
+    Q07("작년보다")에는 절대연도가 없으므로, 기준 연도 없이는 어느 두 해를 견주는지 정할 수
+    없다. 이때 오늘 연도로 대신하지 않는다. 그렇게 하면 같은 질문이 실행한 날에 따라 다른
+    해를 가리키고, 그 차이는 결과만 봐서는 드러나지 않는다.
+
+    사유가 missing_year가 아닌 이유:
+        질문에 기간은 분명히 적혀 있다. 못 읽은 것은 연도가 아니라 그 표현을 옮길 기준이다.
+        무엇이 없어서 막혔는지가 결과에 남아야 무엇을 주면 풀리는지 알 수 있다.
+
+    이 테스트가 fiscal_year_anchors를 주지 않는 것이 요점이다. 해석 경로가 열린 뒤에도
+    기본값으로 조용히 연도를 만들어 내지 않는다는 것을 고정한다.
     """
     with pytest.raises(UnsupportedQuestionError) as error:
         build_query_plan(
@@ -327,7 +335,33 @@ def test_relative_period_question_still_reports_missing_year() -> None:
             known_companies=REAL_COMPANIES,
         )
 
-    assert error.value.reason == "missing_year"
+    assert error.value.reason == "missing_fiscal_year_anchor"
+
+
+def test_relative_period_question_resolves_with_anchor() -> None:
+    """
+    기준 연도를 주면 상대기간이 절대연도 두 개로 옮겨진다.
+
+    이 가드가 지키려는 것은 '두 기간을 물은 질문에 한 기간만 답하지 않는다'이다. 상대기간을
+    옮기고 나서도 그 성질은 그대로여야 하므로, years가 둘이고 intent가 시계열 비교인 것까지
+    여기서 함께 고정한다. 해석 규칙 자체는 tests/unit/test_relative_period_anchor.py가 맡는다.
+    """
+    plan = build_query_plan(
+        "한미반도체 매출이 작년보다 얼마나 늘었어?",
+        known_companies=REAL_COMPANIES,
+        fiscal_year_anchors={"한미반도체": 2025},
+    )
+
+    assert plan.intent == INTENT_TEMPORAL_COMPARE
+    assert plan.years == (2024, 2025)
+    assert plan.metric == METRIC_REVENUE
+
+    # 옮기고 나면 미해결 상태가 아니다. 이 값이 참으로 남아 있으면 Pattern D가 계획을 막는다.
+    assert plan.has_unresolved_relative_period is False
+
+    # 시계열 비교 계획에서는 여전히 단일 기간 통로를 열지 않는다.
+    with pytest.raises(ValueError):
+        plan.year
 
 
 # --------------------------------------------------------------------------

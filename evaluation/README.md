@@ -68,3 +68,16 @@ cases remain validation-only, and future regression cases remain outside the sco
 denominator. A returned blocked or failed execution retains its Agent status and
 reason for comparison; an unexpected exception identifies the failing case and
 terminates the command with a nonzero exit code.
+
+### Temporal metadata
+
+`QuestionCase.as_of_date` and `QuestionCase.corpus_snapshot` are currently
+evaluation metadata only.
+
+Live Agent execution does not pass these fields into `answer_question`, because
+the current public Agent execution contract does not expose corresponding
+runtime inputs.
+
+If temporal/as-of execution becomes part of the Agent contract, the live
+evaluation runner should forward these fields explicitly so reproducibility is
+preserved.

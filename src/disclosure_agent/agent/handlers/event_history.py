@@ -57,6 +57,7 @@ from disclosure_agent.agent.answer_builder import (
     REASON_NO_ORIGINAL_FILING,
     REASON_PARSE_FAILED,
     REASON_UNSUPPORTED_EVENT_TYPE,
+    STAGE_CONTRACT_ADAPTATION,
     STAGE_FILING_DISCOVERY,
     STAGE_PARSING,
     STAGE_PATTERN_ENTRY,
@@ -104,6 +105,10 @@ EVENT_TYPE_BY_DOCUMENT_SUBTYPE: dict[str, EventType] = {
     EVENT_SUBTYPE_SUPPLY_CONTRACT: EventType.SUPPLY_CONTRACT,
     EVENT_SUBTYPE_FACILITY_INVESTMENT: EventType.FACILITY_INVESTMENT,
 }
+
+# 같은 문서의 같은 canonical field는 현재 행 단위 Evidence ID를 공유하게 된다. 서로 다른
+# 원문 행을 하나의 근거처럼 보이게 만들 수 있으므로 Contract 변환 전에 실행을 막는다.
+REASON_EVENT_EVIDENCE_ID_COLLISION = "event_evidence_id_collision"
 
 
 def resolve_event_type(document_subtype: str) -> EventType | None:
@@ -370,6 +375,25 @@ def build_event_history_result(
         event_type=event_type,
     )
 
+    collision_key = find_event_evidence_id_collision(chain)
+
+    if collision_key is not None:
+        source_doc_id, canonical_field = collision_key
+        return EventHistoryResult(
+            plan=plan,
+            root_candidate_doc_ids=(_doc_id(root),),
+            blocked=BlockedInfo(
+                stage=STAGE_CONTRACT_ADAPTATION,
+                reason=REASON_EVENT_EVIDENCE_ID_COLLISION,
+                detail=(
+                    "서로 다른 정정 행이 같은 행 단위 Evidence ID를 만들 수 있어 "
+                    "EventHistory 변환을 중단했습니다: "
+                    f"source_doc_id={source_doc_id!r}, "
+                    f"canonical_field={canonical_field!r}."
+                ),
+            ),
+        )
+
     conversion = to_event_history(
         chain,
         documents=documents,
@@ -409,6 +433,27 @@ def _judge_answerability(chain: FilingChain) -> AnswerabilityStatus:
         return AnswerabilityStatus.ANSWERABLE
 
     return AnswerabilityStatus.PARTIALLY_ANSWERABLE
+
+
+def find_event_evidence_id_collision(chain: FilingChain) -> tuple[str, str] | None:
+    """첫 중복 (source_doc_id, canonical_field) 키를 결정론적으로 찾는다."""
+    seen: set[tuple[str, str]] = set()
+
+    for entry in chain.entries:
+        source_doc_id = _doc_id(entry.filing)
+
+        for change in entry.changes:
+            if change.field is None:
+                continue
+
+            key = (source_doc_id, change.field)
+
+            if key in seen:
+                return key
+
+            seen.add(key)
+
+    return None
 
 
 def _doc_id(filing: FilingLike) -> str:

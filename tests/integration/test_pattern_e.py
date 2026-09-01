@@ -25,6 +25,7 @@ from disclosure_agent.agent import router
 from disclosure_agent.agent.handlers import event_history
 from disclosure_agent.agent.handlers.event_history import (
     REASON_AMBIGUOUS_ROOT,
+    REASON_EVENT_EVIDENCE_ID_COLLISION,
     REASON_NO_ORIGINAL_FILING,
     build_event_history_result,
     filing_date_window,
@@ -338,6 +339,105 @@ def test_change_evidence_supports_before_and_after_values(complete_chain) -> Non
         assert f"before: {change.before}" in evidence.raw_text
         assert f"after: {change.after}" in evidence.raw_text
         assert f"raw_field: {raw_field_by_name[change.field_name]}" in evidence.raw_text
+
+
+def test_duplicate_mapped_field_in_one_document_blocks_before_production(
+    make_event_corpus,
+    stub_parser,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path, corpus_root = make_event_corpus(
+        [
+            _record("E0001", "20250601", is_correction=False),
+            _record("E0002", "20251008", is_correction=True),
+        ]
+    )
+    stub_parser(
+        {
+            "E0001": {},
+            "E0002": {
+                "original_filing_date": "2025-06-01",
+                "correction_date": "2025-10-08",
+                "changes": [
+                    ("계약기간 종료일", "2026-01-31", "2026-06-30"),
+                    ("종료일", "2026-06-30", "2026-09-30"),
+                ],
+            },
+        }
+    )
+
+    def unexpected_call(*args, **kwargs):
+        raise AssertionError("collision guard must run before result production")
+
+    monkeypatch.setattr(event_history, "to_event_history", unexpected_call)
+    monkeypatch.setattr(event_history, "build_event_evidence", unexpected_call)
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+    first = build_event_history_result(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+    second = build_event_history_result(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    for internal in (first, second):
+        assert internal.history is None
+        assert internal.evidence == ()
+        assert internal.blocked is not None
+        assert internal.blocked.stage == "contract_adaptation"
+        assert internal.blocked.reason == REASON_EVENT_EVIDENCE_ID_COLLISION
+        assert "source_doc_id='exchange_E0002'" in internal.blocked.detail
+        assert "canonical_field='contract_end_date'" in internal.blocked.detail
+
+        normalized = normalize_event_history_result(internal)
+        assert normalized.execution_status is ExecutionStatus.BLOCKED
+        assert normalized.answerability_status is None
+        assert normalized.event_histories == []
+        assert normalized.evidence == []
+        assert normalized.execution_issue is not None
+        assert normalized.execution_issue.reason == REASON_EVENT_EVIDENCE_ID_COLLISION
+
+    assert first.blocked == second.blocked
+
+
+def test_same_canonical_field_in_different_documents_does_not_collide(
+    make_event_corpus,
+    stub_parser,
+) -> None:
+    manifest_path, corpus_root = make_event_corpus(
+        [
+            _record("E0001", "20250601", is_correction=False),
+            _record("E0002", "20251008", is_correction=True),
+            _record("E0003", "20251218", is_correction=True),
+        ]
+    )
+    stub_parser(
+        {
+            "E0001": {},
+            "E0002": {
+                "original_filing_date": "2025-06-01",
+                "correction_date": "2025-10-08",
+                "changes": [("계약기간 종료일", "A", "B")],
+            },
+            "E0003": {
+                "original_filing_date": "2025-06-01",
+                "correction_date": "2025-12-18",
+                "changes": [("종료일", "B", "C")],
+            },
+        }
+    )
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+    result = build_event_history_result(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    assert result.blocked is None
+    assert result.history is not None
+    assert [change.before_evidence_id for change in result.history.changes] == [
+        "evidence_exchange_E0002_contract_end_date",
+        "evidence_exchange_E0003_contract_end_date",
+    ]
 
 
 def test_no_natural_language_answer_is_invented(complete_chain) -> None:

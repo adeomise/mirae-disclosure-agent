@@ -67,9 +67,9 @@ def test_q15_runs_through_actual_corpus_http_api() -> None:
     )
     assert len(actual.evidence) >= 2
 
-    evidence_ids = {item.evidence_id for item in actual.evidence}
+    response_evidence_ids = {item.evidence_id for item in actual.evidence}
     for change in history.changes:
-        if change.before_evidence_id is not None:
-            assert change.before_evidence_id in evidence_ids
-        if change.after_evidence_id is not None:
-            assert change.after_evidence_id in evidence_ids
+        assert change.before_evidence_id is not None
+        assert change.after_evidence_id is not None
+        assert change.before_evidence_id in response_evidence_ids
+        assert change.after_evidence_id in response_evidence_ids

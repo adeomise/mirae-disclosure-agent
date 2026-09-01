@@ -35,8 +35,12 @@ Agent 설계 문서 전체에서 정본 표기로 사용합니다.**
 | F. Answerability Gate | Q16 Q17 Q18 | 거부 판정. A~E의 선행·후행 관문 |
 
 18문항은 각각 정확히 하나의 Pattern에 배정됩니다. Pattern F는 독립 유형인 동시에 다른 Pattern의
-실행 중에도 작동합니다. 예를 들어 Q14에서 원공시 시점의 금액은 공시유보 상태이므로, Pattern E
-실행 중에 Pattern F 판정으로 부분 거부되어야 합니다.
+실행 중에도 작동합니다. 예를 들어 Q14 계열에서 원공시 시점의 금액이 공시유보 상태라면, Pattern E
+실행 중에 `WITHHELD_IN_SOURCE` 판정으로 부분 거부되어야 합니다
+([open_decisions.md](open_decisions.md) D9).
+
+다만 **현재 Q14 질문은 그 지점에 닿지 않습니다.** 루트 계약을 1건으로 좁힐 조건이 질문에 없어
+`UNRESOLVED` · `AMBIGUOUS_MATCH`로 먼저 끝납니다(D8). 유보 판정은 루트가 확정된 뒤의 단계입니다.
 
 각 Pattern의 필요 Capability는 **연쇄 참조 없이 전부 나열**합니다. Pattern 한 절만 읽어도 필요한
 Capability가 완결되도록 했습니다.
@@ -361,13 +365,18 @@ Query Analysis
 | C12 | **Answerability Judgment** | 지원 가능 여부와 사유 코드 판정. 전 Pattern의 선행 관문 | 전 문항 | `agent/safety`, `agent/evidence` | MUST |
 | C13 | Semantic Search | Section 경로 매핑 실패 시의 조건부 fallback | Q04 | `retrieval/keyword`, `vector`, `fusion` | SHOULD |
 | C14 | Narrative Diff | 서술 텍스트 2건에서 변화 항목 도출 | Q09 | 구현 위치 미정 | MUST |
-| C15 | PII Filtering | 지분공시에 포함될 수 있는 개인 식별정보 처리 | Q03 | `agent/safety` | **팀 확인 필요** |
+| C15 | PII Filtering | 지분공시에 포함될 수 있는 개인 식별정보 처리 | Q03 | `holding/extractor` (경계는 extractor 출구) | MUST |
 
 - **C14를 MUST로 둔 이유** — Q09의 Primary Capability이며, 대표 질문 18문항은 모두 필수이므로
   선택 등급과 모순이 생기지 않도록 했습니다.
-- **C15를 등급 대신 "팀 확인 필요"로 둔 이유** — Gold·Evidence 작성 시 개인 식별정보가 포함되지
-  않아야 한다는 점은 분명하지만, Agent 응답 단계의 처리 수준은 팀 정책 확인 대상입니다. 이 문서에서
-  구현 정책을 확정하지 않습니다([open_decisions.md](open_decisions.md) D6).
+- **C15가 MUST가 된 이유** — [open_decisions.md](open_decisions.md) **D6-a에서 확정**됐습니다.
+  허용된 보유 ACODE(`THS_STK_CNT`, `THS_STK_RT`)만 구조화하고, PII는 Fact·Evidence·구조화 출력·
+  로그·경고·예외 detail 어디에도 승격하지 않으며, allowlist field를 결정론적으로 특정할 수 없으면
+  fail-closed 합니다.
+- **C15의 구현 위치가 `agent/safety`가 아닌 이유** — 정책이 "Parser가 PII를 읽지 않는다"가 아니라
+  **"PII를 downstream Contract로 승격하지 않는다"**이기 때문입니다. 범용 XML parsing은 PII가 든
+  원문을 읽을 수 있고, 막아야 할 경계는 Parser 입구가 아니라 **extractor 출구**입니다. 응답 단계에
+  필터를 두면 그 앞의 Fact·로그·예외에는 이미 PII가 실려 있게 됩니다.
 - **C13을 Q04에만 배정한 이유** — Q05는 문서 선택 문제이지 검색 문제가 아니고, Q09는 Section 경로로
   위치를 지정할 수 있어 의미 검색이 필요하지 않다고 판단했습니다.
 

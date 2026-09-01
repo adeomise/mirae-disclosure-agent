@@ -44,7 +44,7 @@
 |---|---|---|---|---|---|
 | Q01 | A | `PASS_ACTUAL` | Actual | 없음. FY2025·FY2024·별도 기준 모두 `COMPLETED`/`ANSWERABLE`, Fact 1 · Evidence 1, 연결 유효 | 회귀 fixture에 고정 완료(`Q01`, `Q01-FY2024`, `Q01-SEPARATE`) |
 | Q02 | A | `NOT_IMPLEMENTED` | – | 거래소공시 단건 필드 조회 경로 없음. 현재 `query_plan/unsupported_metric`으로 BLOCKED. 계약상대방으로 문서를 좁히는 C3도 없음 | Pattern A에 event 단건 조회 추가. D1(거래소공시 Parser) 확정 후 |
-| Q03 | A | `NOT_IMPLEMENTED` | – | 지분공시(`document_class=holding`) 미지원. `MetricConcept`에 값은 있으나 analyzer가 인식하지 않음. `query_plan/unsupported_metric`으로 BLOCKED | D6(PII 처리) 확정 전에는 착수하지 않음 |
+| Q03 | A | `NOT_IMPLEMENTED` | – | 지분공시(`document_class=holding`) 미지원. `MetricConcept`에 값은 있으나 analyzer가 인식하지 않음. `query_plan/unsupported_metric`으로 BLOCKED | **D6-a 확정됨.** allowlist(`THS_STK_CNT`, `THS_STK_RT`) 기반 extractor 구현. D6-a의 acceptance criteria 4개를 만족해야 함 |
 | Q04 | B | `NOT_IMPLEMENTED` | – | `document_summary` handler 없음. `query_plan/unsupported_metric`으로 BLOCKED | Pattern B 착수 시. C13 Vector fallback 여부는 D7 |
 | Q05 | B | `NOT_IMPLEMENTED` | – | 같음 + 기간 미지정 기본 문서 정책 미확정(D5-a). `query_plan/missing_year`로 BLOCKED | D5-a 확정 필요 |
 | Q06 | B | `NOT_IMPLEMENTED` | – | 같음 + 판본 선택 정책 미확정(D5). `query_plan/missing_year`로 BLOCKED | D5 확정 필요 |
@@ -55,7 +55,7 @@
 | Q11 | D | `NOT_IMPLEMENTED` | – | 영업이익률 미지원으로 `query_plan/unsupported_metric` BLOCKED. Q10과 달리 지표에서 먼저 걸려 오라우팅되지 않음 | Q08과 함께 |
 | Q12 | D | `NOT_IMPLEMENTED` | – | 신규시설투자 subtype은 Q15에서 지원됐으나 집계 경로가 없음. 기업이 둘이라 `cross_entity_compare`로 분류되고 handler가 없어 `routing/unimplemented_intent`로 BLOCKED. 이력 표현이 없어 Pattern E로 새지도 않음 | 거래소공시 집계 경로. D1 확정 후 |
 | Q13 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 2 · Evidence 9, `chain_complete=True` | 회귀 fixture에 고정 완료(`Q13`) |
-| Q14 | E | `NOT_IMPLEMENTED` | Synthetic(능력 일부) | 질문이 연/월을 주지 않아 `query_plan/missing_year`로 BLOCKED. 계약상대방("포드")으로 루트를 좁히는 C3 없음. 체인 미완결 → `PARTIALLY_ANSWERABLE` 경로는 `tests/integration/test_pattern_e.py`에서 합성 검증됨 | 계약상대방 기반 루트 확정. 공시유보(`WITHHELD_IN_SOURCE`)는 Contract 미결정 |
+| Q14 | E | `NOT_IMPLEMENTED` | Synthetic(능력 일부) | 질문이 연/월을 주지 않아 `query_plan/missing_year`로 BLOCKED. **정답은 `UNRESOLVED`/`AMBIGUOUS_MATCH`로 확정됨**(D8) — 같은 제출일·같은 계약상대방으로 원공시가 복수이고 질문이 둘을 구분하지 못하므로, 루트를 골라 `PARTIALLY_ANSWERABLE`을 내는 것은 정답이 아니다. 체인 미완결 → `PARTIALLY_ANSWERABLE` 경로 자체는 `tests/integration/test_pattern_e.py`에서 합성 검증됨 | `missing_year` 차단을 푸는 것. 루트가 복수임을 실제로 판정해 `ambiguous_root`에 닿게 해야 함. 공시유보(`WITHHELD_IN_SOURCE`)는 **Contract 확정됨**(D9), production 판정은 미구현 |
 | Q15 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 3 · Evidence 8, `chain_complete=True`. 질문에 연도가 없어도 신규시설투자는 공시일 창 없이 루트를 찾음(`requires_filing_anchor=False`). **"몇 번 바뀌었나"를 정정 3건으로 셀지 FieldChange 4건으로 셀지는 미정** — producer는 둘 다 보존하며 세는 규칙은 answer-builder 결정 | 회귀 fixture에 고정 완료(`Q15`). lifecycle은 `future` 유지 — active 전환은 "몇 번" 세는 규칙 확정과 함께 |
 | Q16 | F | `PARTIAL` | Actual | 거부되긴 하나 사유가 다름. `query_plan/unsupported_period`(분기·반기 미지원)로 BLOCKED이며 **기간 밖 판정이 아님**. 연 단위로 물으면(`삼성전자 2027년 매출액이 얼마야?`) 이 차단이 사라지고 `COMPLETED`/`UNANSWERABLE`/`not_found`(`filing_discovery`/`no_matching_filing`)로 답합니다 — 검색 실패이지 기간 밖 판정이 아님 | F1 Gate 구현. 사유 코드는 확정됨(`OUT_OF_DATA_RANGE`, PR #29) |
 | Q17 | F | `PARTIAL` | Actual | `query_plan/unknown_company`로 BLOCKED. 기업명이 없어서 막힌 것이지 "시장 반응은 보유 문서군이 아니다"라는 판정이 아님 | F2 Gate 구현. 사유 코드는 확정됨(`OUT_OF_SCOPE_DATA`, PR #29) |
@@ -77,9 +77,16 @@
 자리가 있습니다.** Q18은 그 값(`out_of_scope_policy`)을 실제로 싣고 나오고, Q16·Q17이 아직
 `PARTIAL`인 것은 Contract 때문이 아니라 **판정 자체가 구현되지 않았기 때문**입니다.
 
-대응 값이 없는 판정(`WITHHELD_IN_SOURCE`, `NOT_COMPARABLE`)에는 여전히
-**`answerability_reason`을 비우고 판정 근거를 `answerability_detail`(stage/reason/detail)에
-남기는 방식**을 씁니다. 그것도 문항 단위로 막는 것은 아닙니다.
+`WITHHELD_IN_SOURCE`와 `NOT_COMPARABLE`도 이제 Contract에 자리가 있습니다. `NOT_COMPARABLE`은
+Pattern D 작업에서, `WITHHELD_IN_SOURCE`는 D9 확정과 함께 추가됐습니다. 두 사유 모두
+`answerability_reason`을 비우지 않고 그대로 싣습니다.
+
+`NOT_COMPARABLE`은 production 판정까지 있고(`agent/normalization.py`의 `STAGE_COMPARABILITY`),
+`WITHHELD_IN_SOURCE`는 **Contract와 Answer Builder 대응만 있고 production 판정은 아직
+없습니다.** 유보를 감지하는 쪽은 Event Parser 결과에 의존하며 별도 PR입니다.
+
+**대응 값이 없는 판정은 현재 없습니다.** 새로 생기면 `answerability_reason`을 비우고 판정 근거를
+`answerability_detail`(stage/reason/detail)에 남기는 기존 규약을 씁니다.
 
 `ambiguous` 판정은 여기 해당하지 않습니다. Contract v0.1에 대응 값이 있어 그대로 표현됩니다.
 

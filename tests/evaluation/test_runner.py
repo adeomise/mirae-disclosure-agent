@@ -8,6 +8,12 @@ from pathlib import Path
 
 import pytest
 
+from disclosure_agent.common.enums import (
+    AnswerabilityReason,
+    AnswerabilityStatus,
+    ExecutionStatus,
+)
+
 REPOSITORY_ROOT = Path(__file__).parents[2]
 RUNNER_PATH = REPOSITORY_ROOT / "evaluation" / "runner.py"
 RUNNER_SPEC = importlib.util.spec_from_file_location("evaluation_runner", RUNNER_PATH)
@@ -48,9 +54,9 @@ def test_default_dataset_reports_deterministic_metrics() -> None:
         "case_count": 21,
         "synthetic_case_count": 3,
         "paired_case_count": 21,
-        "answerable_cases_requiring_evidence": 17,
+        "answerable_cases_requiring_evidence": 16,
         "unanswerable_cases_without_fact": 4,
-        "event_history_case_count": 4,
+        "event_history_case_count": 3,
     }
 
 
@@ -255,13 +261,31 @@ def test_narrative_future_gold_does_not_require_zero_facts() -> None:
 def test_event_history_gold_records_only_supported_structural_invariants() -> None:
     gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
 
-    # Remaining comparator gaps: Q14 final-state content and Q15 change
-    # cardinality cannot be asserted until content comparison and corpus-verified
-    # cardinality are available. Do not substitute guessed values or link counts.
-    assert gold_by_id["q14"].counts.event_histories == 1
-    assert gold_by_id["q14"].counts.event_links is None
+    # Remaining comparator gap: Q15 change cardinality cannot be asserted until
+    # corpus-verified cardinality is available. Do not substitute guessed values
+    # or link counts.
     assert gold_by_id["q15"].counts.event_histories == 1
     assert gold_by_id["q15"].counts.event_links is None
+
+
+def test_q14_gold_requires_ambiguity_instead_of_one_chosen_history() -> None:
+    """
+    Q14 질문은 루트 계약을 구분할 조건을 담고 있지 않다(open_decisions.md D8).
+
+    같은 기업·같은 제출일·같은 계약상대방으로 원공시가 2건 이상이면 어느 계약의 이력인지
+    질문만으로 정해지지 않는다. 후속 정정·해지 체인이 한쪽에만 있다는 이유로 루트를 역으로
+    고르면, 다른 계약의 이력을 그 계약의 이력이라고 말하게 된다.
+
+    그래서 gold는 EventHistory 1건을 요구하지 않는다. 요구하면 "하나를 골라라"가 정답이
+    되어 위 판단이 뒤집힌다.
+    """
+    gold = {gold.case_id: gold for gold in load_dataset().gold_answers}["q14"]
+
+    assert gold.execution_status is ExecutionStatus.COMPLETED
+    assert gold.status is AnswerabilityStatus.UNRESOLVED
+    assert gold.reason is AnswerabilityReason.AMBIGUOUS_MATCH
+    assert gold.counts.event_histories == 0
+    assert gold.event_history is None
 
 
 def test_runner_rejects_answerable_case_without_evidence(tmp_path: Path) -> None:

@@ -62,7 +62,12 @@ from typing import Any
 # 파생 개념은 추출 계층의 어휘가 아니다. 대응하는 ACODE가 없고 문서에서 읽히지도 않으며,
 # 원천 지표에서 계산으로 만들어진다. 그래서 agent.derived_metrics가 정의한다.
 from disclosure_agent.agent.derived_metrics import DerivedMetric
-from disclosure_agent.common.enums import ChainPolicy, Intent, QueryAccountingScope
+from disclosure_agent.common.enums import (
+    ChainPolicy,
+    Intent,
+    QueryAccountingScope,
+    SectionScope,
+)
 from disclosure_agent.periodic.extractor import (
     METRIC_REVENUE,
     SCOPE_CONSOLIDATED,
@@ -90,6 +95,8 @@ __all__ = [
     "PREVIOUS_YEAR_OFFSET",
     "SCOPE_CONSOLIDATED",
     "SCOPE_SEPARATE",
+    "SECTION_SCOPE_TOKENS",
+    "SUMMARY_REQUEST_TOKENS",
     "QueryPlan",
     "RelativePeriod",
     "UnsupportedQuestionError",
@@ -319,6 +326,40 @@ HISTORY_TOKENS = (
 )
 
 
+# --------------------------------------------------------------------------
+# 단일 문서 요약(Pattern B)의 어휘
+# --------------------------------------------------------------------------
+
+# 요약을 요청하는 표현. 이게 있어야 document_summary로 본다.
+#
+# 값을 묻는 표현("알려줘", "얼마야")을 넣지 않는다. Q02("금액이랑 계약기간 알려줘")가
+# 그 경우이며, 넣으면 단일 사실 조회 질문이 요약 경로로 끌려간다. 여기 담는 것은 사용자가
+# 값 하나가 아니라 서술 범위를 정리해 달라고 말한 표현뿐이다.
+#
+# 문항 번호나 특정 기업명으로 가르지 않는다. 대표 질문 문자열을 그대로 알아보는 규칙은
+# 그 문장 하나만 통과시키고 같은 모양의 다른 질문을 막는다.
+SUMMARY_REQUEST_TOKENS = ("요약", "정리")
+
+# 요약 대상이 정기공시임을 밝히는 표기.
+#
+# 사업보고서 하나만 둔다. 반기·분기보고서 표기는 QUARTER_TOKENS가 의도 분기보다 앞에서
+# 거절하므로 여기까지 오지 않는다.
+PERIODIC_REPORT_TOKENS = ("사업보고서",)
+
+# 문서 내 범위(section_scope) 표기.
+#
+# 지금 알아보는 것은 설비 투자 범위 하나다. 나머지 SectionScope 값은 어휘로만 있고 여기에
+# 표기가 없다. 표기를 먼저 넣으면 Section 규칙이 없는 범위의 계획이 만들어지고, 그 계획은
+# handler에서 막힌다. 막히는 자리가 뒤로 밀릴 뿐 답하지 못하는 것은 같으므로, 규칙과 표기를
+# 함께 늘린다.
+#
+# 판정 전에 질문의 공백을 걷어낸다. "설비 투자"와 "설비투자"가 같은 범위를 가리키는데
+# 표기만 다르며, 두 벌을 적어 두면 한쪽을 빠뜨렸을 때 조용히 막힌다.
+SECTION_SCOPE_TOKENS: tuple[tuple[SectionScope, tuple[str, ...]], ...] = (
+    (SectionScope.FACILITY_INVESTMENT, ("설비", "시설투자")),
+)
+
+
 class UnsupportedQuestionError(ValueError):
     """이번 슬라이스가 결정론적으로 처리할 수 없는 질문."""
 
@@ -448,6 +489,12 @@ class QueryPlan:
     month: int | None = None
     # 정정·후속 문서를 어디까지 볼 것인가. 값은 Contract v0.1의 ChainPolicy를 따른다.
     chain_policy: ChainPolicy | None = None
+    # 문서 안에서 어느 범위를 볼 것인가. 단일 문서 요약(Pattern B)에서 required다.
+    #
+    # 기본값을 두지 않는다. 범위를 읽지 못한 요약 질문에 '문서 전체'를 채워 넣으면
+    # docs/agent_design/retrieval_strategy.md Pattern B가 금지한 문서 전체 요약이 조용히
+    # 기본 동작이 된다. 읽지 못하면 계획을 만들지 않는다.
+    section_scope: SectionScope | None = None
     # accounting_scope가 질문에 명시됐는지 기록한다. 기본값으로 채운 경우를 구분하기 위함이다.
     accounting_scope_explicit: bool = True
     # 질문에 상대 기간 표현이 있었다면 그 표현과 해석 결과.
@@ -483,6 +530,16 @@ class QueryPlan:
             raise ValueError(
                 "years는 최소 한 개의 연도를 담아야 합니다: "
                 f"intent={self.intent!r}, chain_policy={self.chain_policy!r}."
+            )
+
+        # 단일 문서 요약 계획은 범위 없이 만들 수 없다.
+        #
+        # 요약 범위는 이 Pattern의 답 그 자체다. 범위가 비면 이 계획을 실행하는 쪽이 어디를
+        # 요약할지 골라야 하고, 무엇을 골랐는지는 계획에도 결과에도 남지 않는다.
+        if self.intent == INTENT_DOCUMENT_SUMMARY and self.section_scope is None:
+            raise ValueError(
+                "단일 문서 요약 계획에는 section_scope가 있어야 합니다: "
+                f"question={self.question!r}."
             )
 
         # 원천 지표와 파생 개념을 동시에 담지 않는다.
@@ -1018,6 +1075,174 @@ def _looks_like_event_history(question: str) -> bool:
     )
 
 
+def _looks_like_document_summary(question: str) -> bool:
+    """
+    문서 하나의 지정 범위를 정리해 달라는 질문인가.
+
+    셋을 모두 만족해야 참이다.
+
+        1. 요약 요청 표현      "정리해줘" / "요약해줘"
+        2. 정기공시 보고서 표기 "사업보고서"
+        3. 알아볼 수 있는 범위  section_scope로 옮겨지는 표현
+
+    요약 표현 하나만으로 판정하지 않는 이유:
+        "정리해줘"·"요약해줘"는 값 조회 질문에도 붙는다. "매출액 정리해줘"가 그 경우이며,
+        표현 하나로 이 경로를 열면 Pattern A가 이미 답하던 질문이 요약 경로로 끌려온다.
+        그 질문은 요약 대상 문서도 범위도 없으므로 결국 막히는데, 막힌 사유가 '요약 대상을
+        확정할 수 없다'가 되어 실제로 일어난 일(답할 수 있었던 값 조회를 가로챘다)과 달라진다.
+        같은 구멍이 Pattern C에도 있다("매출 비교해서 정리해줘").
+
+        그래서 이 경로가 실제로 실행할 수 있는 조건을 전부 여기서 본다. 셋 중 하나라도 없으면
+        요약 계획을 만들지 않고 나머지 판정으로 넘긴다. 넘겨받은 쪽이 답할 수 있으면 답하고,
+        답할 수 없으면 그쪽의 사유로 막힌다. 어느 쪽이든 사유가 실제와 맞는다.
+
+    막는 자리를 옮기지는 않는다:
+        _build_document_summary_plan의 확인은 그대로 둔다. 그 builder는 계획을 직접 만드는
+        호출자도 쓰므로, 여기서 걸렀다는 이유로 그쪽 가드를 지우면 검사 없는 입구가 생긴다.
+
+    판정 순서에 대해:
+        이 판정은 이력 판정보다 뒤다. "시설투자 변경 내용 정리해줘"처럼 두 표현이 함께 있는
+        질문은 Pattern E가 답하던 것이고, 앞에 두면 그 질문을 가로챈다.
+    """
+    if not any(token in question for token in SUMMARY_REQUEST_TOKENS):
+        return False
+
+    if not any(token in question for token in PERIODIC_REPORT_TOKENS):
+        return False
+
+    return _extract_section_scope(question) is not None
+
+
+def _extract_section_scope(question: str) -> SectionScope | None:
+    """
+    질문이 가리키는 문서 내 범위를 읽는다. 없으면 None이며 추측하지 않는다.
+
+    공백을 걷어내고 본다. "설비 투자"와 "설비투자"는 같은 범위이고, 표기를 두 벌 적어 두면
+    한쪽을 빠뜨렸을 때 조용히 막힌다.
+
+    둘 이상 맞으면 고르지 않고 막는다. 한 질문이 두 범위를 함께 가리키면 하나를 골라 답한
+    결과에서 나머지 범위를 물었다는 사실이 사라진다. 기업·기간·공시 유형에 대해 이미 같은
+    규칙을 쓰고 있다.
+    """
+    compact = "".join(question.split())
+
+    matched = [
+        scope
+        for scope, tokens in SECTION_SCOPE_TOKENS
+        if any(token in compact for token in tokens)
+    ]
+
+    if not matched:
+        return None
+
+    if len(matched) > 1:
+        listed = ", ".join(scope.value for scope in matched)
+
+        raise UnsupportedQuestionError(
+            reason="ambiguous_section_scope",
+            detail=(
+                f"질문이 문서 내 범위 {len(matched)}종({listed})을 함께 가리키고 있어 "
+                "어느 범위를 요약할지 특정할 수 없습니다. 한 범위를 골라 답하지 않습니다."
+            ),
+        )
+
+    return matched[0]
+
+
+def _build_document_summary_plan(question: str, companies: tuple[str, ...]) -> QueryPlan:
+    """
+    Q04 계열 단일 문서 요약 계획을 만든다.
+
+        "<기업> <연도>년 사업보고서에서 설비 투자 관련 내용 정리해줘."
+        -> 정기공시 사업보고서 1건 + section_scope=facility_investment
+
+    이 builder가 세 가지를 요구하고, 셋 중 하나라도 없으면 계획을 만들지 않는다.
+
+    대상 문서 종류:
+        정기공시 보고서 표기("사업보고서")를 요구한다. 표기가 없으면 요약 대상을 확정할 수
+        없다. 거래소공시 단건 요약(Q06)이 그 경우이며, 원공시와 정정본 중 무엇을 요약할지는
+        판본 선택 정책이 정한다. 그 정책은 open_decisions.md D5에서 아직 미정이므로 여기서
+        한쪽을 골라 열지 않는다. 정기공시에도 정정본은 있지만, 그쪽은 이미 Pattern A가 쓰고
+        있는 조회 규칙(정정본 제외)이 있어 이 PR이 새로 정하는 것이 없다.
+
+    대상 기간:
+        절대연도 하나를 요구한다. 기간을 밝히지 않은 요약 질문(Q05)에서 어떤 문서를 기본값으로
+        고를지는 open_decisions.md D5-a에서 미정이다. 기본값을 채우면 그 선택이 곧 정책이
+        되므로 missing_year로 막는다. 상대 기간("작년")도 옮기지 않는다. D8이 정한 기준은
+        시계열 비교의 기준 연도이고, 요약 대상 문서를 고르는 기준까지 정하지 않았다.
+
+    문서 내 범위:
+        section_scope를 요구한다. 읽지 못하면 문서 전체 요약으로 대체하지 않고 막는다
+        (docs/agent_design/retrieval_strategy.md Pattern B의 Fallback).
+
+    metric을 담지 않는다:
+        요약 질문은 값 하나를 묻지 않는다. 기본값(매출액)이 남아 있으면 이 계획을 실행하는
+        쪽이 재무 수치를 함께 뽑을 수 있고, 그 값은 질문이 요청한 범위 밖에서 나온다.
+    """
+    if not any(token in question for token in PERIODIC_REPORT_TOKENS):
+        listed = ", ".join(PERIODIC_REPORT_TOKENS)
+
+        raise UnsupportedQuestionError(
+            reason="unsupported_summary_target",
+            detail=(
+                "요약 대상 문서를 확정할 수 없습니다. 정기공시 요약은 보고서 종류"
+                f"({listed})를 질문에서 밝혀야 합니다. 거래소공시 단건 요약은 원공시와 "
+                "정정본 중 무엇을 기준으로 할지 정하는 판본 선택 정책이 필요하며, 그 정책은 "
+                "아직 정해지지 않았습니다(docs/agent_design/open_decisions.md D5). "
+                "대상 문서를 임의로 고르지 않습니다."
+            ),
+        )
+
+    relative_expression = _match_previous_year_expression(question)
+
+    if relative_expression is not None:
+        raise UnsupportedQuestionError(
+            reason="unsupported_summary_period",
+            detail=(
+                f"요약 질문의 상대 기간 표현('{relative_expression}')은 해석하지 않습니다. "
+                "확정된 기준 연도 정책(D8)은 시계열 비교의 기준이며, 요약 대상 문서를 고르는 "
+                "기준까지 정하지 않았습니다. 연도를 밝혀 주십시오."
+            ),
+        )
+
+    years = _require_years(_extract_years(question))
+
+    if len(years) > 1:
+        listed = ", ".join(str(year) for year in years)
+
+        raise UnsupportedQuestionError(
+            reason="unsupported_summary_period",
+            detail=(
+                f"질문이 {len(years)}개 기간({listed})을 함께 가리키고 있습니다. "
+                "단일 문서 요약은 문서 1건을 대상으로 합니다. 한 기간을 골라 답하지 않습니다."
+            ),
+        )
+
+    section_scope = _extract_section_scope(question)
+
+    if section_scope is None:
+        raise UnsupportedQuestionError(
+            reason="missing_section_scope",
+            detail=(
+                "요약할 문서 내 범위를 질문에서 읽지 못했습니다. 문서 전체 요약으로 "
+                "대체하지 않습니다."
+            ),
+        )
+
+    return QueryPlan(
+        question=question.strip(),
+        companies=companies,
+        years=years,
+        intent=INTENT_DOCUMENT_SUMMARY,
+        document_class=DOCUMENT_CLASS_PERIODIC,
+        document_subtype=DOCUMENT_SUBTYPE_ANNUAL,
+        # 요약 범위에 연결·별도 구분이 적용되지 않는다. 재무 수치를 고르지 않기 때문이다.
+        accounting_scope=QueryAccountingScope.NOT_APPLICABLE.value,
+        metric=None,
+        section_scope=section_scope,
+    )
+
+
 def _build_cross_entity_compare_plan(
     question: str,
     companies: tuple[str, ...],
@@ -1363,6 +1588,20 @@ def build_query_plan(
     # 남은 의도를 가른다. 이후 단계는 의도마다 요구하는 것이 다르다.
     if _looks_like_event_history(question):
         return _build_event_history_plan(question, companies)
+
+    # 요약 요청은 이력 판정보다 뒤, 기간 판정보다 앞이다.
+    #
+    #   이력 판정보다 뒤   "시설투자 변경 내용 정리해줘"처럼 두 표현이 함께 있는 질문은
+    #                      Pattern E가 답하던 것이다. 앞에 두면 그 질문을 가로챈다.
+    #
+    #   기간 판정보다 앞   요약 질문의 기간 규칙은 시계열 비교의 것과 다르다. 요약은 문서
+    #                      1건을 대상으로 하므로 기간이 둘이면 답이 성립하지 않고, 상대 기간의
+    #                      기준 연도 정책도 요약 대상 선택까지는 정해진 바 없다. 뒤에 두면
+    #                      "2024년이랑 2025년 사업보고서 설비투자 정리해줘"가 시계열 비교로
+    #                      분류되어 'Pattern C가 지원하지 않는 지표'로 막힌다. 실제로 일어난
+    #                      일은 그것이 아니다.
+    if _looks_like_document_summary(question):
+        return _build_document_summary_plan(question, companies)
 
     years = _extract_years(question)
 

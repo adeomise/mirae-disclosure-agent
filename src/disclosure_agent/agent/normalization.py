@@ -1,8 +1,8 @@
 """Pattern 실행 결과를 공통 실행 Contract로 옮기는 정규화 계층.
 
 역할:
-- Pattern A/C/D/E가 각자의 형태로 만든 내부 결과를 common.schemas.AgentExecutionResult 하나로
-  옮긴다.
+- Pattern A/B/C/D/E가 각자의 형태로 만든 내부 결과를 common.schemas.AgentExecutionResult
+  하나로 옮긴다.
 - 그 과정에서 공통 Contract에 자리가 없는 정보를 조용히 버리지 않고 conversion_gaps에
   남긴다.
 
@@ -30,13 +30,14 @@ execution_status와 answerability_status를 나누는 기준:
     어느 사유가 어느 쪽인지는 아래 ANSWERABILITY_BY_STOP 하나가 정한다.
 
 ExecutionStatus.FAILED에 대하여:
-    이 모듈은 FAILED를 만들지 않는다. Pattern A/C/D/E는 예상한 실패를 전부 BlockedInfo로
+    이 모듈은 FAILED를 만들지 않는다. Pattern A/B/C/D/E는 예상한 실패를 전부 BlockedInfo로
     돌려주고, 예상하지 못한 예외는 삼키지 않고 호출자에게 올린다. 그 예외를 FAILED로 바꿀지는
     API/Runtime 경계의 결정이며 여기서 앞질러 정하지 않는다.
 
 입력:
-- Pattern A의 SingleFactResult, Pattern C의 TemporalCompareResult,
-  Pattern D의 CrossEntityCompareResult, Pattern E의 EventHistoryResult
+- Pattern A의 SingleFactResult, Pattern B의 DocumentSummaryResult,
+  Pattern C의 TemporalCompareResult, Pattern D의 CrossEntityCompareResult,
+  Pattern E의 EventHistoryResult
 
 출력:
 - AgentExecutionResult
@@ -57,6 +58,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from disclosure_agent.agent.answer_builder import (
     REASON_AMBIGUOUS_CANDIDATES,
+    REASON_AMBIGUOUS_FILING,
     REASON_AMBIGUOUS_ROOT,
     REASON_INCOMPARABLE_CALCULATION_INPUTS,
     REASON_INCOMPARABLE_ENTITIES,
@@ -70,6 +72,7 @@ from disclosure_agent.agent.answer_builder import (
     STAGE_CONTRACT_ADAPTATION,
     STAGE_EXTRACTION,
     STAGE_FILING_DISCOVERY,
+    STAGE_SECTION_NAVIGATION,
     BlockedInfo,
 )
 from disclosure_agent.agent.safety import (
@@ -92,12 +95,18 @@ from disclosure_agent.common.schemas import (
     ExecutionIssue,
     Fact,
 )
-from disclosure_agent.periodic.adapter import adapt_financial_fact
+from disclosure_agent.periodic.adapter import adapt_financial_fact, adapt_section_summary
+from disclosure_agent.periodic.sections import (
+    REASON_AMBIGUOUS_SECTION,
+    REASON_EMPTY_SECTION,
+    REASON_NO_MATCHING_SECTION,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - 순환 import를 만들지 않기 위한 타입 전용 import
     from disclosure_agent.agent.handlers.cross_entity_compare import (
         CrossEntityCompareResult,
     )
+    from disclosure_agent.agent.handlers.document_summary import DocumentSummaryResult
     from disclosure_agent.agent.handlers.event_history import EventHistoryResult
     from disclosure_agent.agent.handlers.single_fact import SingleFactResult
     from disclosure_agent.agent.handlers.temporal_compare import TemporalCompareResult
@@ -117,6 +126,12 @@ TARGET_CONTRACT_VERSION = "0.1"
 # EventHistory를 만든 경우에는 event_id에 루트 doc_id가 들어가 후보를 되살릴 수 있지만,
 # 루트를 확정하지 못해 EventHistory 자체가 없으면 담을 자리가 없다.
 GAP_ROOT_CANDIDATE_DOC_IDS = "root_candidate_doc_ids"
+
+# 확정된 요약 범위·항목을 공통 Contract 타입으로 옮기지 못한 경우.
+#
+# answer_builder의 REASON_UNCONVERTIBLE_FACT와 나눈다. 그쪽은 Fact 변환이고 이쪽은
+# DocumentSummary 변환이며, 무엇을 옮기지 못했는지가 후속 조치를 가른다.
+REASON_UNCONVERTIBLE_SUMMARY = "unconvertible_summary"
 
 
 @dataclass(frozen=True)
@@ -151,6 +166,10 @@ class Answerability:
 #         UNANSWERABLE로 보내면 코퍼스에 답이 없다는 뜻이 되어 사실과 달라진다.
 #     unsupported_metric / unsupported_accounting_scope / unimplemented_intent 등
 #         아직 구현하지 않은 요청이다. 코퍼스에 대한 판정이 아니다.
+#     unsupported_section_scope
+#         질문이 지정한 범위를 Section 경로로 옮기는 규칙이 아직 없다. 문서를 열기는 했지만
+#         어디를 볼지 정하지 못한 것이고, 코퍼스에 그 내용이 없다는 판정이 아니다. 위
+#         unsupported_* 계열과 같은 자리다.
 #     unsupported_comparison_* / unsupported_derived_operation
 #         Pattern C와 Pattern D가 계획 입구에서 막은 것이다. 위와 같은 이유로 코퍼스를 보기
 #         전이다.
@@ -172,6 +191,36 @@ ANSWERABILITY_BY_STOP: dict[tuple[str, str], Answerability] = {
     (STAGE_FILING_DISCOVERY, REASON_AMBIGUOUS_ROOT): Answerability(
         AnswerabilityStatus.UNRESOLVED,
         AnswerabilityReason.AMBIGUOUS_MATCH,
+    ),
+    # 요약 대상 공시를 하나로 좁히지 못했다. 문서 목록을 모두 보고 내린 대상 선택 판정이므로
+    # ambiguous_root와 같은 계열이며, 연결 판정이 아니라 AMBIGUOUS_MATCH다(아래 주석 참조).
+    (STAGE_FILING_DISCOVERY, REASON_AMBIGUOUS_FILING): Answerability(
+        AnswerabilityStatus.UNRESOLVED,
+        AnswerabilityReason.AMBIGUOUS_MATCH,
+    ),
+    # Section 탐색(C4)은 문서를 끝까지 읽고 내리는 판정이다. 문서는 열렸고 그 안에 요청한
+    # 범위가 없었거나 하나로 좁혀지지 않았다.
+    #
+    # no_matching_section이 NOT_FOUND인 이유:
+    #     evidence_and_answerability.md의 판정 흐름에서 [5] Section·Fact 탐색 단계의 실패가
+    #     NOT_FOUND다. 문서는 있는데 찾지 못한 것이므로 검색 품질 문제일 수 있고, 그래서
+    #     "해당 기간 데이터가 없다"는 확정 표현(OUT_OF_DATA_RANGE)과 구분한다.
+    #
+    # empty_section을 INSUFFICIENT_EVIDENCE로 두는 이유:
+    #     범위는 찾았는데 그 안에 근거로 쓸 것이 없다. 값을 얻지 못한 것이 아니라 근거가
+    #     비어 있는 상태이며, 근거 없이 요약을 만들지 않는다는 원칙이 답변을 막는다
+    #     (evidence_and_answerability.md 원칙 1).
+    (STAGE_SECTION_NAVIGATION, REASON_NO_MATCHING_SECTION): Answerability(
+        AnswerabilityStatus.UNANSWERABLE,
+        AnswerabilityReason.NOT_FOUND,
+    ),
+    (STAGE_SECTION_NAVIGATION, REASON_AMBIGUOUS_SECTION): Answerability(
+        AnswerabilityStatus.UNRESOLVED,
+        AnswerabilityReason.AMBIGUOUS_MATCH,
+    ),
+    (STAGE_SECTION_NAVIGATION, REASON_EMPTY_SECTION): Answerability(
+        AnswerabilityStatus.UNANSWERABLE,
+        AnswerabilityReason.INSUFFICIENT_EVIDENCE,
     ),
     (STAGE_EXTRACTION, REASON_NO_METRIC_ACODE): Answerability(
         AnswerabilityStatus.UNANSWERABLE,
@@ -492,6 +541,71 @@ def normalize_single_fact_result(result: SingleFactResult) -> AgentExecutionResu
         answerability_status=AnswerabilityStatus.ANSWERABLE,
         facts=[fact],
         evidence=[evidence],
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------------
+# Pattern B
+# --------------------------------------------------------------------------
+
+
+def normalize_document_summary_result(
+    result: DocumentSummaryResult,
+) -> AgentExecutionResult:
+    """
+    Pattern B의 구조화 결과를 공통 실행 Contract로 옮긴다.
+
+    SectionContentItem -> DocumentSummary/Evidence 변환은 periodic.adapter가 한다. Pattern A의
+    FinancialFact 변환과 같은 자리이며, 같은 변환을 여기서 다시 구현하면 두 벌이 된다.
+
+    facts를 만들지 않는다:
+        Pattern B의 최소 Fact 요건이 0이라는 것은 확정 사항이다
+        (evidence_and_answerability.md 유형별 최소 요건). 요약 항목과 그 항목마다의 Evidence가
+        결과이고, 값을 함께 실으면 요약 안에 Pattern A가 고르는 값과 다른 수치가 섞인다.
+
+    calculations도 comparisons도 만들지 않는다:
+        원문에 적힌 비율은 인용하고 재계산하지 않는다는 것이 Pattern B의 출력 요구사항이다
+        (agent_patterns.md Pattern B).
+
+    성공 경로에 answerability_reason을 싣지 않는다. ANSWERABLE은 사유를 갖지 않는다.
+    """
+    warnings = [*result.plan.warnings, *result.warnings]
+
+    if result.blocked is not None:
+        return _stopped_execution(result.blocked, warnings=warnings)
+
+    if result.selection is None or not result.items:
+        # 막히지도 않았는데 확보한 것이 없다. 값을 지어내지 않고 멈춘 지점을 남긴다.
+        return blocked_execution(
+            STAGE_CONTRACT_ADAPTATION,
+            REASON_UNCONVERTIBLE_SUMMARY,
+            "요약 범위나 항목이 비어 있는데 막힌 사유도 없습니다.",
+            warnings=warnings,
+        )
+
+    try:
+        summary, evidence = adapt_section_summary(
+            result.document or {},
+            section_scope=result.selection.scope,
+            selection=result.selection,
+            items=list(result.items),
+        )
+
+    except ValueError as error:
+        # 범위와 내용은 확정했지만 공통 타입으로 옮기지 못했다. 추측해 채우지 않는다.
+        return blocked_execution(
+            STAGE_CONTRACT_ADAPTATION,
+            REASON_UNCONVERTIBLE_SUMMARY,
+            str(error),
+            warnings=warnings,
+        )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        document_summaries=[summary],
+        evidence=list(evidence),
         warnings=warnings,
     )
 

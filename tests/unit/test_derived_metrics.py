@@ -352,6 +352,7 @@ def test_both_comparison_axes_are_routable() -> None:
     """두 축 모두 handler가 붙었다. 실행 범위가 같아진 것은 아니다."""
     assert supported_intents() == (
         "cross_entity_compare",
+        "document_summary",
         "event_history",
         "single_fact",
         "temporal_compare",

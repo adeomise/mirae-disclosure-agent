@@ -1,0 +1,116 @@
+{
+  "_fixture_note": "Pattern B(단일 문서 요약)용 합성 parsed document. 실제 공시 XML·기업명·수치를 쓰지 않는다. 사업보고서 표준 서식 중 '사업의 내용' 아래 생산설비 Section의 구조만 재현한다.",
+  "metadata": {
+    "doc_id": "periodic_SYNTHETIC0001",
+    "corp_name": "테스트반도체(주)",
+    "report_name": "사업보고서",
+    "receipt_no": "SYNTHETIC0001",
+    "document_type": "periodic",
+    "source_path": "raw/periodic/테스트반도체/SYNTHETIC0001_annual_2025_12/SYNTHETIC0001.xml"
+  },
+  "sections": [
+    {
+      "section_id": "section_0001",
+      "title": "II. 사업의 내용",
+      "level": 1,
+      "parent_section_id": null,
+      "section_path": ["II. 사업의 내용"],
+      "paragraphs": [],
+      "text": ""
+    },
+    {
+      "section_id": "section_0002",
+      "title": "2. 주요 제품 및 서비스",
+      "level": 2,
+      "parent_section_id": "section_0001",
+      "section_path": ["II. 사업의 내용", "2. 주요 제품 및 서비스"],
+      "paragraphs": ["가. 주요 제품 현황"],
+      "text": "가. 주요 제품 현황"
+    },
+    {
+      "section_id": "section_0003",
+      "title": "3. 원재료 및 생산설비",
+      "level": 2,
+      "parent_section_id": "section_0001",
+      "section_path": ["II. 사업의 내용", "3. 원재료 및 생산설비"],
+      "paragraphs": [
+        "가. 주요 원재료 매입 현황",
+        "나. 생산설비에 관한 사항",
+        "다. 투자현황 당사는 합성 캠퍼스 부지에 생산시설 신축을 진행하고 있습니다."
+      ],
+      "text": "가. 주요 원재료 매입 현황\n나. 생산설비에 관한 사항\n다. 투자현황 당사는 합성 캠퍼스 부지에 생산시설 신축을 진행하고 있습니다."
+    },
+    {
+      "section_id": "section_0004",
+      "title": "3. 연결재무제표 주석",
+      "level": 2,
+      "parent_section_id": null,
+      "section_path": ["III. 재무에 관한 사항", "3. 연결재무제표 주석"],
+      "paragraphs": [
+        "유형자산 취득 및 투자 관련 주석입니다. 이 내용은 요약 범위 밖입니다."
+      ],
+      "text": "유형자산 취득 및 투자 관련 주석입니다. 이 내용은 요약 범위 밖입니다."
+    }
+  ],
+  "table_groups": [],
+  "tables": [
+    {
+      "table_id": "table_0001",
+      "title": null,
+      "unit": "(단위 : 백만원)",
+      "own_unit": "(단위 : 백만원)",
+      "section_id": "section_0003",
+      "table_group_id": null,
+      "section_path": ["II. 사업의 내용", "3. 원재료 및 생산설비"],
+      "raw_context": "",
+      "attributes": {"aclass": "NORMAL", "afixtable": "N"},
+      "rows": [[{"type": "TD", "text": "(단위 : 백만원)"}]]
+    },
+    {
+      "table_id": "table_0002",
+      "title": null,
+      "unit": "(단위 : 백만원)",
+      "own_unit": null,
+      "section_id": "section_0003",
+      "table_group_id": null,
+      "section_path": ["II. 사업의 내용", "3. 원재료 및 생산설비"],
+      "raw_context": "",
+      "attributes": {"aclass": "NORMAL", "afixtable": "N"},
+      "rows": [
+        [
+          {"type": "TH", "text": "사업부문"},
+          {"type": "TH", "text": "투자목적"},
+          {"type": "TH", "text": "투자기간"},
+          {"type": "TH", "text": "투자액"}
+        ],
+        [
+          {"type": "TD", "text": "합성부문"},
+          {"type": "TD", "text": "생산설비 증설"},
+          {"type": "TD", "text": "2025.01~2025.12"},
+          {"type": "TE", "text": "1,111"}
+        ]
+      ]
+    },
+    {
+      "table_id": "table_0003",
+      "title": null,
+      "unit": null,
+      "own_unit": null,
+      "section_id": "section_0004",
+      "table_group_id": null,
+      "section_path": ["III. 재무에 관한 사항", "3. 연결재무제표 주석"],
+      "raw_context": "",
+      "attributes": {"aclass": "NT_PPE", "afixtable": "N"},
+      "rows": [
+        [
+          {"type": "TH", "text": "자산별"},
+          {"type": "TH", "text": "취득"}
+        ],
+        [
+          {"type": "TD", "text": "건물"},
+          {"type": "TE", "text": "2,222"}
+        ]
+      ]
+    }
+  ]
+}

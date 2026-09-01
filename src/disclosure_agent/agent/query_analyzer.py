@@ -1079,18 +1079,38 @@ def _looks_like_document_summary(question: str) -> bool:
     """
     문서 하나의 지정 범위를 정리해 달라는 질문인가.
 
-    요약 요청 표현 하나만 본다. 대상 문서와 범위까지 여기서 확인하지 않는 이유는, 확인해
-    실패하면 요약을 요청한 질문이 요약 경로로 들어오지 못하고 다른 Pattern의 사유로 막히기
-    때문이다. 그러면 결과에 남는 사유가 실제로 일어난 일과 달라진다.
+    셋을 모두 만족해야 참이다.
 
-    확인은 _build_document_summary_plan이 한다. 그쪽에서 막히면 사유가 요약 경로의 것이 되고,
-    무엇을 밝히면 답할 수 있는 질문인지가 결과에 남는다.
+        1. 요약 요청 표현      "정리해줘" / "요약해줘"
+        2. 정기공시 보고서 표기 "사업보고서"
+        3. 알아볼 수 있는 범위  section_scope로 옮겨지는 표현
+
+    요약 표현 하나만으로 판정하지 않는 이유:
+        "정리해줘"·"요약해줘"는 값 조회 질문에도 붙는다. "매출액 정리해줘"가 그 경우이며,
+        표현 하나로 이 경로를 열면 Pattern A가 이미 답하던 질문이 요약 경로로 끌려온다.
+        그 질문은 요약 대상 문서도 범위도 없으므로 결국 막히는데, 막힌 사유가 '요약 대상을
+        확정할 수 없다'가 되어 실제로 일어난 일(답할 수 있었던 값 조회를 가로챘다)과 달라진다.
+        같은 구멍이 Pattern C에도 있다("매출 비교해서 정리해줘").
+
+        그래서 이 경로가 실제로 실행할 수 있는 조건을 전부 여기서 본다. 셋 중 하나라도 없으면
+        요약 계획을 만들지 않고 나머지 판정으로 넘긴다. 넘겨받은 쪽이 답할 수 있으면 답하고,
+        답할 수 없으면 그쪽의 사유로 막힌다. 어느 쪽이든 사유가 실제와 맞는다.
+
+    막는 자리를 옮기지는 않는다:
+        _build_document_summary_plan의 확인은 그대로 둔다. 그 builder는 계획을 직접 만드는
+        호출자도 쓰므로, 여기서 걸렀다는 이유로 그쪽 가드를 지우면 검사 없는 입구가 생긴다.
 
     판정 순서에 대해:
         이 판정은 이력 판정보다 뒤다. "시설투자 변경 내용 정리해줘"처럼 두 표현이 함께 있는
         질문은 Pattern E가 답하던 것이고, 앞에 두면 그 질문을 가로챈다.
     """
-    return any(token in question for token in SUMMARY_REQUEST_TOKENS)
+    if not any(token in question for token in SUMMARY_REQUEST_TOKENS):
+        return False
+
+    if not any(token in question for token in PERIODIC_REPORT_TOKENS):
+        return False
+
+    return _extract_section_scope(question) is not None
 
 
 def _extract_section_scope(question: str) -> SectionScope | None:

@@ -87,6 +87,23 @@ def test_event_class_summary_is_blocked_at_the_entry() -> None:
     assert result.answerability_reason is None
 
 
+def test_non_annual_periodic_summary_is_blocked_at_the_entry() -> None:
+    """
+    정기공시라도 사업보고서가 아니면 실행하지 않는다.
+
+    Section 규칙(periodic.sections)은 사업보고서 서식을 전제로 만들어져 있어, 반기·분기보고서에서
+    무엇을 고를지 보증되지 않는다. 지금은 분기·반기 표현을 query_analyzer가 의도 분기보다 앞에서
+    거절하지만, 계획을 직접 만드는 호출자에게는 그 방어가 없다.
+    """
+    result = run(summary_plan(document_subtype="half"))
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "pattern_entry"
+    assert result.execution_issue.reason == REASON_UNSUPPORTED_SUMMARY_DOCUMENT_CLASS
+    assert result.document_summaries == []
+    assert result.evidence == []
+
+
 def test_multi_period_summary_is_blocked_at_the_entry() -> None:
     """단일 문서 요약은 회계연도 하나를 요구한다. 한 기간을 골라 답하지 않는다."""
     result = run(summary_plan(years=(2024, 2025)))

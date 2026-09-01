@@ -70,7 +70,7 @@ from disclosure_agent.agent.answer_builder import (
     BlockedInfo,
 )
 from disclosure_agent.agent.normalization import normalize_document_summary_result
-from disclosure_agent.agent.query_analyzer import QueryPlan
+from disclosure_agent.agent.query_analyzer import DOCUMENT_SUBTYPE_ANNUAL, QueryPlan
 from disclosure_agent.common.enums import SectionScope
 from disclosure_agent.common.schemas import AgentExecutionResult
 from disclosure_agent.periodic.sections import (
@@ -156,19 +156,31 @@ def _reject_unsupported_plan(plan: QueryPlan) -> BlockedInfo | None:
     """
     이번 구현이 실행할 수 없는 계획을 입구에서 가려낸다.
 
-    두 가지만 본다. 나머지는 query_analyzer가 계획을 만들 때 이미 확정했다.
+    문서군과 세부유형을 함께 본다:
+        이번 구현 범위는 정기공시 중에서도 사업보고서 한 종류다. 문서군만 확인하면 반기·분기
+        보고서를 대상으로 한 계획이 그대로 통과하고, Section 규칙(periodic.sections)은
+        사업보고서 서식을 전제로 만들어져 있으므로 다른 서식에서 무엇을 고를지 보증되지 않는다.
+        지금은 분기·반기 표현을 query_analyzer가 의도 분기보다 앞에서 거절해 그런 계획이
+        만들어지지 않지만, 계획을 직접 만드는 호출자에게는 그 방어가 없다.
+
     section_scope가 비어 있는 계획은 QueryPlan.__post_init__이 아예 만들지 못하게 막으므로
     여기서 다시 보지 않는다.
     """
-    if plan.document_class != DOCUMENT_CLASS_PERIODIC:
+    if (
+        plan.document_class != DOCUMENT_CLASS_PERIODIC
+        or plan.document_subtype != DOCUMENT_SUBTYPE_ANNUAL
+    ):
         return BlockedInfo(
             stage=STAGE_PATTERN_ENTRY,
             reason=REASON_UNSUPPORTED_SUMMARY_DOCUMENT_CLASS,
             detail=(
-                f"이번 구현은 정기공시 단건 요약만 실행합니다: "
-                f"document_class={plan.document_class!r}. 거래소공시 단건 요약은 원공시와 "
+                "이번 구현은 정기공시 사업보고서 단건 요약만 실행합니다: "
+                f"document_class={plan.document_class!r}, "
+                f"document_subtype={plan.document_subtype!r}. 거래소공시 단건 요약은 원공시와 "
                 "정정본 중 무엇을 기준으로 할지 정하는 판본 선택 정책이 필요하며, 그 정책은 "
-                "아직 정해지지 않았습니다(docs/agent_design/open_decisions.md D5)."
+                "아직 정해지지 않았습니다(docs/agent_design/open_decisions.md D5). "
+                "반기·분기보고서는 Section 규칙이 사업보고서 서식을 전제로 하고 있어 "
+                "확인되지 않은 범위를 고르지 않습니다."
             ),
         )
 

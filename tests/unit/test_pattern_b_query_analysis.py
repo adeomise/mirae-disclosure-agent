@@ -122,6 +122,34 @@ def test_existing_intents_are_unchanged(question: str, expected_intent: str) -> 
     assert plan_for(question).intent == expected_intent
 
 
+@pytest.mark.parametrize(
+    ("question", "expected_intent"),
+    [
+        # 값 조회에 요약 표현만 붙은 질문. 보고서 표기도 범위도 없다.
+        ("테스트반도체 2025년 매출액 정리해줘", INTENT_SINGLE_FACT),
+        # 시계열 비교에 요약 표현만 붙은 질문.
+        (
+            "테스트반도체 2024년과 2025년 매출 비교해서 정리해줘",
+            INTENT_TEMPORAL_COMPARE,
+        ),
+        # 보고서 표기는 있으나 범위가 없다. 문서 전체 요약으로 열지 않는다.
+        ("테스트반도체 2025년 사업보고서 매출액 정리해줘", INTENT_SINGLE_FACT),
+    ],
+)
+def test_summary_expression_alone_does_not_hijack_other_patterns(
+    question: str,
+    expected_intent: str,
+) -> None:
+    """
+    "정리해줘"·"요약해줘"는 값 조회 질문에도 붙는다.
+
+    표현 하나로 요약 경로를 열면 Pattern A·C가 이미 답하던 질문이 끌려오고, 요약 대상도
+    범위도 없으므로 결국 막힌다. 그때 남는 사유는 '요약 대상을 확정할 수 없다'가 되어 실제로
+    일어난 일(답할 수 있던 질문을 가로챘다)과 달라진다.
+    """
+    assert plan_for(question).intent == expected_intent
+
+
 def test_event_history_wins_over_summary_when_both_expressions_are_present() -> None:
     """
     이력 표현과 요약 표현이 함께 있으면 Pattern E다.
@@ -156,11 +184,17 @@ def test_summary_without_a_report_type_is_blocked() -> None:
     Q06 계열. 거래소공시 단건 요약은 판본 선택 정책(D5)이 미정이라 열려 있지 않다.
 
     가까운 문서를 골라 요약하면 원공시와 정정본 중 무엇을 요약했는지가 결과에 남지 않는다.
+
+    사유가 요약 경로의 것이 아닌 이유:
+        정기공시 보고서 표기가 없으면 요약 판정 자체가 서지 않아 나머지 판정으로 넘어간다
+        (_looks_like_document_summary). 넘겨받은 쪽이 Pattern B가 생기기 전과 같은 사유로
+        막으며, 그것이 이 질문에서 실제로 일어난 일이다. 요약 경로가 잡았다가 놓아준 것처럼
+        보이는 사유를 붙이지 않는다.
     """
     with pytest.raises(UnsupportedQuestionError) as error:
         plan_for("테스트전자 합성단지 투자 공시 내용 요약해줘.")
 
-    assert error.value.reason == "unsupported_summary_target"
+    assert error.value.reason == "missing_year"
 
 
 def test_summary_without_a_period_is_blocked() -> None:
@@ -200,11 +234,15 @@ def test_summary_without_a_section_scope_is_blocked() -> None:
     범위를 읽지 못하면 문서 전체 요약으로 대체하지 않는다.
 
     docs/agent_design/retrieval_strategy.md Pattern B의 Fallback이 그 대체를 금지한다.
+
+    범위를 읽지 못한 질문은 요약 판정이 서지 않아 나머지 판정으로 넘어가고, 그쪽에서 막힌다
+    (_looks_like_document_summary). 어느 경로로 막히든 문서 전체를 요약하지 않는 것은 같으며,
+    이 테스트가 고정하는 것은 그 사실이다.
     """
     with pytest.raises(UnsupportedQuestionError) as error:
         plan_for("테스트바이오 2025년 사업보고서 내용 정리해줘")
 
-    assert error.value.reason == "missing_section_scope"
+    assert error.value.reason == "unsupported_metric"
 
 
 def test_quarterly_summary_is_rejected_before_intent_branching() -> None:

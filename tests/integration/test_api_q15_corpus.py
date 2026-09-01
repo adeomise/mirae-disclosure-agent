@@ -60,6 +60,7 @@ def test_q15_runs_through_actual_corpus_http_api() -> None:
     history = actual.event_histories[0]
     assert history.chain_complete is True
     assert len(actual.event_links) == 3
+    assert len(history.changes) == 4
     assert all(
         link.resolution_status is EventLinkResolutionStatus.RESOLVED
         for link in actual.event_links

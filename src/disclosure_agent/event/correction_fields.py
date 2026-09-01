@@ -18,6 +18,8 @@ FIELD_COUNTERPARTY = "counterparty"
 FIELD_SUPPLY_REGION = "supply_region"
 FIELD_CONTRACT_DETAIL = "contract_detail"
 FIELD_CONTRACT_NAME = "contract_name"
+FIELD_REVENUE_RATIO = "revenue_ratio"
+FIELD_DISCLOSURE_HOLD_UNTIL = "disclosure_hold_until"
 FIELD_INVESTMENT_AMOUNT = "investment_amount"
 FIELD_INVESTMENT_END_DATE = "investment_end_date"
 FIELD_INVESTMENT_TYPE = "investment_type"
@@ -44,7 +46,8 @@ HISTORY_CANONICAL_FIELDS = frozenset(
 
 CORRECTION_FIELD_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
     EVENT_SUPPLY_CONTRACT: {
-        FIELD_CONTRACT_AMOUNT: ("계약금액",),
+        FIELD_CONTRACT_AMOUNT: ("계약금액", "계약내역 - 계약금액"),
+        FIELD_REVENUE_RATIO: ("매출액대비", "계약내역 - 매출액대비"),
         FIELD_CONTRACT_START_DATE: ("계약기간 시작일", "시작일"),
         FIELD_CONTRACT_END_DATE: ("계약기간 종료일", "종료일"),
         FIELD_CONTRACT_PERIOD: ("계약기간",),
@@ -57,6 +60,7 @@ CORRECTION_FIELD_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
             "세부내용",
         ),
         FIELD_CONTRACT_NAME: ("체결계약명",),
+        FIELD_DISCLOSURE_HOLD_UNTIL: ("공시유보 관련내용 - 유보기한",),
         FIELD_NOTES: ("기타 투자판단과 관련한 중요사항",),
     },
     EVENT_FACILITY_INVESTMENT: {

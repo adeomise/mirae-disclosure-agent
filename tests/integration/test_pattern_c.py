@@ -14,10 +14,12 @@
     실제 코퍼스가 있으면 대신 채우지 않고 끝까지 돌린다(6절).
 
 무엇을 고정하는가:
-    1. 파생지표 시계열 질문 하나가 Fact 4건 / Calculation 3건 / Comparison 0건이 된다.
+    1. 파생지표 시계열 질문 하나가 Fact 4건 / Calculation 3건 / Comparison 0건이 된다(Q08).
     2. 확보 요청 조건이 대응표와 계획에서 나온다.
     3. 이번 구현이 다루지 못하는 시계열 계획은 값을 만들지 않고 막힌다.
     4. 견줄 수 없는 두 기간은 파생값을 하나도 남기지 않는다.
+    5. 원천 지표 시계열 질문 하나가 Fact 2건 / Calculation 2건 / Comparison 0건이 되고,
+       그 결과가 문장까지 도달한다(Q07).
 
 Router 등록과의 관계:
     handler가 등록되기 전에는 이 질문들이 routing/unimplemented_intent로 막혔다. 등록한
@@ -39,10 +41,14 @@ from disclosure_agent.agent.answer_builder import (
     REASON_UNSUPPORTED_COMPARISON_SUBJECT,
     STAGE_FILING_DISCOVERY,
     STAGE_PATTERN_ENTRY,
+    build_answer_response,
 )
 from disclosure_agent.agent.calculator import (
+    OPERATION_DELTA,
+    OPERATION_DELTA_PCT,
     OPERATION_DIFF_PP,
     OPERATION_RATIO,
+    UNIT_PERCENT,
     UNIT_PERCENTAGE_POINT,
 )
 from disclosure_agent.agent.derived_metrics import DerivedMetric
@@ -507,9 +513,9 @@ def _temporal_plan(**overrides) -> QueryPlan:
 @pytest.mark.parametrize(
     ("overrides", "expected_reason"),
     [
-        # 원천 지표의 시계열 증감. delta·delta_pct가 없으므로 만들 수 없다.
+        # 허용 목록 밖의 원천 지표. 매출(Q07)은 열렸지만 영업이익의 시계열 증감은 아직 아니다.
         (
-            {"metric": "revenue", "derived_metric": None},
+            {"metric": "operating_income", "derived_metric": None},
             REASON_UNSUPPORTED_COMPARISON_METRIC,
         ),
         # 지표를 하나도 읽지 못한 질문.
@@ -563,11 +569,11 @@ def test_source_metric_and_missing_metric_are_told_apart_in_the_detail() -> None
     """
     같은 사유라도 후속 작업이 다르다.
 
-    원천 지표의 시계열 증감은 delta를 구현하면 풀리고, 지표를 못 읽은 질문은 어휘를 넓혀야
+    범위 밖 원천 지표는 허용 목록을 넓히면 풀리고, 지표를 못 읽은 질문은 어휘를 넓혀야
     풀린다. 사유를 늘리는 대신 detail에서 나눈다.
     """
     source = build_temporal_compare_result(
-        _temporal_plan(metric="revenue", derived_metric=None),
+        _temporal_plan(metric="operating_income", derived_metric=None),
         corpus_root="unused",
     )
 
@@ -580,7 +586,7 @@ def test_source_metric_and_missing_metric_are_told_apart_in_the_detail() -> None
     assert missing.blocked is not None
     assert source.blocked.reason == missing.blocked.reason
     assert source.blocked.detail != missing.blocked.detail
-    assert "revenue" in source.blocked.detail
+    assert "operating_income" in source.blocked.detail
 
 
 def test_unsupported_plan_never_opens_the_corpus(
@@ -725,7 +731,244 @@ def test_incomparable_result_records_which_guard_stopped_it(
 
 
 # --------------------------------------------------------------------------
-# 5. Router 경유
+# 5. Q07 모양 — Fact 2 / Calculation 2 / Comparison 0
+#
+# 원천 지표의 시계열 증감이다. 기간별 파생값이 없으므로 Calculation은 증감액과 증감률 2건이며,
+# 둘 다 원천 Fact 2건을 직접 참조한다
+# (evidence_and_answerability.md Calculation cardinality).
+# --------------------------------------------------------------------------
+
+
+Q07_VALUES = {2024: "1000000000", 2025: "1200000000"}
+
+Q07_QUESTION = f"{SYNTHETIC_COMPANY} 매출이 2024년이랑 2025년에 어떻게 달라졌어?"
+
+
+def _q07_collection() -> PeriodFactCollection:
+    """확보 계층이 Q07 요청에 돌려줄 결과. 매출 한 지표를 두 기간에서 확보한다."""
+    facts: list[Fact] = []
+    evidence: list[Evidence] = []
+
+    for fiscal_year in (2024, 2025):
+        doc_id = f"periodic_SYNTHETIC_{fiscal_year}"
+
+        evidence_id = f"evidence_{doc_id}_revenue"
+
+        evidence.append(
+            Evidence(
+                evidence_id=evidence_id,
+                doc_id=doc_id,
+                location_type=EvidenceLocationType.TABLE,
+                section_path=["III. 재무에 관한 사항", "2. 연결재무제표"],
+                row_label="revenue",
+                raw_text=Q07_VALUES[fiscal_year],
+            )
+        )
+
+        facts.append(
+            Fact(
+                fact_id=f"fact_{doc_id}_revenue",
+                company=SYNTHETIC_COMPANY,
+                metric=MetricConcept.REVENUE,
+                fiscal_year=fiscal_year,
+                accounting_scope=FactAccountingScope.CONSOLIDATED,
+                raw_value=Q07_VALUES[fiscal_year],
+                raw_unit="원",
+                normalized_value=Q07_VALUES[fiscal_year],
+                normalized_unit="KRW",
+                evidence_ids=[evidence_id],
+            )
+        )
+
+    return PeriodFactCollection(facts=tuple(facts), evidence=tuple(evidence))
+
+
+@pytest.fixture
+def q07_plan() -> QueryPlan:
+    return _temporal_plan(metric="revenue", derived_metric=None)
+
+
+@pytest.fixture
+def q07_result(
+    q07_plan: QueryPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    nfd_corpus_root: Path,
+):
+    monkeypatch.setattr(
+        temporal_compare, "collect_period_facts", lambda **_: _q07_collection()
+    )
+
+    return _run(q07_plan, corpus_root=nfd_corpus_root)
+
+
+def test_q07_is_answerable(q07_result) -> None:
+    assert q07_result.execution_status is ExecutionStatus.COMPLETED
+    assert q07_result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert q07_result.answerability_reason is None
+
+
+def test_q07_carries_two_facts_two_calculations_and_no_comparison(q07_result) -> None:
+    assert len(q07_result.facts) == 2
+    assert len(q07_result.calculations) == 2
+    assert q07_result.comparisons == []
+
+
+def test_q07_calculations_are_a_delta_and_a_delta_pct(q07_result) -> None:
+    amount, rate = q07_result.calculations
+
+    assert amount.operation == OPERATION_DELTA
+    assert amount.value == "200000000.0000"
+    assert amount.unit == "KRW"
+
+    assert rate.operation == OPERATION_DELTA_PCT
+    assert rate.value == "20.0000"
+    assert rate.unit == UNIT_PERCENT
+
+
+def test_q07_both_calculations_reference_the_source_facts(q07_result) -> None:
+    """
+    증감률이 증감액을 참조하지 않는다. 근거를 되짚는 경로가 짧고, 증감액의 반올림이
+    증감률에 옮겨붙지 않는다(calculator.delta_pct).
+    """
+    fact_ids = [fact.fact_id for fact in q07_result.facts]
+
+    for calculation in q07_result.calculations:
+        assert [item.input_type for item in calculation.inputs] == [
+            ResultInputType.FACT,
+            ResultInputType.FACT,
+        ]
+        assert [item.input_id for item in calculation.inputs] == fact_ids
+
+
+def test_q07_calculation_inputs_are_in_chronological_order(q07_result) -> None:
+    """순서가 뒤바뀌면 부호가 뒤집힌 증감이 나오고, 뒤집힌 값도 그럴듯하다."""
+    by_id = {fact.fact_id: fact for fact in q07_result.facts}
+
+    for calculation in q07_result.calculations:
+        previous, current = (by_id[item.input_id] for item in calculation.inputs)
+
+        assert previous.fiscal_year < current.fiscal_year
+
+
+def test_q07_every_calculation_evidence_reference_resolves(q07_result) -> None:
+    available = {item.evidence_id for item in q07_result.evidence}
+
+    for calculation in q07_result.calculations:
+        assert calculation.evidence_ids
+        assert set(calculation.evidence_ids) <= available
+
+
+def test_q07_calculation_identifiers_are_deterministic(
+    q07_plan: QueryPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    nfd_corpus_root: Path,
+) -> None:
+    monkeypatch.setattr(
+        temporal_compare, "collect_period_facts", lambda **_: _q07_collection()
+    )
+
+    first = _run(q07_plan, corpus_root=nfd_corpus_root)
+    second = _run(q07_plan, corpus_root=nfd_corpus_root)
+
+    assert [item.calculation_id for item in first.calculations] == [
+        item.calculation_id for item in second.calculations
+    ]
+    assert [item.calculation_id for item in first.calculations] == [
+        "calculation_revenue_delta_2024_2025",
+        "calculation_revenue_delta_pct_2024_2025",
+    ]
+
+
+def test_q07_only_requests_the_source_metric_it_needs(
+    q07_plan: QueryPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    nfd_corpus_root: Path,
+) -> None:
+    """파생 개념이 없으므로 대응표를 펼치지 않는다. 매출 하나만 확보한다."""
+    captured: dict[str, object] = {}
+
+    def _collect(**kwargs: object) -> PeriodFactCollection:
+        captured.update(kwargs)
+
+        return _q07_collection()
+
+    monkeypatch.setattr(temporal_compare, "collect_period_facts", _collect)
+
+    _run(q07_plan, corpus_root=nfd_corpus_root)
+
+    assert captured["metrics"] == (MetricConcept.REVENUE,)
+    assert captured["fiscal_years"] == (2024, 2025)
+
+
+def test_q07_builds_a_deterministic_answer(q07_result) -> None:
+    """
+    구조화 결과가 문장까지 도달한다.
+
+    이 자리가 없으면 Fact 2건이 단일 Fact 경로의 가드에 걸려 답이 사라진다. 문장에 실린
+    수치는 전부 Fact와 Calculation에 이미 있는 값이며 여기서 새로 만들지 않는다.
+    """
+    answer = build_answer_response(q07_result).answer
+
+    assert SYNTHETIC_COMPANY in answer
+
+    for value in Q07_VALUES.values():
+        assert value in answer
+
+    # 증감액과 증감률이 저장된 자릿수 그대로 실린다.
+    assert "200000000.0000" in answer
+    assert "20.0000%" in answer
+
+
+def test_q07_answer_does_not_claim_a_direction(q07_result) -> None:
+    """
+    늘었다/줄었다는 결과가 담고 있지 않은 판정이다.
+
+    방향은 증감액의 부호에 이미 담겨 있고, ComparisonResult가 없는 결과에서 우열을 말하면
+    Builder가 판정을 새로 만드는 일이 된다.
+    """
+    answer = build_answer_response(q07_result).answer
+
+    assert "증가" not in answer
+    assert "감소" not in answer
+
+
+def test_q07_is_blocked_when_the_previous_value_is_zero(
+    q07_plan: QueryPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    nfd_corpus_root: Path,
+) -> None:
+    """
+    증감률이 정의되지 않으면 Q07 전체가 막힌다.
+
+    증감액만 남기지 않는 이유는 질문이 요구한 수치 두 건 중 하나만 답하게 되기 때문이다.
+    확보한 Fact와 Evidence는 남고 파생값은 하나도 남지 않는다.
+    """
+    zeroed = _q07_collection()
+
+    facts = (
+        zeroed.facts[0].model_copy(update={"normalized_value": "0", "raw_value": "0"}),
+        zeroed.facts[1],
+    )
+
+    monkeypatch.setattr(
+        temporal_compare,
+        "collect_period_facts",
+        lambda **_: PeriodFactCollection(facts=facts, evidence=zeroed.evidence),
+    )
+
+    result = _run(q07_plan, corpus_root=nfd_corpus_root)
+
+    assert result.calculations == []
+    assert len(result.facts) == 2
+
+    detail = result.answerability_detail or result.execution_issue
+
+    assert detail is not None
+    assert detail.reason == "unusable_calculation_input"
+
+
+# --------------------------------------------------------------------------
+# 6. Router 경유
 # --------------------------------------------------------------------------
 
 
@@ -758,7 +1001,7 @@ def test_question_string_reaches_the_same_result_through_the_router(
 
 
 # --------------------------------------------------------------------------
-# 6. 실측 코퍼스 — 대표 질문 Q08
+# 7. 실측 코퍼스 — 대표 질문 Q08
 # --------------------------------------------------------------------------
 
 

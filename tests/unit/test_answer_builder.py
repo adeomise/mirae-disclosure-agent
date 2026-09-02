@@ -27,6 +27,8 @@ from disclosure_agent.agent.answer_builder import (
     FACT_NORMALIZED_UNIT_LABELS,
     LIMITATION_MESSAGE_BY_REASON,
     METRIC_LABELS,
+    OPERATION_DELTA,
+    OPERATION_DELTA_PCT,
     POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON,
     REASON_INCOMPARABLE_CALCULATION_INPUTS,
     REASON_INCOMPARABLE_PERIODS,
@@ -43,6 +45,12 @@ from disclosure_agent.agent.answer_builder import (
     UnsupportedResultShapeError,
     _topic_particle,
     build_answer_response,
+)
+from disclosure_agent.agent.calculator import (
+    OPERATION_DELTA as CALCULATOR_OPERATION_DELTA,
+)
+from disclosure_agent.agent.calculator import (
+    OPERATION_DELTA_PCT as CALCULATOR_OPERATION_DELTA_PCT,
 )
 from disclosure_agent.agent.derived_metrics import (
     OPERATION_RATIO,
@@ -2245,3 +2253,246 @@ def test_policy_refusal_table_covers_the_gate_categories() -> None:
         REASON_INVESTMENT_ADVICE,
         REASON_FORWARD_LOOKING_PREDICTION,
     }
+
+
+# --------------------------------------------------------------------------
+# Pattern C — 시계열 증감(Q07)
+#
+# Fact 2건과 Calculation 2건을 함께 실은 결과만 문장이 된다. 단일 Fact 경로의 가드는 그대로
+# 두고 이 모양만 연다.
+# --------------------------------------------------------------------------
+
+
+def _delta_calculation(
+    *,
+    calculation_id: str = "calculation_revenue_delta_2024_2025",
+    operation: str = OPERATION_DELTA,
+    value: str = "200000000.0000",
+    unit: str | None = "원",
+    input_ids: tuple[str, str] = ("fact_2024", "fact_2025"),
+) -> CalculationResult:
+    return CalculationResult(
+        calculation_id=calculation_id,
+        operation=operation,
+        inputs=[
+            ResultInputReference(input_type=ResultInputType.FACT, input_id=input_id)
+            for input_id in input_ids
+        ],
+        value=value,
+        unit=unit,
+        evidence_ids=["evidence_SYNTHETIC_01"],
+    )
+
+
+def temporal_delta_result(
+    *,
+    calculations: list[CalculationResult] | None = None,
+    facts: list[Fact] | None = None,
+) -> AgentExecutionResult:
+    """Pattern C의 Q07 성공 결과와 같은 모양(normalize_temporal_compare_result 참조)."""
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=facts
+        if facts is not None
+        else [
+            make_fact(
+                fact_id="fact_2024",
+                fiscal_year=2024,
+                raw_value="1,000",
+                normalized_value="1000000000",
+            ),
+            make_fact(
+                fact_id="fact_2025",
+                fiscal_year=2025,
+                raw_value="1,200",
+                normalized_value="1200000000",
+            ),
+        ],
+        evidence=[make_evidence()],
+        calculations=calculations
+        if calculations is not None
+        else [
+            _delta_calculation(),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+            ),
+        ],
+    )
+
+
+def test_temporal_delta_operation_names_match_the_calculator() -> None:
+    """
+    두 이름은 agent.calculator가 정본이다.
+
+    순환 import 때문에 이 모듈이 그쪽에서 가져오지 못하므로 같은 문자열을 두 곳에 둔다.
+    어긋나면 Q07 문장이 조용히 사라지므로 여기서 붙여 둔다.
+    """
+    assert OPERATION_DELTA == CALCULATOR_OPERATION_DELTA
+    assert OPERATION_DELTA_PCT == CALCULATOR_OPERATION_DELTA_PCT
+
+
+def test_temporal_delta_result_becomes_a_sentence() -> None:
+    answer = build_answer_response(temporal_delta_result()).answer
+
+    assert SYNTHETIC_COMPANY in answer
+    assert "2024년" in answer
+    assert "2025년" in answer
+    assert "200000000.0000원" in answer
+    assert "20.0000%" in answer
+
+
+def test_temporal_delta_sentence_is_deterministic() -> None:
+    result = temporal_delta_result()
+
+    assert build_answer_response(result).answer == build_answer_response(result).answer
+
+
+def test_temporal_delta_reads_the_periods_from_the_calculation_inputs() -> None:
+    """
+    이전·이후를 Fact 목록 순서에서 읽지 않는다.
+
+    목록 순서를 뒤집어도 증감액 Calculation의 inputs가 시간 순서를 정하므로 문장은 같다.
+    """
+    forward = temporal_delta_result()
+
+    reversed_facts = temporal_delta_result(facts=list(reversed(forward.facts)))
+
+    assert build_answer_response(reversed_facts).answer == (
+        build_answer_response(forward).answer
+    )
+
+
+def test_two_facts_without_the_delta_calculations_still_stop() -> None:
+    """일반 다중 Fact 가드는 그대로다. Calculation이 없으면 문장을 만들지 않는다."""
+    result = temporal_delta_result(calculations=[])
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_two_facts_with_other_operations_still_stop() -> None:
+    """연산 이름이 다르면 이 경로가 열리지 않는다."""
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(operation="ratio"),
+            _delta_calculation(
+                calculation_id="calculation_other", operation="diff_pp"
+            ),
+        ]
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_delta_calculations_pointing_elsewhere_still_stop() -> None:
+    """
+    두 Calculation이 결과에 실린 Fact 2건만 참조해야 한다.
+
+    다른 값을 가리키는 참조로 문장을 만들면 문장의 근거가 결과와 어긋난다.
+    """
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(input_ids=("fact_2024", "fact_9999")),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+            ),
+        ]
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_delta_amount_with_an_unlabelled_unit_stops() -> None:
+    """정규화 단위 표기를 정하지 않은 채로 적으면 문장에 추출 계층의 어휘가 실린다."""
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(unit="XYZ"),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+            ),
+        ]
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_delta_and_delta_pct_must_reference_the_facts_in_the_same_order() -> None:
+    """
+    같은 Fact 2건을 쓰되 방향이 서로 반대인 결과는 문장이 되지 않는다.
+
+    집합으로만 보면 통과한다. 그러면 증감액은 2024 -> 2025의 값이고 증감률은 2025 -> 2024의
+    값인데, 문장 조립이 이전·이후를 증감액에서만 읽으므로 부호가 서로 어긋난 두 수치가 한
+    문장에 나란히 실린다. 받는 쪽은 어느 쪽이 맞는지 알 수 없다.
+    """
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(input_ids=("fact_2024", "fact_2025")),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+                input_ids=("fact_2025", "fact_2024"),
+            ),
+        ]
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_delta_and_delta_pct_in_the_same_order_are_accepted() -> None:
+    """대조군. 순서가 같으면 지금까지처럼 문장이 된다."""
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(input_ids=("fact_2024", "fact_2025")),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+                input_ids=("fact_2024", "fact_2025"),
+            ),
+        ]
+    )
+
+    answer = build_answer_response(result).answer
+
+    assert "200000000.0000원" in answer
+    assert "20.0000%" in answer
+
+
+def test_delta_referencing_one_fact_twice_stops() -> None:
+    """
+    두 참조가 같은 Fact를 가리키면 견준 것이 없다.
+
+    순서 검사만으로는 통과한다. 두 Calculation이 똑같이 어긋나 있기 때문이다.
+    """
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(input_ids=("fact_2024", "fact_2024")),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+                input_ids=("fact_2024", "fact_2024"),
+            ),
+        ]
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)

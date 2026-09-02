@@ -384,6 +384,22 @@ METRIC_LABELS: dict[MetricConcept, str] = {
     MetricConcept.OPERATING_INCOME: "영업이익",
 }
 
+# 계약 조회(Q02) 문장이 쓸 거래소공시 필드 표기.
+#
+# METRIC_LABELS와 합치지 않는다. 저쪽은 재무제표 축(회계연도·연결기준)을 전제한 단일 Fact
+# 템플릿이 쓰는 표기이고, 계약금액과 계약기간에는 그 축이 없다. 한 표에 담으면 계약 지표가
+# 그 템플릿으로도 흘러 들어가 "2025년 연결 기준 계약금액" 같은 문장이 만들어진다.
+# DERIVED_METRIC_LABELS를 따로 둔 것과 같은 자리다.
+# 표기가 문장에 그대로 쓰이는 것은 계약금액뿐이다. 시작일·종료일은 "계약기간은 A부터
+# B까지"로 묶여 나가므로 낱개 표기가 문장에 나타나지 않는다. 그래도 표에 두는 이유는 이 표가
+# "어떤 지표가 거래소공시 계약 필드인가"를 정하는 자리이기도 하기 때문이다
+# (_is_contract_fact_bundle).
+CONTRACT_METRIC_LABELS: dict[MetricConcept, str] = {
+    MetricConcept.CONTRACT_AMOUNT: "계약금액",
+    MetricConcept.CONTRACT_START_DATE: "계약 시작일",
+    MetricConcept.CONTRACT_END_DATE: "계약 종료일",
+}
+
 ACCOUNTING_SCOPE_LABELS: dict[FactAccountingScope, str] = {
     FactAccountingScope.CONSOLIDATED: "연결",
     FactAccountingScope.SEPARATE: "별도",
@@ -442,6 +458,18 @@ DERIVED_METRIC_LABELS: dict[DerivedMetric, str] = {
 CALCULATION_UNIT_LABELS: dict[str, str] = {
     UNIT_PERCENT: "%",
 }
+
+# Q07이 만드는 두 Calculation의 연산 이름.
+#
+# agent.calculator에서 가져오지 않는다. 그쪽이 이 모듈의 정지 사유 상수를 이미 가져가고 있어
+# 반대 방향을 열면 순환 import가 된다.
+#
+# 같은 문자열이 두 곳에 있지만 어긋나도 조용히 틀리지 않는다. 이름이 갈리면
+# _is_temporal_delta_shape이 그 모양을 알아보지 못하고, 결과는 아래 단일 Fact 경로로 내려가
+# Fact 2건에서 멈춘다. 틀린 문장이 나가는 쪽이 아니라 문장을 만들지 않는 쪽으로 실패한다.
+# 두 이름이 붙어 있는지는 tests/unit/test_answer_builder.py가 함께 고정한다.
+OPERATION_DELTA = "delta"
+OPERATION_DELTA_PCT = "delta_pct"
 
 # Fact 정규화 단위의 한국어 표기.
 #
@@ -967,6 +995,32 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
             "함께 있습니다. 두 결과를 한 문장으로 잇는 형태가 정해지지 않았습니다."
         )
 
+    # 시계열 증감 결과를 단일 Fact 경로보다 먼저 본다.
+    #
+    # Q07은 두 기간의 원천 Fact 2건과 그 둘에서 나온 Calculation 2건을 함께 싣는다. 아래 단일
+    # Fact 경로는 여러 건에서 멈추도록 만들어졌고 그 가드는 그대로 두어야 하므로, 여기서 먼저
+    # 가르지 않으면 답할 수 있는 결과가 그 가드에 걸린다.
+    #
+    # 가드를 넓히지 않고 이 모양만 연다. _is_temporal_delta_shape은 Fact 2건과 Calculation
+    # 2건의 연산 이름, 그리고 두 Calculation이 그 Fact 2건만 참조한다는 것까지 본다. 조건 하나라도
+    # 어긋나면 아래로 내려가 멈추므로, 임의의 다중 Fact 결과가 이 경로로 답이 되지 않는다.
+    if result.facts and _is_temporal_delta_shape(result):
+        return _join(
+            _temporal_delta_sentence(result),
+            _limitation(result, partial=partial),
+        )
+
+    # 계약 조회 결과를 단일 Fact 경로보다 먼저 본다.
+    #
+    # Q02는 한 계약을 서술하는 여러 값을 함께 확보한다. 아래 단일 Fact 경로는 여러 건에서
+    # 멈추도록 만들어졌고 그 가드는 그대로 두어야 한다. 여기서 먼저 가르지 않으면 계약
+    # 질문이 그 가드에 걸려 답이 사라진다.
+    if result.facts and _is_contract_fact_bundle(result.facts):
+        return _join(
+            _contract_fact_sentence(result.facts),
+            _limitation(result, partial=partial),
+        )
+
     if result.facts:
         return _join(
             _single_fact_sentence(result.facts),
@@ -1078,6 +1132,245 @@ def _summary_item_counts(summary: DocumentSummary) -> str:
         )
 
     return ", ".join(parts)
+
+
+def _is_temporal_delta_shape(result: AgentExecutionResult) -> bool:
+    """
+    같은 기업 두 기간의 증감 결과인가(Q07, Pattern C의 원천 지표 모양).
+
+    좁게 본다. 개수만 맞는 결과를 통과시키면 다른 Pattern이 우연히 Fact 2건과 Calculation
+    2건을 실었을 때 그것이 증감 문장으로 나간다. 그래서 네 가지를 함께 본다.
+
+        Fact 2건 / Calculation 2건
+        두 Calculation의 연산이 증감액과 증감률이고 그 순서다
+        두 Calculation의 입력 참조가 순서까지 같다
+        그 참조가 결과에 실린 Fact 2건이고 둘 다 Fact 참조다
+
+    셋째 조건을 집합이 아니라 순서로 보는 이유:
+        아래 문장 조립은 이전·이후를 증감액의 inputs에서 읽고, 증감률은 값을 그대로 옮긴다.
+        두 Calculation이 같은 Fact 2건을 쓰되 순서가 서로 반대이면, 집합으로는 같으므로
+        통과하지만 증감액은 A->B의 값이고 증감률은 B->A의 값이 된다. 그 둘을 한 문장에 적으면
+        부호가 서로 어긋난 수치가 나란히 실리고, 받는 쪽은 어느 쪽이 맞는지 알 수 없다.
+
+        순서까지 같은지 보면 그 결과는 문장이 되지 않고 아래 단일 Fact 경로로 내려가 멈춘다.
+        조용히 틀린 문장이 나가는 쪽이 아니라 문장을 만들지 않는 쪽으로 실패한다.
+
+    Fact 목록의 순서는 보지 않는다. 확보 순서일 뿐 시간 순서라는 보장이 없고, 시간 순서는
+    증감액의 inputs가 정한다(_temporal_delta_sentence).
+
+    ComparisonResult는 보지 않는다. 이 함수에 닿기 전에 우열 판정 분기가 먼저 갈라지므로
+    여기까지 온 결과에는 판정이 없다.
+    """
+    if len(result.facts) != 2 or len(result.calculations) != 2:
+        return False
+
+    if tuple(item.operation for item in result.calculations) != (
+        OPERATION_DELTA,
+        OPERATION_DELTA_PCT,
+    ):
+        return False
+
+    amount, rate = result.calculations
+
+    ordered = [(item.input_type, item.input_id) for item in amount.inputs]
+
+    if ordered != [(item.input_type, item.input_id) for item in rate.inputs]:
+        return False
+
+    if [input_type for input_type, _ in ordered] != [
+        ResultInputType.FACT,
+        ResultInputType.FACT,
+    ]:
+        return False
+
+    # 같은 Fact를 두 번 가리키는 참조는 여기서 걸린다. 그 경우 아래 집합의 크기가 1이 되어
+    # Fact 2건의 식별자 집합과 같아지지 않는다.
+    return {input_id for _, input_id in ordered} == {
+        fact.fact_id for fact in result.facts
+    }
+
+
+def _temporal_delta_sentence(result: AgentExecutionResult) -> str:
+    """
+    두 기간의 값과 그 증감을 문장으로 옮긴다(Q07).
+
+    값을 만들지 않는다. 두 기간의 값은 Fact에서, 증감액과 증감률은 Calculation에서 그대로
+    읽는다. 여기서 빼거나 나누면 응답에 실린 수치와 문장의 수치가 어긋날 수 있고, 그 어긋남은
+    검산하는 쪽에서만 드러난다.
+
+    이전·이후를 Fact 목록의 순서에서 읽지 않는다. 순서는 확보 요청 순서일 뿐 시간 순서라는
+    보장이 없다. 증감액 Calculation의 inputs가 previous, current 순서라는 것이 계산 계층의
+    계약이므로(calculator.delta) 그 참조를 따라 읽는다.
+
+    늘었다/줄었다를 적지 않는다. 방향은 증감액의 부호에 이미 담겨 있고, 그 부호를 말로 옮기는
+    것은 결과가 담고 있지 않은 판정을 문장이 새로 만드는 일이다. 우열 판정은 ComparisonResult가
+    있는 결과에서만 한다(agent_patterns.md "Agent computes and judges. Builder presents.").
+    """
+    amount, rate = result.calculations
+
+    previous = _referenced_fact(result, amount.inputs[0].input_id)
+
+    current = _referenced_fact(result, amount.inputs[1].input_id)
+
+    sources = [previous, current]
+
+    company = _single_source_attribute(amount, sources, attribute="company")
+
+    metric = _single_source_attribute(amount, sources, attribute="metric")
+
+    scope = _single_source_attribute(amount, sources, attribute="accounting_scope")
+
+    label = _metric_label(metric)
+
+    return _join(
+        f"{company}의 {_scope_phrase(scope)}{label}{_topic_particle(label)} "
+        f"{_period_phrase(previous)}{_fact_value(previous)}, "
+        f"{_period_phrase(current)}{_fact_value(current)}입니다.",
+        f"증감액은 {_delta_amount(amount)}, 증감률은 {_calculation_value(rate)}입니다.",
+    )
+
+
+def _delta_amount(calculation: CalculationResult) -> str:
+    """
+    증감액 표기.
+
+    _calculation_value를 쓰지 않는다. 그쪽이 보는 것은 파생지표의 결과 단위 어휘(percent)이고,
+    증감액의 단위는 원천 Fact의 정규화 단위를 그대로 물려받은 값이다
+    (calculator._shared_normalized_unit). 두 어휘를 한 대응표에 합치면 "percent"와 "KRW"가
+    같은 자리에 놓이고, 어느 쪽 어휘로 적힌 단위인지 받는 쪽이 알 수 없게 된다.
+
+    표기가 없으면 멈춘다. 정규화 단위를 그대로 문장에 적으면 한국어 문장에 추출 계층의 어휘가
+    실린다(_normalized_value_with_unit과 같은 자리).
+    """
+    label = (
+        FACT_NORMALIZED_UNIT_LABELS.get(calculation.unit)
+        if calculation.unit is not None
+        else None
+    )
+
+    if calculation.unit is not None and label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 증감액 단위입니다: {calculation.unit!r}. "
+            "FACT_NORMALIZED_UNIT_LABELS에 추가하십시오."
+        )
+
+    rendered = _value_with_unit(calculation.value, label)
+
+    if rendered is None:
+        raise MissingAnswerSupportError(
+            f"Calculation {calculation.calculation_id!r}에 값과 단위가 모두 갖춰진 표현이 "
+            "없습니다. 값만 있거나 단위만 있는 상태로는 문장을 만들지 않습니다."
+        )
+
+    return rendered
+
+
+def _is_contract_fact_bundle(facts: list[Fact]) -> bool:
+    """거래소공시 계약 필드만으로 이루어진 결과인가.
+
+    전부일 때만 참이다. 계약 필드와 재무 지표가 섞인 결과는 이 문장 형태가 정해지지 않았고,
+    한쪽을 골라 적으면 나머지를 물었다는 사실이 사라진다. 그런 결과는 아래 단일 Fact 경로로
+    내려가 거기서 멈춘다.
+    """
+    return all(fact.metric in CONTRACT_METRIC_LABELS for fact in facts)
+
+
+def _contract_fact_sentence(facts: list[Fact]) -> str:
+    """
+    한 계약에서 확보한 값들을 문장 하나로 옮긴다.
+
+    값을 만들지 않는다. 확보한 Fact에 적힌 것만 옮기며, 없는 필드는 문장에 나타나지 않는다.
+    요청했는데 없는 필드는 여기까지 오지 않는다. adapt_contract_facts가 전부 아니면 하나도
+    만들지 않으므로, 이 자리의 Fact 묶음은 이미 요청한 값을 전부 담고 있다.
+
+    시작일과 종료일을 기간 하나로 적는다:
+        "계약 시작일은 A입니다. 계약 종료일은 B입니다"로 나누어 적으면 두 값이 같은 계약의
+        양 끝이라는 관계가 문장에서 사라진다. 한쪽만 있는 결과는 아래에서 막는다. 없는 쪽을
+        추측해 기간을 만들지 않는다.
+
+    회계연도와 연결/별도 구절을 붙이지 않는다:
+        계약금액과 계약기간은 회계기간의 값이 아니고 거래소공시에는 연결·별도 구분이 없다.
+        Fact도 그렇게 담겨 있으므로(fiscal_year=None, accounting_scope=not_applicable)
+        여기서 덧붙일 것이 없다.
+    """
+    companies = {fact.company for fact in facts}
+
+    if len(companies) > 1:
+        raise UnsupportedResultShapeError(
+            f"계약 문장에 기업이 {len(companies)}곳 실려 있습니다: "
+            f"{', '.join(sorted(companies))}. 한 계약을 서술하는 문장이므로 기업은 한 곳이어야 "
+            "하며, 한 곳을 골라 적지 않습니다."
+        )
+
+    by_metric = {fact.metric: fact for fact in facts}
+
+    if len(by_metric) != len(facts):
+        raise UnsupportedResultShapeError(
+            "같은 계약 필드가 여러 건 실려 있습니다. 어느 값이 정본인지 정해지지 않아 "
+            "하나를 골라 적지 않습니다."
+        )
+
+    start = by_metric.get(MetricConcept.CONTRACT_START_DATE)
+    end = by_metric.get(MetricConcept.CONTRACT_END_DATE)
+
+    # 계약기간이 없으면 어느 계약인지 문장이 밝히지 못한다.
+    #
+    # 한 기업은 한 해에 여러 건의 공급계약을 공시한다. "{회사}의 계약금액은 X원입니다"는
+    # 형식은 자연스럽지만 어느 계약인지 특정되지 않은 문장이고, 읽는 쪽은 그 기업의 유일한
+    # 계약으로 읽는다. 계약기간은 Fact에 이미 실려 있는 값이면서 그 계약을 다른 계약과
+    # 구분해 준다.
+    #
+    # 상대방으로 밝히는 편이 더 낫지만 그 값은 여기까지 오지 않는다. 계약 상대방은
+    # QueryPlan에 있고 AgentExecutionResult에는 자리가 없다. 자리를 만드는 것은 공유
+    # Contract 개정이므로 이 범위에서 하지 않는다.
+    if start is None or end is None:
+        listed = ", ".join(sorted(metric.value for metric in by_metric))
+
+        raise UnsupportedResultShapeError(
+            f"계약기간 없이 계약 값을 문장으로 옮기지 않습니다: {listed}. "
+            "어느 계약인지 문장에서 특정되지 않아, 그 기업의 유일한 계약으로 읽히는 답이 "
+            "나갑니다. 계약을 식별하는 표현을 먼저 정하십시오."
+        )
+
+    clauses: list[str] = []
+
+    amount = by_metric.get(MetricConcept.CONTRACT_AMOUNT)
+
+    if amount is not None:
+        label = CONTRACT_METRIC_LABELS[MetricConcept.CONTRACT_AMOUNT]
+
+        clauses.append(f"{label}{_topic_particle(label)} {_fact_value(amount)}")
+
+    clauses.append(
+        f"계약기간은 {_contract_date_value(start)}부터 {_contract_date_value(end)}까지"
+    )
+
+    return f"{facts[0].company}의 {', '.join(clauses)}입니다."
+
+
+def _contract_date_value(fact: Fact) -> str:
+    """
+    계약 일자 Fact의 값.
+
+    단위를 요구하지 않는 것이 _fact_value와 다른 점이다. 저쪽은 수량을 적으므로 단위가 없으면
+    자릿수를 알 수 없어 멈춘다. 날짜는 수량이 아니라 그 자체로 완결된 표기이며, 단위를
+    요구하면 정상적인 Fact가 답하지 못하고 멈춘다.
+
+    원문 표기를 먼저 쓴다. 공시 대조에 맞는 것은 문서에 적힌 표기다.
+    """
+    for candidate in (fact.raw_value, fact.normalized_value):
+        if candidate is None:
+            continue
+
+        rendered = str(candidate).strip()
+
+        if rendered:
+            return rendered
+
+    raise MissingAnswerSupportError(
+        f"Fact {fact.fact_id!r}에 적을 일자 값이 없습니다. "
+        "값이 비어 있는 상태로는 문장을 만들지 않습니다."
+    )
 
 
 def _single_fact_sentence(facts: list[Fact]) -> str:

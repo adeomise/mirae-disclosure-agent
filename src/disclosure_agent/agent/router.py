@@ -54,6 +54,7 @@ from disclosure_agent.agent.answer_builder import (
     STAGE_QUERY_PLAN,
     STAGE_ROUTING,
 )
+from disclosure_agent.agent.handlers.contract_fact import handle_contract_fact
 from disclosure_agent.agent.handlers.cross_entity_compare import (
     handle_cross_entity_compare,
 )
@@ -67,6 +68,7 @@ from disclosure_agent.agent.normalization import (
     refused_execution,
 )
 from disclosure_agent.agent.query_analyzer import (
+    INTENT_CONTRACT_FACT,
     INTENT_CROSS_ENTITY_COMPARE,
     INTENT_DOCUMENT_SUMMARY,
     INTENT_TEMPORAL_COMPARE,
@@ -104,6 +106,8 @@ HANDLERS: dict[str, Handler] = {
     INTENT_DOCUMENT_SUMMARY: handle_document_summary,
     INTENT_TEMPORAL_COMPARE: handle_temporal_compare,
     INTENT_CROSS_ENTITY_COMPARE: handle_cross_entity_compare,
+    # contract_fact도 Contract v0.1의 Intent에 아직 없어 query_analyzer의 문자열 상수를 쓴다.
+    INTENT_CONTRACT_FACT: handle_contract_fact,
 }
 
 

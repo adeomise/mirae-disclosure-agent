@@ -13,8 +13,12 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from disclosure_agent.agent.answer_builder import STAGE_QUERY_PLAN
 from disclosure_agent.agent.derived_metrics import DerivedMetric
 from disclosure_agent.agent.query_analyzer import (
     DOCUMENT_CLASS_PERIODIC,
@@ -23,11 +27,17 @@ from disclosure_agent.agent.query_analyzer import (
     INTENT_EVENT_HISTORY,
     INTENT_SINGLE_FACT,
     INTENT_TEMPORAL_COMPARE,
+    SUPPORTED_CONTRACT_FIELDS,
     QueryPlan,
     UnsupportedQuestionError,
     build_query_plan,
 )
-from disclosure_agent.common.enums import MetricConcept, QueryAccountingScope
+from disclosure_agent.agent.router import answer_question
+from disclosure_agent.common.enums import (
+    ExecutionStatus,
+    MetricConcept,
+    QueryAccountingScope,
+)
 from disclosure_agent.retrieval.metadata_filter import DOCUMENT_CLASS_EVENT
 
 KNOWN_COMPANIES = ("한화오션",)
@@ -94,26 +104,64 @@ def test_spaced_wording_reads_the_same_fields() -> None:
 
 
 # --------------------------------------------------------------------------
-# 2. 요구한 필드만 담는다
+# 2. 지원하는 필드 조합만 계획이 된다
+#
+# 계획이 열어 주는 범위는 answer_builder가 문장으로 옮길 수 있는 범위를 넘지 않는다.
+# 넘으면 ANSWERABLE로 판정된 결과가 문장을 만드는 자리에서 터지고, 그때는 막힌 이유가
+# 결과에 남지 않은 채 HTTP 500이 된다.
 # --------------------------------------------------------------------------
 
 
-def test_amount_only_question_requests_one_field() -> None:
-    """묻지 않은 값을 담으면 받는 쪽이 무엇이 답이고 무엇이 부수 정보인지 구분할 수 없다."""
-    plan = _plan("한화오션의 2025년 9월 계약금액은?")
+def test_amount_and_period_question_requests_the_supported_shape() -> None:
+    """계약금액과 계약기간을 함께 물은 질문은 지금까지처럼 계획이 된다."""
+    plan = _plan(Q02)
 
-    assert plan.requested_fields == (MetricConcept.CONTRACT_AMOUNT,)
+    assert set(plan.requested_fields) == SUPPORTED_CONTRACT_FIELDS
+    assert plan.requested_fields == (
+        MetricConcept.CONTRACT_AMOUNT,
+        *CONTRACT_PERIOD_FIELDS,
+    )
 
 
-def test_period_question_requests_both_dates() -> None:
+def test_amount_only_question_is_blocked_at_query_plan() -> None:
     """
-    기간은 시작일과 종료일이 함께 있어야 서술된다.
+    계약금액만 물은 질문은 계획 단계에서 막는다.
 
-    한쪽만 담으면 "2025-09-16부터"까지만 답하고 언제 끝나는지를 물었다는 사실이 사라진다.
+    예전에는 requested_fields에 계약금액 하나만 담아 계획을 만들었다. 그 계획은 handler까지
+    통과한 뒤 answer_builder에서 터졌고, 결과가 이미 ANSWERABLE로 판정된 자리라 막힌 이유가
+    남지 않았다. 지금은 여기서 막으므로 사유가 query_plan 단계에 남는다.
     """
-    plan = _plan("한화오션의 2025년 9월 계약기간은?")
+    with pytest.raises(UnsupportedQuestionError) as error:
+        _plan("한화오션의 2025년 9월 계약금액은?")
 
-    assert plan.requested_fields == CONTRACT_PERIOD_FIELDS
+    assert error.value.reason == "unsupported_contract_fields"
+
+
+def test_period_only_question_is_blocked_at_query_plan() -> None:
+    """
+    계약기간만 물은 질문도 함께 막는다.
+
+    이 형태는 answer_builder가 문장으로 옮길 수 있다. 그런데도 막는 이유는, 열어 두면
+    planner가 여는 범위와 builder가 지원하는 범위가 두 벌로 갈리기 때문이다. 넓히는 쪽이
+    늘 나중이어야 두 범위가 조용히 어긋나지 않는다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        _plan("한화오션의 2025년 9월 계약기간은?")
+
+    assert error.value.reason == "unsupported_contract_fields"
+
+
+def test_unsupported_field_detail_names_the_supported_shape() -> None:
+    """무엇을 물어야 답할 수 있는지가 사유에 남지 않으면 질문을 고칠 수 없다."""
+    with pytest.raises(UnsupportedQuestionError) as error:
+        _plan("한화오션의 2025년 9월 계약금액은?")
+
+    detail = error.value.detail
+
+    assert "계약금액과 계약기간을 함께" in detail
+
+    for field in SUPPORTED_CONTRACT_FIELDS:
+        assert field.value in detail
 
 
 # --------------------------------------------------------------------------
@@ -129,14 +177,14 @@ def test_counterparty_is_absent_when_the_question_does_not_name_one(
     상대방을 지어내면 그 이름으로 문서를 고르게 되고, 틀린 상대방으로 고른 계약은 형식이 맞아
     틀렸다는 사실이 드러나지 않는다. 후보가 여럿일 때 막는 일은 retrieval 계층이 한다.
     """
-    plan = _plan("한화오션의 2025년 9월 계약금액은?")
+    plan = _plan("한화오션의 2025년 9월 계약금액이랑 계약기간은?")
 
     assert plan.counterparty is None
 
 
 def test_target_company_is_not_read_as_counterparty() -> None:
     """주체를 상대방 자리에 담으면 그 이름으로 후보를 좁혀 아무 문서도 찾지 못한다."""
-    plan = _plan("2025년 9월 한화오션과 체결한 계약의 계약금액은?")
+    plan = _plan("2025년 9월 한화오션과 체결한 계약의 계약금액과 계약기간은?")
 
     assert plan.companies == ("한화오션",)
     assert plan.counterparty is None
@@ -144,7 +192,7 @@ def test_target_company_is_not_read_as_counterparty() -> None:
 
 def test_korean_counterparty_is_read_without_the_particle() -> None:
     """조사까지 상대방 이름에 담으면 코퍼스의 어떤 이름과도 맞지 않는다."""
-    plan = _plan("한화오션이 2025년 9월 테스트해운과 체결한 계약의 계약금액은?")
+    plan = _plan("한화오션이 2025년 9월 테스트해운과 체결한 계약의 계약금액과 계약기간은?")
 
     assert plan.counterparty == "테스트해운"
 
@@ -265,3 +313,47 @@ def test_pattern_e_history_question_is_unchanged() -> None:
     assert plan.intent == INTENT_EVENT_HISTORY
     assert plan.requested_fields == ()
     assert plan.metric is None
+
+
+# --------------------------------------------------------------------------
+# 6. 막힌 질문이 실행 경로로 새어 나가지 않는다
+# --------------------------------------------------------------------------
+
+
+def test_unsupported_shape_becomes_a_blocked_result_not_an_exception(
+    tmp_path: Path,
+) -> None:
+    """
+    지원하지 않는 필드 조합은 BLOCKED 결과가 되며 예외로 올라가지 않는다.
+
+    이 자리를 보는 이유:
+        query_analyzer가 막아도 그 거절이 예외로 호출자까지 올라가면 API에서 500이 된다.
+        Router가 UnsupportedQuestionError를 query_plan 단계의 BLOCKED로 옮기는 것이 규약이고,
+        이 회귀가 그 연결을 고정한다.
+
+    코퍼스를 열지 않는다:
+        막히는 자리가 질의 해석 단계라 문서를 한 번도 읽지 않는다. manifest는 기업 목록을
+        읽는 데만 쓰이므로 레코드 한 줄이면 된다. 실제 코퍼스 위의 HTTP 회귀는
+        tests/integration/test_api_q02_corpus.py가 따로 본다.
+    """
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        json.dumps({"corp_name": "한화오션"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    result = answer_question(
+        "한화오션의 2025년 9월 계약금액은?",
+        corpus_root=tmp_path,
+        manifest_path=manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+
+    assert result.execution_issue is not None
+    assert result.execution_issue.stage == STAGE_QUERY_PLAN
+    assert result.execution_issue.reason == "unsupported_contract_fields"
+
+    # 답이 되지 않았으므로 값도 근거도 없다.
+    assert result.facts == []
+    assert result.evidence == []

@@ -99,6 +99,7 @@ __all__ = [
     "SCOPE_SEPARATE",
     "SECTION_SCOPE_TOKENS",
     "SUMMARY_REQUEST_TOKENS",
+    "SUPPORTED_CONTRACT_FIELDS",
     "QueryPlan",
     "RelativePeriod",
     "UnsupportedQuestionError",
@@ -387,6 +388,30 @@ SECTION_SCOPE_TOKENS: tuple[tuple[SectionScope, tuple[str, ...]], ...] = (
 #     먼저 보므로, 매출 질문의 '금액'이 이 경로로 끌려오지 않는다.
 CONTRACT_AMOUNT_TOKENS = ("계약금액", "계약 금액", "금액")
 CONTRACT_PERIOD_TOKENS = ("계약기간", "계약 기간", "기간")
+
+# 이 구현이 실제로 답까지 옮길 수 있는 계약 필드 조합.
+#
+# 계획 단계에서 이 조합을 요구하는 이유:
+#     answer_builder가 결정론적으로 문장을 만드는 형태는 대표 Q02 하나다. 계약금액만 담긴
+#     계획이나 계약기간만 담긴 계획도 여기서는 만들 수 있었고 handler도 통과했지만, 문장을
+#     만드는 자리에서 UnsupportedResultShapeError가 났다. 그 예외는 결과가 이미 ANSWERABLE로
+#     판정된 뒤에 터지므로 막힌 이유가 결과에 남지 않고 HTTP 500이 된다.
+#
+#     같은 질문을 막을 것이라면 계획 단계에서 막는다. 그러면 Router가 query_plan 단계의
+#     BLOCKED로 옮기고, 무엇을 지원하지 않는지가 detail에 남는다.
+#
+# 조합을 부분집합으로 두지 않는다:
+#     계약기간만 담긴 결과는 answer_builder가 문장으로 옮길 수 있지만 여기서는 함께 막는다.
+#     넓히려면 그 형태를 대표 질문으로 고정하고 회귀를 함께 두어야 하며, 지금 열어 두면
+#     builder가 지원하는 범위와 planner가 여는 범위가 두 벌로 갈린다. 넓히는 쪽이 늘
+#     나중이어야 조용히 어긋나지 않는다.
+SUPPORTED_CONTRACT_FIELDS: frozenset[MetricConcept] = frozenset(
+    (
+        MetricConcept.CONTRACT_AMOUNT,
+        MetricConcept.CONTRACT_START_DATE,
+        MetricConcept.CONTRACT_END_DATE,
+    )
+)
 
 # 계약 상대방을 가리키는 표현. "<상대방>과/와 체결한 계약" 형태만 읽는다.
 #
@@ -1411,9 +1436,17 @@ def _build_contract_fact_plan(
         없고, 상대방만으로 좁히는 경로는 아직 없다. EventSubtypeRule.requires_filing_anchor가
         공급계약에 대해 True인 것과 같은 판단이다.
 
+    요구 필드를 SUPPORTED_CONTRACT_FIELDS로 고정하는 이유:
+        이 구현이 답 문장까지 옮길 수 있는 형태가 그 하나다. 부분집합을 통과시키면 계획은
+        만들어지고 handler도 지나가지만 answer_builder에서 터지며, 그때는 결과가 이미
+        ANSWERABLE로 판정된 뒤라 막힌 이유가 남지 않는다. 막을 것이면 여기서 막는다.
+
     counterparty가 None이어도 계획을 만든다:
-        상대방 없이 후보가 여럿이면 막는 일은 retrieval 계층이 한다. 여기서 미리 거절하면
-        후보가 하나뿐이라 답할 수 있는 질문까지 함께 막힌다.
+        여기서 거절하지 않는 것은 상대방을 읽지 못한 질문과 지원하지 않는 질문 형태를
+        구분해 남기기 위해서다. 다만 그 계획이 답에 이르지는 않는다. handler가
+        missing_counterparty로 막으며(agent.handlers.contract_fact), 후보가 하나뿐이라
+        상대방 없이도 확정할 수 있는 경로는 아직 열려 있지 않다. 그 경로를 여는 것은 후보
+        유일성 판정을 어느 계층이 내릴지 정하는 결정이고 이 범위 밖이다.
     """
     matched = _find_event_subtype_rules(question)
 
@@ -1434,6 +1467,26 @@ def _build_contract_fact_plan(
 
     years = _require_years(years)
 
+    # 요구 필드 판정은 대상 문서를 확정한 뒤에 본다.
+    #
+    # 유형이 모호하거나 연도가 없는 질문은 어느 계약을 묻는지부터 정해지지 않는다. 그
+    # 상태에서 필드 조합을 먼저 나무라면, 유형과 연도를 밝혀도 여전히 막힌다는 사실이
+    # 첫 응답에 드러나지 않는다.
+    requested_fields = _find_contract_fields(question)
+
+    if set(requested_fields) != SUPPORTED_CONTRACT_FIELDS:
+        listed = ", ".join(sorted(field.value for field in requested_fields)) or "없음"
+        supported = ", ".join(sorted(field.value for field in SUPPORTED_CONTRACT_FIELDS))
+
+        raise UnsupportedQuestionError(
+            reason="unsupported_contract_fields",
+            detail=(
+                f"이 구현이 답할 수 있는 계약 필드 조합이 아닙니다. 질문이 요구한 필드: "
+                f"{listed}. 지원하는 조합: {supported}. 계약금액과 계약기간을 함께 물어야 "
+                "합니다. 일부만 담아 답하지 않습니다."
+            ),
+        )
+
     return QueryPlan(
         question=question.strip(),
         companies=companies,
@@ -1444,7 +1497,7 @@ def _build_contract_fact_plan(
         # 거래소공시에는 연결·별도 구분이 없다.
         accounting_scope=QueryAccountingScope.NOT_APPLICABLE.value,
         metric=None,
-        requested_fields=_find_contract_fields(question),
+        requested_fields=requested_fields,
         counterparty=_extract_counterparty(question, companies[0]),
         month=_extract_month(question),
     )

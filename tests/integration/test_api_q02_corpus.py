@@ -155,3 +155,56 @@ def test_latin_counterparty_spelling_fails_closed() -> None:
     assert actual.status is AnswerabilityStatus.UNANSWERABLE
     assert actual.facts == []
     assert actual.evidence == []
+
+
+@pytest.mark.corpus
+@pytest.mark.parametrize(
+    "question",
+    [
+        f"한화오션이 2025년 9월 {COUNTERPARTY}과 체결한 계약의 계약금액은?",
+        f"한화오션이 2025년 9월 {COUNTERPARTY}과 체결한 계약의 계약기간은?",
+    ],
+    ids=["amount_only", "period_only"],
+)
+def test_unsupported_contract_field_shapes_do_not_reach_the_answer_builder(
+    question: str,
+) -> None:
+    """
+    지원하지 않는 필드 조합이 500으로 새어 나가지 않는다.
+
+    예전에는 계약금액만, 또는 계약기간만 물은 질문도 계획이 되고 handler를 통과했다.
+    문장을 만드는 자리에서야 형태가 정해지지 않았다는 것이 드러났고, 그때는 결과가 이미
+    ANSWERABLE로 판정된 뒤라 예외가 그대로 올라가 500이 됐다. 사용자에게는 서버가 고장난
+    것으로 보이지만 실제로는 지원 범위 밖의 질문이었다.
+
+    지금은 query_analyzer가 계획 단계에서 막는다. 그래서 BLOCKED가 되고, 이 API의 기존
+    계약대로 422 오류 봉투로 나간다(api.service.AgentExecutionHTTPError.status_code).
+    500과 422를 가르는 것이 이 회귀의 핵심이다. 둘 다 오류 응답이지만 500은 서버가 고장난
+    것이고 422는 질문이 지원 범위 밖이라는 뜻이며, 받는 쪽의 다음 행동이 다르다.
+
+    200을 기대하지 않는 이유:
+        BLOCKED는 답이 아니다. 200으로 나가려면 실행이 COMPLETED로 끝나야 하며, 그때만
+        AnswerResponse가 만들어진다. 막힌 결과를 200에 담으면 답이 없는 응답과 답이 있는
+        응답이 같은 봉투로 나가 구분되지 않는다.
+
+    stage와 reason까지 보는 이유:
+        422라는 것만으로는 어디서 막혔는지 알 수 없다. FastAPI의 요청 검증 실패도 422이며
+        (test_api_ask.py의 test_request_validation_422_remains_distinct_from_agent_blocked_422),
+        그쪽은 detail 배열을 담아 봉투 자체가 다르다. query_plan 단계의
+        unsupported_contract_fields까지 고정해야 이 회귀가 실제로 이 경로를 지킨다.
+
+    코퍼스를 요구하는 이유는 이 경로가 manifest에서 기업 목록을 읽은 뒤에 열리기 때문이다.
+    막히는 자리는 그보다 뒤인 질의 해석 단계다.
+    """
+    _require_actual_corpus()
+
+    response = client.post("/api/ask", json={"question": question})
+
+    # 지원하지 않는 질문은 이 API의 기존 BLOCKED 오류 계약으로 나간다. 서버 오류(500)가 아니다.
+    assert response.status_code == 422
+
+    payload = response.json()
+
+    assert payload["execution_status"] == "BLOCKED"
+    assert payload["error"]["stage"] == "query_plan"
+    assert payload["error"]["reason"] == "unsupported_contract_fields"

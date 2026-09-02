@@ -877,6 +877,50 @@ def test_multiple_fact_expectations_fail_without_distinct_matches() -> None:
     assert any(item.startswith("facts:") for item in failures)
 
 
+def test_expected_fact_evidence_ids_require_an_exact_non_dangling_match() -> None:
+    gold = answerable_gold(
+        "case",
+        facts=[
+            {
+                "metric": "contract_amount",
+                "normalized_value": "100",
+                "normalized_unit": "KRW",
+                "evidence_ids": ["evidence-expected"],
+            }
+        ],
+        integrity={"fact_evidence_references": True},
+    )
+
+    def contract_prediction(evidence_id: str) -> PredictionCase:
+        return prediction(
+            "case",
+            facts=[
+                {
+                    "fact_id": "fact-1",
+                    "company": "Synthetic Company",
+                    "metric": "contract_amount",
+                    "accounting_scope": "not_applicable",
+                    "normalized_value": "100",
+                    "normalized_unit": "KRW",
+                    "evidence_ids": [evidence_id],
+                }
+            ],
+            evidence=[
+                {
+                    "evidence_id": evidence_id,
+                    "doc_id": "doc-1",
+                    "location_type": "table",
+                }
+            ],
+        )
+
+    assert compare_prediction(gold, contract_prediction("evidence-expected")) == []
+
+    failures = compare_prediction(gold, contract_prediction("evidence-wrong"))
+
+    assert failures == ["facts: expected fields did not match distinct predicted Facts"]
+
+
 def test_dangling_fact_evidence_reference_fails() -> None:
     gold = answerable_gold(
         "case", integrity={"fact_evidence_references": True}

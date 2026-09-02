@@ -205,6 +205,7 @@ def test_active_q02_gold_pins_actual_contract_facts_and_evidence() -> None:
     ]
     assert actual_facts == [
         {
+            "company": "한화오션",
             "metric": "contract_amount",
             "normalized_value": "1933600000000",
             "normalized_unit": "KRW",
@@ -213,6 +214,7 @@ def test_active_q02_gold_pins_actual_contract_facts_and_evidence() -> None:
             ],
         },
         {
+            "company": "한화오션",
             "metric": "contract_start_date",
             "normalized_value": "2025-09-16",
             "evidence_ids": [
@@ -220,6 +222,7 @@ def test_active_q02_gold_pins_actual_contract_facts_and_evidence() -> None:
             ],
         },
         {
+            "company": "한화오션",
             "metric": "contract_end_date",
             "normalized_value": "2029-05-31",
             "evidence_ids": [
@@ -875,6 +878,17 @@ def test_multiple_fact_expectations_fail_without_distinct_matches() -> None:
     failures = compare_prediction(gold, prediction("case"))
 
     assert any(item.startswith("facts:") for item in failures)
+
+
+def test_expected_fact_company_mismatch_fails() -> None:
+    gold = answerable_gold(
+        "case",
+        facts=[{"company": "Expected Company", "metric": "revenue"}],
+    )
+
+    failures = compare_prediction(gold, prediction("case"))
+
+    assert failures == ["facts: expected fields did not match distinct predicted Facts"]
 
 
 def test_expected_fact_evidence_ids_require_an_exact_non_dangling_match() -> None:

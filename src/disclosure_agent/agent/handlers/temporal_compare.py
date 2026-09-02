@@ -71,13 +71,20 @@ from pathlib import Path
 from typing import Any
 
 from disclosure_agent.agent.answer_builder import (
+    REASON_AMBIGUOUS_FILING,
+    REASON_INCOMPARABLE_NARRATIVE_SECTIONS,
+    REASON_NO_MATCHING_FILING,
+    REASON_PARSE_FAILED,
     REASON_UNSUPPORTED_COMPARISON_METRIC,
     REASON_UNSUPPORTED_COMPARISON_PERIOD,
     REASON_UNSUPPORTED_COMPARISON_SUBJECT,
     REASON_UNSUPPORTED_DERIVED_OPERATION,
     REASON_UNUSABLE_CALCULATION_INPUT,
     STAGE_COMPARABILITY,
+    STAGE_FILING_DISCOVERY,
+    STAGE_PARSING,
     STAGE_PATTERN_ENTRY,
+    STAGE_SECTION_NAVIGATION,
     BlockedInfo,
 )
 from disclosure_agent.agent.calculator import (
@@ -103,23 +110,39 @@ from disclosure_agent.agent.derived_metrics import (
 from disclosure_agent.agent.normalization import normalize_temporal_compare_result
 from disclosure_agent.agent.period_retrieval import collect_period_facts
 from disclosure_agent.agent.query_analyzer import QueryPlan
-from disclosure_agent.common.enums import MetricConcept
+from disclosure_agent.common.enums import MetricConcept, SectionScope
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
     CalculationResult,
     Evidence,
     Fact,
 )
+from disclosure_agent.periodic.adapter import adapt_section_summary
+from disclosure_agent.periodic.sections import SectionNavigationError
+from disclosure_agent.periodic.service import collect_scope_content, load_parsed_document
+from disclosure_agent.retrieval.metadata_filter import (
+    FilingNotFoundError,
+    list_filings,
+)
 
 __all__ = [
+    "NARRATIVE_SECTION_SCOPE",
     "PeriodDerivedValue",
     "TemporalCompareResult",
     "TemporalShape",
     "build_temporal_compare_result",
     "handle_temporal_compare",
+    "is_narrative_plan",
     "resolve_shape",
     "source_metrics_for",
 ]
+
+# 서술 비교로 다루는 문서 내 범위.
+#
+# 값 하나만 연다. Pattern C의 서술 경로가 실제로 확인한 Section 규칙이 business_overview
+# 하나뿐이고(periodic.sections.SECTION_SCOPE_RULES), 다른 범위를 함께 열면 규칙을 확인하지
+# 않은 Section을 견주게 된다.
+NARRATIVE_SECTION_SCOPE = SectionScope.BUSINESS_OVERVIEW
 
 # 이번 구현이 다루는 기간 수. 두 기간의 변화량 하나를 만든다.
 COMPARED_PERIOD_COUNT = 2
@@ -289,6 +312,12 @@ def _unsupported_plan(plan: QueryPlan) -> BlockedInfo | None:
                 "상대 기간 표현을 연도로 옮기는 해석은 아직 구현되지 않았습니다."
             ),
         )
+
+    if is_narrative_plan(plan):
+        # 서술 경로는 지표를 요구하지 않는다. 아래 지표 검사에 걸리면 "다루는 지표가
+        # 아니다"로 막히는데, 이 질문은 지표를 묻지 않았으므로 그 사유는 실제로 일어난 일과
+        # 다르다. 기업·기간 검사는 두 경로가 함께 쓰므로 이 자리가 앞이 아니라 뒤다.
+        return None
 
     shape = resolve_shape(plan)
 
@@ -508,6 +537,234 @@ def _derived_metric_calculations(
     return (old.calculation, new.calculation, change)
 
 
+# --------------------------------------------------------------------------
+# 서술 경로(Q09)
+#
+# 값을 하나도 만들지 않는다. 두 연도의 같은 의미 Section을 확보해 Evidence로 남기고,
+# 그 둘을 항목 단위로 견줄 수 있는지까지만 판정한다.
+#
+# 이번 구현이 변화 항목(NarrativeComparisonClaim)을 만들지 않는 이유:
+#     변화 항목은 양쪽 연도의 Evidence를 모두 요구한다(common.schemas). 그러려면 두 해의
+#     서술을 항목 단위로 짝지어야 하고, 짝지으려면 해마다 달라지지 않는 항목 식별자가 있어야
+#     한다. 현재 SectionContentItem이 가진 것은 셋뿐이며 어느 것도 그 식별자가 아니다.
+#
+#         label/excerpt  본문 텍스트 자체다. 같으면 내용이 같다는 뜻이므로 변화 항목이
+#                        나올 수 없고, 다르면 짝이 지어지지 않는다.
+#         ordinal        원문 순서다. 앞에 단락이 하나 끼어들면 그 뒤가 전부 밀린다. 밀린
+#                        짝으로 만든 변화 항목은 양쪽 Evidence를 갖춘 채로 틀린 말을 한다.
+#         table 내용     수치다. Q09는 수치 비교가 아니다.
+#
+#     실제 코퍼스에서도 같은 결론이 나왔다. 삼성바이오로직스의 사업의 개요는 2023·2024년에
+#     "1) 2) 3) 4)", 2025년에 "가. 나. 다."로 적혀 있어 두 해가 공유하는 항목 표기가 없다.
+#     양쪽에 함께 있는 유일한 이름표는 "[사업부문별 요약 재무현황]"이고 그 내용은 수치다.
+#
+# 그래서 변화가 없다고 답하지 않는다:
+#     짝을 짓지 못한 것과 짝을 지어 보니 같았던 것은 다르다. 둘을 같은 답으로 내보내는 것이
+#     이 문항의 주요 실패 모드이며(docs/agent_design/representative_questions.md Q09),
+#     claims=[]는 후자의 표현이다. 전자는 NOT_COMPARABLE로 나간다.
+# --------------------------------------------------------------------------
+
+
+def is_narrative_plan(plan: QueryPlan) -> bool:
+    """
+    서술 비교로 다룰 계획인가.
+
+    범위(section_scope)로만 판정한다. 지표가 비어 있다는 것으로 가르지 않는 이유:
+        아직 어휘가 없는 원천 지표를 물은 질문도 지표가 비어 있다. 그 질문까지 서술 경로로
+        보내면 묻지도 않은 Section을 견주고, 그 결과는 형식만 맞는다. 무엇을 견주라고 했는지가
+        경로를 가르는 유일한 근거다.
+    """
+    return plan.section_scope is NARRATIVE_SECTION_SCOPE
+
+
+@dataclass(frozen=True)
+class _NarrativeSide:
+    """한 회계연도에서 확보한 서술 Section."""
+
+    fiscal_year: int
+    doc_id: str
+    section_path: tuple[str, ...]
+    evidence: tuple[Evidence, ...]
+
+
+def _collect_narrative_side(
+    plan: QueryPlan,
+    *,
+    fiscal_year: int,
+    corpus_root: str | Path,
+    manifest_path: str | Path | None,
+) -> tuple[_NarrativeSide | None, BlockedInfo | None]:
+    """
+    한 회계연도의 서술 Section을 확보한다.
+
+    공시는 1건으로 확정될 때만 진행한다. Pattern B가 쓰는 규칙과 같다. locate_filing으로
+    접수번호가 가장 큰 것을 고르면 어느 판본을 견줬는지가 결과에 남지 않으며, 두 해를 견주는
+    질문에서는 그 선택이 곧 비교 대상을 바꾼다.
+
+    Section 확정 실패는 periodic.sections의 사유를 그대로 옮긴다. 여기서 사유를 새로 만들면
+    Pattern B와 같은 상황이 두 이름을 갖게 된다.
+    """
+    resolved_manifest = (
+        Path(manifest_path) if manifest_path else Path(corpus_root) / "manifest.jsonl"
+    )
+
+    try:
+        candidates = list_filings(
+            manifest_path=resolved_manifest,
+            corpus_root=corpus_root,
+            company=plan.company,
+            document_class=plan.document_class,
+            document_subtype=plan.document_subtype,
+            year=fiscal_year,
+        )
+
+    except FilingNotFoundError as error:
+        return None, BlockedInfo(
+            stage=STAGE_FILING_DISCOVERY,
+            reason=error.reason,
+            detail=error.detail,
+        )
+
+    if not candidates:
+        return None, BlockedInfo(
+            stage=STAGE_FILING_DISCOVERY,
+            reason=REASON_NO_MATCHING_FILING,
+            detail=(
+                "manifest에서 조건에 맞는 공시를 찾지 못했습니다: "
+                f"{plan.company} / {fiscal_year} / {plan.document_class} / "
+                f"{plan.document_subtype}"
+            ),
+        )
+
+    if len(candidates) > 1:
+        listed = ", ".join(candidate.doc_id for candidate in candidates)
+
+        return None, BlockedInfo(
+            stage=STAGE_FILING_DISCOVERY,
+            reason=REASON_AMBIGUOUS_FILING,
+            detail=(
+                f"{fiscal_year} 회계연도의 조건에 맞는 공시가 {len(candidates)}건입니다: "
+                f"{listed}. 비교 대상 문서를 하나 골라 답하지 않습니다."
+            ),
+        )
+
+    filing = candidates[0]
+
+    try:
+        document = load_parsed_document(filing.main_document)
+
+    except (OSError, ValueError) as error:
+        return None, BlockedInfo(
+            stage=STAGE_PARSING,
+            reason=REASON_PARSE_FAILED,
+            detail=f"{fiscal_year} 회계연도 문서를 열지 못했습니다: {error}",
+        )
+
+    try:
+        selection, items = collect_scope_content(
+            document,
+            section_scope=NARRATIVE_SECTION_SCOPE,
+        )
+
+    except SectionNavigationError as error:
+        return None, BlockedInfo(
+            stage=STAGE_SECTION_NAVIGATION,
+            reason=error.reason,
+            detail=f"{fiscal_year} 회계연도: {error.detail}",
+        )
+
+    # Evidence 변환은 periodic.adapter가 한다. Pattern B가 쓰는 변환과 같은 것을 쓰며,
+    # 여기서 다시 만들면 같은 항목이 두 벌의 evidence_id를 갖게 된다.
+    #
+    # DocumentSummary는 버린다. 이 Pattern의 답은 요약이 아니라 비교이고, 결과에 실으면
+    # answer_builder의 단일 문서 요약 경로가 두 건을 받아 멈춘다.
+    _, evidence = adapt_section_summary(
+        document,
+        section_scope=NARRATIVE_SECTION_SCOPE,
+        selection=selection,
+        items=list(items),
+    )
+
+    return (
+        _NarrativeSide(
+            fiscal_year=fiscal_year,
+            doc_id=filing.doc_id,
+            section_path=tuple(selection.section_path),
+            evidence=tuple(evidence),
+        ),
+        None,
+    )
+
+
+def _build_narrative_result(
+    plan: QueryPlan,
+    *,
+    corpus_root: str | Path,
+    manifest_path: str | Path | None = None,
+) -> TemporalCompareResult:
+    """
+    서술 비교 계획 하나를 구조화 결과까지 처리한다.
+
+    한쪽이라도 확보하지 못하면 그 자리의 사유로 멈춘다. 확보한 한쪽만으로 답하지 않는 이유는
+    수치 경로와 같다. 한 해의 서술은 "무엇이 적혀 있다"까지만 말하며, 질문이 물은 것은
+    "무엇이 달라졌다"이다.
+    """
+    old_year, new_year = sorted(plan.years)
+
+    sides: list[_NarrativeSide] = []
+
+    for fiscal_year in (old_year, new_year):
+        side, blocked = _collect_narrative_side(
+            plan,
+            fiscal_year=fiscal_year,
+            corpus_root=corpus_root,
+            manifest_path=manifest_path,
+        )
+
+        if side is None:
+            # 앞선 연도에서 확보한 Evidence는 남긴다. 어디까지 갔다가 멈췄는지가 결과에
+            # 남아야 하며, 수치 경로가 확보한 Fact를 남기는 것과 같은 자리다.
+            return TemporalCompareResult(
+                plan=plan,
+                evidence=tuple(
+                    item for collected in sides for item in collected.evidence
+                ),
+                blocked=blocked,
+            )
+
+        sides.append(side)
+
+    left, right = sides
+
+    # 양쪽을 모두 확보한 뒤에도 변화 항목을 만들지 않는다.
+    #
+    # 판정의 근거는 문서가 아니라 이 구현이 가진 규칙이다. 승인된 서술 항목 짝짓기 규칙이
+    # 아직 없으므로, 두 기재의 내용이 무엇이든 결과는 같다. 그래서 문서에서 무엇을 세어
+    # 판정한 것처럼 적지 않는다.
+    #
+    # 항목 이름이 몇 건 겹치는지를 세어 판정을 가르지 않는 이유:
+    #     이름이 겹친다는 것은 그 항목의 본문이 같다는 뜻이다(SectionContentItem.label은
+    #     본문 앞부분이다). 겹치면 변화가 없고 겹치지 않으면 짝이 없으므로, 어느 쪽이든
+    #     변화 항목은 나오지 않는다. 그 수를 판정 근거처럼 적으면 "N건이 겹쳐서 짝지을 수
+    #     없다"가 되는데, N이 0보다 클 때 그 문장은 성립하지 않는다.
+    return TemporalCompareResult(
+        plan=plan,
+        evidence=(*left.evidence, *right.evidence),
+        blocked=BlockedInfo(
+            stage=STAGE_COMPARABILITY,
+            reason=REASON_INCOMPARABLE_NARRATIVE_SECTIONS,
+            detail=(
+                f"{plan.company}의 {left.fiscal_year}·{right.fiscal_year} 회계연도 "
+                f"'{' > '.join(right.section_path)}' 부분을 양쪽 모두 확보했습니다"
+                f"({left.doc_id}, {right.doc_id}). "
+                "다만 두 기재의 서술 항목을 같은 항목끼리 짝지을 수 있는 규칙이 이 구현에 "
+                "아직 없어 변화 항목을 만들지 않습니다. 순서로 짝짓거나 비슷한 문구를 같은 "
+                "항목으로 보지 않습니다. 변화가 없다는 판정이 아닙니다."
+            ),
+        ),
+    )
+
+
 def build_temporal_compare_result(
     plan: QueryPlan,
     *,
@@ -524,6 +781,13 @@ def build_temporal_compare_result(
 
     if unsupported is not None:
         return TemporalCompareResult(plan=plan, blocked=unsupported)
+
+    if is_narrative_plan(plan):
+        return _build_narrative_result(
+            plan,
+            corpus_root=corpus_root,
+            manifest_path=manifest_path,
+        )
 
     # QueryPlan을 검색 조건으로 옮기는 일은 여기서 한다. agent.period_retrieval은 질문 해석
     # 결과를 모르고 primitive만 받는다.

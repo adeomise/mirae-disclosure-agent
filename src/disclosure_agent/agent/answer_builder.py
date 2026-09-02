@@ -174,6 +174,19 @@ REASON_INCOMPARABLE_PERIODS = "incomparable_periods"
 REASON_INCOMPARABLE_ENTITIES = "incomparable_entities"
 REASON_UNUSABLE_CALCULATION_INPUT = "unusable_calculation_input"
 
+# 서술 비교(Q09)가 두 연도의 Section을 모두 확보한 뒤 내리는 판정.
+#
+# 위 세 사유와 같은 STAGE_COMPARABILITY에 두고 canonical 사유도 같은 NOT_COMPARABLE로
+# 모으지만, 어긋난 축은 다르다. 위쪽은 확보한 '값'이 함께 쓸 수 없다는 판정이고, 이쪽은
+# 값을 하나도 만들지 않은 채 두 서술 Section의 '내부 구조'를 짝지을 수 없다는 판정이다.
+#
+# 이 사유를 따로 두는 이유:
+#     문서를 찾지 못한 것도(NOT_FOUND), 변화가 없다는 것도(변화 항목 0건) 아니다. 셋을
+#     구분하지 못하는 것이 이 문항의 주요 실패 모드이며
+#     (docs/agent_design/representative_questions.md Q09), 사유를 나눠야 결과만 보고
+#     무엇이 없어서 답하지 못했는지 알 수 있다.
+REASON_INCOMPARABLE_NARRATIVE_SECTIONS = "incomparable_narrative_sections"
+
 # Section 탐색 단계(STAGE_SECTION_NAVIGATION)의 사유는 여기 적지 않는다.
 #
 # 그 판정을 내리는 곳은 periodic.sections이고, 값도 그 모듈이 정본으로 가지고 있다
@@ -603,6 +616,38 @@ POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON: dict[str, str] = {
     REASON_FORWARD_LOOKING_PREDICTION: (
         "아직 공시되지 않은 결과에 대한 예측 요청은 답변 범위 밖입니다. "
         "공시에 기재된 확정 사실·일정 조회는 계속 지원합니다."
+    ),
+}
+
+# NOT_COMPARABLE 중 문장을 따로 쓰는 경우. answerability_detail.reason이 고른다.
+#
+# 대응표에 없는 detail은 UNAVAILABLE_MESSAGE_BY_REASON의 기본 문장을 그대로 쓴다. 수치
+# 경로(guard①·guard②)의 세 사유가 그쪽이며, 이 표가 생겨도 그 문장은 달라지지 않는다.
+#
+# 기본 문장을 나눠 쓰는 이유:
+#     기본 문장은 "확보한 값들의 기준·단위·개념이 서로 달라"라고 말한다. 서술 비교는 값을
+#     하나도 만들지 않으므로 그 문장은 일어나지 않은 일을 설명한다. 사용자는 어떤 값이
+#     어긋났는지 찾게 되고, 찾을 값이 없다.
+#
+#     POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON이 OUT_OF_SCOPE_POLICY 하나를 detail로 나눠
+#     쓰는 것과 같은 구조다. 한 canonical 사유가 성질이 다른 상황을 함께 담을 때 쓰는 자리이며,
+#     뜻이 같은 상황을 문구만 달리 적기 위한 자리가 아니다.
+#
+# 문장이 지켜야 하는 것:
+#     "변화가 없었다"고 말하지 않는다. 두 Section을 모두 찾았지만 짝지을 기준이 없었을
+#     뿐이다. 변화가 없다고 적으면 확인하지 않은 사실을 단정하는 것이 되고, 그것이 이 문항의
+#     주요 실패 모드다(representative_questions.md Q09). 두 문서가 같다고도 말하지 않는다.
+#     원인도 적지 않는다.
+#
+#     두 기재가 서로 다르다고도 말하지 않는다. 짝짓기 기준이 없어 견주지 못한 것이지, 두
+#     기재를 견줘 보고 구성이 다르다고 판정한 것이 아니다. 그렇게 적으면 하지 않은 판정을
+#     한 것처럼 말하게 되며, 진단(detail)이 말하는 것과도 어긋난다.
+NOT_COMPARABLE_MESSAGE_BY_DETAIL_REASON: dict[str, str] = {
+    REASON_INCOMPARABLE_NARRATIVE_SECTIONS: (
+        "두 사업연도의 사업 개요 부분은 모두 공시에서 찾았습니다. "
+        "다만 두 기재를 같은 항목끼리 짝지어 견줄 수 있는 기준이 아직 마련되지 않아 "
+        "무엇이 달라졌는지 단정하지 않습니다. "
+        "변화가 없었다는 뜻은 아니며, 확인한 범위는 두 보고서의 해당 서술 부분에 한정됩니다."
     ),
 }
 
@@ -1971,7 +2016,32 @@ def _unavailable_answer(result: AgentExecutionResult) -> str:
     if reason is AnswerabilityReason.OUT_OF_SCOPE_POLICY:
         return _policy_refusal_answer(result)
 
+    if reason is AnswerabilityReason.NOT_COMPARABLE:
+        return _not_comparable_answer(result)
+
     return _message_for_reason(reason)
+
+
+def _not_comparable_answer(result: AgentExecutionResult) -> str:
+    """
+    비교 불가 판정의 문장.
+
+    detail에 따로 정해 둔 문장이 있으면 그것을 쓰고, 없으면 기본 문장을 쓴다. 수치 경로의
+    세 사유는 대응표에 없으므로 기존 문장 그대로다.
+
+    detail이 통째로 비어 있는 경우도 기본 문장으로 간다. 그 상태는 producer가 만들지 않지만
+    (normalization._stopped_execution이 항상 detail을 채운다), 여기서 속성을 확인하지 않으면
+    그 가정이 깨졌을 때 문장이 아니라 AttributeError가 나간다.
+    """
+    detail = result.answerability_detail
+
+    if detail is not None:
+        message = NOT_COMPARABLE_MESSAGE_BY_DETAIL_REASON.get(detail.reason)
+
+        if message is not None:
+            return message
+
+    return _message_for_reason(AnswerabilityReason.NOT_COMPARABLE)
 
 
 def _policy_refusal_answer(result: AgentExecutionResult) -> str:

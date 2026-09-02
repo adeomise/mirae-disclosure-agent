@@ -122,6 +122,18 @@ SMALLER_EXPRESSIONS: tuple[str, ...] = (
     "밑돕니다",
 )
 
+# 두 값이 같다고 말하는 표현.
+#
+# 견준 값을 직접 가리키는 꼴만 담는다. "같습니다"만으로 판정하면 "매출액은 다음과 같습니다"
+# 같은 문장이 동등 진술로 읽히고, 그때 우열 판정이 있는 답변이 근거 없이 거절되거나 동등
+# 판정이 근거 없이 통과한다. 여기에 없는 표현으로 동등을 말한 답변은 판정을 확인할 수 없는
+# 것으로 보고 결정론 문장으로 돌아간다.
+EQUALITY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"두\s*(값|금액|수치|기업|회사)[은는이가]?\s*(서로\s*)?(같|동일)"),
+    re.compile(r"(양쪽|둘)[은는이가]?\s*(서로\s*)?(같|동일)"),
+    re.compile(r"차이[가는]?\s*없"),
+)
+
 # 비교 대상을 뒤집어 말하는 조사.
 #
 # "A가 B보다 큽니다"는 우열 표현 바로 앞에 진 쪽이 온다. 앞에서부터 이름을 찾는 규칙으로는
@@ -502,8 +514,11 @@ def _require_preserved_relation(text: str, payload: GroundedPayload) -> None:
 
         if relation == ComparisonRelation.EQUAL.value:
             _require_no_ranking_claim(text, comparison.comparison_id)
+            _require_equality_claim(text, comparison.comparison_id)
 
             continue
+
+        _require_no_equality_claim(text, comparison.comparison_id)
 
         sides = _distinguishing_tokens(payload, comparison)
 
@@ -545,6 +560,33 @@ def _require_no_ranking_claim(text: str, comparison_id: str) -> None:
         raise AnswerRejectedError(
             "relation_contradiction",
             f"우열 판정 {comparison_id!r}은 두 값이 같은데 문장이 우열을 말합니다: {stated}",
+        )
+
+
+def _require_equality_claim(text: str, comparison_id: str) -> None:
+    """
+    두 값이 같다고 판정된 결과는 그 판정을 문장에 담아야 한다.
+
+    우열 표현이 없다는 것만으로 통과시키지 않는다. 값만 나란히 적은 문장은 어느 쪽이 큰지
+    묻는 질문에 답하지 않은 것이고, 읽는 사람은 두 수치를 스스로 견줘야 한다. 그 순간 판정을
+    하는 것은 시스템이 아니라 사용자가 되며, 확정된 relation은 답변 어디에도 남지 않는다.
+
+    우열 판정을 담지 않은 답변을 막는 규칙(_require_ranking_matches의 relation_dropped)과
+    같은 자리이고, 같은 이름으로 걸린다.
+    """
+    if not any(pattern.search(text) for pattern in EQUALITY_PATTERNS):
+        raise AnswerRejectedError(
+            "relation_dropped",
+            f"우열 판정 {comparison_id!r}은 두 값이 같다는 판정인데 문장이 그것을 말하지 않습니다",
+        )
+
+
+def _require_no_equality_claim(text: str, comparison_id: str) -> None:
+    """한쪽이 크다고 판정된 결과에 두 값이 같다는 진술이 없어야 한다."""
+    if any(pattern.search(text) for pattern in EQUALITY_PATTERNS):
+        raise AnswerRejectedError(
+            "relation_contradiction",
+            f"우열 판정 {comparison_id!r}은 한쪽이 큰데 문장은 두 값이 같다고 말합니다",
         )
 
 

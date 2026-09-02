@@ -721,3 +721,88 @@ def test_deterministic_history_sentence_passes_the_validator(
         parse_model_answer(model_reply(sentence, used_fact_ids=[], used_evidence_ids=[])),
         payload,
     )
+
+
+# --------------------------------------------------------------------------
+# PR #81 blocker 3 - 동등 판정이 문장에 남는다
+#
+# 우열 표현이 없다는 것만으로는 동등 판정을 옮겼다고 볼 수 없다. 값만 나란히 적은 문장은
+# 어느 쪽이 큰지 묻는 질문에 답하지 않은 것이고, 견주는 일이 사용자에게 넘어간다.
+# --------------------------------------------------------------------------
+
+
+EQUAL_VALUES_SENTENCE = "A사의 2025년 연결 기준 매출액은 100원, B사는 100원입니다."
+
+
+def equal_payload() -> GroundedPayload:
+    return comparison_payload(ComparisonRelation.EQUAL, left_value=100, right_value=100)
+
+
+def test_equal_answer_without_an_equality_claim_is_rejected() -> None:
+    """리뷰가 지적한 모양이다. 수치는 맞지만 확정된 판정이 문장 어디에도 없다."""
+    assert comparison_code(EQUAL_VALUES_SENTENCE, equal_payload()) == "relation_dropped"
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "두 값은 같습니다.",
+        "두 값이 같습니다.",
+        "두 값은 동일합니다.",
+        "두 회사의 매출액은 차이가 없습니다.",
+        "양쪽이 서로 같습니다.",
+    ],
+)
+def test_equal_answer_stating_equality_passes(claim: str) -> None:
+    """'두 값은 같습니다'와 같은 뜻으로 읽히는 표기를 좁게 인정한다."""
+    answer = f"{EQUAL_VALUES_SENTENCE} {claim}"
+
+    client = ScriptedClient(comparison_reply(answer))
+
+    assert verbalize(equal_payload(), client=client) == answer
+
+
+def test_ranking_answer_appending_an_equality_claim_is_rejected() -> None:
+    """우열을 말하고 나서 두 값이 같다고 덧붙이면 판정이 두 개가 된다."""
+    payload = comparison_payload(ComparisonRelation.LEFT_GREATER)
+
+    answer = f"{VALUES_SENTENCE} A사 쪽이 더 큽니다. 두 값은 같습니다."
+
+    assert comparison_code(answer, payload) == "relation_contradiction"
+
+
+def test_equality_claim_is_rejected_even_when_the_ranking_is_correct() -> None:
+    """
+    우열 진술이 판정과 맞아도 통과시키지 않는다.
+
+    한 답변에 서로 반대인 두 진술이 있으면 사용자가 어느 쪽을 믿을지 고르게 되고, 그 선택은
+    확정된 결과와 무관하다.
+    """
+    payload = comparison_payload(ComparisonRelation.RIGHT_GREATER, left_value=90, right_value=100)
+
+    answer = f"{SWAPPED_VALUES_SENTENCE} B사 쪽이 더 큽니다. 두 값은 동일합니다."
+
+    assert comparison_code(answer, payload) == "relation_contradiction"
+
+
+def test_listing_phrase_does_not_count_as_an_equality_claim() -> None:
+    """
+    '다음과 같습니다'는 동등 진술이 아니다.
+
+    '같습니다'만으로 판정하면 이런 문장이 동등 진술로 읽히고, 우열 판정이 실린 정상 답변이
+    근거 없이 거절된다.
+    """
+    payload = comparison_payload(ComparisonRelation.LEFT_GREATER)
+
+    answer = f"두 회사의 매출액은 다음과 같습니다. {VALUES_SENTENCE} A사 쪽이 더 큽니다."
+
+    client = ScriptedClient(comparison_reply(answer))
+
+    assert verbalize(payload, client=client) == answer
+
+
+def test_equal_answer_with_a_ranking_claim_is_still_rejected() -> None:
+    """동등 진술을 요구하게 됐어도 우열 진술 금지가 사라지지 않는다."""
+    answer = f"{EQUAL_VALUES_SENTENCE} 두 값은 같습니다. 다만 A사가 더 큽니다."
+
+    assert comparison_code(answer, equal_payload()) == "relation_contradiction"

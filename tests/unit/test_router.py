@@ -23,6 +23,7 @@ from disclosure_agent.agent.handlers.event_history import handle_event_history
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
 from disclosure_agent.agent.handlers.temporal_compare import handle_temporal_compare
 from disclosure_agent.agent.query_analyzer import (
+    INTENT_CONTRACT_FACT,
     INTENT_CROSS_ENTITY_COMPARE,
     INTENT_DOCUMENT_SUMMARY,
     INTENT_EVENT_HISTORY,
@@ -107,8 +108,9 @@ def test_document_summary_intent_resolves_to_pattern_b_handler() -> None:
 
 
 def test_supported_intents_reports_only_registered_handlers() -> None:
-    """Pattern A / B / C / D / E 다섯이 등록돼 있다."""
+    """Pattern A / B / C / D / E와 계약 단건 조회(Q02) 여섯이 등록돼 있다."""
     assert router.supported_intents() == (
+        INTENT_CONTRACT_FACT,
         INTENT_CROSS_ENTITY_COMPARE,
         INTENT_DOCUMENT_SUMMARY,
         INTENT_EVENT_HISTORY,
@@ -261,6 +263,7 @@ def test_register_handler_makes_a_new_intent_routable(
 def test_registry_is_restored_between_tests() -> None:
     """isolated_registry가 실제로 되돌리는지 확인한다."""
     assert router.supported_intents() == (
+        INTENT_CONTRACT_FACT,
         INTENT_CROSS_ENTITY_COMPARE,
         INTENT_DOCUMENT_SUMMARY,
         INTENT_EVENT_HISTORY,

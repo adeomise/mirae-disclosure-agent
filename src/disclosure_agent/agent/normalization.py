@@ -103,6 +103,7 @@ from disclosure_agent.periodic.sections import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - 순환 import를 만들지 않기 위한 타입 전용 import
+    from disclosure_agent.agent.handlers.contract_fact import ContractFactResult
     from disclosure_agent.agent.handlers.cross_entity_compare import (
         CrossEntityCompareResult,
     )
@@ -245,6 +246,24 @@ ANSWERABILITY_BY_STOP: dict[tuple[str, str], Answerability] = {
     # 계산 입력이 어긋난 것인지(guard①) 두 기간이 어긋난 것인지(Pattern C guard②) 두 기업이
     # 어긋난 것인지(Pattern D guard②)는 answerability_detail.reason이 구분한다
     # (pattern_f_safety.md §5.1의 F3·F4와 같은 구조).
+    # 거래소공시 계약 조회(Q02)의 정지 사유.
+    #
+    # 문자열을 그대로 참조하는 것은 위 no_matching_label_fallback과 같은 방식이다. 사유를
+    # 정의하는 쪽(agent.handlers.contract_fact)이 이 모듈을 import하므로, 상수를 가져오면
+    # 순환이 된다.
+    #
+    # 후보 공시는 있었는데 그 상대방의 계약이 없었다. 코퍼스를 끝까지 보고 내린 판정이므로
+    # 실행은 끝났고, 없다는 것이 답이다. 다른 상대방의 계약으로 대신하지 않는다.
+    (STAGE_FILING_DISCOVERY, "no_matching_counterparty"): Answerability(
+        AnswerabilityStatus.UNANSWERABLE,
+        AnswerabilityReason.NOT_FOUND,
+    ),
+    # 문서는 1건으로 확정했는데 요구한 필드가 그 문서에 없다. 값이 없다는 것을 문서를 열어
+    # 확인했으므로 INSUFFICIENT_EVIDENCE이며, 위 정기공시의 no_metric_acode와 같은 자리다.
+    (STAGE_EXTRACTION, "missing_contract_field"): Answerability(
+        AnswerabilityStatus.UNANSWERABLE,
+        AnswerabilityReason.INSUFFICIENT_EVIDENCE,
+    ),
     (STAGE_COMPARABILITY, REASON_INCOMPARABLE_CALCULATION_INPUTS): Answerability(
         AnswerabilityStatus.UNANSWERABLE,
         AnswerabilityReason.NOT_COMPARABLE,
@@ -608,6 +627,65 @@ def normalize_document_summary_result(
         evidence=list(evidence),
         warnings=warnings,
     )
+
+
+# --------------------------------------------------------------------------
+# Q02 계약 단건 사실 조회
+# --------------------------------------------------------------------------
+
+
+def normalize_contract_fact_result(result: ContractFactResult) -> AgentExecutionResult:
+    """
+    Q02의 구조화 결과를 공통 실행 Contract로 옮긴다.
+
+    Fact/Evidence 변환을 여기서 하지 않는다. event.adapter가 이미 Contract 타입으로 만들어
+    두었고, 같은 변환을 다시 구현하면 두 벌이 되어 그때부터 어느 쪽이 정본인지 알 수 없다.
+    Pattern A가 여기서 adapt_financial_fact를 부르는 것은 그쪽 변환이 문서 metadata를 더
+    요구하기 때문이며, 규칙이 달라서가 아니다.
+
+    막힌 결과에 facts를 싣지 않는다:
+        이 Pattern은 요구한 값을 전부 확보하거나 하나도 확보하지 못한다(adapt_contract_facts).
+        중간 상태가 없으므로 남길 부분 결과도 없다. 후보 목록만 gap으로 남긴다.
+    """
+    warnings = list(result.plan.warnings)
+
+    if result.blocked is not None:
+        return _stopped_execution(
+            result.blocked,
+            warnings=warnings,
+            conversion_gaps=_contract_candidate_gaps(result),
+        )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=list(result.facts),
+        evidence=list(result.evidence),
+        warnings=warnings,
+    )
+
+
+def _contract_candidate_gaps(result: ContractFactResult) -> list[ConversionGap]:
+    """
+    좁히지 못한 후보 목록을 남긴다.
+
+    AgentExecutionResult에는 후보 문서를 담을 자리가 없다. 그냥 버리면 어느 후보들 사이에서
+    막혔는지가 결과에서 사라지고, 받는 쪽은 "왜 못 골랐는지"를 다시 조사해야 한다.
+    Pattern E가 root_candidate_doc_ids를 같은 방식으로 남긴다.
+    """
+    if not result.candidate_doc_ids:
+        return []
+
+    return [
+        ConversionGap(
+            kind="contract_candidate_doc_ids",
+            subject=", ".join(result.candidate_doc_ids),
+            detail=(
+                "좁히지 못한 계약 공시 후보입니다. Contract에 후보 목록을 담을 자리가 "
+                "없어 여기에 남깁니다."
+            ),
+        )
+    ]
 
 
 # --------------------------------------------------------------------------

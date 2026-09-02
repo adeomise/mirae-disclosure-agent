@@ -351,6 +351,7 @@ def test_single_period_metric_questions_still_stop_at_the_query_plan(
 def test_both_comparison_axes_are_routable() -> None:
     """두 축 모두 handler가 붙었다. 실행 범위가 같아진 것은 아니다."""
     assert supported_intents() == (
+        "contract_fact",
         "cross_entity_compare",
         "document_summary",
         "event_history",

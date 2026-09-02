@@ -748,18 +748,42 @@ def test_equal_answer_without_an_equality_claim_is_rejected() -> None:
     [
         "두 값은 같습니다.",
         "두 값이 같습니다.",
-        "두 값은 동일합니다.",
-        "두 회사의 매출액은 차이가 없습니다.",
-        "양쪽이 서로 같습니다.",
+        "두 수치는 동일합니다.",
+        "두 금액은 같습니다.",
+        "양쪽 값은 같습니다.",
+        "둘의 수치는 동일합니다.",
     ],
 )
 def test_equal_answer_stating_equality_passes(claim: str) -> None:
-    """'두 값은 같습니다'와 같은 뜻으로 읽히는 표기를 좁게 인정한다."""
+    """수량사와 값 명사가 붙어 있는 꼴만 인정한다."""
     answer = f"{EQUAL_VALUES_SENTENCE} {claim}"
 
     client = ScriptedClient(comparison_reply(answer))
 
     assert verbalize(equal_payload(), client=client) == answer
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "두 기업은 동일 업종입니다.",
+        "두 회사는 동일합니다.",
+        "두 회사의 연결 기준에는 차이가 없습니다.",
+        "차이가 없습니다.",
+    ],
+)
+def test_equality_of_something_other_than_the_values_is_not_an_equality_claim(
+    claim: str,
+) -> None:
+    """
+    동등의 주어가 값이 아니면 판정을 옮긴 문장이 아니다.
+
+    업종·회계기준·기업 자체가 같다는 말은 견준 수치에 대해 아무 말도 하지 않는다. 이런
+    문장을 동등 진술로 세면 판정이 빠진 답변이 통과하고, 값을 견주는 일은 사용자에게 남는다.
+    """
+    answer = f"{EQUAL_VALUES_SENTENCE} {claim}"
+
+    assert comparison_code(answer, equal_payload()) == "relation_dropped"
 
 
 def test_ranking_answer_appending_an_equality_claim_is_rejected() -> None:

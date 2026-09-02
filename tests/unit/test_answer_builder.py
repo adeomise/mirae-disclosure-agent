@@ -1461,6 +1461,30 @@ def test_partially_answerable_chain_states_the_limitation_and_claims_no_complete
     assert response.event_histories == [history]
 
 
+
+def test_partial_source_support_preserves_supported_fact_and_states_limitation() -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.PARTIAL_SOURCE_SUPPORT,
+        facts=[make_fact()],
+        evidence=[make_evidence()],
+    )
+
+    response = build_answer_response(result)
+
+    assert response.status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert response.reason is AnswerabilityReason.PARTIAL_SOURCE_SUPPORT
+    assert response.facts == result.facts
+    assert response.evidence == result.evidence
+    assert response.answer.endswith(
+        LIMITATION_MESSAGE_BY_REASON[
+            AnswerabilityReason.PARTIAL_SOURCE_SUPPORT
+        ]
+    )
+
+
+
 def test_event_history_without_documents_does_not_produce_a_sentence() -> None:
     result = AgentExecutionResult(
         execution_status=ExecutionStatus.COMPLETED,
@@ -1925,6 +1949,24 @@ def test_reason_sentences_are_distinct() -> None:
 # 유보는 데이터 부재가 아니다. 문서도 항목도 있고 값만 비공개다. 그래서 Builder는 이 판정을
 # 받아도 멈추지 않고, 유보된 값을 0·미공개·없음 같은 대체 값으로 바꾸지도 않는다.
 # --------------------------------------------------------------------------
+
+def test_partial_source_support_is_allowed_only_for_partial_answers() -> None:
+    assert (
+        AnswerabilityReason.PARTIAL_SOURCE_SUPPORT
+        in ALLOWED_REASONS_BY_STATUS[
+            AnswerabilityStatus.PARTIALLY_ANSWERABLE
+        ]
+    )
+
+    for status in (
+        AnswerabilityStatus.ANSWERABLE,
+        AnswerabilityStatus.UNRESOLVED,
+        AnswerabilityStatus.UNANSWERABLE,
+    ):
+        assert (
+            AnswerabilityReason.PARTIAL_SOURCE_SUPPORT
+            not in ALLOWED_REASONS_BY_STATUS[status]
+        )
 
 
 def test_partially_withheld_answer_states_the_limitation_without_inventing_a_value() -> None:
@@ -2496,3 +2538,13 @@ def test_delta_referencing_one_fact_twice_stops() -> None:
 
     with pytest.raises(UnsupportedResultShapeError):
         build_answer_response(result)
+
+
+
+def test_partial_source_support_has_a_partial_limitation_message() -> None:
+    message = LIMITATION_MESSAGE_BY_REASON[
+        AnswerabilityReason.PARTIAL_SOURCE_SUPPORT
+    ]
+
+    assert message.strip()
+    assert "원문 근거" in message

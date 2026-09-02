@@ -122,3 +122,52 @@ def test_entry_guard_does_not_invent_a_summary() -> None:
     assert result.facts == []
     assert result.calculations == []
     assert result.comparisons == []
+
+
+# --------------------------------------------------------------------------
+# 범위 묶음(section_scopes)의 계획 불변식
+# --------------------------------------------------------------------------
+
+
+def test_plan_with_only_a_scope_bundle_can_be_built() -> None:
+    plan = summary_plan(
+        section_scope=None,
+        section_scopes=(SectionScope.BUSINESS_OVERVIEW, SectionScope.PRODUCTS),
+    )
+
+    assert plan.section_scope is None
+    assert plan.section_scopes == (SectionScope.BUSINESS_OVERVIEW, SectionScope.PRODUCTS)
+
+
+def test_scope_and_scope_bundle_cannot_coexist() -> None:
+    """범위 하나와 범위 묶음을 함께 담으면 어느 쪽이 정본인지 계획만 봐서는 알 수 없다."""
+    with pytest.raises(ValueError, match="함께 담을 수 없습니다"):
+        summary_plan(
+            section_scope=SectionScope.FACILITY_INVESTMENT,
+            section_scopes=(SectionScope.BUSINESS_OVERVIEW, SectionScope.PRODUCTS),
+        )
+
+
+def test_scope_bundle_is_only_for_document_summary_plans() -> None:
+    """다른 의도의 handler는 이 값을 읽지 않으므로 요청한 범위가 조용히 사라진다."""
+    with pytest.raises(ValueError, match="단일 문서 요약 계획에서만"):
+        QueryPlan(
+            question="테스트반도체 2025년 연결 기준 매출액이 얼마야?",
+            companies=("테스트반도체",),
+            years=(2025,),
+            section_scopes=(SectionScope.BUSINESS_OVERVIEW,),
+        )
+
+
+def test_scope_bundle_rejects_a_repeated_scope() -> None:
+    with pytest.raises(ValueError, match="거듭"):
+        summary_plan(
+            section_scope=None,
+            section_scopes=(SectionScope.PRODUCTS, SectionScope.PRODUCTS),
+        )
+
+
+def test_scope_bundle_rejects_a_bare_scope() -> None:
+    """SectionScope은 StrEnum이라 낱개로 넘기면 글자 단위로 순회된다."""
+    with pytest.raises(TypeError, match="튜플"):
+        summary_plan(section_scope=None, section_scopes=SectionScope.PRODUCTS)

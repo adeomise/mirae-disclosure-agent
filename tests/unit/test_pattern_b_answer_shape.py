@@ -247,3 +247,72 @@ def test_answerable_without_any_support_still_fails_fast() -> None:
                 answerability_status=AnswerabilityStatus.ANSWERABLE,
             )
         )
+
+
+# --------------------------------------------------------------------------
+# 3. 같은 문서의 범위 여러 건(Q05)
+# --------------------------------------------------------------------------
+
+
+def test_two_scopes_of_the_same_document_produce_one_answer() -> None:
+    """
+    같은 문서의 서로 다른 범위는 범위마다의 문장을 결과 순서대로 잇는다.
+
+    문장을 새로 쓰지 않는다. 각 범위의 문장은 범위 하나일 때와 같은 형태다.
+    """
+    overview = summary(
+        labels=("가. 합성 항목", "나. 합성 항목"),
+        section_scope=SectionScope.BUSINESS_OVERVIEW,
+    )
+    products = summary(
+        labels=("다. 합성 항목",),
+        item_type=SummaryItemType.TABLE,
+        section_scope=SectionScope.PRODUCTS,
+    )
+
+    result = completed([overview, products])
+    response = build_answer_response(result)
+
+    assert response.status is AnswerabilityStatus.ANSWERABLE
+    assert response.reason is None
+    assert response.facts == []
+    assert len(response.evidence) == len(result.evidence) == 3
+
+    overview_label = SECTION_SCOPE_LABELS[SectionScope.BUSINESS_OVERVIEW]
+    products_label = SECTION_SCOPE_LABELS[SectionScope.PRODUCTS]
+
+    assert overview_label in response.answer
+    assert products_label in response.answer
+    assert response.answer.index(overview_label) < response.answer.index(products_label)
+    assert "2건" in response.answer
+    assert "1건" in response.answer
+    assert "business_overview" not in response.answer
+    assert "products" not in response.answer
+
+
+def test_two_summaries_from_different_documents_still_fail_fast() -> None:
+    """범위가 달라도 문서가 다르면 이전과 같이 막는다."""
+    with pytest.raises(UnsupportedResultShapeError, match="DocumentSummary가 2건"):
+        build_answer_response(
+            completed(
+                [
+                    summary(section_scope=SectionScope.BUSINESS_OVERVIEW),
+                    summary(
+                        section_scope=SectionScope.PRODUCTS,
+                        doc_id="periodic_SYNTHETIC0002",
+                    ),
+                ]
+            )
+        )
+
+
+def test_repeated_scope_of_the_same_document_fails_fast() -> None:
+    with pytest.raises(UnsupportedResultShapeError, match="거듭"):
+        build_answer_response(
+            completed(
+                [
+                    summary(section_scope=SectionScope.PRODUCTS),
+                    summary(labels=("다. 합성 항목",), section_scope=SectionScope.PRODUCTS),
+                ]
+            )
+        )

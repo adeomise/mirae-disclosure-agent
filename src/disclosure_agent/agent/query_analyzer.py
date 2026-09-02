@@ -82,6 +82,8 @@ from disclosure_agent.retrieval.metadata_filter import (
 
 __all__ = [
     "ANCHOR_SOURCE_LATEST_ANNUAL_FILING",
+    "BUSINESS_DESCRIPTION_TOKENS",
+    "BUSINESS_PROFILE_SECTION_SCOPES",
     "DOCUMENT_CLASS_PERIODIC",
     "DOCUMENT_SUBTYPE_ANNUAL",
     "INTENT_CONTRACT_FACT",
@@ -95,6 +97,7 @@ __all__ = [
     "METRIC_REVENUE",
     "PREVIOUS_YEAR_EXPRESSIONS",
     "PREVIOUS_YEAR_OFFSET",
+    "PRODUCT_TOKENS",
     "SCOPE_CONSOLIDATED",
     "SCOPE_SEPARATE",
     "SECTION_SCOPE_TOKENS",
@@ -381,6 +384,31 @@ SECTION_SCOPE_TOKENS: tuple[tuple[SectionScope, tuple[str, ...]], ...] = (
 )
 
 # --------------------------------------------------------------------------
+# 기업 소개 요약(Q05)의 어휘
+# --------------------------------------------------------------------------
+
+# "무슨 사업을 하고 주력 제품이 뭐야?"처럼 사업 개요와 주요 제품을 함께 묻는 표현.
+#
+# 두 묶음을 모두 요구한다. 사업 개요만 묻거나 제품만 묻는 질문은 이 모양이 아니며, 그런
+# 질문을 여기로 끌어오면 묻지 않은 범위까지 요약한 결과가 나간다. 한 묶음만으로 판정하면
+# "주요 제품 매출이 얼마야?" 같은 값 조회 질문도 요약 경로로 끌려온다.
+#
+# 요약 요청 표현("정리해줘")도 보고서 종류("사업보고서")도 요구하지 않는다. 이 질문 모양은
+# 문서를 지목하지 않고 기업을 소개해 달라고 말하며, 그 답이 사업보고서의 사업 개요·주요 제품
+# Section에 있다는 것이 이 경로가 아는 서식 지식이다.
+#
+# 판정 전에 질문의 공백을 걷어낸다. SECTION_SCOPE_TOKENS와 같은 이유다.
+BUSINESS_DESCRIPTION_TOKENS = ("무슨사업", "어떤사업")
+PRODUCT_TOKENS = ("주력제품", "주요제품")
+
+# 이 질문 모양이 요약하는 범위. 순서는 사업보고서 서식의 Section 순서이며, 결과의
+# DocumentSummary도 이 순서로 실린다.
+BUSINESS_PROFILE_SECTION_SCOPES: tuple[SectionScope, ...] = (
+    SectionScope.BUSINESS_OVERVIEW,
+    SectionScope.PRODUCTS,
+)
+
+# --------------------------------------------------------------------------
 # 거래소공시 단건 사실 조회(Q02)의 어휘
 # --------------------------------------------------------------------------
 
@@ -396,6 +424,30 @@ SECTION_SCOPE_TOKENS: tuple[tuple[SectionScope, tuple[str, ...]], ...] = (
 #     먼저 보므로, 매출 질문의 '금액'이 이 경로로 끌려오지 않는다.
 CONTRACT_AMOUNT_TOKENS = ("계약금액", "계약 금액", "금액")
 CONTRACT_PERIOD_TOKENS = ("계약기간", "계약 기간", "기간")
+
+# 기업 소개 요약(Q05)이 요약 요청으로 받지 않는 값 조회 표기.
+#
+# "무슨 사업을 하고 주력 제품이 뭐고 2025년 매출은 얼마야?"처럼 사업 서술과 제품 표현이 있어도
+# 값을 함께 묻는 질문은 순수한 문서 요약이 아니다. 그것을 요약으로 받으면 근거를 갖춘 채로
+# 물은 값을 빼놓은 답이 나가고, 값을 물었다는 사실은 결과 어디에도 남지 않는다. 그래서 아래
+# 표기가 하나라도 있으면 Q05 경로를 열지 않고, 질문은 이 경로가 생기기 전과 같은 경로(단일
+# 사실 조회·계약 조회)로 흘러가 그쪽 규칙으로 답하거나 막힌다. 두 반을 함께 답하는 능력은
+# 여기서 만들지 않는다.
+#
+# 표기는 이 모듈이 값 조회에 이미 쓰는 어휘를 그대로 잇는다. 지표 어휘가 늘면 여기도 함께
+# 늘어야 하므로 이름을 다시 적지 않는다. 맨 뒤의 낱말들은 지표 이름 없이 값을 묻는 표현이다.
+# 판정은 공백을 걷어낸 질문에 대해 하므로 "계약 금액"처럼 띄어 쓴 표기는 "금액"이 대신 받는다.
+BUSINESS_PROFILE_EXCLUDED_TOKENS: tuple[str, ...] = (
+    *REVENUE_TOKENS,
+    *(token for token, _ in DERIVED_METRIC_TOKENS),
+    *CONTRACT_AMOUNT_TOKENS,
+    "영업이익",
+    "얼마",
+    "비중",
+    "비율",
+    "주식수",
+    "지분",
+)
 
 # 이 구현이 실제로 답까지 옮길 수 있는 계약 필드 조합.
 #
@@ -591,6 +643,16 @@ class QueryPlan:
     # docs/agent_design/retrieval_strategy.md Pattern B가 금지한 문서 전체 요약이 조용히
     # 기본 동작이 된다. 읽지 못하면 계획을 만들지 않는다.
     section_scope: SectionScope | None = None
+    # 한 문서에서 함께 요약해야 하는 범위 묶음. 기업 소개 요약(Q05)이 쓴다.
+    #
+    # section_scope를 튜플로 바꾸지 않은 이유:
+    #     section_scope는 "이 계획이 요약할 범위 하나"라는 뜻으로 Pattern B(Q04)와
+    #     Pattern C의 서술 비교(Q09)가 이미 읽고 있다. 그것을 복수로 바꾸면 읽는 쪽이 전부
+    #     "첫 값" 또는 "전부"를 다시 정해야 한다. requested_fields가 metric 옆에 따로 있는
+    #     것과 같은 구조다.
+    #
+    # section_scope와 서로 배타다(__post_init__ 참조). 단일 문서 요약 계획에서만 쓴다.
+    section_scopes: tuple[SectionScope, ...] = ()
     # accounting_scope가 질문에 명시됐는지 기록한다. 기본값으로 채운 경우를 구분하기 위함이다.
     accounting_scope_explicit: bool = True
     # 질문에 상대 기간 표현이 있었다면 그 표현과 해석 결과.
@@ -632,10 +694,46 @@ class QueryPlan:
         #
         # 요약 범위는 이 Pattern의 답 그 자체다. 범위가 비면 이 계획을 실행하는 쪽이 어디를
         # 요약할지 골라야 하고, 무엇을 골랐는지는 계획에도 결과에도 남지 않는다.
-        if self.intent == INTENT_DOCUMENT_SUMMARY and self.section_scope is None:
+        if (
+            self.intent == INTENT_DOCUMENT_SUMMARY
+            and self.section_scope is None
+            and not self.section_scopes
+        ):
             raise ValueError(
                 "단일 문서 요약 계획에는 section_scope가 있어야 합니다: "
                 f"question={self.question!r}."
+            )
+
+        # SectionScope은 StrEnum이라 낱개로 넘겨도 문자열로 순회된다. companies를 막는
+        # 것과 같다.
+        if isinstance(self.section_scopes, str):
+            raise TypeError(
+                "section_scopes는 SectionScope 하나가 아니라 튜플이어야 합니다: "
+                f"{self.section_scopes!r}"
+            )
+
+        # 범위 하나와 범위 묶음을 함께 담지 않는다.
+        #
+        # 둘 다 담기면 이 계획을 읽는 쪽이 어느 쪽을 요약할지 스스로 골라야 하고, 무엇을
+        # 골랐는지는 계획 어디에도 남지 않는다. metric/derived_metric 규칙과 같은 이유다.
+        if self.section_scope is not None and self.section_scopes:
+            raise ValueError(
+                "section_scope와 section_scopes를 함께 담을 수 없습니다: "
+                f"section_scope={self.section_scope!r}, "
+                f"section_scopes={self.section_scopes!r}. 요약 범위의 정본은 하나여야 합니다."
+            )
+
+        # 범위 묶음은 단일 문서 요약에서만 뜻이 있다. 다른 의도에 실리면 그 handler는 이
+        # 값을 읽지 않으므로, 요청한 범위가 조용히 사라진 계획이 된다.
+        if self.section_scopes and self.intent != INTENT_DOCUMENT_SUMMARY:
+            raise ValueError(
+                "section_scopes는 단일 문서 요약 계획에서만 담을 수 있습니다: "
+                f"intent={self.intent!r}."
+            )
+
+        if len(set(self.section_scopes)) != len(self.section_scopes):
+            raise ValueError(
+                f"section_scopes에 같은 범위가 거듭 담겨 있습니다: {self.section_scopes!r}."
             )
 
         # 원천 지표와 파생 개념을 동시에 담지 않는다.
@@ -1191,6 +1289,113 @@ def _looks_like_event_history(question: str) -> bool:
     """
     return bool(_find_event_subtype_rules(question)) and any(
         token in question for token in HISTORY_TOKENS
+    )
+
+
+def _looks_like_business_profile(question: str) -> bool:
+    """
+    기업이 무슨 사업을 하고 주력 제품이 무엇인지 함께 묻는 질문인가(Q05).
+
+    두 묶음(사업 서술 표현, 제품 표현)이 모두 있어야 참이다. 한쪽만으로 판정하지 않는
+    이유는 BUSINESS_DESCRIPTION_TOKENS의 설명과 같다.
+
+    값 조회 표기가 함께 있으면 거짓이다. 두 묶음이 있어도 값을 함께 묻는 질문은 순수한
+    요약 요청이 아니며, 요약으로 받으면 물은 값이 조용히 빠진 답이 나간다
+    (BUSINESS_PROFILE_EXCLUDED_TOKENS의 설명). 그런 질문은 이 경로가 생기기 전과 같은
+    경로로 흘러간다.
+
+    판정 순서에 대해:
+        이력 판정보다 뒤, 일반 요약 판정보다 앞이다. 일반 요약 판정은 요약 요청 표현과
+        보고서 종류를 요구하므로 이 질문을 알아보지 못하고, 그대로 두면 단일 사실 조회
+        경로로 내려가 missing_year로 막힌다. 그 사유는 실제로 일어난 일(기업 소개를 물었다)과
+        다르다.
+    """
+    compact = "".join(question.split())
+
+    if any(token in compact for token in BUSINESS_PROFILE_EXCLUDED_TOKENS):
+        return False
+
+    return any(token in compact for token in BUSINESS_DESCRIPTION_TOKENS) and any(
+        token in compact for token in PRODUCT_TOKENS
+    )
+
+
+def _build_business_profile_plan(
+    question: str,
+    companies: tuple[str, ...],
+    fiscal_year_anchors: Mapping[str, int] | None,
+) -> QueryPlan:
+    """
+    Q05 계열 기업 소개 요약 계획을 만든다.
+
+        "<기업>는 무슨 사업을 하고 주력 제품이 뭐야?"
+        -> 정기공시 사업보고서 1건 + section_scopes=(business_overview, products)
+
+    대상 기간:
+        절대연도가 하나 있으면 그 해다. 없으면 코퍼스에 있는 그 기업의 최신 사업보고서
+        회계연도(fiscal_year_anchors)로 옮긴다. 이 질문 모양은 기업의 현재 모습을 묻고,
+        그 답은 코퍼스 기준 가장 최근 사업보고서에 있다. 실행 시각을 쓰지 않는 이유는
+        _resolve_anchor_year와 같다.
+
+        이 기본값은 이 질문 모양에만 적용한다. 일반 요약(_build_document_summary_plan)의
+        기간 규칙은 그대로이며, 기간 없는 일반 요약은 여전히 missing_year로 막힌다. 기간
+        미지정 질문 전반의 기본 문서 정책(open_decisions.md D5-a)을 여기서 정하지 않는다.
+
+        상대 기간("작년")은 옮기지 않는다. 일반 요약과 같은 이유다. 절대연도가 둘이면 문서
+        1건으로 좁혀지지 않으므로 막는다.
+
+    metric을 담지 않는다:
+        _build_document_summary_plan과 같은 이유다.
+    """
+    relative_expression = _match_previous_year_expression(question)
+
+    if relative_expression is not None:
+        raise UnsupportedQuestionError(
+            reason="unsupported_summary_period",
+            detail=(
+                f"요약 질문의 상대 기간 표현('{relative_expression}')은 해석하지 않습니다. "
+                "연도를 밝히거나 비워 두십시오. 비워 두면 코퍼스에 있는 최신 사업보고서를 "
+                "기준으로 답합니다."
+            ),
+        )
+
+    years = _extract_years(question)
+
+    if len(years) > 1:
+        listed = ", ".join(str(year) for year in years)
+
+        raise UnsupportedQuestionError(
+            reason="unsupported_summary_period",
+            detail=(
+                f"질문이 {len(years)}개 기간({listed})을 함께 가리키고 있습니다. "
+                "기업 소개 요약은 사업보고서 1건을 대상으로 합니다. 한 기간을 골라 답하지 "
+                "않습니다."
+            ),
+        )
+
+    warnings: tuple[str, ...] = ()
+
+    if not years:
+        anchor_year = _resolve_anchor_year(companies[0], fiscal_year_anchors)
+
+        years = (anchor_year,)
+        warnings = (
+            f"질문에 회계연도가 없어 코퍼스에 있는 '{companies[0]}'의 최신 사업보고서 "
+            f"회계연도 FY{anchor_year}로 해석했습니다. 실행 시각이나 현재 연도를 쓰지 "
+            "않았습니다.",
+        )
+
+    return QueryPlan(
+        question=question.strip(),
+        companies=companies,
+        years=years,
+        intent=INTENT_DOCUMENT_SUMMARY,
+        document_class=DOCUMENT_CLASS_PERIODIC,
+        document_subtype=DOCUMENT_SUBTYPE_ANNUAL,
+        accounting_scope=QueryAccountingScope.NOT_APPLICABLE.value,
+        metric=None,
+        section_scopes=BUSINESS_PROFILE_SECTION_SCOPES,
+        warnings=warnings,
     )
 
 
@@ -1880,6 +2085,12 @@ def build_query_plan(
     #                      "2024년이랑 2025년 사업보고서 설비투자 정리해줘"가 시계열 비교로
     #                      분류되어 'Pattern C가 지원하지 않는 지표'로 막힌다. 실제로 일어난
     #                      일은 그것이 아니다.
+    # 기업 소개 요약(Q05)은 일반 요약 판정보다 앞이다. 일반 요약 판정은 이 질문을
+    # 알아보지 못하므로 순서가 결과를 바꾸지는 않지만, 앞에 두어야 두 판정이 서로 다른
+    # 질문 모양을 본다는 것이 자리에서 드러난다.
+    if _looks_like_business_profile(question):
+        return _build_business_profile_plan(question, companies, fiscal_year_anchors)
+
     if _looks_like_document_summary(question):
         return _build_document_summary_plan(question, companies)
 

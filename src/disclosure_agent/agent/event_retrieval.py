@@ -64,10 +64,12 @@ from disclosure_agent.retrieval.metadata_filter import (
 )
 
 __all__ = [
+    "COUNTERPARTY_ALIAS_GROUPS",
     "ContractCandidate",
     "ContractCandidateReadError",
     "ContractSelection",
     "ContractSelectionStatus",
+    "counterparty_key",
     "filing_date_window",
     "select_by_counterparty",
     "select_contract_filing",
@@ -75,6 +77,62 @@ __all__ = [
 
 # 본문에서 계약 상대방을 담는 canonical field. event.extractor의 어휘다.
 COUNTERPARTY_FIELD = "counterparty"
+
+# 같은 상대방을 가리키는 표기 묶음.
+#
+# 왜 필요한가:
+#     질문과 공시 본문이 같은 회사를 다른 문자 체계로 적는 경우가 있다. 대표 Q02가 그렇다.
+#     질문은 "Yang Ming"으로 적고 본문은 "양밍해운"으로 적는다. normalize_company_name은
+#     법인격 표기와 공백·구분 기호만 걷어내므로 두 표기는 끝내 만나지 않고, 실제로 있는
+#     계약이 '없다'로 판정된다.
+#
+# 음차 규칙을 만들지 않는 이유:
+#     "Yang Ming -> 양밍"을 규칙으로 세우면 그 규칙이 적어 두지 않은 다른 이름에도
+#     적용된다. 어떤 상호가 한글로 어떻게 읽히는지는 규칙이 정하는 것이 아니라 그 회사가
+#     정하는 것이고, 규칙이 만들어 낸 이름으로 문서를 고르면 틀린 상대방의 계약이 형식만
+#     맞은 채 답이 된다. 그 틀림은 답을 받는 쪽에서 드러나지 않는다.
+#
+#     그래서 표기를 하나씩 적는다. 여기 적히지 않은 이름은 지금까지와 똑같이 정규화한 전체
+#     문자열이 같아야만 일치한다. 늘어나는 것은 이 표뿐이고 판정 규칙은 그대로다.
+#
+# 부분 일치·유사도를 여전히 쓰지 않는다:
+#     별칭을 거친 뒤에도 비교는 전체 문자열이 같은지 하나다. "테스트해운"이
+#     "테스트해운로지스"에 걸리지 않는 성질은 그대로다(select_by_counterparty 참조).
+#
+# 각 묶음의 첫 표기가 canonical이다. 비교 키는 거기서 유도하며 손으로 적지 않는다. 두 벌을
+# 적어 두면 표기를 고칠 때 한쪽만 바뀔 수 있다.
+COUNTERPARTY_ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
+    # 대표 Q02의 상대방. 공시 본문은 한글 상호로, 질문은 라틴 표기로 적는다.
+    ("양밍해운", "Yang Ming"),
+)
+
+# 정규화한 표기 -> canonical 비교 키.
+_COUNTERPARTY_ALIASES: dict[str, str] = {
+    normalize_company_name(spelling): normalize_company_name(group[0])
+    for group in COUNTERPARTY_ALIAS_GROUPS
+    for spelling in group
+}
+
+
+def counterparty_key(name: str) -> str:
+    """
+    계약 상대방을 비교할 때 쓰는 키.
+
+    normalize_company_name을 거친 뒤 별칭 표를 한 번 찾아본다. 표에 없으면 정규화한 이름
+    그대로이므로, 별칭을 등록하지 않은 상대방의 판정은 이 함수가 생기기 전과 같다.
+
+    질문 쪽과 문서 쪽 모두 이 함수를 지나야 한다. 한쪽만 지나면 등록한 별칭이 방향에 따라
+    걸리기도 하고 걸리지 않기도 한다.
+
+    빈 이름은 빈 키다. 호출부가 "전부 일치"로 읽지 않도록 select_by_counterparty가 따로
+    막는다.
+    """
+    normalized = normalize_company_name(name)
+
+    if not normalized:
+        return ""
+
+    return _COUNTERPARTY_ALIASES.get(normalized, normalized)
 
 
 def filing_date_window(year: int, month: int | None) -> tuple[str, str]:
@@ -164,15 +222,17 @@ def select_by_counterparty(
     """
     계약 상대방이 일치하는 후보만 남긴다.
 
-    비교는 회사명 정규화(normalize_company_name)를 거친다. 법인격 표기와 공백·구분 기호
-    차이 때문에 같은 상대방이 다른 이름으로 읽히면, 실제로는 있는 계약이 '없다'로 판정된다.
+    비교는 counterparty_key를 거친다. 회사명 정규화(normalize_company_name)에 더해 등록된
+    표기 별칭을 canonical 키로 모은다. 법인격 표기·공백·구분 기호 차이나 문자 체계 차이
+    때문에 같은 상대방이 다른 이름으로 읽히면, 실제로는 있는 계약이 '없다'로 판정된다.
 
-    부분 일치를 쓰지 않는다. "선주"가 "북미 지역 선주"와 "유럽 지역 선주"에 모두 걸리는
-    식으로 후보가 늘어나면, 좁히려고 넣은 조건이 오히려 잘못된 문서를 후보에 들인다.
+    별칭을 거친 뒤에도 비교는 전체 문자열이 같은지 하나다. 부분 일치를 쓰지 않는다.
+    "선주"가 "북미 지역 선주"와 "유럽 지역 선주"에 모두 걸리는 식으로 후보가 늘어나면,
+    좁히려고 넣은 조건이 오히려 잘못된 문서를 후보에 들인다.
 
     입력 순서를 그대로 보존한다. 순서를 바꾸면 호출부가 앞에서부터 하나를 고르고 싶어진다.
     """
-    target = normalize_company_name(counterparty)
+    target = counterparty_key(counterparty)
 
     if not target:
         return ()
@@ -187,7 +247,7 @@ def select_by_counterparty(
         if not found:
             continue
 
-        if normalize_company_name(str(found.get("normalized_value") or "")) == target:
+        if counterparty_key(str(found.get("normalized_value") or "")) == target:
             matched.append(candidate)
 
     return tuple(matched)

@@ -21,13 +21,15 @@ import pytest
 
 from disclosure_agent.agent import event_retrieval
 from disclosure_agent.agent.event_retrieval import (
+    COUNTERPARTY_ALIAS_GROUPS,
     ContractCandidate,
     ContractSelectionStatus,
+    counterparty_key,
     filing_date_window,
     select_by_counterparty,
     select_contract_filing,
 )
-from disclosure_agent.retrieval.metadata_filter import FilingRef
+from disclosure_agent.retrieval.metadata_filter import FilingRef, normalize_company_name
 
 COMPANY = "테스트조선(주)"
 
@@ -394,3 +396,131 @@ def test_select_by_counterparty_refuses_empty_target() -> None:
     candidates = [_candidate("SYNTHETIC0001", "테스트해운")]
 
     assert select_by_counterparty(candidates, "") == ()
+
+
+# --------------------------------------------------------------------------
+# 6. 상대방 표기 별칭
+#
+# 등록한 표기만 canonical 키로 모인다. 별칭을 거친 뒤의 비교는 지금까지처럼 전체 문자열이
+# 같은지 하나이며, 부분 일치도 음차 추정도 들어오지 않는다.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("asked", "written"),
+    [
+        ("Yang Ming", "양밍해운"),
+        ("양밍해운", "Yang Ming"),
+        ("Yang Ming", "Yang Ming"),
+        ("양밍해운", "양밍해운"),
+    ],
+    ids=["latin_asks_korean", "korean_asks_latin", "latin_both", "korean_both"],
+)
+def test_registered_alias_matches_in_both_directions(corpus, asked, written) -> None:
+    """
+    질문 쪽과 문서 쪽 어느 자리에 어느 표기가 와도 같은 계약으로 읽힌다.
+
+    한 방향만 걸리면 같은 계약이 질문을 어떻게 쓰느냐에 따라 있기도 하고 없기도 하다.
+    """
+    corpus([("SYNTHETIC0001", written)])
+
+    selection = select_contract_filing(
+        company=COMPANY,
+        year=2025,
+        month=9,
+        counterparty=asked,
+        corpus_root=CORPUS_ROOT,
+    )
+
+    assert selection.status is ContractSelectionStatus.SELECTED
+    assert selection.matched_doc_ids == ("exchange_SYNTHETIC0001",)
+
+
+def test_alias_normalizes_legal_suffix_and_spacing_too(corpus) -> None:
+    """별칭은 정규화를 대신하지 않고 그 뒤에 얹힌다."""
+    corpus([("SYNTHETIC0001", "양밍해운 주식회사")])
+
+    selection = select_contract_filing(
+        company=COMPANY,
+        year=2025,
+        month=9,
+        counterparty="YangMing",
+        corpus_root=CORPUS_ROOT,
+    )
+
+    assert selection.status is ContractSelectionStatus.SELECTED
+
+
+def test_unregistered_spelling_still_fails_closed(corpus) -> None:
+    """
+    표에 없는 표기는 음차로 추정하지 않는다.
+
+    "Hanwha Ocean"과 "한화오션"은 사람이 보면 같은 회사지만 등록하지 않았다. 규칙으로
+    이어 버리면 등록하지 않은 이름까지 규칙이 만든 짝으로 문서를 고르게 된다.
+    """
+    corpus([("SYNTHETIC0001", "한화오션")])
+
+    selection = select_contract_filing(
+        company=COMPANY,
+        year=2025,
+        month=9,
+        counterparty="Hanwha Ocean",
+        corpus_root=CORPUS_ROOT,
+    )
+
+    assert selection.status is ContractSelectionStatus.NOT_FOUND
+
+
+def test_alias_does_not_open_partial_matching(corpus) -> None:
+    """canonical 키를 공유하지 않는 더 긴 이름은 여전히 걸리지 않는다."""
+    corpus([("SYNTHETIC0001", "양밍해운로지스")])
+
+    selection = select_contract_filing(
+        company=COMPANY,
+        year=2025,
+        month=9,
+        counterparty="Yang Ming",
+        corpus_root=CORPUS_ROOT,
+    )
+
+    assert selection.status is ContractSelectionStatus.NOT_FOUND
+
+
+def test_alias_preserves_ambiguity_when_two_roots_share_a_counterparty(corpus) -> None:
+    """
+    별칭이 0/1/N 판정을 바꾸지 않는다.
+
+    표기가 달라도 같은 상대방이면 둘 다 후보가 되고, 둘이면 고르지 않고 막는다.
+    """
+    corpus([("SYNTHETIC0001", "양밍해운"), ("SYNTHETIC0002", "Yang Ming")])
+
+    selection = select_contract_filing(
+        company=COMPANY,
+        year=2025,
+        month=9,
+        counterparty="Yang Ming",
+        corpus_root=CORPUS_ROOT,
+    )
+
+    assert selection.status is ContractSelectionStatus.AMBIGUOUS
+    assert selection.matched_doc_ids == (
+        "exchange_SYNTHETIC0001",
+        "exchange_SYNTHETIC0002",
+    )
+
+
+def test_counterparty_key_is_identity_for_unregistered_names() -> None:
+    """등록하지 않은 이름의 판정은 별칭 표가 생기기 전과 같다."""
+    assert counterparty_key("테스트해운(주)") == normalize_company_name("테스트해운")
+    assert counterparty_key("") == ""
+
+
+def test_counterparty_key_maps_registered_spellings_to_one_key() -> None:
+    """묶음 안의 표기는 전부 같은 키로 모인다. 첫 표기가 canonical이다."""
+    for group in COUNTERPARTY_ALIAS_GROUPS:
+        canonical = counterparty_key(group[0])
+
+        assert canonical == normalize_company_name(group[0])
+
+        for spelling in group[1:]:
+            assert counterparty_key(spelling) == canonical

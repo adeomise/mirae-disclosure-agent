@@ -38,18 +38,25 @@ EXPECTED_START_DATE = "2025-09-16"
 
 EXPECTED_END_DATE = "2029-05-31"
 
-# 공시 본문이 계약 상대방을 적은 표기.
+# 대표 Q02가 상대방을 적은 표기. 공시 본문은 같은 회사를 한글 상호("양밍해운")로 적는다.
 #
-# 질문을 이 표기로 쓰는 이유:
-#     원문은 상대방을 한글 상호로 적는다. 라틴 표기("Yang Ming")로 물으면 현재 구현은
-#     찾지 못하고 막는다(아래 회귀 참조). 두 표기를 잇는 일은 상대방 대조 규칙을 넓히는
-#     결정이고, 이 파일이 정할 사항이 아니다.
-COUNTERPARTY = "양밍해운"
+# 두 표기가 만나는 자리:
+#     agent.event_retrieval.COUNTERPARTY_ALIAS_GROUPS에 등록된 별칭이 둘을 같은 비교 키로
+#     모은다. 별칭을 거친 뒤의 대조는 지금까지처럼 전체 문자열이 같은지 하나이며, 음차
+#     추정이나 부분 일치가 들어온 것이 아니다. 등록 범위와 그 경계는
+#     tests/unit/test_contract_filing_selection.py가 고정한다.
+COUNTERPARTY = "Yang Ming"
 
+# 대표 질문 문자열. 표기를 코퍼스에 맞춰 바꾸지 않는다. 대표 질문이 그대로 답이 되는지가
+# 이 파일이 보는 것이고, 질문을 구현에 맞춰 고치면 그 사실이 사라진다.
 Q02 = f"한화오션이 2025년 9월 {COUNTERPARTY}과 체결한 계약의 계약금액과 계약기간은?"
 
-# 같은 계약을 라틴 표기로 물은 질문.
-Q02_LATIN = "한화오션이 2025년 9월 Yang Ming과 체결한 계약의 계약금액과 계약기간은?"
+# 코퍼스에 없는 상대방. 별칭 표에도 없으므로 비슷한 이름으로 대신 고르지 않아야 한다.
+UNKNOWN_COUNTERPARTY = "Hanwha Ocean"
+
+Q02_UNKNOWN_COUNTERPARTY = (
+    f"한화오션이 2025년 9월 {UNKNOWN_COUNTERPARTY}과 체결한 계약의 계약금액과 계약기간은?"
+)
 
 client = TestClient(app)
 
@@ -120,10 +127,21 @@ def test_q02_supply_contract_answer_is_grounded_in_the_actual_filing() -> None:
     # 각 Fact의 근거가 응답 안에서 실제로 풀린다. 개수만 세면 연결이 끊긴 채로도 통과한다.
     assert len(actual.evidence) == 3
 
-    response_evidence_ids = {item.evidence_id for item in actual.evidence}
+    evidence_ids = [item.evidence_id for item in actual.evidence]
+
+    # 근거 id가 겹치면 서로 다른 값이 같은 근거를 가리키는 것으로 읽힌다. 셋을 확보했다는
+    # 사실이 개수로만 남고 무엇을 확보했는지는 남지 않는다.
+    assert len(set(evidence_ids)) == 3
+
+    response_evidence_ids = set(evidence_ids)
 
     for fact in actual.facts:
-        assert fact.evidence_ids
+        # 값 하나에 근거 하나다. 계약금액·시작일·종료일은 한 문서의 서로 다른 자리에서
+        # 읽히므로, 한 Fact가 근거를 여럿 달고 있으면 어느 자리에서 읽은 값인지 흐려진다.
+        assert len(fact.evidence_ids) == 1
+
+        # 참조한 근거가 응답 안에서 실제로 풀린다. 응답에 없는 id를 가리키면 근거를 갖췄다는
+        # 표시만 남고 받는 쪽은 원문을 찾아갈 수 없다.
         assert set(fact.evidence_ids) <= response_evidence_ids
 
     # 문장이 확보한 값을 그대로 말하는가. 원문 표기로 적힌다.
@@ -132,20 +150,21 @@ def test_q02_supply_contract_answer_is_grounded_in_the_actual_filing() -> None:
 
 
 @pytest.mark.corpus
-def test_latin_counterparty_spelling_fails_closed() -> None:
+def test_unregistered_counterparty_spelling_still_fails_closed() -> None:
     """
-    원문이 한글 상호로 적은 상대방을 라틴 표기로 물으면 찾지 못한다.
+    별칭 표에 없는 상대방은 비슷한 이름으로 대신 고르지 않는다.
 
-    이 회귀는 현재 동작을 고정하는 것이지 바람직한 동작을 고정하는 것이 아니다.
-    표기를 잇는 규칙(음차·별칭 대응표)은 아직 정해지지 않았고, 정해지기 전까지는 비슷한
-    이름으로 대신 고르지 않는 쪽이 맞다. 부분 일치나 음차 추정을 넣으면 "북미 지역 선주"
-    같은 다른 계약이 후보로 끌려온다.
+    별칭이 연 것은 등록한 표기 묶음 하나뿐이라는 것을 실제 코퍼스 위에서 고정한다. 이
+    회귀가 없으면 별칭을 넣은 변경이 음차 추정이나 부분 일치까지 함께 연 경우를 잡지 못한다.
+    "Hanwha Ocean"은 사람이 보면 이 질문의 주체와 같은 회사지만 상대방으로는 등록되지
+    않았고, 코퍼스의 어떤 계약 상대방과도 맞지 않는다.
 
-    규칙이 정해지면 이 테스트가 먼저 깨져서 알려 준다.
+    표기를 잇는 규칙을 넓히려면 COUNTERPARTY_ALIAS_GROUPS에 표기를 적는다. 규칙을 세워
+    적지 않은 이름까지 잇는 순간 이 테스트가 먼저 깨져서 알려 준다.
     """
     _require_actual_corpus()
 
-    response = client.post("/api/ask", json={"question": Q02_LATIN})
+    response = client.post("/api/ask", json={"question": Q02_UNKNOWN_COUNTERPARTY})
 
     assert response.status_code == 200
 

@@ -17,10 +17,13 @@
     '축소해서 답하지 않는다'까지이며, 답하는 경로는 tests/integration/test_pattern_c.py가
     맡는다.
 
-Pattern C handler가 등록된 뒤:
-    이 질문들은 여전히 값을 하나도 만들지 않고 막힌다. 막는 자리만 Router에서 handler
-    입구(pattern_entry)로 옮겨왔다. Router는 intent만 보므로 "원천 지표의 시계열 증감은
-    아직 못 한다"를 판정할 자리가 아니고, 그 판정은 Pattern C가 한다.
+Q07이 구현된 뒤:
+    이 질문들은 여전히 값을 하나도 만들지 않지만, 막히는 자리는 다시 옮겨왔다
+    (routing -> pattern_entry -> 확보 이후). 매출의 시계열 증감은 이제 Pattern C가 만들며,
+    합성 코퍼스에 읽을 본문이 없어 parsing에서 멈춘다.
+
+    이 파일이 고정하는 것은 자리가 아니라 성질이다. 두 기간 중 하나를 골라 답한 결과가
+    나오지 않는다는 것이며, 답하는 경로는 tests/integration/test_pattern_c.py가 맡는다.
 
 false positive:
     같은 연도가 문장에 여러 번 나오는 것은 두 기간이 아니다. 값으로 중복을 제거하며,
@@ -38,8 +41,8 @@ from pathlib import Path
 import pytest
 
 from disclosure_agent.agent.answer_builder import (
-    REASON_UNSUPPORTED_COMPARISON_METRIC,
     REASON_UNSUPPORTED_COMPARISON_PERIOD,
+    STAGE_PARSING,
     STAGE_PATTERN_ENTRY,
     STAGE_ROUTING,
 )
@@ -174,8 +177,8 @@ def test_multi_period_question_is_classified_as_temporal_compare(question: str) 
     temporal_compare는 이미 KNOWN_INTENTS에 있다. 새 intent를 만들면 Router가 '어휘에 없는
     intent'로 보고 후속 작업이 달라진다.
 
-    이 intent에는 handler가 있다. 그래도 아래 질문들은 값을 만들지 않는데, 원천 지표의
-    시계열 증감이 Pattern C의 이번 구현 범위 밖이기 때문이다. 그 판정은 5절이 고정한다.
+    이 intent에는 handler가 있고 매출의 시계열 증감도 구현되어 있다. 그래도 아래 질문들이
+    합성 코퍼스에서 값을 만들지 못하는 것은 읽을 본문이 없기 때문이며, 5절이 그것을 고정한다.
     """
     plan = build_query_plan(question, known_companies=REAL_COMPANIES)
 
@@ -199,7 +202,7 @@ def test_multi_period_plan_carries_a_diagnostic_warning(question: str) -> None:
     이 파일이 고정하는 안전 불변식은 넷이며 전부 다른 케이스가 맡는다.
         1. distinct 절대연도가 둘 이상이면 temporal_compare   (2절)
         2. single_fact로 축소되지 않는다                      (2절·3절)
-        3. 값을 만들기 전에 막힌다 (pattern_entry)            (5절)
+        3. 값을 하나도 만들지 않고 막힌다                     (5절)
         4. facts와 evidence가 비어 있다                       (5절)
     """
     plan = build_query_plan(question, known_companies=REAL_COMPANIES)
@@ -457,9 +460,16 @@ def test_multi_period_question_produces_no_value(
     answerability_status도 비어 있어야 한다. 코퍼스를 보지 않았으므로 답이 있는지 없는지
     판정하지 않았다.
 
-    막히는 자리는 Pattern C handler의 입구다. 이 질문들은 원천 지표(매출)를 두 기간에 걸쳐
-    묻고 있고, 그 증감은 이번 구현 범위 밖이다. handler가 등록되기 전에는 같은 결과가
-    routing/unimplemented_intent로 나왔다.
+    막히는 자리는 Q07 구현과 함께 옮겨왔다. 이 질문들은 원천 지표(매출)를 두 기간에 걸쳐
+    묻고 있고 그 증감은 이제 Pattern C가 만든다. 그래서 handler 입구를 지나 확보까지 가며,
+    합성 코퍼스에는 읽을 본문이 없어 parsing에서 멈춘다.
+
+    자리가 세 번 옮겨왔지만(routing -> pattern_entry -> parsing) 이 파일이 고정하는 성질은
+    그대로다. 두 기간 중 하나를 골라 답한 결과가 나오지 않는다는 것이며, 그것을 재는 것은
+    아래 facts/evidence/calculations가 비어 있다는 검사다.
+
+    답하는 경로 자체는 여기서 보지 않는다. 확보를 대신 채운 Q07 성공 모양은
+    tests/integration/test_pattern_c.py 5절이 맡는다.
     """
     result = answer_question(
         question,
@@ -477,8 +487,7 @@ def test_multi_period_question_produces_no_value(
     issue = result.execution_issue
 
     assert issue is not None
-    assert issue.stage == STAGE_PATTERN_ENTRY
-    assert issue.reason == REASON_UNSUPPORTED_COMPARISON_METRIC
+    assert issue.stage == STAGE_PARSING
 
 
 @pytest.mark.parametrize(
@@ -530,11 +539,16 @@ def test_blocked_multi_period_result_names_the_missing_capability(
     """
     무엇을 구현하면 풀리는 질문인지가 결과에 남아야 후속 작업을 고를 수 있다.
 
-    handler가 등록되기 전에는 그 이름이 intent였다(temporal_compare 미구현). 지금은 그보다
-    좁게, 어느 지표의 무엇을 못 만드는지가 남는다.
+    이름이 두 번 좁아졌다. handler가 등록되기 전에는 intent였고(temporal_compare 미구현),
+    등록된 뒤에는 지표였다(원천 지표의 증감 미구현). 매출의 증감이 구현된 지금 남은 것은
+    기간 쪽이며, 상대 기간 표현을 아직 옮기지 못한다는 사실이 결과에 남는다.
+
+    지표 쪽으로 이 성질을 재지 않는 이유는, 질의 해석이 원천 지표로 읽는 어휘가 매출뿐이고
+    그 매출이 이제 지원되기 때문이다. 질문 문자열로 도달할 수 있는 "인식했으나 범위 밖인
+    지표"가 없으므로, 그 경로는 계획을 직접 넣는 tests/integration/test_pattern_c.py가 맡는다.
     """
     result = answer_question(
-        "테스트반도체 2024년 매출과 2025년 매출 비교해줘",
+        "테스트반도체 2025년 매출이 전년보다 얼마나 늘었어?",
         corpus_root=nfd_corpus_root,
         manifest_path=synthetic_manifest_path,
     )
@@ -542,8 +556,9 @@ def test_blocked_multi_period_result_names_the_missing_capability(
     issue = result.execution_issue
 
     assert issue is not None
-    assert METRIC_REVENUE in issue.detail
-    assert "시계열" in issue.detail
+    assert issue.stage == STAGE_PATTERN_ENTRY
+    assert issue.reason == REASON_UNSUPPORTED_COMPARISON_PERIOD
+    assert "상대 기간" in issue.detail
 
 
 def test_single_year_question_still_reaches_the_pattern_a_handler(

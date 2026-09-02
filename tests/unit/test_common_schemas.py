@@ -497,6 +497,7 @@ def test_answerability_reason_values_include_pattern_f_contract_extensions() -> 
         "OUT_OF_DATA_RANGE": "out_of_data_range",
         "OUT_OF_SCOPE_DATA": "out_of_scope_data",
         "OUT_OF_SCOPE_POLICY": "out_of_scope_policy",
+        "PARTIAL_SOURCE_SUPPORT": "partial_source_support",
     }
 
 
@@ -905,3 +906,18 @@ def test_execution_result_serializes_to_json_compatible_contract() -> None:
         }
     ]
     assert "answer" not in dumped
+
+
+def test_partial_source_support_is_partial_answerability_reason() -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.PARTIAL_SOURCE_SUPPORT,
+    )
+
+    assert result.answerability_status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.PARTIAL_SOURCE_SUPPORT
+    assert (
+        result.model_dump(mode="json")["answerability_reason"]
+        == "partial_source_support"
+    )

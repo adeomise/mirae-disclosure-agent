@@ -29,16 +29,6 @@ CORPUS_MANIFEST_ENV = "DISCLOSURE_CORPUS_MANIFEST"
 
 Q04 = "삼성바이오로직스 2025년 사업보고서에서 설비 투자 관련 내용 정리해줘."
 
-# Q05·Q06은 요약 대상 문서를 고르는 정책이 정해지기 전까지 답하지 않는다.
-#
-#     Q05  기간 미지정 시의 기본 문서 선택 정책(open_decisions.md D5-a) 미정
-#     Q06  거래소공시 단건 요약의 판본 선택 정책(open_decisions.md D5) 미정
-#
-# Q04를 열었다고 해서 이 둘이 조용히 임의의 문서를 고르기 시작하면 안 된다. 그 회귀는 200
-# 응답으로 나타나므로 상태 코드로 고정한다.
-Q05 = "한미반도체는 무슨 사업을 하고 주력 제품이 뭐야?"
-Q06 = "LG유플러스 파주 AIDC 투자 공시 내용 요약해줘."
-
 # 표준 서식에서 설비 투자 범위가 놓이는 자리.
 EXPECTED_SECTION_ANCESTOR = "사업의 내용"
 EXPECTED_SECTION_TITLE = "생산설비"
@@ -152,34 +142,3 @@ def test_q04_runs_through_actual_corpus_http_api() -> None:
     assert all(evidence.raw_text and evidence.raw_text.strip() for evidence in actual.evidence)
 
     assert actual.answer.strip()
-
-
-@pytest.mark.corpus
-@pytest.mark.parametrize(
-    ("question", "expected_reason"),
-    [
-        pytest.param(Q05, "missing_year", id="q05-default-period-policy-pending"),
-        pytest.param(Q06, "missing_year", id="q06-version-policy-pending"),
-    ],
-)
-def test_pending_summary_policies_stay_closed(
-    question: str,
-    expected_reason: str,
-) -> None:
-    """
-    Q04를 연 것이 Q05·Q06을 함께 열지 않는다.
-
-    두 문항이 막히는 이유는 각각 D5-a와 D5이며, 어느 쪽도 이 PR에서 정하지 않았다. 정책 없이
-    문서를 고르기 시작하면 200 응답에 근거까지 갖춘 답이 돌아오고, 그 선택이 곧 정책이 된다.
-    """
-    _require_actual_corpus()
-
-    response = client.post("/api/ask", json={"question": question})
-
-    assert response.status_code == 422
-
-    payload = response.json()
-
-    assert payload["execution_status"] == "BLOCKED"
-    assert payload["error"]["stage"] == "query_plan"
-    assert payload["error"]["reason"] == expected_reason

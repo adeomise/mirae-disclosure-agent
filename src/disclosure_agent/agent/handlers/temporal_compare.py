@@ -313,11 +313,29 @@ def _unsupported_plan(plan: QueryPlan) -> BlockedInfo | None:
             ),
         )
 
-    if is_narrative_plan(plan):
-        # 서술 경로는 지표를 요구하지 않는다. 아래 지표 검사에 걸리면 "다루는 지표가
-        # 아니다"로 막히는데, 이 질문은 지표를 묻지 않았으므로 그 사유는 실제로 일어난 일과
-        # 다르다. 기업·기간 검사는 두 경로가 함께 쓰므로 이 자리가 앞이 아니라 뒤다.
-        return None
+    if plan.section_scope is NARRATIVE_SECTION_SCOPE:
+        if is_narrative_plan(plan):
+            # 서술 경로는 지표를 요구하지 않는다. 아래 지표 검사에 걸리면 "다루는 지표가
+            # 아니다"로 막히는데, 이 질문은 지표를 묻지 않았으므로 그 사유는 실제로 일어난
+            # 일과 다르다. 기업·기간 검사는 두 경로가 함께 쓰므로 이 자리가 앞이 아니라 뒤다.
+            return None
+
+        # 서술 범위와 지표를 함께 담은 계획이다. 어느 경로로도 보내지 않는다.
+        #
+        # 아래 지표 검사로 흘려보내면 매출처럼 지원하는 지표는 그대로 통과해 수치 경로가
+        # 답하고, 질문이 함께 밝힌 범위는 결과 어디에도 남지 않는다. 서술 경로로 보내면
+        # 반대로 지표가 사라진다. 둘 다 형식은 맞고 질문의 절반에만 답한 결과다.
+        requested = plan.derived_metric.value if plan.derived_metric else plan.metric
+
+        return BlockedInfo(
+            stage=STAGE_PATTERN_ENTRY,
+            reason=REASON_UNSUPPORTED_COMPARISON_METRIC,
+            detail=(
+                f"서술 범위({plan.section_scope.value})와 지표({requested})를 함께 견주는 "
+                "질문은 이번 구현이 다루지 않습니다. 서술 비교는 지표 없이, 수치 비교는 범위 "
+                "없이 각각 따로 물어야 합니다. 한쪽 요청을 버리고 답하지 않습니다."
+            ),
+        )
 
     shape = resolve_shape(plan)
 
@@ -567,14 +585,25 @@ def _derived_metric_calculations(
 
 def is_narrative_plan(plan: QueryPlan) -> bool:
     """
-    서술 비교로 다룰 계획인가.
+    서술 비교로 다룰 계획인가. 순수한 서술 모양일 때만 참이다.
 
-    범위(section_scope)로만 판정한다. 지표가 비어 있다는 것으로 가르지 않는 이유:
+    세 조건을 함께 요구한다. 범위가 서술 범위이고, 원천 지표도 파생 개념도 묻지 않았을 때다.
+
+    범위만으로 판정하지 않는 이유:
+        범위와 지표를 함께 담은 계획("사업 개요"와 "매출"을 한 질문에)은 두 경로 중 어느
+        쪽으로 보내도 한쪽 요청이 조용히 사라진다. 서술 경로로 보내면 지표가, 수치 경로로
+        보내면 범위가 버려지며, 어느 쪽 결과도 형식은 맞는다. 그런 계획은 두 경로 모두
+        받지 않고 _unsupported_plan이 입구에서 막는다.
+
+    지표의 부재만으로 판정하지 않는 이유:
         아직 어휘가 없는 원천 지표를 물은 질문도 지표가 비어 있다. 그 질문까지 서술 경로로
-        보내면 묻지도 않은 Section을 견주고, 그 결과는 형식만 맞는다. 무엇을 견주라고 했는지가
-        경로를 가르는 유일한 근거다.
+        보내면 묻지도 않은 Section을 견주게 된다. 범위를 밝혔다는 사실이 여전히 필요하다.
     """
-    return plan.section_scope is NARRATIVE_SECTION_SCOPE
+    return (
+        plan.section_scope is NARRATIVE_SECTION_SCOPE
+        and plan.metric is None
+        and plan.derived_metric is None
+    )
 
 
 @dataclass(frozen=True)
@@ -601,6 +630,13 @@ def _collect_narrative_side(
     접수번호가 가장 큰 것을 고르면 어느 판본을 견줬는지가 결과에 남지 않으며, 두 해를 견주는
     질문에서는 그 선택이 곧 비교 대상을 바꾼다.
 
+    정정본을 후보에 포함한다:
+        판본 선택 정책(docs/agent_design/open_decisions.md D5)은 아직 미정이고, 이 handler가
+        그 정책을 새로 정하지 않는다. 정정본을 조회에서 빼면 원본과 정정본이 함께 있는
+        연도가 원본 1건으로 보여 "유일하게 확정됐다"고 진행하게 된다. 그것은 정책 없이 원본을
+        고른 것이며, 고른 사실이 결과에 남지 않는다. 그래서 정정본까지 후보로 보고, 같은
+        연도에 판본이 둘 이상이면 어느 것도 고르지 않고 ambiguous_filing으로 멈춘다.
+
     Section 확정 실패는 periodic.sections의 사유를 그대로 옮긴다. 여기서 사유를 새로 만들면
     Pattern B와 같은 상황이 두 이름을 갖게 된다.
     """
@@ -616,6 +652,7 @@ def _collect_narrative_side(
             document_class=plan.document_class,
             document_subtype=plan.document_subtype,
             year=fiscal_year,
+            include_corrections=True,
         )
 
     except FilingNotFoundError as error:
@@ -643,8 +680,9 @@ def _collect_narrative_side(
             stage=STAGE_FILING_DISCOVERY,
             reason=REASON_AMBIGUOUS_FILING,
             detail=(
-                f"{fiscal_year} 회계연도의 조건에 맞는 공시가 {len(candidates)}건입니다: "
-                f"{listed}. 비교 대상 문서를 하나 골라 답하지 않습니다."
+                f"{fiscal_year} 회계연도의 조건에 맞는 공시(정정본 포함)가 "
+                f"{len(candidates)}건입니다: {listed}. 판본 선택 정책이 정해지지 않아 비교 "
+                "대상 문서를 하나 골라 답하지 않습니다."
             ),
         )
 

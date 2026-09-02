@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -25,12 +26,16 @@ import pytest
 
 from disclosure_agent.agent import router
 from disclosure_agent.agent.answer_builder import (
+    REASON_AMBIGUOUS_FILING,
     REASON_INCOMPARABLE_NARRATIVE_SECTIONS,
+    REASON_UNSUPPORTED_COMPARISON_METRIC,
     STAGE_COMPARABILITY,
     STAGE_FILING_DISCOVERY,
+    STAGE_PATTERN_ENTRY,
     STAGE_SECTION_NAVIGATION,
     build_answer_response,
 )
+from disclosure_agent.agent.derived_metrics import DerivedMetric
 from disclosure_agent.agent.handlers import temporal_compare as pattern_c
 from disclosure_agent.agent.handlers.temporal_compare import (
     build_temporal_compare_result,
@@ -150,6 +155,32 @@ def _rewrite_manifest(path: Path, records: list[dict[str, Any]]) -> None:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _version_unique(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    정정본이 없는 manifest 레코드만 남긴다.
+
+    공용 합성 manifest(tests/conftest.py)는 2025 사업보고서의 원본과 정정본을 함께 담고
+    있다. 서술 경로는 판본 선택 정책이 없어 정정본을 후보에 넣으므로, 그 manifest를 그대로
+    쓰면 2025년이 언제나 모호해져 그 뒤의 판정을 시험할 수 없다.
+
+    정정본을 숨기는 것이 아니다. 원본과 정정본이 함께 있는 경우는
+    test_original_plus_correction_for_one_year_fails_closed가 정정본을 명시적으로 더해
+    따로 고정한다.
+    """
+    return [record for record in records if not record.get("is_correction")]
+
+
+@pytest.fixture
+def narrative_manifest_path(
+    synthetic_manifest_path: Path,
+    manifest_records: list[dict[str, Any]],
+) -> Path:
+    """해마다 판본이 하나뿐인 합성 manifest. 서술 경로의 정상 흐름은 이것을 쓴다."""
+    _rewrite_manifest(synthetic_manifest_path, _version_unique(manifest_records))
+
+    return synthetic_manifest_path
+
+
 # --------------------------------------------------------------------------
 # 1. 경로 진입
 # --------------------------------------------------------------------------
@@ -167,7 +198,7 @@ def test_canonical_question_reaches_the_narrative_path(
 
 
 def test_metric_less_plan_without_a_scope_stays_unsupported(
-    synthetic_manifest_path: Path,
+    narrative_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
     """
@@ -187,13 +218,121 @@ def test_metric_less_plan_without_a_scope_stays_unsupported(
     result = handle_temporal_compare(
         plan,
         corpus_root=nfd_corpus_root,
-        manifest_path=synthetic_manifest_path,
+        manifest_path=narrative_manifest_path,
     )
 
     assert result.execution_status is ExecutionStatus.BLOCKED
     assert result.answerability_status is None
     assert result.execution_issue is not None
     assert result.execution_issue.reason == "unsupported_comparison_metric"
+
+
+@pytest.mark.parametrize(
+    ("label", "overrides"),
+    [
+        ("서술 범위 + 원천 지표", {"metric": "revenue"}),
+        ("서술 범위 + 파생 개념", {"derived_metric": DerivedMetric.OPERATING_MARGIN}),
+    ],
+)
+def test_mixed_scope_and_metric_plan_is_not_narrative(
+    label: str,
+    overrides: dict[str, Any],
+    narrative_plan: QueryPlan,
+) -> None:
+    """
+    서술 범위와 지표를 함께 담은 계획은 서술 경로가 아니다.
+
+    범위만 보고 서술 경로로 보내면 질문이 함께 밝힌 지표가 조용히 사라진다. 판정은 순수한
+    서술 모양(범위 있음, 지표 없음, 파생 개념 없음)에서만 참이어야 한다.
+    """
+    mixed = replace(narrative_plan, **overrides)
+
+    assert mixed.section_scope is SectionScope.BUSINESS_OVERVIEW, label
+    assert is_narrative_plan(mixed) is False, label
+
+
+@pytest.mark.parametrize(
+    ("label", "overrides"),
+    [
+        ("서술 범위 + 원천 지표", {"metric": "revenue"}),
+        ("서술 범위 + 파생 개념", {"derived_metric": DerivedMetric.OPERATING_MARGIN}),
+    ],
+)
+def test_mixed_scope_and_metric_plan_fails_closed_without_discarding_either(
+    label: str,
+    overrides: dict[str, Any],
+    narrative_plan: QueryPlan,
+    documents_by_year,
+    narrative_manifest_path: Path,
+    nfd_corpus_root: Path,
+) -> None:
+    """
+    범위와 지표를 함께 담은 계획은 어느 경로로도 답하지 않는다.
+
+    셋을 함께 고정한다.
+        서술 경로로 새지 않는다   NOT_COMPARABLE이 나오면 지표를 버리고 서술을 견준 것이다.
+        수치 경로로 새지 않는다   Fact나 Calculation이 나오면 범위를 버리고 값을 견준 것이다.
+        입구에서 막힌다          코퍼스를 보기 전이므로 답변 가능성을 판정하지 않는다.
+
+    매출은 수치 경로가 지원하는 지표라, 범위 검사가 없으면 그대로 통과해 Q07처럼 답한다.
+    그 경우가 이 테스트가 막으려는 것이다.
+    """
+    documents_by_year(UNPAIRABLE_PARAGRAPHS)
+
+    mixed = replace(narrative_plan, **overrides)
+
+    result = handle_temporal_compare(
+        mixed,
+        corpus_root=nfd_corpus_root,
+        manifest_path=narrative_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED, label
+    assert result.answerability_status is None, label
+    assert result.answerability_reason is not AnswerabilityReason.NOT_COMPARABLE, label
+
+    issue = result.execution_issue
+
+    assert issue is not None, label
+    assert issue.stage == STAGE_PATTERN_ENTRY, label
+    assert issue.reason == REASON_UNSUPPORTED_COMPARISON_METRIC, label
+
+    # 어느 쪽 요청도 버리고 답하지 않았다.
+    assert result.facts == [], label
+    assert result.calculations == [], label
+    assert result.evidence == [], label
+    assert result.narrative_comparisons == [], label
+
+
+def test_numeric_plans_without_a_scope_are_unaffected_by_the_narrative_gate() -> None:
+    """
+    범위가 없는 수치 계획(Q07·Q08)은 서술 판정에 걸리지 않는다.
+
+    서술 판정이 범위를 먼저 보므로, 범위가 비어 있는 계획은 그 분기에 들어가지 않는다. 그
+    사실을 계획 모양으로 고정한다. 실행 결과는 test_pattern_c.py가 그대로 고정한다.
+    """
+    q07_like = QueryPlan(
+        question="합성 질문",
+        companies=("테스트반도체",),
+        years=(OLD_YEAR, NEW_YEAR),
+        intent=INTENT_TEMPORAL_COMPARE,
+        metric="revenue",
+    )
+    # QueryPlan.metric의 기본값이 비어 있지 않으므로 파생 개념 계획은 metric을 명시적으로
+    # 비운다. test_pattern_c.py의 _temporal_plan이 같은 이유로 같은 모양을 쓴다.
+    q08_like = QueryPlan(
+        question="합성 질문",
+        companies=("테스트반도체",),
+        years=(OLD_YEAR, NEW_YEAR),
+        intent=INTENT_TEMPORAL_COMPARE,
+        metric=None,
+        derived_metric=DerivedMetric.OPERATING_MARGIN,
+    )
+
+    for plan in (q07_like, q08_like):
+        assert plan.section_scope is None
+        assert is_narrative_plan(plan) is False
+        assert pattern_c.resolve_shape(plan) is not None
 
 
 # --------------------------------------------------------------------------
@@ -205,7 +344,7 @@ def test_metric_less_plan_without_a_scope_stays_unsupported(
 def unpairable_result(
     narrative_plan: QueryPlan,
     documents_by_year,
-    synthetic_manifest_path: Path,
+    narrative_manifest_path: Path,
     nfd_corpus_root: Path,
 ):
     documents_by_year(UNPAIRABLE_PARAGRAPHS)
@@ -213,7 +352,7 @@ def unpairable_result(
     return handle_temporal_compare(
         narrative_plan,
         corpus_root=nfd_corpus_root,
-        manifest_path=synthetic_manifest_path,
+        manifest_path=narrative_manifest_path,
     )
 
 
@@ -301,7 +440,7 @@ def test_verdict_does_not_depend_on_section_contents(
     paragraphs_by_year: dict[int, list[str]],
     narrative_plan: QueryPlan,
     documents_by_year,
-    synthetic_manifest_path: Path,
+    narrative_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
     """
@@ -320,7 +459,7 @@ def test_verdict_does_not_depend_on_section_contents(
     result = handle_temporal_compare(
         narrative_plan,
         corpus_root=nfd_corpus_root,
-        manifest_path=synthetic_manifest_path,
+        manifest_path=narrative_manifest_path,
     )
 
     assert result.execution_status is ExecutionStatus.COMPLETED, label
@@ -360,7 +499,7 @@ def test_diagnostic_does_not_claim_a_content_derived_verdict(
 def test_missing_section_on_one_side_fails_closed(
     narrative_plan: QueryPlan,
     documents_by_year,
-    synthetic_manifest_path: Path,
+    narrative_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
     """
@@ -374,7 +513,7 @@ def test_missing_section_on_one_side_fails_closed(
     result = handle_temporal_compare(
         narrative_plan,
         corpus_root=nfd_corpus_root,
-        manifest_path=synthetic_manifest_path,
+        manifest_path=narrative_manifest_path,
     )
 
     assert result.answerability_reason is not AnswerabilityReason.NOT_COMPARABLE
@@ -390,7 +529,7 @@ def test_ambiguous_section_on_one_side_fails_closed(
     narrative_plan: QueryPlan,
     documents_by_year,
     monkeypatch: pytest.MonkeyPatch,
-    synthetic_manifest_path: Path,
+    narrative_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
     """범위 후보가 여럿이면 하나를 골라 견주지 않는다."""
@@ -414,7 +553,7 @@ def test_ambiguous_section_on_one_side_fails_closed(
     result = handle_temporal_compare(
         narrative_plan,
         corpus_root=nfd_corpus_root,
-        manifest_path=synthetic_manifest_path,
+        manifest_path=narrative_manifest_path,
     )
 
     detail = result.answerability_detail
@@ -429,7 +568,7 @@ def test_ambiguous_section_on_one_side_fails_closed(
 def test_missing_filing_for_one_year_is_not_downgraded_to_partial(
     narrative_plan: QueryPlan,
     manifest_records: list[dict[str, Any]],
-    synthetic_manifest_path: Path,
+    narrative_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
     """
@@ -439,16 +578,16 @@ def test_missing_filing_for_one_year_is_not_downgraded_to_partial(
     """
     remaining = [
         record
-        for record in manifest_records
+        for record in _version_unique(manifest_records)
         if record["rcept_no"] != RECEIPT_BY_YEAR[OLD_YEAR]
     ]
 
-    _rewrite_manifest(synthetic_manifest_path, remaining)
+    _rewrite_manifest(narrative_manifest_path, remaining)
 
     result = handle_temporal_compare(
         narrative_plan,
         corpus_root=nfd_corpus_root,
-        manifest_path=synthetic_manifest_path,
+        manifest_path=narrative_manifest_path,
     )
 
     assert result.answerability_status is not AnswerabilityStatus.PARTIALLY_ANSWERABLE
@@ -465,7 +604,7 @@ def test_ambiguous_filing_is_not_downgraded_to_partial(
     narrative_plan: QueryPlan,
     documents_by_year,
     manifest_records: list[dict[str, Any]],
-    synthetic_manifest_path: Path,
+    narrative_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
     """
@@ -486,17 +625,92 @@ def test_ambiguous_filing_is_not_downgraded_to_partial(
     duplicate["rcept_no"] = "SYNTHETIC9001"
     duplicate["doc_id"] = "periodic_SYNTHETIC9001"
 
-    _rewrite_manifest(synthetic_manifest_path, [*manifest_records, duplicate])
+    _rewrite_manifest(
+        narrative_manifest_path, [*_version_unique(manifest_records), duplicate]
+    )
 
     result = handle_temporal_compare(
         narrative_plan,
         corpus_root=nfd_corpus_root,
-        manifest_path=synthetic_manifest_path,
+        manifest_path=narrative_manifest_path,
     )
 
     assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
     assert result.answerability_reason is AnswerabilityReason.AMBIGUOUS_MATCH
     assert result.answerability_status is not AnswerabilityStatus.PARTIALLY_ANSWERABLE
+
+
+def test_original_plus_correction_for_one_year_fails_closed(
+    narrative_plan: QueryPlan,
+    documents_by_year,
+    manifest_records: list[dict[str, Any]],
+    narrative_manifest_path: Path,
+    nfd_corpus_root: Path,
+) -> None:
+    """
+    같은 해에 원본과 정정본이 함께 있으면 원본을 고르지 않는다.
+
+    판본 선택 정책(D5)이 없으므로 정정본을 조회에서 빼는 것 자체가 원본을 고르는 정책이 된다.
+    정정본을 후보에 넣고, 둘이면 어느 것도 고르지 않는다.
+    """
+    documents_by_year(UNPAIRABLE_PARAGRAPHS)
+
+    original = next(
+        record
+        for record in manifest_records
+        if record["rcept_no"] == RECEIPT_BY_YEAR[NEW_YEAR]
+    )
+    correction = copy.deepcopy(original)
+    correction["rcept_no"] = "SYNTHETIC0001C"
+    correction["doc_id"] = "periodic_SYNTHETIC0001C"
+    correction["is_correction"] = True
+    correction["report_nm"] = f"[기재정정]{original['report_nm']}"
+
+    _rewrite_manifest(
+        narrative_manifest_path, [*_version_unique(manifest_records), correction]
+    )
+
+    result = handle_temporal_compare(
+        narrative_plan,
+        corpus_root=nfd_corpus_root,
+        manifest_path=narrative_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
+    assert result.answerability_reason is AnswerabilityReason.AMBIGUOUS_MATCH
+    assert result.answerability_status is not AnswerabilityStatus.PARTIALLY_ANSWERABLE
+
+    detail = result.answerability_detail
+
+    assert detail is not None
+    assert detail.stage == STAGE_FILING_DISCOVERY
+    assert detail.reason == REASON_AMBIGUOUS_FILING
+    assert "정정본 포함" in detail.detail
+
+    # 원본을 조용히 고르지 않았다. 원본 문서의 근거가 결과에 있으면 고른 것이다.
+    doc_ids = {item.doc_id for item in result.evidence}
+
+    assert DOC_BY_YEAR[NEW_YEAR] not in doc_ids
+    assert "periodic_SYNTHETIC0001C" not in doc_ids
+    assert result.narrative_comparisons == []
+
+
+def test_single_filing_per_year_proceeds_with_corrections_included(
+    unpairable_result,
+) -> None:
+    """
+    정정본을 후보에 넣어도 해마다 1건이면 그대로 진행한다.
+
+    합성 manifest에는 정정본이 없으므로 두 해 모두 1건이고, 비교 불가 판정까지 도달한다.
+    이 테스트가 없으면 정정본 포함이 모든 연도를 모호하게 만드는 회귀를 잡지 못한다.
+    """
+    assert unpairable_result.execution_status is ExecutionStatus.COMPLETED
+    assert unpairable_result.answerability_reason is AnswerabilityReason.NOT_COMPARABLE
+    assert {item.doc_id for item in unpairable_result.evidence} == {
+        DOC_BY_YEAR[OLD_YEAR],
+        DOC_BY_YEAR[NEW_YEAR],
+    }
 
 
 # --------------------------------------------------------------------------
@@ -570,7 +784,7 @@ def test_numeric_not_comparable_message_is_unchanged() -> None:
 
 def test_router_reaches_the_narrative_path_from_the_question_string(
     documents_by_year,
-    synthetic_manifest_path: Path,
+    narrative_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
     documents_by_year(UNPAIRABLE_PARAGRAPHS)
@@ -578,7 +792,7 @@ def test_router_reaches_the_narrative_path_from_the_question_string(
     result = router.answer_question(
         NARRATIVE_QUESTION,
         corpus_root=nfd_corpus_root,
-        manifest_path=synthetic_manifest_path,
+        manifest_path=narrative_manifest_path,
     )
 
     assert result.execution_status is ExecutionStatus.COMPLETED
@@ -592,7 +806,7 @@ def test_router_reaches_the_narrative_path_from_the_question_string(
 def test_narrative_result_is_deterministic_across_runs(
     narrative_plan: QueryPlan,
     documents_by_year,
-    synthetic_manifest_path: Path,
+    narrative_manifest_path: Path,
     nfd_corpus_root: Path,
 ) -> None:
     documents_by_year(UNPAIRABLE_PARAGRAPHS)
@@ -600,13 +814,13 @@ def test_narrative_result_is_deterministic_across_runs(
     first = build_temporal_compare_result(
         narrative_plan,
         corpus_root=nfd_corpus_root,
-        manifest_path=synthetic_manifest_path,
+        manifest_path=narrative_manifest_path,
     )
 
     second = build_temporal_compare_result(
         narrative_plan,
         corpus_root=nfd_corpus_root,
-        manifest_path=synthetic_manifest_path,
+        manifest_path=narrative_manifest_path,
     )
 
     assert first.to_dict() == second.to_dict()

@@ -33,10 +33,12 @@ LLM이 수치를 만들지 않는다:
                                                  잘못된 Fact로 파생값을 만드는 것을 막는다.
     guard②  validate_temporal_comparability      두 파생값을 함께 쓰기 직전(기간 축).
     guard②  validate_cross_entity_comparability  두 파생값을 함께 쓰기 직전(기업 축).
+    guard②  validate_temporal_fact_comparability
+                                                 두 원천 Fact를 함께 쓰기 직전(기간 축).
     guard②  validate_cross_entity_fact_comparability
                                                  두 원천 Fact를 함께 쓰기 직전(기업 축).
 
-    넷 다 C9 하나이며 적용 시점만 다르다
+    다섯 다 C9 하나이며 적용 시점만 다르다
     (docs/agent_design/agent_patterns.md#comparability-validation의-적용-지점).
     연도별 guard①이 각각 통과해도 연도 사이의 어긋남은 남으므로, guard②를 건너뛰면
     2024년 연결 기준과 2025년 별도 기준의 차이가 조용히 나간다.
@@ -100,18 +102,24 @@ from disclosure_agent.common.schemas import (
 
 __all__ = [
     "CalculationBlockedError",
+    "OPERATION_DELTA",
+    "OPERATION_DELTA_PCT",
     "OPERATION_DIFF_PP",
     "OPERATION_RATIO",
     "QUANTUM",
+    "UNIT_PERCENT",
     "UNIT_PERCENTAGE_POINT",
     "compare_calculations",
     "compare_facts",
+    "delta",
+    "delta_pct",
     "diff",
     "ratio",
     "validate_calculation_inputs",
     "validate_cross_entity_comparability",
     "validate_cross_entity_fact_comparability",
     "validate_temporal_comparability",
+    "validate_temporal_fact_comparability",
 ]
 
 # 이 모듈이 수행할 수 있는 연산.
@@ -123,11 +131,30 @@ __all__ = [
 OPERATION_RATIO = "ratio"
 OPERATION_DIFF_PP = "diff_pp"
 
+# 원천 값 두 건의 증감. 파생값을 거치지 않고 Fact에서 바로 나온다.
+#
+# diff_pp와 나누는 이유는 입력이 다르기 때문이다. diff_pp는 이미 백분율인 두 파생값의 차이를
+# percentage point로 내고, delta는 같은 단위를 가진 두 원천 값의 차이를 그 단위 그대로 낸다.
+# 한 이름으로 묶으면 결과 단위가 입력에 따라 달라지는 연산이 되고, 받는 쪽이 3.67이 %p인지
+# 원인지 operation만 보고는 알 수 없다.
+OPERATION_DELTA = "delta"
+OPERATION_DELTA_PCT = "delta_pct"
+
 # 백분율 두 값의 차이가 갖는 단위.
 #
 # 대응표에 자리가 없어 여기서 정한다. 비율의 단위(percent)를 그대로 쓰지 않는 이유는,
 # 45.69%와 -2.10%p가 같은 단위가 되면 받는 쪽이 차이를 비율로 읽기 때문이다.
 UNIT_PERCENTAGE_POINT = "percentage_point"
+
+# 증감률의 단위.
+#
+# UNIT_PERCENTAGE_POINT와 같은 자리에서 같은 이유로 정한다. 증감률은 입력이 원이든 주식 수든
+# 언제나 백분율이므로 파생지표 대응표가 정할 값이 아니고, 그 대응표에 delta_pct 항목도 없다.
+#
+# agent.derived_metrics에도 같은 표기의 상수가 있지만 그쪽에서 가져오지 않는다. 이 모듈은
+# 파생 개념을 모르는 것이 전제이며(모듈 docstring), 대응표를 import하는 순간 "영업이익률의
+# 결과 단위"와 "증감률의 단위"가 한 값을 공유하게 된다. 둘은 우연히 같은 문자열일 뿐이다.
+UNIT_PERCENT = "percent"
 
 # 비율을 백분율로 옮기는 배수.
 PERCENT_SCALE = Decimal(100)
@@ -592,6 +619,164 @@ def validate_temporal_comparability(
         )
 
 
+def validate_temporal_fact_comparability(
+    *,
+    previous: Fact,
+    current: Fact,
+    expected_metric: MetricConcept,
+    expected_previous_year: int,
+    expected_current_year: int,
+) -> None:
+    """
+    같은 기업 두 기간의 원천 Fact를 함께 쓰기 직전에 견줄 수 있는지 본다(Q07).
+
+    이 경로에서 guard가 하나뿐인 이유:
+        Q07은 기간별 파생값을 만들지 않는다. 증감 수치의 입력이 곧 두 기간의 원천 Fact이므로
+        guard①이 적용될 자리가 없고, 단위 정규화 성공(C8)을 확인하는 자리도 여기 하나다
+        (agent_patterns.md Pattern C 수치 경로의 "Q07은 기간별 파생값 없음").
+
+        Q10이 같은 이유로 guard②에서 단위를 함께 보는 것과 같은 구조이며, 축만 다르다.
+        그쪽은 다른 두 기업의 같은 연도를 요구하고 이쪽은 같은 기업의 다른 두 연도를 요구한다.
+
+    요청한 지표와 두 회계연도를 함께 받는 이유:
+        두 Fact가 서로 일치하는 것만으로는 부족하다. 둘 다 2023년과 2024년 값이면 서로는
+        일치하지만 FY2024 대 FY2025를 물은 질문에는 답하지 않은 결과가 되고, 그 사실이 결과
+        어디에도 남지 않는다. validate_cross_entity_fact_comparability가 같은 이유로 지표와
+        연도를 받는 것과 같은 자리다.
+
+    연도 순서를 여기서 보는 이유:
+        증감은 방향을 가진 값이다. previous와 current가 뒤바뀌면 부호가 뒤집히고, 부호가
+        뒤집힌 증감도 그럴듯하다. 호출자가 sorted()로 넘긴다는 약속에 기대면 그 약속을 어긴
+        호출 하나가 조용히 통과한다.
+
+    이전 값이 0인 경우를 여기서 막는 이유:
+        증감액은 정의되지만 증감률은 정의되지 않는다. 한쪽만 만들면 질문이 요구한 수치 두 건
+        중 하나만 남고, 남은 하나로 나머지를 되짚을 수도 없다. 확보한 값으로 답할 수 없다는
+        판정을 계산 직전에 한 번에 내린다.
+
+    결산월 일치는 보지 않는다. Fact에도 Evidence에도 담을 자리가 없다
+    (validate_cross_entity_fact_comparability의 같은 항목 참조).
+
+    Raises:
+        CalculationBlockedError: 규칙 하나라도 어긋난 경우.
+    """
+    # 판정 순서는 좁히는 순서를 따른다. 누구를 -> 무엇을 -> 언제 -> 어떤 기준으로 ->
+    # 어떤 단위로 -> 어떤 값으로. 기업 간 경로와 같은 순서다.
+    if previous.company != current.company:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_PERIODS,
+            f"두 기간의 기업이 다릅니다: {previous.company} / {current.company}. "
+            "시계열 비교는 같은 기업의 두 기간을 견줍니다.",
+        )
+
+    if previous.metric is not current.metric:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_PERIODS,
+            f"두 기간의 지표가 다릅니다: "
+            f"{previous.metric.value} / {current.metric.value}",
+        )
+
+    # 서로 같은 것만 보지 않는다. 둘 다 같은 값으로 잘못 확보된 경우를 통과시키기 때문이며,
+    # _require_expected_unit이 Calculation 경로에서 기대 단위를 함께 보는 것과 같은 이유다.
+    if previous.metric is not expected_metric:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_PERIODS,
+            f"질문이 요청한 지표는 {expected_metric.value}인데 "
+            f"{previous.metric.value}를 받았습니다.",
+        )
+
+    if previous.fiscal_year is None or current.fiscal_year is None:
+        # 연도를 모르는 값끼리는 어느 쪽이 이전인지 정할 수 없다. 순서를 추측하면 부호가
+        # 뒤집힌 증감이 나가고, 뒤집힌 값도 그럴듯하다.
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_PERIODS,
+            "회계연도를 확정하지 못한 Fact로는 증감을 만들지 않습니다: "
+            f"{previous.fact_id!r}={previous.fiscal_year!r} "
+            f"{current.fact_id!r}={current.fiscal_year!r}",
+        )
+
+    if previous.fiscal_year == current.fiscal_year:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_PERIODS,
+            f"두 Fact의 회계연도가 같습니다: {previous.fiscal_year}. "
+            "같은 기간끼리는 증감이 정의되지 않습니다.",
+        )
+
+    if previous.fiscal_year > current.fiscal_year:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_PERIODS,
+            f"이전 기간의 회계연도가 이후 기간보다 뒤입니다: "
+            f"{previous.fiscal_year} > {current.fiscal_year}. "
+            "순서가 뒤바뀌면 증감의 부호가 뒤집힙니다.",
+        )
+
+    if (previous.fiscal_year, current.fiscal_year) != (
+        expected_previous_year,
+        expected_current_year,
+    ):
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_PERIODS,
+            f"질문이 요청한 회계연도는 {expected_previous_year} -> "
+            f"{expected_current_year}인데 "
+            f"{previous.fiscal_year} -> {current.fiscal_year}의 값을 받았습니다.",
+        )
+
+    if previous.fiscal_period != current.fiscal_period:
+        # 연간 값과 분기 값의 차이는 증감이 아니다. 현재 periodic.adapter는 이 자리를 채우지
+        # 않아 양쪽 모두 None이지만(periodic/adapter.py), 채워지는 날 이 검사가 없으면
+        # 사업보고서의 연간 값과 분기보고서의 분기 값이 조용히 견줘진다.
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_PERIODS,
+            f"두 기간의 회계기간 구분이 다릅니다: "
+            f"{previous.fiscal_period!r} / {current.fiscal_period!r}",
+        )
+
+    scope = _require_single_scope(
+        (previous, current), reason=REASON_INCOMPARABLE_PERIODS, subject="두 기간"
+    )
+
+    # 기준을 확정하지 못한 값끼리는 "같다"고 말할 수 없다. 두 기간이 모두 unknown이면 위
+    # 검사는 통과하지만, 한 해가 연결이고 다른 해가 별도일 가능성이 그대로 남는다.
+    if scope is FactAccountingScope.UNKNOWN:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_PERIODS,
+            "회계기준을 확정하지 못한 Fact로는 증감을 만들지 않습니다. "
+            "연결과 별도를 섞어도 그럴듯한 증감이 나옵니다.",
+        )
+
+    if previous.normalized_unit is None or current.normalized_unit is None:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_PERIODS,
+            "정규화 단위가 없는 Fact로는 증감을 만들지 않습니다: "
+            f"{previous.fact_id!r}={previous.normalized_unit!r} "
+            f"{current.fact_id!r}={current.normalized_unit!r}",
+        )
+
+    if previous.normalized_unit != current.normalized_unit:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_PERIODS,
+            f"두 기간의 정규화 단위가 다릅니다: "
+            f"{previous.normalized_unit} / {current.normalized_unit}. "
+            "정규화에 실패한 값끼리 빼면 자릿수가 어긋난 증감이 나갑니다.",
+        )
+
+    # 값 자체가 쓸 수 있는지는 마지막에 본다. 계산 직전에 확인하지 않으면 뺄셈이나 나눗셈
+    # 자리에서 터지고, 그때는 어느 입력이 문제였는지가 결과에 남지 않는다.
+    #
+    # 여기서 나가는 사유는 위와 다르다. unusable_calculation_input은 "그 값으로는 산술이
+    # 성립하지 않는다"이고 대응표에 없으므로 실행 중단으로 남는다. 코퍼스에 답이 없다는
+    # 판정이 아니기 때문이며, guard①이 같은 자리에서 같은 사유를 쓰는 것과 같다.
+    _decimal(current.normalized_value, label=f"이후 Fact {current.fact_id!r}")
+
+    if _decimal(
+        previous.normalized_value, label=f"이전 Fact {previous.fact_id!r}"
+    ).is_zero():
+        raise CalculationBlockedError(
+            REASON_UNUSABLE_CALCULATION_INPUT,
+            f"이전 Fact {previous.fact_id!r}의 값이 0입니다. 증감률이 정의되지 않습니다.",
+        )
+
+
 def validate_cross_entity_comparability(
     *,
     left: CalculationResult,
@@ -919,6 +1104,149 @@ def diff(
         value=str(_quantize(value)),
         unit=UNIT_PERCENTAGE_POINT,
         evidence_ids=_merged_evidence_ids(old.evidence_ids, new.evidence_ids),
+    )
+
+
+def _shared_normalized_unit(previous: Fact, current: Fact) -> str:
+    """
+    두 원천 Fact가 함께 쓰는 정규화 단위를 읽는다.
+
+    증감액의 단위는 정책이 아니라 입력의 성질이다. ratio가 output_unit을 인자로 받는 것과
+    다른 자리인 이유가 그것이다. 비율의 결과 단위는 파생지표 대응표가 정하지만, 두 값을 뺀
+    결과의 단위는 그 두 값이 이미 정해 두었다. 인자로 받으면 대응표에 없는 값을 호출자가
+    지어내야 하고, 지어낸 단위와 실제 값이 어긋나도 결과에는 드러나지 않는다.
+
+    guard②가 이미 같은 것을 확인한 뒤에 불린다. 그래도 다시 보는 이유는 ratio가 분모 0을
+    다시 보는 이유와 같다. 값을 읽는 과정에서 드러나는 실패를 조용히 지나가면 잘못된 수치가
+    만들어진다.
+
+    Raises:
+        CalculationBlockedError: 단위가 없거나 서로 다른 경우.
+    """
+    if previous.normalized_unit is None or current.normalized_unit is None:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_CALCULATION_INPUTS,
+            "정규화 단위가 없는 Fact로는 증감을 만들지 않습니다: "
+            f"{previous.fact_id!r}={previous.normalized_unit!r} "
+            f"{current.fact_id!r}={current.normalized_unit!r}",
+        )
+
+    if previous.normalized_unit != current.normalized_unit:
+        raise CalculationBlockedError(
+            REASON_INCOMPARABLE_CALCULATION_INPUTS,
+            f"두 기간의 정규화 단위가 다릅니다: "
+            f"{previous.normalized_unit} / {current.normalized_unit}",
+        )
+
+    return previous.normalized_unit
+
+
+def delta(
+    *,
+    calculation_id: str,
+    previous: Fact,
+    current: Fact,
+) -> CalculationResult:
+    """
+    같은 기업 두 기간의 원천 Fact에서 증감액을 만든다.
+
+        current - previous
+
+    결과 단위는 두 Fact가 함께 쓰는 정규화 단위다. 원 단위 매출의 증감은 원이고, 그 값을
+    percent나 percentage point로 옮기지 않는다.
+
+    입력 검증은 하지 않는다. 호출자가 validate_temporal_fact_comparability를 먼저 부르며,
+    두 판정을 한 함수에 섞으면 "검증만 하고 계산은 하지 않는" 경로를 시험할 수 없다. 다만
+    값을 읽는 과정에서 발견되는 실패(값 없음·파싱 불가·단위 불일치)는 여기서도 예외로
+    나간다. ratio가 같은 규칙을 쓰는 것과 같은 자리다.
+
+    inputs는 previous, current 순서다. diff가 old, new 순서로 적는 것과 같은 이유이며,
+    뒤집으면 부호가 뒤집힌 증감이 나오고 뒤집힌 값도 그럴듯하다.
+
+    저장된 값이 아니라 Fact의 정규화 값에서 뺀다. 두 원천 값은 반올림을 거치지 않은 값이므로
+    diff가 피하려던 어긋남(중간값과 표기값의 불일치)이 이 경로에는 없다.
+    """
+    previous_value = _decimal(
+        previous.normalized_value, label=f"이전 Fact {previous.fact_id!r}"
+    )
+
+    current_value = _decimal(
+        current.normalized_value, label=f"이후 Fact {current.fact_id!r}"
+    )
+
+    unit = _shared_normalized_unit(previous, current)
+
+    with localcontext() as context:
+        context.prec = PRECISION
+
+        value = current_value - previous_value
+
+    return CalculationResult(
+        calculation_id=calculation_id,
+        operation=OPERATION_DELTA,
+        inputs=[_fact_reference(previous), _fact_reference(current)],
+        value=str(_quantize(value)),
+        unit=unit,
+        evidence_ids=_merged_evidence_ids(previous.evidence_ids, current.evidence_ids),
+    )
+
+
+def delta_pct(
+    *,
+    calculation_id: str,
+    previous: Fact,
+    current: Fact,
+) -> CalculationResult:
+    """
+    같은 기업 두 기간의 원천 Fact에서 증감률을 백분율로 만든다.
+
+        (current - previous) / previous * 100
+
+    증감액 Calculation을 참조하지 않고 원천 Fact 두 건을 직접 참조한다. 두 가지 이유가 있다.
+
+        근거를 되짚는 경로가 짧다. 증감률이 어느 값에서 나왔는지 보려면 Calculation을 한 번 더
+        거치지 않고 Fact로 바로 간다(evidence_and_answerability.md "입력 Fact 2건 전부 참조").
+
+        증감액이 저장 자릿수로 반올림된 값이라는 점이 증감률에 옮겨붙지 않는다. 반올림된
+        분자로 나누면 두 원천 값에서 직접 구한 비율과 미세하게 어긋날 수 있고, 그 어긋남은
+        검산하는 쪽에서만 드러난다.
+
+    분모는 이전 값이다. 이후 값으로 나누면 부호는 같고 크기만 다른 그럴듯한 값이 나온다.
+
+    입력 검증은 delta와 같은 규칙을 따른다. 이전 값이 0이면 여기서도 막는다.
+    validate_temporal_fact_comparability가 이미 같은 것을 보지만, ratio가 분모 0을 다시 보는
+    것과 같은 이유로 계산 직전에도 확인한다.
+    """
+    previous_value = _decimal(
+        previous.normalized_value, label=f"이전 Fact {previous.fact_id!r}"
+    )
+
+    current_value = _decimal(
+        current.normalized_value, label=f"이후 Fact {current.fact_id!r}"
+    )
+
+    if previous_value.is_zero():
+        raise CalculationBlockedError(
+            REASON_UNUSABLE_CALCULATION_INPUT,
+            f"이전 Fact {previous.fact_id!r}의 값이 0입니다. 증감률이 정의되지 않습니다.",
+        )
+
+    # 단위를 결과에 쓰지는 않지만 확인은 한다. 증감률은 언제나 백분율이므로 단위가 어긋나도
+    # 결과 표기는 그대로 percent가 되고, 그때 틀렸다는 사실이 값에도 단위에도 남지 않는다.
+    _shared_normalized_unit(previous, current)
+
+    with localcontext() as context:
+        context.prec = PRECISION
+
+        value = (current_value - previous_value) / previous_value * PERCENT_SCALE
+
+    return CalculationResult(
+        calculation_id=calculation_id,
+        operation=OPERATION_DELTA_PCT,
+        inputs=[_fact_reference(previous), _fact_reference(current)],
+        value=str(_quantize(value)),
+        unit=UNIT_PERCENT,
+        evidence_ids=_merged_evidence_ids(previous.evidence_ids, current.evidence_ids),
     )
 
 

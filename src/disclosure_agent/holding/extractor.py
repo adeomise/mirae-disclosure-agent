@@ -18,7 +18,7 @@ HOLDING_ACODE_ALLOWLIST = {
     "THS_STK_CNT": (MetricConcept.HOLDING_SHARES, "shares"),
     "THS_STK_RT": (MetricConcept.HOLDING_RATIO, "percent"),
 }
-SHARE_VALUE_PATTERN = re.compile(r"^[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)$")
+SHARE_VALUE_PATTERN = re.compile(r"^(?:\d+|\d{1,3}(?:,\d{3})+)$")
 
 
 class HoldingExtractionError(Exception):
@@ -52,7 +52,7 @@ def _normalize_value(acode: str, raw_value: str) -> str:
         raise InvalidHoldingTargetValueError(
             f"invalid target value: acode={acode}"
         ) from error
-    if not value.is_finite():
+    if not value.is_finite() or not Decimal("0") <= value <= Decimal("100"):
         raise InvalidHoldingTargetValueError(f"invalid target value: acode={acode}")
     return format(value, "f")
 

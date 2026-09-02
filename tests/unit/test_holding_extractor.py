@@ -134,7 +134,11 @@ def test_duplicate_target_fails_closed_without_source_text_leakage(
     ("acode", "raw_value"),
     [
         ("THS_STK_CNT", "홍길동"),
+        ("THS_STK_CNT", "-1,000"),
+        ("THS_STK_CNT", "1.5"),
         ("THS_STK_RT", "010-1234-5678"),
+        ("THS_STK_RT", "-3.2"),
+        ("THS_STK_RT", "150"),
     ],
 )
 def test_invalid_target_fails_closed_without_source_text_leakage(
@@ -154,6 +158,35 @@ def test_invalid_target_fails_closed_without_source_text_leakage(
     assert acode in message
     assert raw_value not in message
     assert all(value not in message for value in PII_VALUES)
+
+
+@pytest.mark.parametrize(
+    ("acode", "raw_value", "metric", "normalized_unit"),
+    [
+        ("THS_STK_CNT", "0", MetricConcept.HOLDING_SHARES, "shares"),
+        ("THS_STK_RT", "0", MetricConcept.HOLDING_RATIO, "percent"),
+        ("THS_STK_RT", "100", MetricConcept.HOLDING_RATIO, "percent"),
+    ],
+)
+def test_holding_target_domain_boundaries_are_inclusive(
+    tmp_path: Path,
+    acode: str,
+    raw_value: str,
+    metric: MetricConcept,
+    normalized_unit: str,
+) -> None:
+    document = _document(
+        tmp_path,
+        f'<TE ACODE="{acode}">{raw_value}</TE>',
+    )
+
+    result = extract_holding_facts(document, target_company="테스트발행회사")
+
+    assert len(result.facts) == 1
+    fact = result.facts[0]
+    assert fact.metric is metric
+    assert fact.normalized_value == raw_value
+    assert fact.normalized_unit == normalized_unit
 
 
 def test_extraction_output_does_not_leak_pii_from_target_row(tmp_path: Path) -> None:

@@ -54,8 +54,10 @@ def test_default_dataset_reports_deterministic_metrics() -> None:
         "case_count": 21,
         "synthetic_case_count": 3,
         "paired_case_count": 21,
-        "answerable_cases_requiring_evidence": 16,
-        "unanswerable_cases_without_fact": 4,
+        # Q09 is the verified NOT_COMPARABLE narrative-comparison case: both fiscal
+        # years' sections are found (min_evidence_count stays 2) but no change is asserted.
+        "answerable_cases_requiring_evidence": 15,
+        "unanswerable_cases_without_fact": 5,
         "event_history_case_count": 3,
     }
 

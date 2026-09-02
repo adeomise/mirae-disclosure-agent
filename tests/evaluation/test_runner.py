@@ -134,7 +134,7 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q13",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 14
+    assert sum(question.lifecycle == "future" for question in representative) == 13
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:

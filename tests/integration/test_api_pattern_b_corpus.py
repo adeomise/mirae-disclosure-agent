@@ -143,6 +143,8 @@ def test_q04_runs_through_actual_corpus_http_api() -> None:
     assert any(EXPECTED_SECTION_ANCESTOR in part for part in section_path[:-1])
     assert EXPECTED_SECTION_TITLE in section_path[-1]
 
+    # Evidence may contain only text, only tables, or both. This is an allowlist for every
+    # returned location type, not a requirement that both types be present.
     assert {evidence.location_type for evidence in actual.evidence} <= {
         EvidenceLocationType.TEXT,
         EvidenceLocationType.TABLE,
@@ -154,13 +156,16 @@ def test_q04_runs_through_actual_corpus_http_api() -> None:
 
 @pytest.mark.corpus
 @pytest.mark.parametrize(
-    "question",
+    ("question", "expected_reason"),
     [
-        pytest.param(Q05, id="q05-default-period-policy-pending"),
-        pytest.param(Q06, id="q06-version-policy-pending"),
+        pytest.param(Q05, "missing_year", id="q05-default-period-policy-pending"),
+        pytest.param(Q06, "missing_year", id="q06-version-policy-pending"),
     ],
 )
-def test_pending_summary_policies_stay_closed(question: str) -> None:
+def test_pending_summary_policies_stay_closed(
+    question: str,
+    expected_reason: str,
+) -> None:
     """
     Q04를 연 것이 Q05·Q06을 함께 열지 않는다.
 
@@ -177,3 +182,4 @@ def test_pending_summary_policies_stay_closed(question: str) -> None:
 
     assert payload["execution_status"] == "BLOCKED"
     assert payload["error"]["stage"] == "query_plan"
+    assert payload["error"]["reason"] == expected_reason

@@ -568,6 +568,9 @@ UNAVAILABLE_MESSAGE_BY_REASON: dict[AnswerabilityReason, str] = {
     AnswerabilityReason.INCOMPLETE_CHAIN: (
         "정정 이력의 일부를 확정하지 못해 답변을 확정할 수 없습니다."
     ),
+    AnswerabilityReason.PARTIAL_SOURCE_SUPPORT: (
+        "질문에 필요한 일부 항목의 원문 근거를 확인하지 못해 전체 답변을 확정할 수 없습니다."
+    ),
     # 공시는 찾았고 항목도 있는데 값만 원문에서 공개되지 않았다. "찾지 못했다"(NOT_FOUND)와
     # 다르므로 질문을 좁히라고 안내하지 않는다. 좁혀도 원문에 값이 없다.
     #
@@ -625,6 +628,9 @@ LIMITATION_MESSAGE_BY_REASON: dict[AnswerabilityReason, str] = {
     AnswerabilityReason.WITHHELD_IN_SOURCE: (
         "다만 질문에 필요한 일부 항목은 원문에서 공개되지 않아 확인하지 못했습니다."
     ),
+    AnswerabilityReason.PARTIAL_SOURCE_SUPPORT: (
+        "다만 질문에 필요한 일부 항목은 원문 근거를 확보하지 못해 확인하지 못했습니다."
+    ),
 }
 
 LIMITATION_WITHOUT_REASON_MESSAGE = "다만 요청하신 내용의 일부는 확인하지 못했습니다."
@@ -677,7 +683,10 @@ _UNRESOLVED_REASONS: frozenset[AnswerabilityReason] = frozenset(
 # 그래서 WITHHELD_IN_SOURCE를 여기 넣지 않는 것이 요점이다. 넣으면 "핵심 field 전체가 유보"
 # (D9 case B)가 UNANSWERABLE로 나가지 못하고 Builder에서 멈춘다.
 _PARTIAL_ONLY_REASONS: frozenset[AnswerabilityReason] = frozenset(
-    {AnswerabilityReason.INCOMPLETE_CHAIN}
+    {
+        AnswerabilityReason.INCOMPLETE_CHAIN,
+        AnswerabilityReason.PARTIAL_SOURCE_SUPPORT,
+    }
 )
 
 ALLOWED_REASONS_BY_STATUS: dict[AnswerabilityStatus, frozenset[AnswerabilityReason]] = {

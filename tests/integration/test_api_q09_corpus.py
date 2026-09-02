@@ -172,6 +172,7 @@ def test_q09_runs_through_actual_corpus_http_api() -> None:
     # FY2025는 의도적으로 확정되지 않았다.
     retained = {item["doc_id"] for item in payload["evidence"]}
 
+    assert retained
     assert retained <= resolved_doc_ids
     assert retained.isdisjoint(ambiguous_doc_ids)
 

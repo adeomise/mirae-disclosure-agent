@@ -75,8 +75,10 @@ class CollectionCounts(BaseModel):
     event_links: int | None = Field(default=None, ge=0)
     event_histories: int | None = Field(default=None, ge=0)
     resolved_event_states: int | None = Field(default=None, ge=0)
+    document_summaries: int | None = Field(default=None, ge=0)
     calculations: int | None = Field(default=None, ge=0)
     comparisons: int | None = Field(default=None, ge=0)
+    narrative_comparisons: int | None = Field(default=None, ge=0)
 
 
 class IntegrityExpectation(BaseModel):

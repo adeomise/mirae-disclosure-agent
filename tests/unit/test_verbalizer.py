@@ -786,6 +786,26 @@ def test_equality_of_something_other_than_the_values_is_not_an_equality_claim(
     assert comparison_code(answer, equal_payload()) == "relation_dropped"
 
 
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "두 값은 같은 기준으로 계산되었습니다.",
+        "두 금액은 동일한 단위로 표시되었습니다.",
+        "두 수치는 같은 방식으로 산출되었습니다.",
+    ],
+)
+def test_attributive_form_is_not_an_equality_predicate(claim: str) -> None:
+    """
+    '같은'·'동일한'은 뒤에 오는 명사를 꾸미는 자리다.
+
+    계산 기준이나 표시 단위가 같다는 말이지 값이 같다는 말이 아니다. 어간까지만 보면 이런
+    문장이 동등 진술로 세어지고, 판정이 빠진 답변이 통과한다.
+    """
+    answer = f"{EQUAL_VALUES_SENTENCE} {claim}"
+
+    assert comparison_code(answer, equal_payload()) == "relation_dropped"
+
+
 def test_ranking_answer_appending_an_equality_claim_is_rejected() -> None:
     """우열을 말하고 나서 두 값이 같다고 덧붙이면 판정이 두 개가 된다."""
     payload = comparison_payload(ComparisonRelation.LEFT_GREATER)

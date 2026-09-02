@@ -20,6 +20,7 @@ from disclosure_agent.agent.handlers.cross_entity_compare import (
 )
 from disclosure_agent.agent.handlers.document_summary import handle_document_summary
 from disclosure_agent.agent.handlers.event_history import handle_event_history
+from disclosure_agent.agent.handlers.holding_fact import handle_holding_fact
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
 from disclosure_agent.agent.handlers.temporal_compare import handle_temporal_compare
 from disclosure_agent.agent.query_analyzer import (
@@ -27,6 +28,7 @@ from disclosure_agent.agent.query_analyzer import (
     INTENT_CROSS_ENTITY_COMPARE,
     INTENT_DOCUMENT_SUMMARY,
     INTENT_EVENT_HISTORY,
+    INTENT_HOLDING_FACT,
     INTENT_SINGLE_FACT,
     INTENT_TEMPORAL_COMPARE,
     INTENT_UNANSWERABLE_CHECK,
@@ -107,13 +109,18 @@ def test_document_summary_intent_resolves_to_pattern_b_handler() -> None:
     assert router.resolve_handler(INTENT_DOCUMENT_SUMMARY) is handle_document_summary
 
 
+def test_holding_fact_intent_resolves_to_q03_handler() -> None:
+    assert router.resolve_handler(INTENT_HOLDING_FACT) is handle_holding_fact
+
+
 def test_supported_intents_reports_only_registered_handlers() -> None:
-    """Pattern A / B / C / D / E와 계약 단건 조회(Q02) 여섯이 등록돼 있다."""
+    """Pattern A / B / C / D / E와 Q02/Q03 단건 조회가 등록돼 있다."""
     assert router.supported_intents() == (
         INTENT_CONTRACT_FACT,
         INTENT_CROSS_ENTITY_COMPARE,
         INTENT_DOCUMENT_SUMMARY,
         INTENT_EVENT_HISTORY,
+        INTENT_HOLDING_FACT,
         INTENT_SINGLE_FACT,
         INTENT_TEMPORAL_COMPARE,
     )
@@ -267,6 +274,7 @@ def test_registry_is_restored_between_tests() -> None:
         INTENT_CROSS_ENTITY_COMPARE,
         INTENT_DOCUMENT_SUMMARY,
         INTENT_EVENT_HISTORY,
+        INTENT_HOLDING_FACT,
         INTENT_SINGLE_FACT,
         INTENT_TEMPORAL_COMPARE,
     )

@@ -1075,6 +1075,21 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
             _limitation(result, partial=partial),
         )
 
+    if result.facts and {fact.metric for fact in result.facts} == {
+        MetricConcept.HOLDING_SHARES,
+        MetricConcept.HOLDING_RATIO,
+    }:
+        by_metric = {fact.metric: fact for fact in result.facts}
+        shares = by_metric[MetricConcept.HOLDING_SHARES]
+        ratio = by_metric[MetricConcept.HOLDING_RATIO]
+        if len(result.facts) != 2 or shares.company != ratio.company:
+            raise UnsupportedResultShapeError("지분공시 Fact 묶음의 회사·지표가 일치하지 않습니다.")
+        return _join(
+            f"{shares.company}의 이번 보고 시점 보유주식 수는 "
+            f"{shares.raw_value}주이고, 보유비율은 {ratio.raw_value}%입니다.",
+            _limitation(result, partial=partial),
+        )
+
     if result.facts:
         return _join(
             _single_fact_sentence(result.facts),

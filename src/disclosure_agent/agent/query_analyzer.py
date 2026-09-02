@@ -76,6 +76,7 @@ from disclosure_agent.periodic.extractor import (
 )
 from disclosure_agent.retrieval.metadata_filter import (
     DOCUMENT_CLASS_EVENT,
+    DOCUMENT_CLASS_HOLDING,
     DOCUMENT_CLASS_PERIODIC,
     normalize_company_name,
 )
@@ -90,6 +91,7 @@ __all__ = [
     "INTENT_CROSS_ENTITY_COMPARE",
     "INTENT_DOCUMENT_SUMMARY",
     "INTENT_EVENT_HISTORY",
+    "INTENT_HOLDING_FACT",
     "INTENT_SINGLE_FACT",
     "INTENT_TEMPORAL_COMPARE",
     "INTENT_UNANSWERABLE_CHECK",
@@ -130,6 +132,7 @@ INTENT_EVENT_HISTORY = Intent.EVENT_HISTORY.value
 #     틀렸다는 사실이 드러나지 않는다. 별도 이름이면 handler가 등록될 때까지
 #     unimplemented_intent로 막힌다.
 INTENT_CONTRACT_FACT = "contract_fact"
+INTENT_HOLDING_FACT = "holding_fact"
 
 INTENT_DOCUMENT_SUMMARY = "document_summary"
 INTENT_TEMPORAL_COMPARE = "temporal_compare"
@@ -139,6 +142,7 @@ INTENT_UNANSWERABLE_CHECK = "unanswerable_check"
 KNOWN_INTENTS: tuple[str, ...] = (
     INTENT_SINGLE_FACT,
     INTENT_CONTRACT_FACT,
+    INTENT_HOLDING_FACT,
     INTENT_DOCUMENT_SUMMARY,
     INTENT_TEMPORAL_COMPARE,
     INTENT_CROSS_ENTITY_COMPARE,
@@ -637,6 +641,8 @@ class QueryPlan:
     # 이 값으로 문서를 고르는 일은 여기서 하지 않는다. 실제 후보 대조는 retrieval 계층이
     # 맡는다(agent.event_retrieval.select_contract_filing).
     counterparty: str | None = None
+    # 지분공시의 보고자. companies에는 발행회사만 담는다.
+    filer: str | None = None
     # 질문이 월까지 지정한 경우. Q13처럼 원공시를 월 단위로 지목할 때 쓴다.
     month: int | None = None
     # 정정·후속 문서를 어디까지 볼 것인가. 값은 Contract v0.1의 ChainPolicy를 따른다.
@@ -2065,6 +2071,35 @@ def build_query_plan(
     # missing_year가 되는 일이 없다. 질문에는 기간이 분명히 적혀 있으므로 '연도를 못 읽었다'는
     # 사유는 실제로 일어난 일과 다르다.
     _reject_unsupported_relative_period(question)
+
+    # 지분공시는 보고자와 발행회사 두 곳을 모두 지목한다. 비교 질문이
+    # 아니므로 다중 기업 분기보다 먼저 구조를 확정한다.
+    if "대량보유" in question:
+        if len(companies) != 2:
+            raise UnsupportedQuestionError(
+                reason="ambiguous_holding_entities",
+                detail="지분공시 질문에서 보고자와 발행회사를 하나씩 확정해야 합니다.",
+            )
+        years = _require_years(_extract_years(question))
+        requested = (MetricConcept.HOLDING_SHARES, MetricConcept.HOLDING_RATIO)
+        if not all(token in question for token in ("보유주식 수", "보유비율")):
+            raise UnsupportedQuestionError(
+                reason="unsupported_holding_fields",
+                detail="현재는 보유주식 수와 보유비율을 함께 묻는 질문만 지원합니다.",
+            )
+        return QueryPlan(
+            question=question.strip(),
+            companies=(companies[1],),
+            years=years,
+            month=_extract_month(question),
+            intent=INTENT_HOLDING_FACT,
+            document_class=DOCUMENT_CLASS_HOLDING,
+            document_subtype="대량보유상황보고서",
+            accounting_scope="not_applicable",
+            metric=None,
+            requested_fields=requested,
+            filer=companies[0],
+        )
 
     # 기업이 둘 이상이면 Pattern D다. 이 판정을 나머지 의도 분기보다 먼저 한다.
     #

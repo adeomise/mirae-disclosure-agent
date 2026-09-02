@@ -355,6 +355,7 @@ def test_both_comparison_axes_are_routable() -> None:
         "cross_entity_compare",
         "document_summary",
         "event_history",
+        "holding_fact",
         "single_fact",
         "temporal_compare",
     )

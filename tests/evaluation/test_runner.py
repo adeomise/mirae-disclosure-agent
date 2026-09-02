@@ -54,7 +54,10 @@ def test_default_dataset_reports_deterministic_metrics() -> None:
         "case_count": 21,
         "synthetic_case_count": 3,
         "paired_case_count": 21,
-        "answerable_cases_requiring_evidence": 16,
+        # Q09 is UNRESOLVED / ambiguous_match against the actual corpus: FY2025 has an
+        # original and a correction filing and no periodic-report version policy (D5)
+        # exists, so it is counted in neither bucket below (same convention as Q14).
+        "answerable_cases_requiring_evidence": 15,
         "unanswerable_cases_without_fact": 4,
         "event_history_case_count": 3,
     }

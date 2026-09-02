@@ -32,8 +32,8 @@ Section을 하나로 확정하는 이유:
 - SectionSelection, SectionContentItem 목록
 
 TODO:
-- business_overview·products·financial_statement의 Section 규칙 확정. 지금은 어휘만 있고
-  규칙이 없어 unsupported_section_scope로 막힌다(SECTION_SCOPE_RULES 참조).
+- products·financial_statement의 Section 규칙 확정. 지금은 어휘만 있고 규칙이 없어
+  unsupported_section_scope로 막힌다(SECTION_SCOPE_RULES 참조).
 - Section 내부의 항목 단위(가./나./(1)) 분할. Parser가 본문 P와 TABLE의 문서 내 순서를
   함께 남기지 않아 지금은 Section 경계가 곧 범위 경계다.
 """
@@ -135,19 +135,32 @@ class SectionScopeRule:
 
 # 범위 -> Section 규칙.
 #
-# 지금 담긴 것은 facility_investment 하나다. 나머지 SectionScope 값은 어휘로만 있고 규칙이
-# 없어 unsupported_section_scope로 막힌다. 규칙을 실제 코퍼스로 확인하지 않은 채 넣으면,
-# 확인되지 않은 Section을 요약해 놓고 형식만 맞는 결과가 나간다.
+# 지금 담긴 것은 facility_investment와 business_overview 둘이다. 나머지 SectionScope 값은
+# 어휘로만 있고 규칙이 없어 unsupported_section_scope로 막힌다. 규칙을 실제 코퍼스로 확인하지
+# 않은 채 넣으면, 확인되지 않은 Section을 요약해 놓고 형식만 맞는 결과가 나간다.
 #
 # facility_investment의 근거:
 #     docs/agent_design/retrieval_strategy.md Pattern B가 "사업의 내용 Section 아래 설비
 #     관련 하위 Section으로 범위를 먼저 좁혀야 한다"고 적고 있다. 표준 서식에서 그 자리는
 #     "II. 사업의 내용 / 3. 원재료 및 생산설비"이며, 이 규칙은 그 경로를 가리킨다.
+#
+# business_overview의 근거:
+#     docs/agent_design/retrieval_strategy.md Pattern C가 "Q09는 사업의 내용 Section"을
+#     양쪽 문서에 같은 경로로 적용한다고 적고 있다. 표준 서식에서 사업 구조를 서술하는 자리는
+#     "II. 사업의 내용 / 1. 사업의 개요"이며, 이 규칙은 그 경로를 가리킨다.
+#
+#     상위 Section을 함께 요구하는 것이 여기서도 중요하다. '개요'는 문서 여러 곳에 나오고,
+#     상위 조건이 없으면 회사의 개요나 이사의 경영진단이 함께 걸린다.
 SECTION_SCOPE_RULES: dict[SectionScope, SectionScopeRule] = {
     SectionScope.FACILITY_INVESTMENT: SectionScopeRule(
         scope=SectionScope.FACILITY_INVESTMENT,
         ancestor_tokens=("사업의 내용",),
         title_tokens=("생산설비",),
+    ),
+    SectionScope.BUSINESS_OVERVIEW: SectionScopeRule(
+        scope=SectionScope.BUSINESS_OVERVIEW,
+        ancestor_tokens=("사업의 내용",),
+        title_tokens=("사업의 개요",),
     ),
 }
 

@@ -62,6 +62,7 @@ from disclosure_agent.agent.answer_builder import (
     REASON_AMBIGUOUS_ROOT,
     REASON_INCOMPARABLE_CALCULATION_INPUTS,
     REASON_INCOMPARABLE_ENTITIES,
+    REASON_INCOMPARABLE_NARRATIVE_SECTIONS,
     REASON_INCOMPARABLE_PERIODS,
     REASON_NO_MATCHING_CONTEXT,
     REASON_NO_MATCHING_FILING,
@@ -273,6 +274,19 @@ ANSWERABILITY_BY_STOP: dict[tuple[str, str], Answerability] = {
         AnswerabilityReason.NOT_COMPARABLE,
     ),
     (STAGE_COMPARABILITY, REASON_INCOMPARABLE_ENTITIES): Answerability(
+        AnswerabilityStatus.UNANSWERABLE,
+        AnswerabilityReason.NOT_COMPARABLE,
+    ),
+    # 서술 비교(Q09)가 두 연도의 Section을 모두 확보한 뒤 내린 판정이다. 위 셋과 같은 자리에
+    # 두는 이유도 같다. 코퍼스를 끝까지 읽고 내린 판정이므로 실행은 끝났고, 확보한 것으로는
+    # 답할 수 없다는 판정이다.
+    #
+    # UNANSWERABLE이지 UNRESOLVED가 아니다. 문서도 Section도 하나로 확정했으므로 대상이
+    # 모호한 상태가 아니다. 짝지을 수 없다는 판정 자체는 끝났다.
+    #
+    # PARTIALLY_ANSWERABLE로 낮추지 않는다. 확보한 서술을 일부 답으로 내보내면 견주지 못한
+    # 결과가 견준 결과처럼 읽힌다.
+    (STAGE_COMPARABILITY, REASON_INCOMPARABLE_NARRATIVE_SECTIONS): Answerability(
         AnswerabilityStatus.UNANSWERABLE,
         AnswerabilityReason.NOT_COMPARABLE,
     ),

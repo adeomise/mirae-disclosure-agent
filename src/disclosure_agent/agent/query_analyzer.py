@@ -361,15 +361,23 @@ PERIODIC_REPORT_TOKENS = ("사업보고서",)
 
 # 문서 내 범위(section_scope) 표기.
 #
-# 지금 알아보는 것은 설비 투자 범위 하나다. 나머지 SectionScope 값은 어휘로만 있고 여기에
-# 표기가 없다. 표기를 먼저 넣으면 Section 규칙이 없는 범위의 계획이 만들어지고, 그 계획은
-# handler에서 막힌다. 막히는 자리가 뒤로 밀릴 뿐 답하지 못하는 것은 같으므로, 규칙과 표기를
-# 함께 늘린다.
+# 알아보는 것은 설비 투자와 사업 개요 두 범위다. 나머지 SectionScope 값은 어휘로만 있고
+# 여기에 표기가 없다. 표기를 먼저 넣으면 Section 규칙이 없는 범위의 계획이 만들어지고, 그
+# 계획은 handler에서 막힌다. 막히는 자리가 뒤로 밀릴 뿐 답하지 못하는 것은 같으므로, 규칙과
+# 표기를 함께 늘린다. business_overview도 그 규칙(periodic.sections)과 같은 변경에서 늘렸다.
 #
 # 판정 전에 질문의 공백을 걷어낸다. "설비 투자"와 "설비투자"가 같은 범위를 가리키는데
 # 표기만 다르며, 두 벌을 적어 두면 한쪽을 빠뜨렸을 때 조용히 막힌다.
+#
+# business_overview의 표기를 셋으로 둔 이유:
+#     "사업 구조"는 Q09가 쓰는 표현이고, "사업 개요"·"사업의 개요"는 사업보고서가 그 내용을
+#     담고 있는 Section의 제목이다. 셋 다 같은 범위를 가리키므로 함께 둔다.
+#
+#     '사업'만으로는 알아보지 않는다. 공백을 걷어내면 "사업보고서"가 그 조건을 만족해,
+#     문서 종류를 밝힌 모든 질문이 이 범위를 가리킨 것으로 읽힌다.
 SECTION_SCOPE_TOKENS: tuple[tuple[SectionScope, tuple[str, ...]], ...] = (
     (SectionScope.FACILITY_INVESTMENT, ("설비", "시설투자")),
+    (SectionScope.BUSINESS_OVERVIEW, ("사업구조", "사업개요", "사업의개요")),
 )
 
 # --------------------------------------------------------------------------
@@ -1601,9 +1609,20 @@ def _build_temporal_compare_plan(
     years=(2025,)). "전년"을 연도로 옮기려면 기준 시점 정책이 필요하고 그것은 Pattern C
     범위다. 미해결 상대기간을 표현해야 할 때가 오면 공유 Contract의 Period.kind가 그 자리를
     이미 갖고 있으므로, 그때 agent -> common 변환 경계에서 정한다.
+
+    문서 내 범위를 함께 읽는 이유(Q09):
+        시계열 비교에는 수치 경로와 서술 경로가 있다(agent_patterns.md Pattern C). 두 경로를
+        가르는 것은 '지표를 읽지 못했다'가 아니라 '어느 서술 범위를 견주라고 했는가'이다.
+        지표가 비어 있다는 것만으로 서술 비교라고 단정하면, 아직 어휘가 없는 원천 지표를 물은
+        질문이 서술 경로로 끌려가 엉뚱한 Section을 견준 답이 나온다. 그래서 질문이 범위를
+        밝힌 경우에만 이 값을 담고, 읽지 못하면 None으로 둔 채 실행하는 쪽의 판정에 맡긴다.
+
+        범위를 읽는 일은 _extract_section_scope 하나가 한다. Pattern B와 같은 어휘를 쓰며,
+        여기에 따로 대응표를 두면 같은 표현에 두 벌의 규칙이 생긴다.
     """
     accounting_scope, scope_explicit = _extract_accounting_scope(question)
     metric, derived_metric = _resolve_requested_metrics(question)
+    section_scope = _extract_section_scope(question)
 
     listed = ", ".join(str(year) for year in years)
 
@@ -1625,6 +1644,7 @@ def _build_temporal_compare_plan(
         accounting_scope=accounting_scope,
         metric=metric,
         derived_metric=derived_metric,
+        section_scope=section_scope,
         accounting_scope_explicit=scope_explicit,
         relative_period=relative_period,
         warnings=(f"{detail} 시계열 비교로 해석했습니다.",),

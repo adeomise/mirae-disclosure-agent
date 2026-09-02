@@ -129,10 +129,11 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
     }
     assert {question.case_id for question in representative if question.lifecycle == "active"} == {
         "q01",
+        "q02",
         "q13",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 15
+    assert sum(question.lifecycle == "future" for question in representative) == 14
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -187,6 +188,53 @@ def test_active_q01_gold_pins_corpus_verified_fact() -> None:
     ]
     assert q01.min_evidence_count == 1
     assert q01.integrity.fact_evidence_references is True
+
+
+def test_active_q02_gold_pins_actual_contract_facts_and_evidence() -> None:
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    q02 = {gold.case_id: gold for gold in loaded.gold_answers}["q02"]
+
+    assert questions["q02"].question == (
+        "한화오션이 2025년 9월 Yang Ming과 체결한 계약의 계약금액과 계약기간은?"
+    )
+    assert q02.execution_status is ExecutionStatus.COMPLETED
+    assert q02.status is AnswerabilityStatus.ANSWERABLE
+    assert q02.reason is None
+    assert q02.counts.model_dump(exclude_none=True) == {"facts": 3, "evidence": 3}
+    actual_facts = [
+        fact.model_dump(exclude_none=True, mode="json")
+        for fact in q02.expected_facts()
+    ]
+    assert actual_facts == [
+        {
+            "company": "한화오션",
+            "metric": "contract_amount",
+            "normalized_value": "1933600000000",
+            "normalized_unit": "KRW",
+            "evidence_ids": [
+                "evidence_exchange_20250917800008_contract_amount"
+            ],
+        },
+        {
+            "company": "한화오션",
+            "metric": "contract_start_date",
+            "normalized_value": "2025-09-16",
+            "evidence_ids": [
+                "evidence_exchange_20250917800008_contract_start_date"
+            ],
+        },
+        {
+            "company": "한화오션",
+            "metric": "contract_end_date",
+            "normalized_value": "2029-05-31",
+            "evidence_ids": [
+                "evidence_exchange_20250917800008_contract_end_date"
+            ],
+        },
+    ]
+    assert q02.min_evidence_count == 3
+    assert q02.integrity.fact_evidence_references is True
 
 
 def test_active_q13_gold_pins_corpus_verified_chain_structure() -> None:
@@ -833,6 +881,61 @@ def test_multiple_fact_expectations_fail_without_distinct_matches() -> None:
     failures = compare_prediction(gold, prediction("case"))
 
     assert any(item.startswith("facts:") for item in failures)
+
+
+def test_expected_fact_company_mismatch_fails() -> None:
+    gold = answerable_gold(
+        "case",
+        facts=[{"company": "Expected Company", "metric": "revenue"}],
+    )
+
+    failures = compare_prediction(gold, prediction("case"))
+
+    assert failures == ["facts: expected fields did not match distinct predicted Facts"]
+
+
+def test_expected_fact_evidence_ids_require_an_exact_non_dangling_match() -> None:
+    gold = answerable_gold(
+        "case",
+        facts=[
+            {
+                "metric": "contract_amount",
+                "normalized_value": "100",
+                "normalized_unit": "KRW",
+                "evidence_ids": ["evidence-expected"],
+            }
+        ],
+        integrity={"fact_evidence_references": True},
+    )
+
+    def contract_prediction(evidence_id: str) -> PredictionCase:
+        return prediction(
+            "case",
+            facts=[
+                {
+                    "fact_id": "fact-1",
+                    "company": "Synthetic Company",
+                    "metric": "contract_amount",
+                    "accounting_scope": "not_applicable",
+                    "normalized_value": "100",
+                    "normalized_unit": "KRW",
+                    "evidence_ids": [evidence_id],
+                }
+            ],
+            evidence=[
+                {
+                    "evidence_id": evidence_id,
+                    "doc_id": "doc-1",
+                    "location_type": "table",
+                }
+            ],
+        )
+
+    assert compare_prediction(gold, contract_prediction("evidence-expected")) == []
+
+    failures = compare_prediction(gold, contract_prediction("evidence-wrong"))
+
+    assert failures == ["facts: expected fields did not match distinct predicted Facts"]
 
 
 def test_dangling_fact_evidence_reference_fails() -> None:

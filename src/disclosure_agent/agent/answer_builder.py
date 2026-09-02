@@ -384,6 +384,22 @@ METRIC_LABELS: dict[MetricConcept, str] = {
     MetricConcept.OPERATING_INCOME: "영업이익",
 }
 
+# 계약 조회(Q02) 문장이 쓸 거래소공시 필드 표기.
+#
+# METRIC_LABELS와 합치지 않는다. 저쪽은 재무제표 축(회계연도·연결기준)을 전제한 단일 Fact
+# 템플릿이 쓰는 표기이고, 계약금액과 계약기간에는 그 축이 없다. 한 표에 담으면 계약 지표가
+# 그 템플릿으로도 흘러 들어가 "2025년 연결 기준 계약금액" 같은 문장이 만들어진다.
+# DERIVED_METRIC_LABELS를 따로 둔 것과 같은 자리다.
+# 표기가 문장에 그대로 쓰이는 것은 계약금액뿐이다. 시작일·종료일은 "계약기간은 A부터
+# B까지"로 묶여 나가므로 낱개 표기가 문장에 나타나지 않는다. 그래도 표에 두는 이유는 이 표가
+# "어떤 지표가 거래소공시 계약 필드인가"를 정하는 자리이기도 하기 때문이다
+# (_is_contract_fact_bundle).
+CONTRACT_METRIC_LABELS: dict[MetricConcept, str] = {
+    MetricConcept.CONTRACT_AMOUNT: "계약금액",
+    MetricConcept.CONTRACT_START_DATE: "계약 시작일",
+    MetricConcept.CONTRACT_END_DATE: "계약 종료일",
+}
+
 ACCOUNTING_SCOPE_LABELS: dict[FactAccountingScope, str] = {
     FactAccountingScope.CONSOLIDATED: "연결",
     FactAccountingScope.SEPARATE: "별도",
@@ -967,6 +983,17 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
             "함께 있습니다. 두 결과를 한 문장으로 잇는 형태가 정해지지 않았습니다."
         )
 
+    # 계약 조회 결과를 단일 Fact 경로보다 먼저 본다.
+    #
+    # Q02는 한 계약을 서술하는 여러 값을 함께 확보한다. 아래 단일 Fact 경로는 여러 건에서
+    # 멈추도록 만들어졌고 그 가드는 그대로 두어야 한다. 여기서 먼저 가르지 않으면 계약
+    # 질문이 그 가드에 걸려 답이 사라진다.
+    if result.facts and _is_contract_fact_bundle(result.facts):
+        return _join(
+            _contract_fact_sentence(result.facts),
+            _limitation(result, partial=partial),
+        )
+
     if result.facts:
         return _join(
             _single_fact_sentence(result.facts),
@@ -1078,6 +1105,114 @@ def _summary_item_counts(summary: DocumentSummary) -> str:
         )
 
     return ", ".join(parts)
+
+
+def _is_contract_fact_bundle(facts: list[Fact]) -> bool:
+    """거래소공시 계약 필드만으로 이루어진 결과인가.
+
+    전부일 때만 참이다. 계약 필드와 재무 지표가 섞인 결과는 이 문장 형태가 정해지지 않았고,
+    한쪽을 골라 적으면 나머지를 물었다는 사실이 사라진다. 그런 결과는 아래 단일 Fact 경로로
+    내려가 거기서 멈춘다.
+    """
+    return all(fact.metric in CONTRACT_METRIC_LABELS for fact in facts)
+
+
+def _contract_fact_sentence(facts: list[Fact]) -> str:
+    """
+    한 계약에서 확보한 값들을 문장 하나로 옮긴다.
+
+    값을 만들지 않는다. 확보한 Fact에 적힌 것만 옮기며, 없는 필드는 문장에 나타나지 않는다.
+    요청했는데 없는 필드는 여기까지 오지 않는다. adapt_contract_facts가 전부 아니면 하나도
+    만들지 않으므로, 이 자리의 Fact 묶음은 이미 요청한 값을 전부 담고 있다.
+
+    시작일과 종료일을 기간 하나로 적는다:
+        "계약 시작일은 A입니다. 계약 종료일은 B입니다"로 나누어 적으면 두 값이 같은 계약의
+        양 끝이라는 관계가 문장에서 사라진다. 한쪽만 있는 결과는 아래에서 막는다. 없는 쪽을
+        추측해 기간을 만들지 않는다.
+
+    회계연도와 연결/별도 구절을 붙이지 않는다:
+        계약금액과 계약기간은 회계기간의 값이 아니고 거래소공시에는 연결·별도 구분이 없다.
+        Fact도 그렇게 담겨 있으므로(fiscal_year=None, accounting_scope=not_applicable)
+        여기서 덧붙일 것이 없다.
+    """
+    companies = {fact.company for fact in facts}
+
+    if len(companies) > 1:
+        raise UnsupportedResultShapeError(
+            f"계약 문장에 기업이 {len(companies)}곳 실려 있습니다: "
+            f"{', '.join(sorted(companies))}. 한 계약을 서술하는 문장이므로 기업은 한 곳이어야 "
+            "하며, 한 곳을 골라 적지 않습니다."
+        )
+
+    by_metric = {fact.metric: fact for fact in facts}
+
+    if len(by_metric) != len(facts):
+        raise UnsupportedResultShapeError(
+            "같은 계약 필드가 여러 건 실려 있습니다. 어느 값이 정본인지 정해지지 않아 "
+            "하나를 골라 적지 않습니다."
+        )
+
+    start = by_metric.get(MetricConcept.CONTRACT_START_DATE)
+    end = by_metric.get(MetricConcept.CONTRACT_END_DATE)
+
+    # 계약기간이 없으면 어느 계약인지 문장이 밝히지 못한다.
+    #
+    # 한 기업은 한 해에 여러 건의 공급계약을 공시한다. "{회사}의 계약금액은 X원입니다"는
+    # 형식은 자연스럽지만 어느 계약인지 특정되지 않은 문장이고, 읽는 쪽은 그 기업의 유일한
+    # 계약으로 읽는다. 계약기간은 Fact에 이미 실려 있는 값이면서 그 계약을 다른 계약과
+    # 구분해 준다.
+    #
+    # 상대방으로 밝히는 편이 더 낫지만 그 값은 여기까지 오지 않는다. 계약 상대방은
+    # QueryPlan에 있고 AgentExecutionResult에는 자리가 없다. 자리를 만드는 것은 공유
+    # Contract 개정이므로 이 범위에서 하지 않는다.
+    if start is None or end is None:
+        listed = ", ".join(sorted(metric.value for metric in by_metric))
+
+        raise UnsupportedResultShapeError(
+            f"계약기간 없이 계약 값을 문장으로 옮기지 않습니다: {listed}. "
+            "어느 계약인지 문장에서 특정되지 않아, 그 기업의 유일한 계약으로 읽히는 답이 "
+            "나갑니다. 계약을 식별하는 표현을 먼저 정하십시오."
+        )
+
+    clauses: list[str] = []
+
+    amount = by_metric.get(MetricConcept.CONTRACT_AMOUNT)
+
+    if amount is not None:
+        label = CONTRACT_METRIC_LABELS[MetricConcept.CONTRACT_AMOUNT]
+
+        clauses.append(f"{label}{_topic_particle(label)} {_fact_value(amount)}")
+
+    clauses.append(
+        f"계약기간은 {_contract_date_value(start)}부터 {_contract_date_value(end)}까지"
+    )
+
+    return f"{facts[0].company}의 {', '.join(clauses)}입니다."
+
+
+def _contract_date_value(fact: Fact) -> str:
+    """
+    계약 일자 Fact의 값.
+
+    단위를 요구하지 않는 것이 _fact_value와 다른 점이다. 저쪽은 수량을 적으므로 단위가 없으면
+    자릿수를 알 수 없어 멈춘다. 날짜는 수량이 아니라 그 자체로 완결된 표기이며, 단위를
+    요구하면 정상적인 Fact가 답하지 못하고 멈춘다.
+
+    원문 표기를 먼저 쓴다. 공시 대조에 맞는 것은 문서에 적힌 표기다.
+    """
+    for candidate in (fact.raw_value, fact.normalized_value):
+        if candidate is None:
+            continue
+
+        rendered = str(candidate).strip()
+
+        if rendered:
+            return rendered
+
+    raise MissingAnswerSupportError(
+        f"Fact {fact.fact_id!r}에 적을 일자 값이 없습니다. "
+        "값이 비어 있는 상태로는 문장을 만들지 않습니다."
+    )
 
 
 def _single_fact_sentence(facts: list[Fact]) -> str:

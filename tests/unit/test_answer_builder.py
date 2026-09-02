@@ -2427,3 +2427,72 @@ def test_delta_amount_with_an_unlabelled_unit_stops() -> None:
 
     with pytest.raises(UnsupportedResultShapeError):
         build_answer_response(result)
+
+
+def test_delta_and_delta_pct_must_reference_the_facts_in_the_same_order() -> None:
+    """
+    같은 Fact 2건을 쓰되 방향이 서로 반대인 결과는 문장이 되지 않는다.
+
+    집합으로만 보면 통과한다. 그러면 증감액은 2024 -> 2025의 값이고 증감률은 2025 -> 2024의
+    값인데, 문장 조립이 이전·이후를 증감액에서만 읽으므로 부호가 서로 어긋난 두 수치가 한
+    문장에 나란히 실린다. 받는 쪽은 어느 쪽이 맞는지 알 수 없다.
+    """
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(input_ids=("fact_2024", "fact_2025")),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+                input_ids=("fact_2025", "fact_2024"),
+            ),
+        ]
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_delta_and_delta_pct_in_the_same_order_are_accepted() -> None:
+    """대조군. 순서가 같으면 지금까지처럼 문장이 된다."""
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(input_ids=("fact_2024", "fact_2025")),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+                input_ids=("fact_2024", "fact_2025"),
+            ),
+        ]
+    )
+
+    answer = build_answer_response(result).answer
+
+    assert "200000000.0000원" in answer
+    assert "20.0000%" in answer
+
+
+def test_delta_referencing_one_fact_twice_stops() -> None:
+    """
+    두 참조가 같은 Fact를 가리키면 견준 것이 없다.
+
+    순서 검사만으로는 통과한다. 두 Calculation이 똑같이 어긋나 있기 때문이다.
+    """
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(input_ids=("fact_2024", "fact_2024")),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+                input_ids=("fact_2024", "fact_2024"),
+            ),
+        ]
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)

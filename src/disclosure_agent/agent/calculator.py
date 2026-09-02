@@ -73,7 +73,7 @@ guard②이 축마다 따로 있는 이유:
 - Contract의 CalculationResult
 
 TODO:
-- delta·delta_pct·aggregate 등 나머지 수치형 연산(Q07·Q12)
+- aggregate 등 나머지 수치형 연산(Q12)
 """
 
 from __future__ import annotations

@@ -1139,14 +1139,24 @@ def _is_temporal_delta_shape(result: AgentExecutionResult) -> bool:
     같은 기업 두 기간의 증감 결과인가(Q07, Pattern C의 원천 지표 모양).
 
     좁게 본다. 개수만 맞는 결과를 통과시키면 다른 Pattern이 우연히 Fact 2건과 Calculation
-    2건을 실었을 때 그것이 증감 문장으로 나간다. 그래서 세 가지를 함께 본다.
+    2건을 실었을 때 그것이 증감 문장으로 나간다. 그래서 네 가지를 함께 본다.
 
         Fact 2건 / Calculation 2건
         두 Calculation의 연산이 증감액과 증감률이고 그 순서다
-        두 Calculation이 참조하는 것이 그 Fact 2건뿐이다
+        두 Calculation의 입력 참조가 순서까지 같다
+        그 참조가 결과에 실린 Fact 2건이고 둘 다 Fact 참조다
 
-    마지막 조건이 문장의 근거를 고정한다. 이 자리를 지나면 아래 문장 조립이 참조를 따라
-    이전·이후를 읽으므로, 참조가 다른 값을 가리키는 결과는 여기서 걸러야 한다.
+    셋째 조건을 집합이 아니라 순서로 보는 이유:
+        아래 문장 조립은 이전·이후를 증감액의 inputs에서 읽고, 증감률은 값을 그대로 옮긴다.
+        두 Calculation이 같은 Fact 2건을 쓰되 순서가 서로 반대이면, 집합으로는 같으므로
+        통과하지만 증감액은 A->B의 값이고 증감률은 B->A의 값이 된다. 그 둘을 한 문장에 적으면
+        부호가 서로 어긋난 수치가 나란히 실리고, 받는 쪽은 어느 쪽이 맞는지 알 수 없다.
+
+        순서까지 같은지 보면 그 결과는 문장이 되지 않고 아래 단일 Fact 경로로 내려가 멈춘다.
+        조용히 틀린 문장이 나가는 쪽이 아니라 문장을 만들지 않는 쪽으로 실패한다.
+
+    Fact 목록의 순서는 보지 않는다. 확보 순서일 뿐 시간 순서라는 보장이 없고, 시간 순서는
+    증감액의 inputs가 정한다(_temporal_delta_sentence).
 
     ComparisonResult는 보지 않는다. 이 함수에 닿기 전에 우열 판정 분기가 먼저 갈라지므로
     여기까지 온 결과에는 판정이 없다.
@@ -1160,14 +1170,24 @@ def _is_temporal_delta_shape(result: AgentExecutionResult) -> bool:
     ):
         return False
 
-    fact_ids = {fact.fact_id for fact in result.facts}
+    amount, rate = result.calculations
 
-    return all(
-        [item.input_type for item in calculation.inputs]
-        == [ResultInputType.FACT, ResultInputType.FACT]
-        and {item.input_id for item in calculation.inputs} == fact_ids
-        for calculation in result.calculations
-    )
+    ordered = [(item.input_type, item.input_id) for item in amount.inputs]
+
+    if ordered != [(item.input_type, item.input_id) for item in rate.inputs]:
+        return False
+
+    if [input_type for input_type, _ in ordered] != [
+        ResultInputType.FACT,
+        ResultInputType.FACT,
+    ]:
+        return False
+
+    # 같은 Fact를 두 번 가리키는 참조는 여기서 걸린다. 그 경우 아래 집합의 크기가 1이 되어
+    # Fact 2건의 식별자 집합과 같아지지 않는다.
+    return {input_id for _, input_id in ordered} == {
+        fact.fact_id for fact in result.facts
+    }
 
 
 def _temporal_delta_sentence(result: AgentExecutionResult) -> str:

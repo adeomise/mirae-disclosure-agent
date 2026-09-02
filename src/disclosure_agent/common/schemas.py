@@ -267,6 +267,83 @@ class ComparisonResult(BaseModel):
     relation: ComparisonRelation
 
 
+class NarrativeComparisonClaim(BaseModel):
+    """One observed difference between two fiscal years' narrative sections.
+
+    양쪽 연도의 Evidence를 모두 요구한다:
+        서술 비교는 "무엇이 달라졌는가"를 말한다. 한쪽 연도의 근거만으로는 그 연도에 무엇이
+        적혀 있었는지까지만 말할 수 있고, 달라졌다는 진술은 다른 연도를 함께 봐야 성립한다.
+        한쪽이 비어도 통과하면 한 해의 서술을 변화로 옮겨 적은 항목이 형식만 맞는 채로 남는다
+        (docs/agent_design/evidence_and_answerability.md 유형 3 "변화 항목마다 해당 연도
+        Evidence").
+
+    값도 원인도 담지 않는다:
+        Q09는 계산 경로를 지나지 않으므로 수치를 담을 자리가 없고(agent_patterns.md Pattern C
+        서술 경로), 왜 달라졌는지는 원문이 말하지 않는 한 추론이다. 담을 자리를 만들어 두면
+        비워 두기로 한 판단이 다음 구현에서 조용히 채워진다.
+    """
+
+    claim_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    left_evidence_ids: list[str] = Field(min_length=1)
+    right_evidence_ids: list[str] = Field(min_length=1)
+
+
+class NarrativeComparisonResult(BaseModel):
+    """Two fiscal years of one company's same semantic section, compared as narrative.
+
+    claims가 비어 있는 것과 결과가 없는 것은 다르다:
+        claims=[]는 "양쪽을 모두 읽었고 의미 있는 변화를 찾지 못했다"이며 그 자체가 답이다.
+        그래서 최소 길이를 두지 않는다. 반대로 어느 한쪽 Section을 확정하지 못한 경우는 이
+        결과를 만들지 않고 상위 단계가 막는다. 둘을 같은 모양으로 두면 '변화 없음'과 '보지
+        못함'이 구분되지 않으며, 그것이 이 문항의 주요 실패 모드다
+        (docs/agent_design/representative_questions.md Q09).
+
+    section_path를 양쪽 모두 요구하는 이유:
+        같은 의미 범위를 견줬다는 사실은 결과에 남아야 확인할 수 있다. 경로가 없으면 어느
+        Section을 읽었는지 결과만 봐서는 드러나지 않는다.
+
+    CalculationResult·ComparisonResult와 잇지 않는다:
+        Q09는 수치 비교가 아니다. 참조를 담을 자리를 만들면 서술 결과가 수치 결과의 근거로
+        쓰일 수 있게 되고, 그 경로는 이 Pattern이 만들지 않는다.
+    """
+
+    comparison_id: str = Field(min_length=1)
+    company: str = Field(min_length=1)
+    section_scope: SectionScope
+    left_fiscal_year: int
+    right_fiscal_year: int
+    left_section_path: list[str] = Field(min_length=1)
+    right_section_path: list[str] = Field(min_length=1)
+    claims: list[NarrativeComparisonClaim] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def require_ordered_distinct_years(self) -> "NarrativeComparisonResult":
+        """
+        두 회계연도가 서로 다르고 오래된 쪽이 left인지 확인한다.
+
+        순서를 고정하는 이유는 Pattern C의 수치 경로가 변화량을 시간 순서로 만드는 것과 같다
+        (handlers/temporal_compare의 ``sorted(plan.years)``). 질문에 적힌 순서를 그대로 쓰면
+        같은 변화가 방향이 뒤집힌 채로 서술되고, 뒤집힌 서술도 그럴듯하다.
+
+        같은 연도를 막는 이유는, 한 해를 자기 자신과 견준 결과는 변화가 없다는 판정처럼
+        보이지만 실제로는 비교를 하지 않은 것이기 때문이다.
+        """
+        if self.left_fiscal_year == self.right_fiscal_year:
+            raise ValueError(
+                "NarrativeComparisonResult는 서로 다른 두 회계연도를 요구합니다: "
+                f"{self.left_fiscal_year}"
+            )
+
+        if self.left_fiscal_year > self.right_fiscal_year:
+            raise ValueError(
+                "NarrativeComparisonResult의 left_fiscal_year는 right_fiscal_year보다 "
+                f"앞서야 합니다: {self.left_fiscal_year} > {self.right_fiscal_year}"
+            )
+
+        return self
+
+
 class ConversionGap(BaseModel):
     """Structured information that cannot yet be represented by the contract."""
 
@@ -302,6 +379,10 @@ class AgentExecutionResult(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     calculations: list[CalculationResult] = Field(default_factory=list)
     comparisons: list[ComparisonResult] = Field(default_factory=list)
+    # 서술 비교(Q09)의 결과. comparisons와 나눠 둔다. ComparisonResult는 두 값의 우열이고
+    # 이쪽은 두 서술의 변화 항목이라, 한 목록에 담으면 받는 쪽이 어느 것이 수치 판정인지
+    # 항목마다 확인해야 한다.
+    narrative_comparisons: list[NarrativeComparisonResult] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     conversion_gaps: list[ConversionGap] = Field(default_factory=list)
 

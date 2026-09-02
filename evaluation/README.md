@@ -37,10 +37,12 @@ case may instead use structural gold: at least one specified collection count or
 positive `min_evidence_count`. Completely empty future gold is rejected.
 
 The comparator supports optional exact collection counts, multiple partial Fact
-expectations, canonical execution/answerability fields, and Fact/Calculation to
-Evidence reference integrity. Expected Fact fields that are omitted are not
-compared. Event, EventLink, EventHistory, and Calculation content rubrics remain
-future extensions; their collection counts can already be checked.
+expectations, canonical execution/answerability fields, and non-empty Fact/Calculation
+to Evidence reference integrity. Expected Fact fields that are omitted are not
+compared. Calculation gold can fix operation/unit order and independently recompute
+`delta`/`delta_pct` values from their ordered Fact inputs. Event, EventLink, and
+EventHistory content rubrics remain future extensions; their collection counts can
+already be checked.
 
 ## Corpus-dependent gold values
 

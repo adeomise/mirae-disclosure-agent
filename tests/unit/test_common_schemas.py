@@ -65,6 +65,7 @@ def test_q01_dummy_fact_preserves_raw_and_normalized_values() -> None:
 def test_additional_source_metric_concepts_validate_as_facts() -> None:
     metrics = (
         MetricConcept.OPERATING_INCOME,
+        MetricConcept.INVESTMENT_AMOUNT,
         MetricConcept.HOLDING_SHARES,
         MetricConcept.HOLDING_RATIO,
     )
@@ -77,6 +78,26 @@ def test_additional_source_metric_concepts_validate_as_facts() -> None:
             accounting_scope=FactAccountingScope.NOT_APPLICABLE,
         )
         assert fact.metric is metric
+
+
+def test_investment_amount_metric_validates_and_serializes_as_fact() -> None:
+    assert MetricConcept.INVESTMENT_AMOUNT.value == "investment_amount"
+
+    fact = Fact(
+        fact_id="fact_dummy_investment_amount",
+        company="dummy-company",
+        metric=MetricConcept.INVESTMENT_AMOUNT,
+        accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+        normalized_value="28533520000",
+        normalized_unit="KRW",
+        evidence_ids=[],
+    )
+
+    payload = fact.model_dump(mode="json")
+    assert payload["metric"] == "investment_amount"
+    assert payload["accounting_scope"] == "not_applicable"
+    assert payload["normalized_value"] == "28533520000"
+    assert payload["normalized_unit"] == "KRW"
 
 
 def test_result_input_and_comparison_enums_preserve_contract_values() -> None:

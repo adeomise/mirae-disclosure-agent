@@ -27,6 +27,7 @@ class MetricConcept(StrEnum):
     REVENUE = "revenue"
     OPERATING_INCOME = "operating_income"
     CONTRACT_AMOUNT = "contract_amount"
+    INVESTMENT_AMOUNT = "investment_amount"
     CONTRACT_START_DATE = "contract_start_date"
     CONTRACT_END_DATE = "contract_end_date"
     HOLDING_SHARES = "holding_shares"

@@ -4,7 +4,11 @@
 - 같은 기업의 두 회계연도에서 파생지표를 각각 만들고, 그 변화량까지 확정한다.
 
 현재 구현 범위:
+- 대표 질문 Q07 계열("<기업> 매출이 <연도>년이랑 <연도>년에 어떻게 달라졌어?").
 - 대표 질문 Q08 계열("<기업> 영업이익률이 <연도>년이랑 <연도>년에 어떻게 달라졌어?").
+
+  두 모양이 갈리는 자리는 resolve_shape이며, 만드는 Calculation의 개수가 다르다.
+  Q07은 원천 Fact 2건에서 증감액·증감률 2건, Q08은 기간별 비율 2건과 그 변화량 1건이다.
 
     QueryPlan
       -> 계획 모양 확인          (이 모듈)
@@ -35,8 +39,9 @@
 무엇을 하지 않는가:
 - 우열을 판정하지 않는다. Q08은 변화량 자체를 묻고 최종 대소 관계를 요구하지 않으므로
   ComparisonResult를 만들지 않는다(evidence_and_answerability.md Calculation cardinality).
-- 상대 기간("작년")을 연도로 옮기지 않는다. 기준 시점 정책이 없고, 그 해석을 붙이면 Pattern F가
-  막고 있는 미래 방향 질문이 함께 통과한다(coverage_status.md Q07).
+- 상대 기간("작년")을 연도로 옮기지 않는다. 그 해석은 이미 있으나 질의 해석 계층의 몫이며
+  (query_analyzer의 기준 연도 규칙), 여기로 오는 계획에는 이미 옮겨진 절대연도가 담겨 있다.
+  옮기지 못한 계획은 연도 개수 검사에서 막힌다.
 - 자연어를 만들지 않는다. 문장 조립은 answer_builder의 몫이다.
 
 문서군을 다시 확인하지 않는 이유:
@@ -54,14 +59,14 @@
   직접 쓴다.
 
 TODO:
-- 원천 지표의 시계열 증감(delta·delta_pct)으로 Q07 확장. 상대 기간 해석과 Pattern F를 같은
-  작업으로 묶어야 한다.
+- 매출 외 원천 지표의 시계열 증감(SUPPORTED_SOURCE_METRICS 확장)
 - 기간이 셋 이상인 추이 질문
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -76,15 +81,21 @@ from disclosure_agent.agent.answer_builder import (
     BlockedInfo,
 )
 from disclosure_agent.agent.calculator import (
+    OPERATION_DELTA,
+    OPERATION_DELTA_PCT,
     OPERATION_DIFF_PP,
     OPERATION_RATIO,
     CalculationBlockedError,
+    delta,
+    delta_pct,
     diff,
     ratio,
     validate_calculation_inputs,
     validate_temporal_comparability,
+    validate_temporal_fact_comparability,
 )
 from disclosure_agent.agent.derived_metrics import (
+    DerivedMetric,
     DerivedMetricSpec,
     get_derived_metric_spec,
     required_source_metrics,
@@ -103,12 +114,95 @@ from disclosure_agent.common.schemas import (
 __all__ = [
     "PeriodDerivedValue",
     "TemporalCompareResult",
+    "TemporalShape",
     "build_temporal_compare_result",
     "handle_temporal_compare",
+    "resolve_shape",
+    "source_metrics_for",
 ]
 
 # 이번 구현이 다루는 기간 수. 두 기간의 변화량 하나를 만든다.
 COMPARED_PERIOD_COUNT = 2
+
+# 이번 구현이 여는 원천 지표와 파생 개념.
+#
+# 허용 목록으로 둔다. "막을 것"을 세는 대신 "열 것"을 세는 이유는, 어휘가 넓어질 때 새로
+# 들어온 지표가 조용히 통과하지 않게 하기 위해서다. Pattern D가 같은 자리에서 같은 방식을
+# 쓴다(handlers/cross_entity_compare.SUPPORTED_SOURCE_METRICS).
+SUPPORTED_SOURCE_METRICS: tuple[MetricConcept, ...] = (MetricConcept.REVENUE,)
+
+SUPPORTED_DERIVED_METRICS: tuple[DerivedMetric, ...] = (DerivedMetric.OPERATING_MARGIN,)
+
+
+class TemporalShape(StrEnum):
+    """
+    이번 구현이 실행할 수 있는 계획 모양.
+
+    둘로 나누는 이유는 확보할 원천 지표와 만들 결과의 개수가 다르기 때문이다.
+
+        SOURCE_METRIC   Q07. 기간별 원천 Fact 1건씩에서 증감액과 증감률을 만든다.
+                        기간별 파생값이 없으므로 Calculation은 2건이다
+                        (evidence_and_answerability.md Calculation cardinality).
+        DERIVED_METRIC  Q08. 기간별로 비율 Calculation을 하나씩 만든 뒤 그 둘의 변화량을
+                        만든다. Calculation 3건이다.
+
+    둘 다 ComparisonResult를 만들지 않는다. Q07·Q08 모두 증감 수치 자체를 묻고 최종 우열
+    판정을 요구하지 않는다. 그 점이 Pattern D와 갈리는 자리다.
+
+    intent가 아니다. Router는 intent만 보고 handler를 고르며, 그 안에서 어떤 모양을 다룰지는
+    이 Pattern이 안다. 공유 Contract의 Intent enum을 넓히지 않는 이유가 그것이다.
+    Pattern D의 CrossEntityShape와 같은 구조이며 축만 다르다.
+    """
+
+    SOURCE_METRIC = "source_metric"
+    DERIVED_METRIC = "derived_metric"
+
+
+def resolve_shape(plan: QueryPlan) -> TemporalShape | None:
+    """
+    계획이 어느 모양인지 읽는다. 이번 범위 밖이면 None이며 추측하지 않는다.
+
+    두 모양은 배타다. QueryPlan이 metric과 derived_metric을 함께 담지 못하게 이미 막고
+    있으므로(QueryPlan.__post_init__), 여기서 둘 다 채워진 계획은 만들어질 수 없다.
+
+    둘 다 비어 있는 계획은 어느 모양도 아니다. 질문에서 지표를 읽지 못한 경우이며, 한쪽을
+    기본값으로 골라 주지 않는다. Pattern D의 같은 이름 함수와 같은 구조다.
+    """
+    if plan.derived_metric is not None:
+        if plan.derived_metric in SUPPORTED_DERIVED_METRICS:
+            return TemporalShape.DERIVED_METRIC
+
+        return None
+
+    if plan.metric is not None and plan.metric in SUPPORTED_SOURCE_METRICS:
+        return TemporalShape.SOURCE_METRIC
+
+    return None
+
+
+def source_metrics_for(plan: QueryPlan) -> tuple[MetricConcept, ...]:
+    """
+    이 계획을 실행하려면 기간마다 어떤 원천 지표를 확보해야 하는가.
+
+    파생 개념을 원천 지표로 펼치는 일은 대응표가 한다. 계획에 함께 담아 두면 같은 질문에
+    대응표와 계획이 서로 다른 답을 갖는 순간이 생긴다(derived_metrics.required_source_metrics).
+
+    Raises:
+        ValueError: 이번 범위 밖의 계획. 호출하기 전에 _unsupported_plan을 통과시켜야 한다.
+    """
+    shape = resolve_shape(plan)
+
+    if shape is TemporalShape.DERIVED_METRIC:
+        return required_source_metrics(plan.derived_metric)
+
+    if shape is TemporalShape.SOURCE_METRIC:
+        return (MetricConcept(plan.metric),)
+
+    raise ValueError(
+        "이번 구현이 다루지 않는 계획에서 원천 지표를 읽을 수 없습니다: "
+        f"metric={plan.metric!r}, derived_metric={plan.derived_metric!r}. "
+        "_unsupported_plan을 먼저 통과시켜야 합니다."
+    )
 
 
 @dataclass(frozen=True)
@@ -196,36 +290,48 @@ def _unsupported_plan(plan: QueryPlan) -> BlockedInfo | None:
             ),
         )
 
-    if plan.derived_metric is None:
-        # metric과 derived_metric은 QueryPlan이 배타로 강제한다. 둘 다 비어 있는 경우와
-        # 원천 지표만 있는 경우는 후속 작업이 다르므로 detail에서 나눈다.
+    shape = resolve_shape(plan)
+
+    if shape is None:
+        # 지표를 읽지 못한 경우와 읽었으나 범위 밖인 경우를 detail에서 나눈다. 후속 작업이
+        # 서로 다르기 때문이며, Pattern D가 같은 자리에서 하는 구분과 같다.
+        requested = plan.derived_metric.value if plan.derived_metric else plan.metric
+
         missing = (
-            f"원천 지표({plan.metric})의 시계열 증감은 아직 구현되지 않았습니다."
-            if plan.metric is not None
+            f"계획에 담긴 지표: {requested}."
+            if requested is not None
             else "질문에서 지표를 읽지 못했습니다."
+        )
+
+        supported = ", ".join(
+            (
+                *(metric.value for metric in SUPPORTED_SOURCE_METRICS),
+                *(metric.value for metric in SUPPORTED_DERIVED_METRICS),
+            )
         )
 
         return BlockedInfo(
             stage=STAGE_PATTERN_ENTRY,
             reason=REASON_UNSUPPORTED_COMPARISON_METRIC,
             detail=(
-                f"이번 구현은 파생지표의 시계열 비교만 다룹니다. {missing}"
+                f"이번 구현이 시계열 비교로 다루는 지표는 {supported}뿐입니다. {missing}"
             ),
         )
 
-    spec = get_derived_metric_spec(plan.derived_metric)
+    if shape is TemporalShape.DERIVED_METRIC:
+        spec = get_derived_metric_spec(plan.derived_metric)
 
-    if spec.operation != OPERATION_RATIO:
-        # 대응표에는 있으나 계산기가 아직 만들 수 없는 연산이다. 대응표만 넓히고 계산기를
-        # 넓히지 않은 경우가 여기로 오며, 조용히 ratio로 처리하면 정의가 다른 값이 나간다.
-        return BlockedInfo(
-            stage=STAGE_PATTERN_ENTRY,
-            reason=REASON_UNSUPPORTED_DERIVED_OPERATION,
-            detail=(
-                f"파생지표 {plan.derived_metric.value}의 연산은 {spec.operation}이며, "
-                f"이번 구현이 만들 수 있는 연산은 {OPERATION_RATIO}뿐입니다."
-            ),
-        )
+        if spec.operation != OPERATION_RATIO:
+            # 대응표에는 있으나 계산기가 아직 만들 수 없는 연산이다. 대응표만 넓히고 계산기를
+            # 넓히지 않은 경우가 여기로 오며, 조용히 ratio로 처리하면 정의가 다른 값이 나간다.
+            return BlockedInfo(
+                stage=STAGE_PATTERN_ENTRY,
+                reason=REASON_UNSUPPORTED_DERIVED_OPERATION,
+                detail=(
+                    f"파생지표 {plan.derived_metric.value}의 연산은 {spec.operation}이며, "
+                    f"이번 구현이 만들 수 있는 연산은 {OPERATION_RATIO}뿐입니다."
+                ),
+            )
 
     return None
 
@@ -235,10 +341,16 @@ def _calculation_id(plan: QueryPlan, *, suffix: str) -> str:
     결정적 Calculation 식별자.
 
     같은 질문을 두 번 실행하면 같은 값이 나와야 하므로 난수를 쓰지 않는다. 한 실행 결과
-    안에서만 유일하면 되고, 이번 Pattern은 기업 하나를 다루므로 파생 개념과 회계연도로
+    안에서만 유일하면 되고, 이번 Pattern은 기업 하나를 다루므로 요청 개념과 회계연도로
     충분하다. 기업 축이 필요한 Pattern D는 그 handler가 자기 축을 덧붙인다.
+
+    개념 표기는 계획이 담은 쪽에서 읽는다. Q07은 derived_metric이 비어 있으므로 그쪽을 바로
+    참조하면 식별자를 만들 수 없다. 두 모양이 같은 이름 공간을 쓰지만 원천 지표와 파생 개념의
+    어휘가 겹치지 않으므로(MetricConcept / DerivedMetric) 한 실행 안에서 충돌하지 않는다.
     """
-    return f"calculation_{plan.derived_metric.value}_{suffix}"
+    concept = plan.derived_metric.value if plan.derived_metric else plan.metric
+
+    return f"calculation_{concept}_{suffix}"
 
 
 def _by_year_and_metric(facts: tuple[Fact, ...]) -> dict[tuple[int | None, str], Fact]:
@@ -306,6 +418,96 @@ def _build_period_value(
     )
 
 
+def _source_metric_calculations(
+    plan: QueryPlan,
+    *,
+    index: dict[tuple[int | None, str], Fact],
+    old_year: int,
+    new_year: int,
+) -> tuple[CalculationResult, ...]:
+    """
+    원천 지표 두 기간에서 증감액과 증감률을 만든다(Q07).
+
+    guard①을 지나지 않는다. 기간별 파생값이 없어 계산 입력 검증이 적용될 자리가 없고, 단위
+    정규화 성공(C8) 확인은 guard②가 함께 본다
+    (calculator.validate_temporal_fact_comparability의 "guard가 하나뿐인 이유").
+
+    두 Calculation 모두 원천 Fact 2건을 직접 참조한다. 증감률이 증감액을 참조하지 않는
+    이유는 calculator.delta_pct가 적어 둔 두 가지와 같다.
+
+    Raises:
+        CalculationBlockedError: 확보 결과가 어긋났거나 guard②가 막은 경우.
+    """
+    (metric,) = source_metrics_for(plan)
+
+    previous = _require_fact(index, fiscal_year=old_year, metric=metric)
+
+    current = _require_fact(index, fiscal_year=new_year, metric=metric)
+
+    validate_temporal_fact_comparability(
+        previous=previous,
+        current=current,
+        expected_metric=metric,
+        expected_previous_year=old_year,
+        expected_current_year=new_year,
+    )
+
+    return (
+        delta(
+            calculation_id=_calculation_id(
+                plan, suffix=f"{OPERATION_DELTA}_{old_year}_{new_year}"
+            ),
+            previous=previous,
+            current=current,
+        ),
+        delta_pct(
+            calculation_id=_calculation_id(
+                plan, suffix=f"{OPERATION_DELTA_PCT}_{old_year}_{new_year}"
+            ),
+            previous=previous,
+            current=current,
+        ),
+    )
+
+
+def _derived_metric_calculations(
+    plan: QueryPlan,
+    *,
+    index: dict[tuple[int | None, str], Fact],
+    old_year: int,
+    new_year: int,
+) -> tuple[CalculationResult, ...]:
+    """
+    기간별 비율 둘과 그 변화량을 만든다(Q08).
+
+    Raises:
+        CalculationBlockedError: 확보 결과가 어긋났거나 guard①·guard②가 막은 경우.
+    """
+    spec = get_derived_metric_spec(plan.derived_metric)
+
+    old = _build_period_value(plan, spec=spec, index=index, fiscal_year=old_year)
+
+    new = _build_period_value(plan, spec=spec, index=index, fiscal_year=new_year)
+
+    validate_temporal_comparability(
+        left=old.calculation,
+        right=new.calculation,
+        left_sources=old.sources,
+        right_sources=new.sources,
+        expected_unit=spec.output_unit,
+    )
+
+    change = diff(
+        calculation_id=_calculation_id(
+            plan, suffix=f"{OPERATION_DIFF_PP}_{old_year}_{new_year}"
+        ),
+        old=old.calculation,
+        new=new.calculation,
+    )
+
+    return (old.calculation, new.calculation, change)
+
+
 def build_temporal_compare_result(
     plan: QueryPlan,
     *,
@@ -323,8 +525,6 @@ def build_temporal_compare_result(
     if unsupported is not None:
         return TemporalCompareResult(plan=plan, blocked=unsupported)
 
-    spec = get_derived_metric_spec(plan.derived_metric)
-
     # QueryPlan을 검색 조건으로 옮기는 일은 여기서 한다. agent.period_retrieval은 질문 해석
     # 결과를 모르고 primitive만 받는다.
     #
@@ -333,7 +533,7 @@ def build_temporal_compare_result(
     collection = collect_period_facts(
         company=plan.company,
         fiscal_years=plan.years,
-        metrics=required_source_metrics(plan.derived_metric),
+        metrics=source_metrics_for(plan),
         accounting_scope=plan.accounting_scope,
         document_class=plan.document_class,
         document_subtype=plan.document_subtype,
@@ -352,25 +552,17 @@ def build_temporal_compare_result(
     # 변화에 부호가 뒤집힌 값이 나오고, 뒤집힌 값도 그럴듯하다.
     old_year, new_year = sorted(plan.years)
 
+    # 모양에 따라 만드는 결과의 개수가 다르다. 어느 쪽이든 하나라도 막히면 파생값을 전부
+    # 버린다는 규칙은 같다(TemporalCompareResult docstring).
+    build = (
+        _source_metric_calculations
+        if resolve_shape(plan) is TemporalShape.SOURCE_METRIC
+        else _derived_metric_calculations
+    )
+
     try:
-        old = _build_period_value(plan, spec=spec, index=index, fiscal_year=old_year)
-
-        new = _build_period_value(plan, spec=spec, index=index, fiscal_year=new_year)
-
-        validate_temporal_comparability(
-            left=old.calculation,
-            right=new.calculation,
-            left_sources=old.sources,
-            right_sources=new.sources,
-            expected_unit=spec.output_unit,
-        )
-
-        change = diff(
-            calculation_id=_calculation_id(
-                plan, suffix=f"{OPERATION_DIFF_PP}_{old_year}_{new_year}"
-            ),
-            old=old.calculation,
-            new=new.calculation,
+        calculations = build(
+            plan, index=index, old_year=old_year, new_year=new_year
         )
 
     except CalculationBlockedError as error:
@@ -390,7 +582,7 @@ def build_temporal_compare_result(
         plan=plan,
         facts=collection.facts,
         evidence=collection.evidence,
-        calculations=(old.calculation, new.calculation, change),
+        calculations=calculations,
     )
 
 

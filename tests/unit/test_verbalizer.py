@@ -18,6 +18,7 @@ import logging
 
 import pytest
 
+from disclosure_agent.agent.answer_builder import build_answer_response
 from disclosure_agent.agent.grounded_payload import GroundedPayload, build_grounded_payload
 from disclosure_agent.agent.hyperclova import (
     HyperClovaResponseError,
@@ -34,18 +35,22 @@ from disclosure_agent.agent.verbalizer import (
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
+    ComparisonRelation,
     EvidenceLocationType,
     ExecutionStatus,
     FactAccountingScope,
     MetricConcept,
+    ResultInputType,
 )
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
+    ComparisonResult,
     EventHistory,
     Evidence,
     EvidenceProvenance,
     Fact,
     FieldChange,
+    ResultInputReference,
 )
 
 QUESTION = "한미반도체 2025년 연결 기준 매출액이 얼마야?"
@@ -389,3 +394,330 @@ def test_validate_answer_names_the_rule_it_broke() -> None:
         validate_answer(answer, fact_payload())
 
     assert raised.value.code == "value_dropped"
+
+
+# --------------------------------------------------------------------------
+# PR #81 blocker 1 - 우열 판정이 문장에서 뒤집히지 않는다
+#
+# 값과 기업명이 모두 맞고 방향만 반대인 문장은 기존 검증기를 전부 통과한다. relation을 보는
+# 자리가 없으면 걸리는 곳이 없다.
+# --------------------------------------------------------------------------
+
+
+def comparison_result(
+    relation: ComparisonRelation,
+    *,
+    left_value: int = 100,
+    right_value: int = 90,
+) -> AgentExecutionResult:
+    def operand(fact_id: str, company: str, value: int, evidence_id: str) -> Fact:
+        return Fact(
+            fact_id=fact_id,
+            company=company,
+            metric=MetricConcept.REVENUE,
+            fiscal_year=2025,
+            fiscal_period="FY",
+            accounting_scope=FactAccountingScope.CONSOLIDATED,
+            raw_value=str(value),
+            raw_unit="원",
+            normalized_value=value,
+            normalized_unit="KRW",
+            evidence_ids=[evidence_id],
+        )
+
+    def reference(fact_id: str) -> ResultInputReference:
+        return ResultInputReference(input_type=ResultInputType.FACT, input_id=fact_id)
+
+    def source(evidence_id: str, doc_id: str) -> Evidence:
+        return Evidence(
+            evidence_id=evidence_id, doc_id=doc_id, location_type=EvidenceLocationType.TABLE
+        )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=[
+            operand("fact_left", "A사", left_value, "ev_left"),
+            operand("fact_right", "B사", right_value, "ev_right"),
+        ],
+        evidence=[source("ev_left", "doc_a"), source("ev_right", "doc_b")],
+        comparisons=[
+            ComparisonResult(
+                comparison_id="cmp_1",
+                left=reference("fact_left"),
+                right=reference("fact_right"),
+                relation=relation,
+            )
+        ],
+    )
+
+
+def comparison_payload(
+    relation: ComparisonRelation,
+    *,
+    left_value: int = 100,
+    right_value: int = 90,
+) -> GroundedPayload:
+    result = comparison_result(relation, left_value=left_value, right_value=right_value)
+
+    return build_grounded_payload(result, question="A사와 B사 중 어디가 더 커?")
+
+
+def comparison_reply(answer: str) -> str:
+    return json.dumps(
+        {
+            "answer": answer,
+            "used_fact_ids": ["fact_left", "fact_right"],
+            "used_calculation_ids": [],
+            "used_evidence_ids": ["ev_left", "ev_right"],
+        },
+        ensure_ascii=False,
+    )
+
+
+def comparison_code(answer: str, payload: GroundedPayload) -> str:
+    """이 문장이 걸린 규칙의 이름. 어느 규칙에 걸렸는지까지 고정한다."""
+    with pytest.raises(AnswerRejectedError) as raised:
+        validate_answer(parse_model_answer(comparison_reply(answer)), payload)
+
+    return raised.value.code
+
+
+VALUES_SENTENCE = "A사의 2025년 연결 기준 매출액은 100원, B사는 90원입니다."
+
+SWAPPED_VALUES_SENTENCE = "A사의 2025년 연결 기준 매출액은 90원, B사는 100원입니다."
+
+
+def test_left_greater_answer_naming_the_right_side_is_rejected() -> None:
+    """리뷰가 지적한 바로 그 모양이다. 수치는 맞고 방향만 반대다."""
+    payload = comparison_payload(ComparisonRelation.LEFT_GREATER)
+
+    assert (
+        comparison_code(f"{VALUES_SENTENCE} B사가 더 큽니다.", payload) == "relation_contradiction"
+    )
+
+
+def test_right_greater_answer_naming_the_left_side_is_rejected() -> None:
+    payload = comparison_payload(ComparisonRelation.RIGHT_GREATER, left_value=90, right_value=100)
+
+    answer = f"{SWAPPED_VALUES_SENTENCE} A사가 더 큽니다."
+
+    assert comparison_code(answer, payload) == "relation_contradiction"
+
+
+def test_equal_answer_claiming_a_winner_is_rejected() -> None:
+    payload = comparison_payload(ComparisonRelation.EQUAL, left_value=100, right_value=100)
+
+    answer = "A사의 2025년 연결 기준 매출액은 100원, B사는 100원입니다. A사가 더 큽니다."
+
+    assert comparison_code(answer, payload) == "relation_contradiction"
+
+
+def test_left_greater_answer_naming_the_left_side_passes() -> None:
+    payload = comparison_payload(ComparisonRelation.LEFT_GREATER)
+
+    answer = f"{VALUES_SENTENCE} A사 쪽이 더 큽니다."
+
+    assert verbalize(payload, client=ScriptedClient(comparison_reply(answer))) == answer
+
+
+def test_right_greater_answer_naming_the_right_side_passes() -> None:
+    payload = comparison_payload(ComparisonRelation.RIGHT_GREATER, left_value=90, right_value=100)
+
+    answer = f"{SWAPPED_VALUES_SENTENCE} B사 쪽이 더 큽니다."
+
+    assert verbalize(payload, client=ScriptedClient(comparison_reply(answer))) == answer
+
+
+def test_equal_answer_without_a_ranking_claim_passes() -> None:
+    payload = comparison_payload(ComparisonRelation.EQUAL, left_value=100, right_value=100)
+
+    answer = "A사의 2025년 연결 기준 매출액은 100원, B사는 100원입니다. 두 값은 같습니다."
+
+    assert verbalize(payload, client=ScriptedClient(comparison_reply(answer))) == answer
+
+
+def test_answer_dropping_the_ranking_is_rejected() -> None:
+    """질문이 요구한 판정이 사라진 답변이다. 확인하지 못한 것을 통과시키지 않는다."""
+    payload = comparison_payload(ComparisonRelation.LEFT_GREATER)
+
+    assert comparison_code(VALUES_SENTENCE, payload) == "relation_dropped"
+
+
+def test_inverting_comparative_is_not_reinterpreted() -> None:
+    """A가 B보다 크다는 꼴은 표현 앞에 진 쪽이 온다. 좌우를 다시 해석하지 않고 거절한다."""
+    payload = comparison_payload(ComparisonRelation.LEFT_GREATER)
+
+    answer = f"{VALUES_SENTENCE} A사가 B사보다 더 큽니다."
+
+    assert comparison_code(answer, payload) == "unverifiable_relation"
+
+
+@pytest.mark.parametrize("relation", list(ComparisonRelation))
+def test_deterministic_comparison_sentence_passes_the_validator(
+    relation: ComparisonRelation,
+) -> None:
+    """결정론 문장이 자기 검증기에 걸리면 대조군이 사라진다."""
+    result = comparison_result(relation)
+
+    payload = build_grounded_payload(result, question="A사와 B사 중 어디가 더 커?")
+
+    sentence = build_answer_response(result).answer
+
+    validate_answer(parse_model_answer(comparison_reply(sentence)), payload)
+
+
+# --------------------------------------------------------------------------
+# PR #81 blocker 2 - 이력의 셈과 완결 여부를 문장이 뒤집지 않는다
+# --------------------------------------------------------------------------
+
+
+def counted_history_result(
+    *,
+    documents: int = 2,
+    changes: int = 1,
+    chain_complete: bool = True,
+) -> AgentExecutionResult:
+    history = EventHistory(
+        event_id="evt_1",
+        document_ids=[f"doc_{index}" for index in range(documents)],
+        changes=[
+            FieldChange(field_name="contract_amount", before=100.0, after=120.0)
+            for _ in range(changes)
+        ],
+        chain_complete=chain_complete,
+    )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=(
+            AnswerabilityStatus.ANSWERABLE
+            if chain_complete
+            else AnswerabilityStatus.PARTIALLY_ANSWERABLE
+        ),
+        answerability_reason=None if chain_complete else AnswerabilityReason.INCOMPLETE_CHAIN,
+        event_histories=[history],
+        evidence=[evidence()],
+    )
+
+
+def counted_history_payload(**shape: object) -> GroundedPayload:
+    return build_grounded_payload(
+        counted_history_result(**shape),  # type: ignore[arg-type]
+        question="그 공급계약 나중에 바뀐 내용 있어?",
+    )
+
+
+def history_code(answer: str, payload: GroundedPayload) -> str:
+    reply = model_reply(answer, used_fact_ids=[], used_evidence_ids=[])
+
+    with pytest.raises(AnswerRejectedError) as raised:
+        validate_answer(parse_model_answer(reply), payload)
+
+    return raised.value.code
+
+
+def test_denying_changes_that_exist_is_rejected() -> None:
+    payload = counted_history_payload(changes=1)
+
+    answer = "관련 공시 2건을 확인했으며, 변경된 내용은 없습니다."
+
+    assert history_code(answer, payload) == "history_contradiction"
+
+
+def test_claiming_changes_that_do_not_exist_is_rejected() -> None:
+    """건수를 적지 않아도 변경이 있었다는 진술 자체가 결과와 어긋난다."""
+    payload = counted_history_payload(changes=0)
+
+    answer = "관련 공시 2건을 확인했으며, 계약 내용이 변경되었습니다."
+
+    assert history_code(answer, payload) == "history_contradiction"
+
+
+def test_claiming_a_change_count_that_does_not_exist_is_rejected() -> None:
+    """
+    건수를 적은 쪽은 수치 검증이 먼저 잡는다.
+
+    change_count=0인 payload에 '1'이라는 수치가 없기 때문이다. 두 규칙 중 어느 쪽이 잡든
+    결과는 같지만(결정론 문장으로 돌아간다), 어느 자리에서 걸리는지는 고정해 둔다.
+    """
+    payload = counted_history_payload(changes=0)
+
+    answer = "관련 공시 2건을 확인했으며, 1건 변경되었습니다."
+
+    assert history_code(answer, payload) == "ungrounded_number"
+
+
+def test_claiming_a_complete_chain_when_it_is_not_is_rejected() -> None:
+    payload = counted_history_payload(chain_complete=False)
+
+    assert payload.limitation is not None
+
+    answer = f"관련 공시 2건으로 전체 이력이 완결되었습니다. {payload.limitation}"
+
+    assert history_code(answer, payload) == "chain_contradiction"
+
+
+def test_claiming_an_incomplete_chain_when_it_is_complete_is_rejected() -> None:
+    payload = counted_history_payload(chain_complete=True)
+
+    answer = "관련 공시 2건을 확인했으나 이력이 불완전합니다. 확인된 변경 항목은 1건입니다."
+
+    assert history_code(answer, payload) == "chain_contradiction"
+
+
+def test_non_contradictory_history_wording_passes() -> None:
+    """모든 항목을 적으라고 요구하지 않는다. 정면으로 어긋나는 진술만 막는다."""
+    payload = counted_history_payload(documents=2, changes=1, chain_complete=True)
+
+    answer = "관련 공시 2건으로 이어지는 이력을 확인했으며, 확인된 변경 항목은 1건입니다."
+
+    client = ScriptedClient(model_reply(answer, used_fact_ids=[], used_evidence_ids=[]))
+
+    assert verbalize(payload, client=client) == answer
+
+
+def test_withheld_limitation_does_not_read_as_an_incomplete_chain() -> None:
+    """
+    체인은 완결됐는데 원문에서 일부 field가 유보된 결과다(D9).
+
+    그 한계 문장은 확인하지 못했다는 말로 끝나고 답변에 반드시 남아야 한다. 완결 여부를 그
+    표현만으로 판정하면 반드시 남아야 할 문장이 검증기에 걸린다.
+    """
+    result = counted_history_result(chain_complete=True)
+
+    result.answerability_status = AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    result.answerability_reason = AnswerabilityReason.WITHHELD_IN_SOURCE
+
+    payload = build_grounded_payload(result, question="그 공급계약 나중에 바뀐 내용 있어?")
+
+    sentence = build_answer_response(result).answer
+
+    validate_answer(
+        parse_model_answer(model_reply(sentence, used_fact_ids=[], used_evidence_ids=[])),
+        payload,
+    )
+
+
+@pytest.mark.parametrize(
+    ("documents", "changes", "chain_complete"),
+    [(2, 1, False), (2, 0, False), (1, 0, True), (3, 2, True), (3, 0, True)],
+)
+def test_deterministic_history_sentence_passes_the_validator(
+    documents: int,
+    changes: int,
+    chain_complete: bool,
+) -> None:
+    """Pattern E의 다섯 가지 문장 모양이 모두 자기 검증기를 통과한다."""
+    result = counted_history_result(
+        documents=documents, changes=changes, chain_complete=chain_complete
+    )
+
+    payload = build_grounded_payload(result, question="그 공급계약 나중에 바뀐 내용 있어?")
+
+    sentence = build_answer_response(result).answer
+
+    validate_answer(
+        parse_model_answer(model_reply(sentence, used_fact_ids=[], used_evidence_ids=[])),
+        payload,
+    )

@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from disclosure_agent.agent.answer_builder import ACCOUNTING_SCOPE_LABELS
-from disclosure_agent.agent.grounded_payload import GroundedPayload
+from disclosure_agent.agent.grounded_payload import GroundedComparison, GroundedPayload
 from disclosure_agent.agent.hyperclova import ChatCompletionClient, HyperClovaError
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
@@ -95,6 +95,79 @@ ADVISORY_EXPRESSIONS: tuple[str, ...] = (
     "예상됩니다",
     "예측됩니다",
     "될 것으로 보입니다",
+)
+
+# 우열을 말하는 표현과 그 방향.
+#
+# 목록을 짧게 둔다. 여기에 없는 표현으로 우열을 말한 답변은 "판정을 확인할 수 없음"으로 걸러져
+# 결정론 문장으로 돌아간다. 넓히다가 하나라도 방향을 잘못 적으면 뒤집힌 판정이 통과하므로,
+# 확실한 것만 담고 나머지는 fallback에 맡긴다.
+GREATER_EXPRESSIONS: tuple[str, ...] = (
+    "더 큽니다",
+    "더 많습니다",
+    "더 높습니다",
+    "더 큰",
+    "더 많은",
+    "상회",
+    "웃돕니다",
+)
+
+SMALLER_EXPRESSIONS: tuple[str, ...] = (
+    "더 작습니다",
+    "더 적습니다",
+    "더 낮습니다",
+    "더 작은",
+    "더 적은",
+    "하회",
+    "밑돕니다",
+)
+
+# 비교 대상을 뒤집어 말하는 조사.
+#
+# "A가 B보다 큽니다"는 우열 표현 바로 앞에 진 쪽이 온다. 앞에서부터 이름을 찾는 규칙으로는
+# 방향을 반대로 읽게 되므로, 이 조사가 낀 절은 판정하지 않고 거절한다. 좌우를 조용히 다시
+# 해석하지 않는다.
+INVERTING_PARTICLE = "보다"
+
+# 절의 경계. 우열 표현이 어느 이름에 걸리는지 볼 범위를 한 문장으로 자른다.
+CLAUSE_BOUNDARIES = ".!?\n"
+
+# 변경이 없었다는 진술.
+#
+# answer_builder._event_history_sentence가 실제로 쓰는 두 표현("확인된 변경 항목은 없습니다",
+# "이후 변경된 내용은 확인되지 않았습니다")을 포함한다. 결정론 문장이 자기 검증기를 통과하지
+# 못하면 대조군이 사라진다.
+NO_CHANGE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"변경(된)?\s*(내용|사항|항목)?[은는이가]?\s*(없|확인되지\s*않|확인하지\s*못)"),
+    re.compile(r"바뀐\s*(내용|것|사항)?[은는이가]?\s*없"),
+    re.compile(r"정정(된)?\s*(내용|사항)?[은는이가]?\s*없"),
+)
+
+# 변경이 있었다는 진술.
+NO_CHANGE_CONTRADICTIONS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"변경\s*(된)?\s*(내용|사항|항목)?[은는이가]?\s*\d+\s*건"),
+    re.compile(r"\d+\s*건[이은]?\s*(변경|정정)"),
+    re.compile(r"(변경|정정)되었|(변경|정정)됐|바뀌었"),
+)
+
+# 이력을 끝까지 확인했다는 진술. chain_complete=False인 결과에서 거절한다.
+CHAIN_COMPLETE_CLAIMS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"완결"),
+    re.compile(r"(모두|전부|끝까지)\s*확인"),
+    re.compile(r"(전체|모든)\s*이력[을은는이가]?\s*확인했"),
+    re.compile(r"최종\s*(이력|상태|내용)"),
+)
+
+# 이력이 끊겼다는 진술. chain_complete=True인 결과에서 거절한다.
+#
+# "확인하지 못했습니다"만으로 판정하지 않는다. 체인은 끝까지 확보했는데 원문에서 일부 field가
+# 유보된 결과(WITHHELD_IN_SOURCE)의 한계 문장이 그 표현을 쓰고, 그 문장은 답변에 반드시 남아야
+# 한다(_require_limitation_when_partial). 여기서는 이력 자체가 미완결이라는 진술만 본다.
+CHAIN_INCOMPLETE_CLAIMS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"불완전"),
+    re.compile(r"완결되지\s*(않|못)"),
+    re.compile(r"이력[을은는이가]?\s*(일부|중간)"),
+    re.compile(r"(전체|모든)\s*이력[을은는이가]?\s*확인하지\s*못"),
 )
 
 SYSTEM_PROMPT = """당신은 한국 공시 데이터 질의응답 시스템의 '표현' 단계입니다.
@@ -229,6 +302,8 @@ def validate_answer(answer: ModelAnswer, payload: GroundedPayload) -> None:
     _require_known_entities(answer.answer, payload)
     _require_consistent_accounting_scope(answer.answer, payload)
     _require_limitation_when_partial(answer.answer, payload)
+    _require_preserved_relation(answer.answer, payload)
+    _require_consistent_history_semantics(answer.answer, payload)
     _require_no_advisory_wording(answer.answer)
 
 
@@ -408,6 +483,257 @@ def _require_limitation_when_partial(text: str, payload: GroundedPayload) -> Non
     """
     if payload.limitation and payload.limitation not in text:
         raise AnswerRejectedError("limitation_dropped", "한계 진술이 문장에서 빠졌습니다")
+
+
+def _require_preserved_relation(text: str, payload: GroundedPayload) -> None:
+    """
+    문장이 확정된 우열 판정을 뒤집지 않았는지 본다.
+
+    relation이 정본이다. 모델은 그것을 옮기기만 하며, 값을 다시 견주지 않는다
+    (answer_builder._comparison_sentence와 같은 원칙). 값은 맞는데 방향만 뒤집힌 문장은
+    수치 검증을 그대로 통과하므로, 여기서 보지 않으면 걸리는 자리가 없다.
+
+    판정을 확인할 수 없으면 통과시키지 않고 거절한다. 확인하지 못한 것을 통과시키면 질문이
+    요구한 판정이 검증 없이 나가고, 그 답이 맞는지는 아무도 모른다. 거절의 대가는 결정론
+    문장이며, 그 문장은 판정을 반드시 담고 있다.
+    """
+    for comparison in payload.comparisons:
+        relation = comparison.relation
+
+        if relation == ComparisonRelation.EQUAL.value:
+            _require_no_ranking_claim(text, comparison.comparison_id)
+
+            continue
+
+        sides = _distinguishing_tokens(payload, comparison)
+
+        if sides is None:
+            raise AnswerRejectedError(
+                "unverifiable_relation",
+                f"우열 판정 {comparison.comparison_id!r}의 두 대상을 문장에서 구분할 표기가 "
+                "없습니다",
+            )
+
+        left_tokens, right_tokens = sides
+
+        if relation == ComparisonRelation.LEFT_GREATER.value:
+            winner, loser = left_tokens, right_tokens
+
+        elif relation == ComparisonRelation.RIGHT_GREATER.value:
+            winner, loser = right_tokens, left_tokens
+
+        else:
+            raise AnswerRejectedError(
+                "unverifiable_relation",
+                f"확인 방법이 정해지지 않은 relation입니다: {relation!r}",
+            )
+
+        _require_ranking_matches(text, comparison.comparison_id, winner=winner, loser=loser)
+
+
+def _require_no_ranking_claim(text: str, comparison_id: str) -> None:
+    """두 값이 같다고 판정된 결과에 한쪽이 크다는 진술이 없어야 한다."""
+    stated = sorted(
+        {
+            expression
+            for expression in GREATER_EXPRESSIONS + SMALLER_EXPRESSIONS
+            if expression in text
+        }
+    )
+
+    if stated:
+        raise AnswerRejectedError(
+            "relation_contradiction",
+            f"우열 판정 {comparison_id!r}은 두 값이 같은데 문장이 우열을 말합니다: {stated}",
+        )
+
+
+def _require_ranking_matches(
+    text: str,
+    comparison_id: str,
+    *,
+    winner: frozenset[str],
+    loser: frozenset[str],
+) -> None:
+    """
+    우열 표현마다 그 앞에 놓인 이름이 판정과 맞는지 본다.
+
+    표현 하나를 볼 때 문장 경계까지만 거슬러 올라간다. 앞 문장에는 두 대상의 값이 나란히
+    적혀 있어(answer_builder._comparison_sentence), 범위를 넓히면 두 이름이 모두 잡혀 어느
+    쪽에 걸린 표현인지 알 수 없게 된다.
+    """
+    occurrences = [
+        (index, polarity)
+        for expressions, polarity in (
+            (GREATER_EXPRESSIONS, "greater"),
+            (SMALLER_EXPRESSIONS, "smaller"),
+        )
+        for expression in expressions
+        for index in _find_all(text, expression)
+    ]
+
+    if not occurrences:
+        raise AnswerRejectedError(
+            "relation_dropped",
+            f"우열 판정 {comparison_id!r}이 문장에 나타나지 않습니다",
+        )
+
+    for index, polarity in occurrences:
+        clause = text[_clause_start(text, index) : index]
+
+        if INVERTING_PARTICLE in clause:
+            # "A가 B보다 큽니다"는 표현 앞에 진 쪽이 온다. 좌우를 다시 해석하지 않는다.
+            raise AnswerRejectedError(
+                "unverifiable_relation",
+                f"우열 판정 {comparison_id!r}의 방향을 확인할 수 없는 표현입니다",
+            )
+
+        names_winner = any(token in clause for token in winner)
+        names_loser = any(token in clause for token in loser)
+
+        if names_winner == names_loser:
+            # 둘 다 나오거나(어느 쪽에 걸렸는지 모름) 하나도 나오지 않는(대상이 없음) 절이다.
+            raise AnswerRejectedError(
+                "unverifiable_relation",
+                f"우열 판정 {comparison_id!r}이 가리키는 대상을 문장에서 특정할 수 없습니다",
+            )
+
+        expected_winner = polarity == "greater"
+
+        if names_winner is not expected_winner:
+            raise AnswerRejectedError(
+                "relation_contradiction",
+                f"우열 판정 {comparison_id!r}과 반대로 말한 문장입니다",
+            )
+
+
+def _distinguishing_tokens(
+    payload: GroundedPayload,
+    comparison: GroundedComparison,
+) -> tuple[frozenset[str], frozenset[str]] | None:
+    """
+    두 대상을 문장에서 갈라 볼 표기. 갈리지 않으면 None.
+
+    양쪽이 공유하는 표기는 뺀다. 같은 해의 두 기업을 견줬다면 연도는 둘 다 나오므로 이름을
+    가리지 못하고, 한 기업의 두 해를 견줬다면 기업명이 그렇다. 남는 것이 없으면(같은 기업의
+    같은 해) 문장만 보고는 어느 쪽 이야기인지 알 수 없으며, 그때는 판정하지 않는다.
+    """
+    left = _operand_tokens(payload, comparison.left_id)
+    right = _operand_tokens(payload, comparison.right_id)
+
+    if left is None or right is None:
+        return None
+
+    distinct_left = left - right
+    distinct_right = right - left
+
+    if not distinct_left or not distinct_right:
+        return None
+
+    return frozenset(distinct_left), frozenset(distinct_right)
+
+
+def _operand_tokens(payload: GroundedPayload, operand_id: str) -> set[str] | None:
+    """견준 대상 한쪽이 문장에서 불릴 만한 표기. payload에 없으면 None."""
+    for fact in payload.facts:
+        if fact.fact_id == operand_id:
+            return _identity_tokens(fact.company, fact.fiscal_year)
+
+    for calculation in payload.calculations:
+        if calculation.calculation_id == operand_id:
+            return _identity_tokens(calculation.company, calculation.fiscal_year)
+
+    return None
+
+
+def _identity_tokens(company: str, fiscal_year: int | None) -> set[str]:
+    tokens = {company}
+
+    if fiscal_year is not None:
+        tokens.add(str(fiscal_year))
+
+    return tokens
+
+
+def _require_consistent_history_semantics(text: str, payload: GroundedPayload) -> None:
+    """
+    이력의 셈과 완결 여부를 문장이 뒤집지 않았는지 본다.
+
+    모든 항목을 문장에 적으라고 요구하지 않는다. 무엇을 앞세울지는 질문이 정하고, 여기서
+    빠짐없이 적기를 강제하면 답변이 결정론 문장의 어순을 그대로 따라가는 것 말고는 통과할 수
+    없게 된다. 정면으로 어긋나는 진술만 막는다.
+    """
+    for history in payload.event_histories:
+        if history.change_count:
+            _reject_matching(
+                text,
+                NO_CHANGE_PATTERNS,
+                code="history_contradiction",
+                detail=(
+                    f"이력 {history.event_id!r}에 변경 {history.change_count}건이 있는데 "
+                    "문장은 변경이 없다고 말합니다"
+                ),
+            )
+
+        else:
+            _reject_matching(
+                text,
+                NO_CHANGE_CONTRADICTIONS,
+                code="history_contradiction",
+                detail=(
+                    f"이력 {history.event_id!r}에 확인된 변경이 없는데 문장은 변경이 있었다고 "
+                    "말합니다"
+                ),
+            )
+
+        if history.chain_complete:
+            _reject_matching(
+                text,
+                CHAIN_INCOMPLETE_CLAIMS,
+                code="chain_contradiction",
+                detail=f"이력 {history.event_id!r}은 완결됐는데 문장은 미완결이라고 말합니다",
+            )
+
+        else:
+            _reject_matching(
+                text,
+                CHAIN_COMPLETE_CLAIMS,
+                code="chain_contradiction",
+                detail=f"이력 {history.event_id!r}은 미완결인데 문장은 완결됐다고 말합니다",
+            )
+
+
+def _reject_matching(
+    text: str,
+    patterns: tuple[re.Pattern[str], ...],
+    *,
+    code: str,
+    detail: str,
+) -> None:
+    """패턴 중 하나라도 문장에 나타나면 거절한다."""
+    if any(pattern.search(text) for pattern in patterns):
+        raise AnswerRejectedError(code, detail)
+
+
+def _find_all(text: str, needle: str) -> list[int]:
+    """needle이 나타나는 모든 위치."""
+    positions: list[int] = []
+
+    start = text.find(needle)
+
+    while start != -1:
+        positions.append(start)
+
+        start = text.find(needle, start + 1)
+
+    return positions
+
+
+def _clause_start(text: str, index: int) -> int:
+    """index 앞의 가장 가까운 문장 경계 다음 위치."""
+    boundaries = [text.rfind(marker, 0, index) for marker in CLAUSE_BOUNDARIES]
+
+    return max(boundaries) + 1
 
 
 def _require_no_advisory_wording(text: str) -> None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,9 +10,13 @@ import pytest
 
 from disclosure_agent.agent import facility_investment_aggregation as facility
 from disclosure_agent.agent.facility_investment_aggregation import (
+    REASON_EXTRACTION_FAILED,
     REASON_INCOMPATIBLE_UNIT,
     REASON_INCOMPLETE_CHAIN,
     REASON_MISSING_PROVENANCE,
+    REASON_PARSE_FAILED,
+    STAGE_EXTRACTION,
+    STAGE_PARSING,
     FacilityInvestmentCollection,
     FacilityInvestmentFailure,
     collect_facility_investment_facts,
@@ -364,6 +370,91 @@ def test_unrelated_correction_is_parsed_for_linking_but_not_extracted_or_adapted
     )
 
 
+@pytest.mark.parametrize(
+    ("failure_kind", "stage", "reason"),
+    [
+        ("parse", STAGE_PARSING, REASON_PARSE_FAILED),
+        ("extraction", STAGE_EXTRACTION, REASON_EXTRACTION_FAILED),
+    ],
+)
+def test_target_root_failure_preserves_other_root_fact_evidence_at_agent_boundary(
+    synthetic_event_stack,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+    stage: str,
+    reason: str,
+) -> None:
+    if failure_kind == "parse":
+        synthetic_event_stack.parse_failures.add("ROOT_B")
+    else:
+        synthetic_event_stack.extraction_failures.add("ROOT_B")
+
+    left = collect_facility_investment_facts(
+        company=LEFT,
+        target_year=2024,
+        corpus_root="/synthetic",
+    )
+
+    assert [fact.normalized_value for fact in left.facts] == ["120"]
+    assert left.facts[0].evidence_ids == [
+        "evidence_exchange_CORR_A_investment_amount"
+    ]
+    assert {item.evidence_id for item in left.evidence} == set(
+        left.facts[0].evidence_ids
+    )
+    assert left.evidence[0].doc_id == "exchange_CORR_A"
+    assert len(left.failures) == 1
+    assert left.failures[0].root_doc_id == "exchange_ROOT_B"
+    assert left.failures[0].stage == stage
+    assert left.failures[0].reason == reason
+    assert all("ROOT_B" not in fact.fact_id for fact in left.facts)
+
+    right = _collection(RIGHT, (_fact(RIGHT, "resolved", "50"),))
+    by_company = {LEFT: left, RIGHT: right}
+    monkeypatch.setattr(
+        cross_entity_compare,
+        "collect_facility_investment_facts",
+        lambda **kwargs: by_company[kwargs["company"]],
+    )
+    plan = build_query_plan(Q12, known_companies=(LEFT, RIGHT))
+
+    result = cross_entity_compare.handle_cross_entity_compare(
+        plan,
+        corpus_root="/synthetic",
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.answerability_status is None
+    assert result.execution_issue is not None
+    assert result.execution_issue.stage == stage
+    assert result.execution_issue.reason == reason
+    assert left.facts[0] in result.facts
+    assert left.evidence[0] in result.evidence
+    assert result.calculations == []
+    assert result.comparisons == []
+
+
+def test_correction_parse_failure_remains_collection_level_fail_closed(
+    synthetic_event_stack,
+) -> None:
+    synthetic_event_stack.parse_failures.add("CORR_C")
+
+    result = collect_facility_investment_facts(
+        company=LEFT,
+        target_year=2024,
+        corpus_root="/synthetic",
+    )
+
+    assert result.facts == ()
+    assert result.evidence == ()
+    assert result.failures[-1].root_doc_id == ""
+    assert result.failures[-1].stage == STAGE_PARSING
+    assert result.failures[-1].reason == REASON_PARSE_FAILED
+    assert "exchange_CORR_C" in result.failures[-1].detail
+    assert "CORR_C" in synthetic_event_stack.parsed_receipts
+    assert synthetic_event_stack.linker_candidate_receipts == []
+
+
 def test_later_other_field_correction_keeps_prior_amount_provenance(
     synthetic_event_stack,
 ) -> None:
@@ -489,6 +580,157 @@ def _collection(company: str, facts: tuple[Fact, ...]) -> FacilityInvestmentColl
         facts=facts,
         evidence=evidence,
     )
+
+
+def test_zero_amount_cancellation_contributes_zero_with_correction_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """같은 subtype 정정이 투자금액을 0으로 명시하는 취소 표현을 고정한다."""
+
+    def materialize(filing: FilingRef, body: str) -> FilingRef:
+        directory = tmp_path / filing.receipt_no
+        directory.mkdir()
+        main_document = directory / f"{filing.receipt_no}.xml"
+        main_document.write_text(
+            f"<html><head><title>신규시설투자등</title></head><body>{body}</body></html>",
+            encoding="utf-8",
+        )
+        return replace(
+            filing,
+            directory=directory,
+            main_document=main_document,
+        )
+
+    cancelled_root = materialize(
+        _filing("CANCELLED_ROOT", "20240110"),
+        """
+        <span>신규 시설투자 등</span>
+        <table id="XFormD1_Form0_Table0">
+          <tr><td>2. 투자내역</td><td>투자금액(원)</td><td>100</td></tr>
+        </table>
+        """,
+    )
+    live_root = materialize(
+        _filing("LIVE_ROOT", "20240210"),
+        """
+        <span>신규 시설투자 등</span>
+        <table id="XFormD1_Form0_Table0">
+          <tr><td>2. 투자내역</td><td>투자금액(원)</td><td>50</td></tr>
+        </table>
+        """,
+    )
+    cancellation = materialize(
+        _filing("CANCEL", "20250110", correction=True),
+        """
+        <span>정정신고(보고)</span><span>신규 시설투자 등</span>
+        <table id="XFormD8_Form0_Table1">
+          <tr><td>정정일자</td><td>2025-01-10</td></tr>
+          <tr><td>1. 정정관련 공시서류</td><td>신규시설투자등</td></tr>
+          <tr><td>2. 정정관련 공시서류제출일</td><td>2024-01-10</td></tr>
+          <tr><td>3. 정정사유</td><td>시설투자 취소</td></tr>
+        </table>
+        <table id="XFormD8_Form0_RepeatTable0">
+          <tr><td>정정항목</td><td>정정전</td><td>정정후</td></tr>
+          <tr><td>2. 투자내역 - 투자금액(원)</td><td>100</td><td>0</td></tr>
+        </table>
+        <table id="XFormD1_Form0_Table0">
+          <tr><td>2. 투자내역</td><td>투자금액(원)</td><td>0</td></tr>
+        </table>
+        """,
+    )
+    candidates = [cancelled_root, live_root, cancellation]
+    chains_by_root: dict[str, FilingChain] = {}
+    states_by_root: dict[str, ResolvedEventState] = {}
+    real_build_filing_chain = facility.build_filing_chain
+    real_resolve_latest_event_state = facility.resolve_latest_event_state
+
+    def fake_list_event_filings(**kwargs):
+        if kwargs["include_corrections"] is False:
+            return [cancelled_root, live_root]
+        return candidates
+
+    def capture_chain(*, root_receipt_no: str, **kwargs) -> FilingChain:
+        chain = real_build_filing_chain(
+            root_receipt_no=root_receipt_no,
+            **kwargs,
+        )
+        chains_by_root[root_receipt_no] = chain
+        return chain
+
+    def capture_state(*, chain: FilingChain, **kwargs) -> ResolvedEventState:
+        state = real_resolve_latest_event_state(chain=chain, **kwargs)
+        states_by_root[chain.root_receipt_no] = state
+        return state
+
+    monkeypatch.setattr(facility, "list_event_filings", fake_list_event_filings)
+    monkeypatch.setattr(facility, "build_filing_chain", capture_chain)
+    monkeypatch.setattr(facility, "resolve_latest_event_state", capture_state)
+
+    collection = collect_facility_investment_facts(
+        company=LEFT,
+        target_year=2024,
+        corpus_root=tmp_path,
+    )
+
+    assert collection.root_doc_ids == (
+        "exchange_CANCELLED_ROOT",
+        "exchange_LIVE_ROOT",
+    )
+    assert collection.failures == ()
+    assert [fact.normalized_value for fact in collection.facts] == ["0", "50"]
+
+    cancellation_chain = chains_by_root["CANCELLED_ROOT"]
+    assert [entry.filing.receipt_no for entry in cancellation_chain.entries] == [
+        "CANCELLED_ROOT",
+        "CANCEL",
+    ]
+    assert [
+        (change.field, change.before, change.after)
+        for change in cancellation_chain.entries[1].changes
+    ] == [("investment_amount", "100", "0")]
+
+    cancelled_amount = states_by_root["CANCELLED_ROOT"].fields[
+        "investment_amount"
+    ]
+    assert Decimal(str(cancelled_amount.value)) == Decimal("0")
+    assert cancelled_amount.source_doc_id == "exchange_CANCEL"
+    assert cancelled_amount.evidence_ids == [
+        "evidence_exchange_CANCEL_investment_amount"
+    ]
+
+    cancelled_fact = collection.facts[0]
+    cancellation_evidence_id = "evidence_exchange_CANCEL_investment_amount"
+
+    assert cancelled_fact.raw_value == "0"
+    assert cancelled_fact.evidence_ids == [cancellation_evidence_id]
+    assert any(
+        item.evidence_id == cancellation_evidence_id
+        and item.doc_id == "exchange_CANCEL"
+        and item.raw_text == "0"
+        for item in collection.evidence
+    )
+
+    right = _collection(RIGHT, (_fact(RIGHT, "resolved", "40"),))
+    by_company = {LEFT: collection, RIGHT: right}
+    monkeypatch.setattr(
+        cross_entity_compare,
+        "collect_facility_investment_facts",
+        lambda **kwargs: by_company[kwargs["company"]],
+    )
+    plan = build_query_plan(Q12, known_companies=(LEFT, RIGHT))
+
+    result = cross_entity_compare.handle_cross_entity_compare(
+        plan,
+        corpus_root="/synthetic",
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert [item.value for item in result.calculations] == ["50", "40"]
+    assert [len(item.inputs) for item in result.calculations] == [2, 1]
+    assert len(result.comparisons) == 1
+    assert result.comparisons[0].relation is ComparisonRelation.LEFT_GREATER
 
 
 def test_company_aggregates_and_comparison_preserve_question_order(

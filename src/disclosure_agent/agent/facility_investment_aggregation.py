@@ -298,37 +298,62 @@ def collect_facility_investment_facts(
         return FacilityInvestmentCollection(company=company, failures=(failure,))
 
     root_doc_ids = tuple(_doc_id(root) for root in roots)
-    root_receipt_nos = {root.receipt_no for root in roots}
+    documents: dict[str, dict] = {}
+    parsed_roots: list[FilingRef] = []
+    facts: list[Fact] = []
+    evidence: list[Evidence] = []
+    failures: list[FacilityInvestmentFailure] = []
 
-    # Linker에는 전체 candidate 집합을 그대로 넘긴다. 정정이 가리킨 원공시
-    # 후보를 빼면 애매한 연결이 거짓으로 유일해질 수 있기 때문이다. 다만 parse는
-    # target root와 연도 제한 없는 correction에만 필요하다. 다른 root로 확정된
-    # non-correction 문서는 메타데이터만으로 original 후보가 되므로 본문을 읽지 않는다.
-    parse_candidates = tuple(
-        filing
-        for filing in chain_candidates
-        if filing.is_correction or filing.receipt_no in root_receipt_nos
-    )
+    # Target root 본문은 서로의 해석에 필요하지 않으므로 root별로 읽는다. 한 root의
+    # parse 실패 때문에 이미 안전하게 해소할 수 있는 다른 root까지 버리지 않는다.
+    for root in roots:
+        try:
+            documents[root.receipt_no] = parse_exchange_document(root.main_document)
+        except (OSError, ValueError) as error:
+            failures.append(
+                _failure(
+                    company=company,
+                    root_doc_id=_doc_id(root),
+                    stage=STAGE_PARSING,
+                    reason=REASON_PARSE_FAILED,
+                    detail=str(error),
+                )
+            )
+            continue
 
-    try:
-        documents = {
-            filing.receipt_no: parse_exchange_document(filing.main_document)
-            for filing in parse_candidates
-        }
-    except (OSError, ValueError) as error:
-        failure = _failure(
-            company=company,
-            root_doc_id="",
-            stage=STAGE_PARSING,
-            reason=REASON_PARSE_FAILED,
-            detail=str(error),
-        )
-        return FacilityInvestmentCollection(
-            company=company, root_doc_ids=root_doc_ids, failures=(failure,)
-        )
+        parsed_roots.append(root)
 
-    # 모든 correction을 parse한 뒤 target root별 chain을 먼저 확정한다. filings에는
-    # 전체 candidate를 넘겨 original disambiguation을 약화하지 않는다.
+    # Correction은 linking 전에는 어느 root에 속하는지 확정할 수 없다. 따라서 하나라도
+    # parse하지 못하면 특정 root와 무관하다고 추측하지 않고 collection 전체를 fail-closed한다.
+    for filing in chain_candidates:
+        if not filing.is_correction:
+            continue
+
+        try:
+            documents[filing.receipt_no] = parse_exchange_document(
+                filing.main_document
+            )
+        except (OSError, ValueError) as error:
+            failures.append(
+                _failure(
+                    company=company,
+                    root_doc_id="",
+                    stage=STAGE_PARSING,
+                    reason=REASON_PARSE_FAILED,
+                    detail=(
+                        f"{_doc_id(filing)} correction을 parse하지 못해 어느 target "
+                        f"chain의 최신 상태도 확정하지 않았습니다: {error}"
+                    ),
+                )
+            )
+            return FacilityInvestmentCollection(
+                company=company,
+                root_doc_ids=root_doc_ids,
+                failures=tuple(failures),
+            )
+
+    # Linker의 original 후보에는 연도 제한 없는 전체 집합을 그대로 전달한다. 실패한
+    # target root도 metadata 후보로 남으므로 다른 root의 ambiguous-link 판정이 느슨해지지 않는다.
     chains_by_root = {
         root.receipt_no: build_filing_chain(
             root_receipt_no=root.receipt_no,
@@ -336,58 +361,48 @@ def collect_facility_investment_facts(
             documents=documents,
             event_type=EVENT_FACILITY_INVESTMENT,
         )
-        for root in roots
+        for root in parsed_roots
     }
-    target_chain_receipt_nos = {
-        entry.filing.receipt_no
-        for chain in chains_by_root.values()
-        for entry in chain.entries
-    }
-    extraction_candidates = tuple(
-        filing
-        for filing in parse_candidates
-        if filing.receipt_no in target_chain_receipt_nos
-    )
 
-    try:
-        extracted_by_receipt = {
-            filing.receipt_no: _extract_filing_event(
-                filing, documents[filing.receipt_no]
-            )
-            for filing in extraction_candidates
-        }
-        extracted_by_doc_id = {
-            str(extracted["doc_id"]): extracted
-            for extracted in extracted_by_receipt.values()
-        }
-        adapted_by_receipt = {
-            receipt_no: adapt_extracted_event(extracted)
-            for receipt_no, extracted in extracted_by_receipt.items()
-        }
-        adapted_by_doc_id = {
-            result.event.source_doc_id: result for result in adapted_by_receipt.values()
-        }
-    except (KeyError, ValueError) as error:
-        failure = _failure(
-            company=company,
-            root_doc_id="",
-            stage=STAGE_EXTRACTION,
-            reason=REASON_EXTRACTION_FAILED,
-            detail=str(error),
-        )
-        return FacilityInvestmentCollection(
-            company=company, root_doc_ids=root_doc_ids, failures=(failure,)
-        )
-
-    facts: list[Fact] = []
-    evidence: list[Evidence] = []
-    failures: list[FacilityInvestmentFailure] = []
-
-    for root in roots:
+    for root in parsed_roots:
         chain = chains_by_root[root.receipt_no]
 
         if not chain.is_complete:
             failures.append(_chain_failure(company, root, chain))
+            continue
+
+        # Chain을 먼저 확정했으므로 이 root와 실제로 연결된 문서만 extract/adapt한다.
+        # 실패 경계도 root 단위여서 다른 정상 root의 Fact/Evidence는 보존된다.
+        try:
+            extracted_by_receipt = {
+                entry.filing.receipt_no: _extract_filing_event(
+                    entry.filing,
+                    documents[entry.filing.receipt_no],
+                )
+                for entry in chain.entries
+            }
+            extracted_by_doc_id = {
+                str(extracted["doc_id"]): extracted
+                for extracted in extracted_by_receipt.values()
+            }
+            adapted_by_receipt = {
+                receipt_no: adapt_extracted_event(extracted)
+                for receipt_no, extracted in extracted_by_receipt.items()
+            }
+            adapted_by_doc_id = {
+                result.event.source_doc_id: result
+                for result in adapted_by_receipt.values()
+            }
+        except (KeyError, ValueError) as error:
+            failures.append(
+                _failure(
+                    company=company,
+                    root_doc_id=_doc_id(root),
+                    stage=STAGE_EXTRACTION,
+                    reason=REASON_EXTRACTION_FAILED,
+                    detail=str(error),
+                )
+            )
             continue
 
         conversion = to_event_history(

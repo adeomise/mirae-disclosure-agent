@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -18,8 +20,10 @@ from disclosure_agent.event.extractor import extract_event
 from disclosure_agent.event.latest_state import resolve_latest_event_state
 from disclosure_agent.event.linker import ChainEntry, FilingChain, build_filing_chain
 from disclosure_agent.event.parser import parse_exchange_document
+from disclosure_agent.retrieval.metadata_filter import list_event_filings
 
 CORPUS_ROOT_ENV = "DISCLOSURE_CORPUS_ROOT"
+CORPUS_MANIFEST_ENV = "DISCLOSURE_CORPUS_MANIFEST"
 DEFAULT_EXCHANGE_ROOT = (
     Path(__file__).resolve().parents[2] / "data" / "raw" / "exchange"
 )
@@ -35,6 +39,24 @@ SUPPLY_CONTRACT_FILINGS = (
     ("20250728800035", "2025-07-28", False),
     ("20250731800028", "2025-07-31", True),
 )
+
+Q06_COMPANY = "LG유플러스"
+Q06_DOCUMENT_SUBTYPE = "신규시설투자등"
+Q06_SEMANTIC_TOKEN = "AIDC"
+Q06_FIELD_NAMES = {
+    "investment_type",
+    "investment_target",
+    "investment_amount",
+    "equity",
+    "equity_ratio",
+    "large_corporation",
+    "investment_purpose",
+    "investment_start_date",
+    "investment_end_date",
+    "board_resolution_date",
+    "notes",
+}
+
 
 @dataclass(frozen=True)
 class FilingStub:
@@ -385,6 +407,45 @@ def _actual_exchange_root(
     return None
 
 
+def _q06_corpus_paths() -> tuple[Path, Path] | None:
+    raw_corpus_root = os.environ.get(CORPUS_ROOT_ENV)
+
+    if not raw_corpus_root:
+        return None
+
+    corpus_root = Path(raw_corpus_root).expanduser()
+    raw_manifest = os.environ.get(CORPUS_MANIFEST_ENV)
+    manifest_path = (
+        Path(raw_manifest).expanduser()
+        if raw_manifest
+        else corpus_root / "manifest.jsonl"
+    )
+
+    return corpus_root, manifest_path
+
+
+@pytest.mark.parametrize(
+    ("explicit_manifest", "expected_manifest"),
+    [
+        ("/explicit/custom.jsonl", Path("/explicit/custom.jsonl")),
+        (None, Path("/some/root/manifest.jsonl")),
+    ],
+)
+def test_q06_corpus_paths_respect_explicit_manifest_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_manifest: str | None,
+    expected_manifest: Path,
+) -> None:
+    monkeypatch.setenv(CORPUS_ROOT_ENV, "/some/root")
+
+    if explicit_manifest is None:
+        monkeypatch.delenv(CORPUS_MANIFEST_ENV, raising=False)
+    else:
+        monkeypatch.setenv(CORPUS_MANIFEST_ENV, explicit_manifest)
+
+    assert _q06_corpus_paths() == (Path("/some/root"), expected_manifest)
+
+
 def test_samsung_biologics_actual_facility_investment_latest_state() -> None:
     corpus_root = _actual_exchange_root(SAMSUNG_FILINGS)
 
@@ -504,6 +565,209 @@ def test_samsung_biologics_actual_facility_investment_latest_state() -> None:
         assert state.fields[field_name].evidence_ids == [
             f"evidence_{source_doc_id}_{field_name}"
         ]
+
+
+@pytest.mark.corpus
+def test_q06_actual_facility_investment_latest_state_and_provenance() -> None:
+    corpus_paths = _q06_corpus_paths()
+
+    if corpus_paths is None:
+        pytest.skip(f"{CORPUS_ROOT_ENV} is not set")
+
+    corpus_root, manifest_path = corpus_paths
+
+    if not manifest_path.is_file():
+        pytest.skip(f"corpus manifest does not exist: {manifest_path}")
+
+    candidate_filings = list_event_filings(
+        manifest_path=manifest_path,
+        corpus_root=corpus_root,
+        company=Q06_COMPANY,
+        include_corrections=True,
+    )
+    candidate_documents = {
+        filing.receipt_no: parse_exchange_document(
+            filing.main_document,
+            corp_name=filing.corp_name,
+            report_name=filing.report_name,
+            receipt_date=filing.receipt_date,
+        )
+        for filing in candidate_filings
+    }
+    candidate_events = {
+        filing.doc_id: extract_event(candidate_documents[filing.receipt_no])
+        for filing in candidate_filings
+    }
+
+    matching_roots = []
+
+    for filing in candidate_filings:
+        extracted_event = candidate_events[filing.doc_id]
+        fields = extracted_event.get("fields") or {}
+        semantic_text = " ".join(
+            str((fields.get(field_name) or {}).get("normalized_value") or "")
+            for field_name in ("investment_target", "investment_purpose")
+        )
+
+        if (
+            not filing.is_correction
+            and extracted_event.get("event_type")
+            == EventType.FACILITY_INVESTMENT.value
+            and Q06_SEMANTIC_TOKEN in semantic_text
+        ):
+            matching_roots.append(filing)
+
+    assert len(matching_roots) == 1, (
+        "Q06 requires exactly one non-correction AIDC facility-investment "
+        f"root, found {len(matching_roots)}"
+    )
+
+    root = matching_roots[0]
+    root_extracted = candidate_events[root.doc_id]
+    root_fields = root_extracted["fields"]
+
+    assert root.doc_id
+    assert root.receipt_no
+    assert root.receipt_date
+    assert root.corp_name == Q06_COMPANY
+    assert root.document_subtype == Q06_DOCUMENT_SUBTYPE
+    assert root.is_correction is False
+    assert root_extracted["company"] == root.corp_name
+    assert root_extracted["event_type"] == EventType.FACILITY_INVESTMENT.value
+    assert root_extracted["correction"] is None
+    assert Q06_SEMANTIC_TOKEN in " ".join(
+        str(root_fields[field_name]["normalized_value"])
+        for field_name in ("investment_target", "investment_purpose")
+    )
+
+    filings = [
+        filing
+        for filing in candidate_filings
+        if filing.document_subtype == root.document_subtype
+    ]
+    parsed = {
+        filing.receipt_no: candidate_documents[filing.receipt_no]
+        for filing in filings
+    }
+    extracted = {
+        filing.doc_id: candidate_events[filing.doc_id]
+        for filing in filings
+    }
+    adapted = {
+        doc_id: adapt_extracted_event(event)
+        for doc_id, event in extracted.items()
+    }
+
+    chain = build_filing_chain(
+        root_receipt_no=root.receipt_no,
+        filings=filings,
+        documents=parsed,
+        event_type=EventType.FACILITY_INVESTMENT.value,
+    )
+
+    assert chain.root_receipt_no == root.receipt_no
+    assert len(chain.entries) == 1
+    assert chain.entries[0].filing.doc_id == root.doc_id
+    assert all(not entry.is_correction for entry in chain.entries)
+    assert chain.is_complete is True
+    assert chain.unresolved_links == ()
+
+    conversion = to_event_history(
+        chain,
+        documents=parsed,
+        filings=filings,
+        event_type=EventType.FACILITY_INVESTMENT,
+    )
+
+    assert conversion.history is not None
+    assert conversion.links == ()
+    assert conversion.conversion_gaps == ()
+
+    history = conversion.history
+
+    assert history.document_ids == [root.doc_id]
+    assert history.changes == []
+    assert history.chain_complete is True
+
+    state = resolve_latest_event_state(
+        root_event=adapted[root.doc_id].event,
+        history=history,
+        chain=chain,
+        documents=adapted,
+    )
+
+    assert state.event_id == history.event_id
+    assert state.company == root.corp_name
+    assert state.event_type is EventType.FACILITY_INVESTMENT
+    assert state.as_of.strftime("%Y%m%d") == root.receipt_date
+    assert Q06_FIELD_NAMES <= state.fields.keys()
+
+    for field_name in Q06_FIELD_NAMES:
+        value = state.fields[field_name].value
+
+        assert value is not None
+        assert not isinstance(value, str) or value.strip()
+
+    amount = Decimal(str(state.fields["investment_amount"].value))
+    equity = Decimal(str(state.fields["equity"].value))
+    equity_ratio = Decimal(str(state.fields["equity_ratio"].value))
+
+    assert amount.is_finite() and amount >= 0
+    assert equity.is_finite() and equity >= 0
+    assert equity_ratio.is_finite() and 0 <= equity_ratio <= 100
+    assert state.fields["investment_amount"].unit == "KRW"
+    assert state.fields["equity"].unit == "KRW"
+    assert state.fields["equity_ratio"].unit == "%"
+
+    for field_name in (
+        "investment_start_date",
+        "investment_end_date",
+        "board_resolution_date",
+    ):
+        value = str(state.fields[field_name].value)
+
+        assert date.fromisoformat(value).isoformat() == value
+
+    assert Q06_SEMANTIC_TOKEN in " ".join(
+        str(state.fields[field_name].value)
+        for field_name in ("investment_target", "investment_purpose")
+    )
+
+    for field_name in Q06_FIELD_NAMES:
+        state_value = state.fields[field_name].value
+        extracted_value = root_fields[field_name]["normalized_value"]
+
+        if field_name in {"investment_amount", "equity", "equity_ratio"}:
+            assert Decimal(str(state_value)) == Decimal(str(extracted_value))
+        else:
+            assert state_value == extracted_value
+
+        assert state.fields[field_name].unit == root_fields[field_name].get(
+            "normalized_unit"
+        )
+
+    evidence_by_id = {
+        item.evidence_id: item
+        for result in adapted.values()
+        for item in result.evidence
+    }
+    chain_doc_ids = {entry.filing.doc_id for entry in chain.entries}
+
+    for field_name in Q06_FIELD_NAMES:
+        field = state.fields[field_name]
+
+        assert field.source_doc_id in chain_doc_ids
+        assert field.evidence_ids
+
+        for evidence_id in field.evidence_ids:
+            assert evidence_id in evidence_by_id
+            evidence = evidence_by_id[evidence_id]
+
+            assert evidence.doc_id == field.source_doc_id
+            assert evidence.field_name == field_name
+            assert evidence.raw_text is not None
+            assert evidence.raw_text.strip()
+
 
 def test_samsung_supply_contract_actual_latest_state() -> None:
     corpus_root = _actual_exchange_root(SUPPLY_CONTRACT_FILINGS)

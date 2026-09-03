@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from disclosure_agent.event.extractor import extract_event
 from disclosure_agent.event.latest_state import resolve_latest_event_state
 from disclosure_agent.event.linker import ChainEntry, FilingChain, build_filing_chain
 from disclosure_agent.event.parser import parse_exchange_document
+from disclosure_agent.retrieval.metadata_filter import list_event_filings
 
 CORPUS_ROOT_ENV = "DISCLOSURE_CORPUS_ROOT"
 DEFAULT_EXCHANGE_ROOT = (
@@ -35,6 +37,24 @@ SUPPLY_CONTRACT_FILINGS = (
     ("20250728800035", "2025-07-28", False),
     ("20250731800028", "2025-07-31", True),
 )
+
+Q06_COMPANY = "LG유플러스"
+Q06_DOC_ID = "exchange_20250429800933"
+Q06_RECEIPT_NO = "20250429800933"
+Q06_DOCUMENT_SUBTYPE = "신규시설투자등"
+Q06_FIELD_NAMES = {
+    "investment_type",
+    "investment_target",
+    "investment_amount",
+    "equity",
+    "equity_ratio",
+    "large_corporation",
+    "investment_purpose",
+    "investment_start_date",
+    "investment_end_date",
+    "board_resolution_date",
+    "notes",
+}
 
 @dataclass(frozen=True)
 class FilingStub:
@@ -504,6 +524,163 @@ def test_samsung_biologics_actual_facility_investment_latest_state() -> None:
         assert state.fields[field_name].evidence_ids == [
             f"evidence_{source_doc_id}_{field_name}"
         ]
+
+
+@pytest.mark.corpus
+def test_q06_actual_facility_investment_latest_state_and_provenance() -> None:
+    configured = os.environ.get(CORPUS_ROOT_ENV)
+
+    if not configured:
+        pytest.skip(f"{CORPUS_ROOT_ENV} is not set")
+
+    corpus_root = Path(configured).expanduser()
+    manifest_path = corpus_root / "manifest.jsonl"
+
+    if not manifest_path.is_file():
+        pytest.skip(f"corpus manifest does not exist: {manifest_path}")
+
+    filings = list_event_filings(
+        manifest_path=manifest_path,
+        corpus_root=corpus_root,
+        company=Q06_COMPANY,
+        include_corrections=True,
+        document_subtype=Q06_DOCUMENT_SUBTYPE,
+    )
+
+    assert [filing.doc_id for filing in filings] == [Q06_DOC_ID]
+
+    root = filings[0]
+
+    assert root.receipt_no == Q06_RECEIPT_NO
+    assert root.receipt_date == "20250429"
+    assert root.corp_name == Q06_COMPANY
+    assert root.document_subtype == Q06_DOCUMENT_SUBTYPE
+    assert root.is_correction is False
+
+    parsed = {
+        filing.receipt_no: parse_exchange_document(
+            filing.main_document,
+            corp_name=filing.corp_name,
+            report_name=filing.report_name,
+            receipt_date=filing.receipt_date,
+        )
+        for filing in filings
+    }
+    extracted = {
+        filing.doc_id: extract_event(parsed[filing.receipt_no])
+        for filing in filings
+    }
+    adapted = {
+        doc_id: adapt_extracted_event(event)
+        for doc_id, event in extracted.items()
+    }
+
+    root_extracted = extracted[Q06_DOC_ID]
+
+    assert root_extracted["company"] == Q06_COMPANY
+    assert root_extracted["event_type"] == EventType.FACILITY_INVESTMENT.value
+    assert root_extracted["correction"] is None
+    assert (
+        root_extracted["fields"]["investment_target"]["normalized_value"]
+        == "파주 AIDC 신규 구축"
+    )
+    assert (
+        root_extracted["fields"]["investment_purpose"]["normalized_value"]
+        == "고객 수요 증가에 따른 AIDC 신규 구축"
+    )
+
+    chain = build_filing_chain(
+        root_receipt_no=Q06_RECEIPT_NO,
+        filings=filings,
+        documents=parsed,
+        event_type=EventType.FACILITY_INVESTMENT.value,
+    )
+
+    assert chain.root_receipt_no == Q06_RECEIPT_NO
+    assert [entry.filing.doc_id for entry in chain.entries] == [Q06_DOC_ID]
+    assert all(not entry.is_correction for entry in chain.entries)
+    assert chain.is_complete is True
+    assert chain.unresolved_links == ()
+
+    conversion = to_event_history(
+        chain,
+        documents=parsed,
+        filings=filings,
+        event_type=EventType.FACILITY_INVESTMENT,
+    )
+
+    assert conversion.history is not None
+    assert conversion.links == ()
+    assert conversion.conversion_gaps == ()
+
+    history = conversion.history
+
+    assert history.document_ids == [Q06_DOC_ID]
+    assert history.changes == []
+    assert history.chain_complete is True
+
+    state = resolve_latest_event_state(
+        root_event=adapted[Q06_DOC_ID].event,
+        history=history,
+        chain=chain,
+        documents=adapted,
+    )
+
+    assert state.event_id == f"event_facility_investment_{Q06_DOC_ID}"
+    assert state.company == Q06_COMPANY
+    assert state.as_of.isoformat() == "2025-04-29"
+    assert Q06_FIELD_NAMES <= state.fields.keys()
+
+    assert state.fields["investment_type"].value == "신규시설투자"
+    assert state.fields["investment_target"].value == "파주 AIDC 신규 구축"
+    assert Decimal(str(state.fields["investment_amount"].value)) == Decimal(
+        "615600000000"
+    )
+    assert state.fields["investment_amount"].unit == "KRW"
+    assert Decimal(str(state.fields["equity"].value)) == Decimal("8768379152088")
+    assert state.fields["equity"].unit == "KRW"
+    assert Decimal(str(state.fields["equity_ratio"].value)) == Decimal("7.02")
+    assert state.fields["equity_ratio"].unit == "%"
+    assert state.fields["large_corporation"].value == "해당"
+    assert (
+        state.fields["investment_purpose"].value
+        == "고객 수요 증가에 따른 AIDC 신규 구축"
+    )
+    assert state.fields["investment_start_date"].value == "2025-05-07"
+    assert state.fields["investment_end_date"].value == "2027-05-25"
+    assert state.fields["board_resolution_date"].value == "2025-04-29"
+
+    evidence_by_id = {
+        item.evidence_id: item
+        for result in adapted.values()
+        for item in result.evidence
+    }
+
+    for field_name in Q06_FIELD_NAMES:
+        field = state.fields[field_name]
+
+        assert field.source_doc_id == Q06_DOC_ID
+        assert field.evidence_ids
+
+        for evidence_id in field.evidence_ids:
+            assert evidence_id in evidence_by_id
+            assert evidence_by_id[evidence_id].doc_id == field.source_doc_id
+
+    assert state.fields["investment_target"].evidence_ids == [
+        f"evidence_{Q06_DOC_ID}_investment_target"
+    ]
+    assert state.fields["investment_amount"].evidence_ids == [
+        f"evidence_{Q06_DOC_ID}_investment_amount"
+    ]
+    assert state.fields["investment_purpose"].evidence_ids == [
+        f"evidence_{Q06_DOC_ID}_investment_purpose"
+    ]
+    assert state.fields["investment_start_date"].evidence_ids == [
+        f"evidence_{Q06_DOC_ID}_investment_start_date"
+    ]
+    assert state.fields["investment_end_date"].evidence_ids == [
+        f"evidence_{Q06_DOC_ID}_investment_end_date"
+    ]
 
 def test_samsung_supply_contract_actual_latest_state() -> None:
     corpus_root = _actual_exchange_root(SUPPLY_CONTRACT_FILINGS)

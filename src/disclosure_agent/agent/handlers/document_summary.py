@@ -5,6 +5,9 @@
 
 현재 구현 범위:
 - 대표 질문 Q04 계열("<기업> <연도>년 사업보고서에서 <범위> 관련 내용 정리해줘").
+- 대표 질문 Q05 계열("<기업>는 무슨 사업을 하고 주력 제품이 뭐야?"). 문서 1건에서 범위
+  둘(사업의 개요, 주요 제품)을 각각 확정해 DocumentSummary 2건으로 싣는다. 계획의
+  section_scopes가 이 경로를 가른다(_handle_multi_scope_summary).
 
     QueryPlan
       -> 계획 모양 확인          (이 모듈)
@@ -34,6 +37,12 @@ Fact를 만들지 않는 이유:
     판본 선택 정책(open_decisions.md D5)은 미정이고, 이 handler가 그 정책을 새로 정하지 않는다.
     같은 규칙을 그대로 쓰면 두 Pattern이 같은 문서를 본다.
 
+    Q05 경로(section_scopes)는 정정본을 후보에 포함한다. 그 경로는 질문이 연도를 밝히지 않아
+    코퍼스 기준 최신 회계연도로 옮긴 계획이며, 정정본을 빼면 원본과 정정본이 함께 있는 해가
+    원본 1건으로 보여 "유일하게 확정됐다"고 진행하게 된다. 그것은 정책 없이 원본을 고른
+    것이다. 그래서 Q09(temporal_compare)와 같은 규칙을 쓴다. 후보가 둘 이상이면 어느 것도
+    고르지 않고 ambiguous_filing으로 멈춘다. Q04 경로의 규칙은 바꾸지 않는다.
+
 Vector Search를 쓰지 않는 이유:
     구조 기반 탐색이 1순위이고 의미 검색은 조건부 fallback 후보다
     (docs/agent_design/retrieval_strategy.md). 도입 여부는 open_decisions.md D7에서 미정이며,
@@ -48,14 +57,14 @@ Vector Search를 쓰지 않는 이유:
   직접 쓴다.
 
 TODO:
-- Q05(기간 미지정)의 기본 문서 선택. open_decisions.md D5-a가 정해진 뒤에 연다.
+- Q05 이외의 기간 미지정 요약의 기본 문서 선택. open_decisions.md D5-a가 정해진 뒤에 연다.
 - Q06(거래소공시 단건 요약)의 판본 선택. open_decisions.md D5가 정해진 뒤에 연다.
 - Section 내부의 항목 단위 분할. periodic.sections의 TODO 참조.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -70,10 +79,19 @@ from disclosure_agent.agent.answer_builder import (
     BlockedInfo,
 )
 from disclosure_agent.agent.normalization import normalize_document_summary_result
-from disclosure_agent.agent.query_analyzer import DOCUMENT_SUBTYPE_ANNUAL, QueryPlan
-from disclosure_agent.common.enums import SectionScope
+from disclosure_agent.agent.query_analyzer import (
+    BUSINESS_PROFILE_SECTION_SCOPES,
+    DOCUMENT_SUBTYPE_ANNUAL,
+    QueryPlan,
+)
+from disclosure_agent.common.enums import (
+    AnswerabilityStatus,
+    ExecutionStatus,
+    SectionScope,
+)
 from disclosure_agent.common.schemas import AgentExecutionResult
 from disclosure_agent.periodic.sections import (
+    REASON_AMBIGUOUS_SECTION,
     SectionContentItem,
     SectionNavigationError,
     SectionSelection,
@@ -142,12 +160,184 @@ def handle_document_summary(
     Router가 부르는 진입점.
 
     공통 Contract인 AgentExecutionResult를 돌려준다.
+
+    계획의 section_scopes가 Q05의 범위 묶음(BUSINESS_PROFILE_SECTION_SCOPES)과 정확히 같을
+    때만 범위 묶음 경로다. 그 경로는 정정본을 후보에 포함하는 조회 규칙을 쓰므로, 묶음이
+    비어 있지 않다는 것만으로 열면 다른 묶음이 그 규칙을 물려받는다. 다른 묶음은 범위 하나의
+    경로로 보내 입구 가드(_reject_unsupported_plan)가 막게 한다. 범위 하나로 바꿔 읽지 않는다.
     """
+    if plan.section_scopes == BUSINESS_PROFILE_SECTION_SCOPES:
+        return _handle_multi_scope_summary(
+            plan,
+            corpus_root=corpus_root,
+            manifest_path=manifest_path,
+        )
+
     return normalize_document_summary_result(
         build_document_summary_result(
             plan,
             corpus_root=corpus_root,
             manifest_path=manifest_path,
+        )
+    )
+
+
+def _handle_multi_scope_summary(
+    plan: QueryPlan,
+    *,
+    corpus_root: str | Path,
+    manifest_path: str | Path | None,
+) -> AgentExecutionResult:
+    """
+    문서 1건에서 범위 여럿을 각각 확정해 DocumentSummary 여러 건으로 싣는다(Q05).
+
+    공시 확정과 파싱은 한 번만 한다. 범위마다 다시 찾으면 같은 질문 안에서 범위별로 다른
+    문서를 볼 수 있고, 그 어긋남은 결과만 봐서는 드러나지 않는다.
+
+    범위 하나라도 확정하지 못하면 전부 멈춘다. 확정한 범위만 실어 보내면 질문이 물은
+    나머지 범위가 사라진 사실이 결과에 남지 않는다. 멈춘 사유는 그 범위를 단독으로
+    요약했을 때와 같은 사유다(normalize_document_summary_result가 그대로 옮긴다).
+
+    범위마다의 확정·수집·변환은 범위 하나의 경로(build_result_from_document,
+    normalize_document_summary_result)를 그대로 쓴다. 여기서 같은 일을 다시 적으면 두 벌이
+    된다. 범위별 계획은 원래 계획의 section_scope 자리에 그 범위 하나를 넣은 복제본이다.
+    """
+    entry_block = _reject_unsupported_plan(plan)
+
+    if entry_block is not None:
+        return normalize_document_summary_result(
+            DocumentSummaryResult(plan=plan, blocked=entry_block)
+        )
+
+    filing, blocked = _select_filing(
+        plan,
+        corpus_root=corpus_root,
+        manifest_path=manifest_path,
+        include_corrections=True,
+    )
+
+    if filing is None:
+        return normalize_document_summary_result(
+            DocumentSummaryResult(
+                plan=plan,
+                blocked=blocked
+                or BlockedInfo(
+                    stage=STAGE_FILING_DISCOVERY,
+                    reason=REASON_NO_MATCHING_FILING,
+                    detail="공시를 확정하지 못했는데 그 사유가 남지 않았습니다.",
+                ),
+            )
+        )
+
+    try:
+        document = load_parsed_document(filing.main_document)
+
+    except (OSError, ValueError) as error:
+        return normalize_document_summary_result(
+            DocumentSummaryResult(
+                plan=plan,
+                filing=filing,
+                blocked=BlockedInfo(
+                    stage=STAGE_PARSING,
+                    reason=REASON_PARSE_FAILED,
+                    detail=str(error),
+                ),
+            )
+        )
+
+    summaries = []
+    evidence = []
+    warnings: list[str] = []
+
+    # 범위별로 확정한 Section과 실은 근거의 식별자.
+    #
+    # 두 범위가 같은 Section으로 확정되면 같은 근거가 두 번 실리고, 답은 서로 다른 두 범위를
+    # 찾은 것처럼 말하게 된다. 규칙 둘이 한 제목에 함께 걸리는 서식("사업의 개요 및 주요
+    # 제품")이 그 경우다. 그 Section이 어느 범위의 것인지 정할 근거가 없으므로, Section
+    # 탐색이 후보를 하나로 좁히지 못했을 때와 같은 사유(ambiguous_section)로 멈춘다. 근거
+    # 식별자는 Section 식별자에서 나오므로 두 검사는 같은 것을 보지만, 근거 쪽 검사가 있어야
+    # 식별자 규칙이 바뀌어도 중복 근거가 그대로 나가지 않는다.
+    section_scope_by_id: dict[str, SectionScope] = {}
+    evidence_ids: set[str] = set()
+
+    for section_scope in plan.section_scopes:
+        scoped_plan = replace(plan, section_scope=section_scope, section_scopes=())
+
+        part = build_result_from_document(document, plan=scoped_plan, filing=filing)
+
+        if part.selection is not None:
+            claimed_by = section_scope_by_id.get(part.selection.section_id)
+
+            if claimed_by is not None:
+                return _blocked_scope_collision(
+                    part,
+                    detail=(
+                        f"'{claimed_by.value}'와 '{section_scope.value}' 범위가 같은 Section "
+                        f"'{' > '.join(part.selection.section_path)}'으로 확정됐습니다. "
+                        "한 Section을 두 범위로 나눠 요약하지 않습니다."
+                    ),
+                )
+
+            section_scope_by_id[part.selection.section_id] = section_scope
+
+        normalized = normalize_document_summary_result(part)
+
+        if normalized.answerability_status is not AnswerabilityStatus.ANSWERABLE:
+            return normalized
+
+        repeated = sorted(
+            {item.evidence_id for item in normalized.evidence if item.evidence_id in evidence_ids}
+        )
+
+        if repeated:
+            return _blocked_scope_collision(
+                part,
+                detail=(
+                    f"'{section_scope.value}' 범위의 근거가 앞서 확정한 범위의 근거와 겹칩니다: "
+                    f"{', '.join(repeated)}. 같은 근거를 두 범위에 나눠 싣지 않습니다."
+                ),
+            )
+
+        evidence_ids.update(item.evidence_id for item in normalized.evidence)
+
+        summaries.extend(normalized.document_summaries)
+        evidence.extend(normalized.evidence)
+
+        for warning in normalized.warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        document_summaries=summaries,
+        evidence=evidence,
+        warnings=warnings,
+    )
+
+
+def _blocked_scope_collision(
+    part: DocumentSummaryResult,
+    *,
+    detail: str,
+) -> AgentExecutionResult:
+    """
+    범위 묶음 경로에서 두 범위가 한 Section이나 한 근거를 함께 가리킨 경우의 정지.
+
+    사유는 Section 탐색의 ambiguous_section을 그대로 쓴다. 문서는 열었고 범위마다 Section을
+    찾았지만 그 Section이 어느 범위의 것인지 하나로 정하지 못한 것이므로, 같은 단계의 같은
+    판정이다. 새 사유를 만들면 같은 상황이 두 이름을 갖는다.
+    """
+    return normalize_document_summary_result(
+        DocumentSummaryResult(
+            plan=part.plan,
+            filing=part.filing,
+            document=part.document,
+            blocked=BlockedInfo(
+                stage=STAGE_SECTION_NAVIGATION,
+                reason=REASON_AMBIGUOUS_SECTION,
+                detail=detail,
+            ),
         )
     )
 
@@ -165,7 +355,26 @@ def _reject_unsupported_plan(plan: QueryPlan) -> BlockedInfo | None:
 
     section_scope가 비어 있는 계획은 QueryPlan.__post_init__이 아예 만들지 못하게 막으므로
     여기서 다시 보지 않는다.
+
+    범위 묶음은 Q05의 묶음 하나만 받는다:
+        범위 묶음 경로는 정정본을 후보에 포함하는 조회 규칙과 두 범위의 충돌 검사를 그
+        묶음에 맞춰 두었다. 다른 묶음(범위 하나짜리 묶음 포함)이 들어오면 그 규칙을
+        물려받거나, 범위 하나의 경로가 section_scope 없이 진행하게 된다. 어느 쪽도 계획이
+        요청한 것과 다르므로 입구에서 막는다.
     """
+    if plan.section_scopes and plan.section_scopes != BUSINESS_PROFILE_SECTION_SCOPES:
+        supported = ", ".join(scope.value for scope in BUSINESS_PROFILE_SECTION_SCOPES)
+        requested = ", ".join(scope.value for scope in plan.section_scopes)
+
+        return BlockedInfo(
+            stage=STAGE_PATTERN_ENTRY,
+            reason=REASON_UNSUPPORTED_SUMMARY_SECTION_SCOPE,
+            detail=(
+                f"지원하지 않는 범위 묶음입니다: ({requested}). 범위 묶음 요약은 "
+                f"({supported}) 하나만 실행합니다. 범위 하나의 요약으로 바꿔 읽지 않습니다."
+            ),
+        )
+
     if (
         plan.document_class != DOCUMENT_CLASS_PERIODIC
         or plan.document_subtype != DOCUMENT_SUBTYPE_ANNUAL
@@ -204,6 +413,7 @@ def _select_filing(
     *,
     corpus_root: str | Path,
     manifest_path: str | Path | None,
+    include_corrections: bool = False,
 ) -> tuple[FilingRef | None, BlockedInfo | None]:
     """
     질문이 가리키는 공시를 1건으로 확정한다.
@@ -211,6 +421,9 @@ def _select_filing(
     후보를 전부 받아 개수로 판정한다. 0건이면 코퍼스에 그 문서가 없다는 확정 판정이고
     (docs/agent_design/evidence_and_answerability.md의 [4]단계), 2건 이상이면 어느 문서를
     요약할지 정할 근거가 없다는 판정이다. 둘은 후속 조치가 다르므로 사유를 나눈다.
+
+    include_corrections의 기본값은 Q04 경로의 규칙(정정본 제외)이다. Q05 경로가 참을 넘긴다
+    (모듈 docstring 참조).
     """
     resolved_manifest = (
         Path(manifest_path) if manifest_path else Path(corpus_root) / "manifest.jsonl"
@@ -224,6 +437,7 @@ def _select_filing(
             document_class=plan.document_class,
             document_subtype=plan.document_subtype,
             year=plan.year,
+            include_corrections=include_corrections,
         )
 
     except FilingNotFoundError as error:
@@ -246,12 +460,13 @@ def _select_filing(
 
     if len(candidates) > 1:
         listed = ", ".join(candidate.doc_id for candidate in candidates)
+        scope_note = "(정정본 포함) " if include_corrections else ""
 
         return None, BlockedInfo(
             stage=STAGE_FILING_DISCOVERY,
             reason=REASON_AMBIGUOUS_FILING,
             detail=(
-                f"조건에 맞는 공시가 {len(candidates)}건입니다: {listed}. "
+                f"조건에 맞는 공시{scope_note}가 {len(candidates)}건입니다: {listed}. "
                 "요약 대상 문서를 하나 골라 답하지 않습니다."
             ),
         )

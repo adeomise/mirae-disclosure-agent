@@ -32,7 +32,7 @@ Section을 하나로 확정하는 이유:
 - SectionSelection, SectionContentItem 목록
 
 TODO:
-- products·financial_statement의 Section 규칙 확정. 지금은 어휘만 있고 규칙이 없어
+- financial_statement의 Section 규칙 확정. 지금은 어휘만 있고 규칙이 없어
   unsupported_section_scope로 막힌다(SECTION_SCOPE_RULES 참조).
 - Section 내부의 항목 단위(가./나./(1)) 분할. Parser가 본문 P와 TABLE의 문서 내 순서를
   함께 남기지 않아 지금은 Section 경계가 곧 범위 경계다.
@@ -135,9 +135,9 @@ class SectionScopeRule:
 
 # 범위 -> Section 규칙.
 #
-# 지금 담긴 것은 facility_investment와 business_overview 둘이다. 나머지 SectionScope 값은
-# 어휘로만 있고 규칙이 없어 unsupported_section_scope로 막힌다. 규칙을 실제 코퍼스로 확인하지
-# 않은 채 넣으면, 확인되지 않은 Section을 요약해 놓고 형식만 맞는 결과가 나간다.
+# 지금 담긴 것은 facility_investment, business_overview, products 셋이다. 나머지 SectionScope
+# 값은 어휘로만 있고 규칙이 없어 unsupported_section_scope로 막힌다. 규칙을 실제 코퍼스로
+# 확인하지 않은 채 넣으면, 확인되지 않은 Section을 요약해 놓고 형식만 맞는 결과가 나간다.
 #
 # facility_investment의 근거:
 #     docs/agent_design/retrieval_strategy.md Pattern B가 "사업의 내용 Section 아래 설비
@@ -151,6 +151,16 @@ class SectionScopeRule:
 #
 #     상위 Section을 함께 요구하는 것이 여기서도 중요하다. '개요'는 문서 여러 곳에 나오고,
 #     상위 조건이 없으면 회사의 개요나 이사의 경영진단이 함께 걸린다.
+#
+# products의 근거:
+#     표준 서식에서 주력 제품을 서술하는 자리는 "II. 사업의 내용 / 2. 주요 제품 및 서비스"이며,
+#     이 규칙은 그 경로를 가리킨다. Q05("무슨 사업을 하고 주력 제품이 뭐야?")가 사업의 개요와
+#     함께 요약하는 범위이고, 실제 코퍼스의 사업보고서에서 이 경로가 하나로 확정되는 것을
+#     확인한 뒤 넣었다.
+#
+#     제목 표기는 '주요 제품'까지만 요구한다. '및 서비스'까지 요구하면 서비스를 다루지 않는
+#     기업의 서식 변형에서 조용히 막힌다. '제품'만으로는 보지 않는다. 매출 및 수주상황
+#     Section의 하위 제목("제품별 매출")이 함께 걸린다.
 SECTION_SCOPE_RULES: dict[SectionScope, SectionScopeRule] = {
     SectionScope.FACILITY_INVESTMENT: SectionScopeRule(
         scope=SectionScope.FACILITY_INVESTMENT,
@@ -161,6 +171,11 @@ SECTION_SCOPE_RULES: dict[SectionScope, SectionScopeRule] = {
         scope=SectionScope.BUSINESS_OVERVIEW,
         ancestor_tokens=("사업의 내용",),
         title_tokens=("사업의 개요",),
+    ),
+    SectionScope.PRODUCTS: SectionScopeRule(
+        scope=SectionScope.PRODUCTS,
+        ancestor_tokens=("사업의 내용",),
+        title_tokens=("주요 제품",),
     ),
 }
 

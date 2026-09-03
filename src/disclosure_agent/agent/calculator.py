@@ -72,8 +72,8 @@ guard②이 축마다 따로 있는 이유:
 출력:
 - Contract의 CalculationResult
 
-TODO:
-- aggregate 등 나머지 수치형 연산(Q12)
+Q12의 기업별 합계는 aggregate가 만들고, 최종 우열은 기존
+ComparisonResult 판정이 만든다.
 """
 
 from __future__ import annotations
@@ -102,6 +102,7 @@ from disclosure_agent.common.schemas import (
 
 __all__ = [
     "CalculationBlockedError",
+    "OPERATION_AGGREGATE",
     "OPERATION_DELTA",
     "OPERATION_DELTA_PCT",
     "OPERATION_DIFF_PP",
@@ -109,6 +110,7 @@ __all__ = [
     "QUANTUM",
     "UNIT_PERCENT",
     "UNIT_PERCENTAGE_POINT",
+    "aggregate",
     "compare_calculations",
     "compare_facts",
     "delta",
@@ -116,6 +118,7 @@ __all__ = [
     "diff",
     "ratio",
     "validate_calculation_inputs",
+    "validate_aggregation_inputs",
     "validate_cross_entity_comparability",
     "validate_cross_entity_fact_comparability",
     "validate_temporal_comparability",
@@ -130,6 +133,7 @@ __all__ = [
 # 어긋나면 handler가 계산 전에 막는다(handlers/temporal_compare.py 참조).
 OPERATION_RATIO = "ratio"
 OPERATION_DIFF_PP = "diff_pp"
+OPERATION_AGGREGATE = "aggregate"
 
 # 원천 값 두 건의 증감. 파생값을 거치지 않고 Fact에서 바로 나온다.
 #
@@ -352,6 +356,48 @@ def validate_calculation_inputs(
             REASON_UNUSABLE_CALCULATION_INPUT,
             f"분모 Fact {denominator.fact_id!r}의 값이 0입니다. 비율이 정의되지 않습니다.",
         )
+
+
+def validate_aggregation_inputs(
+    facts: Sequence[Fact],
+    *,
+    expected_company: str,
+    expected_metric: MetricConcept,
+    expected_unit: str,
+) -> None:
+    """한 기업의 건별 Fact를 합산해도 되는지 집계 직전에 확인한다."""
+    if not facts:
+        raise CalculationBlockedError(
+            REASON_UNUSABLE_CALCULATION_INPUT,
+            f"{expected_company}의 {expected_metric.value} 집계 입력이 없습니다.",
+        )
+
+    for fact in facts:
+        if fact.company != expected_company:
+            raise CalculationBlockedError(
+                REASON_INCOMPARABLE_CALCULATION_INPUTS,
+                f"집계 Fact의 기업이 다릅니다: {fact.company} / {expected_company}",
+            )
+        if fact.metric is not expected_metric:
+            raise CalculationBlockedError(
+                REASON_INCOMPARABLE_CALCULATION_INPUTS,
+                f"집계 Fact의 지표가 다릅니다: "
+                f"{fact.metric.value} / {expected_metric.value}",
+            )
+        if fact.accounting_scope is not FactAccountingScope.NOT_APPLICABLE:
+            raise CalculationBlockedError(
+                REASON_INCOMPARABLE_CALCULATION_INPUTS,
+                f"이벤트 집계 Fact의 회계기준은 not_applicable이어야 합니다: "
+                f"{fact.accounting_scope.value}",
+            )
+        if fact.normalized_unit != expected_unit:
+            raise CalculationBlockedError(
+                REASON_INCOMPARABLE_CALCULATION_INPUTS,
+                f"집계 Fact의 정규화 단위가 {expected_unit}가 아닙니다: "
+                f"{fact.fact_id!r}={fact.normalized_unit!r}",
+            )
+
+        _decimal(fact.normalized_value, label=f"집계 Fact {fact.fact_id!r}")
 
 
 # --------------------------------------------------------------------------
@@ -1021,6 +1067,46 @@ def validate_cross_entity_fact_comparability(
 # --------------------------------------------------------------------------
 # 수치형 파생 결과
 # --------------------------------------------------------------------------
+
+
+def aggregate(
+    *,
+    calculation_id: str,
+    facts: Sequence[Fact],
+    output_unit: str,
+) -> CalculationResult:
+    """Fact 목록을 Decimal로 합산한 결정적 집계 결과를 만든다.
+
+    입력 비교 가능성은 ``validate_aggregation_inputs``가 먼저 확인한다.
+    이 함수는 전달된 순서를 그대로 참조에 남겨 건별 포함 목록을 재현할 수
+    있게 한다. 반올림은 하지 않으며 float를 거치지 않는다.
+    """
+    if not facts:
+        raise CalculationBlockedError(
+            REASON_UNUSABLE_CALCULATION_INPUT,
+            "집계할 Fact가 없습니다.",
+        )
+
+    total = sum(
+        (_decimal(fact.normalized_value, label=f"집계 Fact {fact.fact_id!r}") for fact in facts),
+        start=Decimal(0),
+    )
+    value = format(total, "f")
+
+    if "." in value:
+        value = value.rstrip("0").rstrip(".")
+
+    if Decimal(value).is_zero():
+        value = "0"
+
+    return CalculationResult(
+        calculation_id=calculation_id,
+        operation=OPERATION_AGGREGATE,
+        inputs=[_fact_reference(fact) for fact in facts],
+        value=value,
+        unit=output_unit,
+        evidence_ids=_merged_evidence_ids(*(fact.evidence_ids for fact in facts)),
+    )
 
 
 def ratio(

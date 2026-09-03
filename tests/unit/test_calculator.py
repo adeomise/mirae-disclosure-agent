@@ -30,12 +30,15 @@ from disclosure_agent.agent.answer_builder import (
     REASON_UNUSABLE_CALCULATION_INPUT,
 )
 from disclosure_agent.agent.calculator import (
+    OPERATION_AGGREGATE,
     OPERATION_DIFF_PP,
     OPERATION_RATIO,
     UNIT_PERCENTAGE_POINT,
     CalculationBlockedError,
+    aggregate,
     diff,
     ratio,
+    validate_aggregation_inputs,
     validate_calculation_inputs,
     validate_temporal_comparability,
 )
@@ -147,6 +150,57 @@ def check_inputs(numerator: Fact, denominator: Fact) -> None:
         numerator_metric=NUMERATOR_METRIC,
         denominator_metric=DENOMINATOR_METRIC,
     )
+
+
+def test_aggregate_sums_exact_decimal_fact_values_and_preserves_inputs() -> None:
+    facts = tuple(
+        make_fact(
+            metric=MetricConcept.INVESTMENT_AMOUNT,
+            value=value,
+            company=COMPANY,
+            accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+            normalized_unit="KRW",
+            fact_id=f"fact_investment_{index}",
+        )
+        for index, value in enumerate(("100", "200.50"), start=1)
+    )
+    validate_aggregation_inputs(
+        facts,
+        expected_company=COMPANY,
+        expected_metric=MetricConcept.INVESTMENT_AMOUNT,
+        expected_unit="KRW",
+    )
+
+    calculation = aggregate(
+        calculation_id="calculation_investment_total",
+        facts=facts,
+        output_unit="KRW",
+    )
+
+    assert calculation.operation == OPERATION_AGGREGATE
+    assert calculation.value == "300.5"
+    assert [item.input_id for item in calculation.inputs] == [
+        "fact_investment_1",
+        "fact_investment_2",
+    ]
+
+
+def test_aggregation_guard_rejects_an_incompatible_unit() -> None:
+    fact = make_fact(
+        metric=MetricConcept.INVESTMENT_AMOUNT,
+        value="100",
+        company=COMPANY,
+        accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+        normalized_unit="USD",
+    )
+
+    with pytest.raises(CalculationBlockedError, match="KRW"):
+        validate_aggregation_inputs(
+            (fact,),
+            expected_company=COMPANY,
+            expected_metric=MetricConcept.INVESTMENT_AMOUNT,
+            expected_unit="KRW",
+        )
 
 
 # --------------------------------------------------------------------------

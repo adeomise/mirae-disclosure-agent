@@ -2081,6 +2081,11 @@ def build_query_plan(
                 detail="지분공시 질문에서 보고자와 발행회사를 하나씩 확정해야 합니다.",
             )
         years = _require_years(_extract_years(question))
+        if len(years) != 1:
+            raise UnsupportedQuestionError(
+                reason="unsupported_holding_period_count",
+                detail="지분공시 단건 조회는 한 개 연도만 지정해야 합니다.",
+            )
         requested = (MetricConcept.HOLDING_SHARES, MetricConcept.HOLDING_RATIO)
         if not all(token in question for token in ("보유주식 수", "보유비율")):
             raise UnsupportedQuestionError(

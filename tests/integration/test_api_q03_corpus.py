@@ -72,3 +72,6 @@ def test_q03_runs_through_actual_corpus_http_api() -> None:
         assert fact.normalized_unit == unit
         assert fact.evidence_ids == [evidence_id]
         assert set(fact.evidence_ids) <= available
+
+    assert "1,237,964,708주" in actual.answer
+    assert "20.74%" in actual.answer

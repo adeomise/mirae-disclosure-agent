@@ -451,3 +451,48 @@ def test_value_requests_without_a_year_stay_fail_closed(question: str) -> None:
         plan_for(question)
 
     assert error.value.reason == "missing_year"
+
+
+# --------------------------------------------------------------------------
+# 6. '사업부'는 사업 서술이 아니다
+# --------------------------------------------------------------------------
+#
+# 사업 서술 표기는 조사까지 요구한다("무슨 사업을", "어떤 사업을", "어떤 사업인지"). '무슨
+# 사업'만으로 보면 사업부를 묻는 질문이 함께 걸리고, 그 질문은 기업 소개가 아니다.
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "테스트반도체는 어떤 사업부가 주력 제품을 담당해?",
+        "테스트반도체는 무슨 사업부의 주요 제품이야?",
+    ],
+)
+def test_business_unit_questions_do_not_open_the_business_profile_path(
+    question: str,
+) -> None:
+    """사업부를 묻는 질문은 이전과 같이 연도 없는 값 조회로 흘러가 missing_year로 막힌다."""
+    with pytest.raises(UnsupportedQuestionError) as error:
+        plan_for(question)
+
+    assert error.value.reason == "missing_year"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "한미반도체는 무슨 사업을 하고 주력 제품이 뭐야?",
+        "한미반도체는 어떤 사업을 하고 주요 제품이 뭐야?",
+        "한미반도체는 2024년에 어떤 사업을 하고 주요 제품이 뭐야?",
+    ],
+)
+def test_canonical_business_profile_wordings_still_open_the_path(question: str) -> None:
+    plan = build_query_plan(
+        question,
+        known_companies=("한미반도체",),
+        fiscal_year_anchors={"한미반도체": 2025},
+    )
+
+    assert plan.intent == INTENT_DOCUMENT_SUMMARY
+    assert plan.section_scopes == (SectionScope.BUSINESS_OVERVIEW, SectionScope.PRODUCTS)
+    assert plan.years == ((2024,) if "2024년" in question else (2025,))

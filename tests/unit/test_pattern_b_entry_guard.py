@@ -19,9 +19,11 @@ import pytest
 from disclosure_agent.agent.handlers.document_summary import (
     REASON_UNSUPPORTED_SUMMARY_DOCUMENT_CLASS,
     REASON_UNSUPPORTED_SUMMARY_PERIOD,
+    REASON_UNSUPPORTED_SUMMARY_SECTION_SCOPE,
     handle_document_summary,
 )
 from disclosure_agent.agent.query_analyzer import (
+    BUSINESS_PROFILE_SECTION_SCOPES,
     INTENT_DOCUMENT_SUMMARY,
     QueryPlan,
 )
@@ -171,3 +173,54 @@ def test_scope_bundle_rejects_a_bare_scope() -> None:
     """SectionScope은 StrEnum이라 낱개로 넘기면 글자 단위로 순회된다."""
     with pytest.raises(TypeError, match="튜플"):
         summary_plan(section_scope=None, section_scopes=SectionScope.PRODUCTS)
+
+
+# --------------------------------------------------------------------------
+# 범위 묶음 경로의 입구: Q05의 묶음 하나만 받는다
+# --------------------------------------------------------------------------
+#
+# 범위 묶음 경로는 정정본을 후보에 포함하는 조회 규칙을 쓴다. 묶음이 비어 있지 않다는 것만으로
+# 그 경로를 열면 다른 묶음이 그 규칙을 물려받는다. 그래서 Q05의 묶음과 정확히 같을 때만 열고,
+# 다른 묶음은 입구에서 막는다. 범위 하나의 요약으로 바꿔 읽지도 않는다.
+
+
+def test_canonical_scope_bundle_passes_the_entry_guard() -> None:
+    """Q05의 묶음은 입구를 지나 공시 조회 단계까지 간다. 코퍼스가 없으므로 거기서 멈춘다."""
+    result = run(summary_plan(section_scope=None, section_scopes=BUSINESS_PROFILE_SECTION_SCOPES))
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "filing_discovery"
+
+
+def test_single_element_bundle_is_blocked_at_the_entry() -> None:
+    """범위 하나짜리 묶음은 Q05가 아니다. 범위 하나의 요약으로 바꿔 읽지 않고 막는다."""
+    result = run(
+        summary_plan(section_scope=None, section_scopes=(SectionScope.FACILITY_INVESTMENT,))
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "pattern_entry"
+    assert result.execution_issue.reason == REASON_UNSUPPORTED_SUMMARY_SECTION_SCOPE
+    assert result.document_summaries == []
+    assert result.evidence == []
+
+
+def test_arbitrary_scope_bundle_is_blocked_at_the_entry() -> None:
+    result = run(
+        summary_plan(
+            section_scope=None,
+            section_scopes=(SectionScope.FACILITY_INVESTMENT, SectionScope.PRODUCTS),
+        )
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "pattern_entry"
+    assert result.execution_issue.reason == REASON_UNSUPPORTED_SUMMARY_SECTION_SCOPE
+
+
+def test_scalar_scope_plan_still_passes_the_entry_guard() -> None:
+    """범위 하나의 계획(Q04)은 이전과 같이 입구를 지나 공시 조회 단계까지 간다."""
+    result = run(summary_plan(section_scope=SectionScope.FACILITY_INVESTMENT))
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "filing_discovery"

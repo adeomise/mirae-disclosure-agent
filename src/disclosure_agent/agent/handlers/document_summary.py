@@ -79,7 +79,11 @@ from disclosure_agent.agent.answer_builder import (
     BlockedInfo,
 )
 from disclosure_agent.agent.normalization import normalize_document_summary_result
-from disclosure_agent.agent.query_analyzer import DOCUMENT_SUBTYPE_ANNUAL, QueryPlan
+from disclosure_agent.agent.query_analyzer import (
+    BUSINESS_PROFILE_SECTION_SCOPES,
+    DOCUMENT_SUBTYPE_ANNUAL,
+    QueryPlan,
+)
 from disclosure_agent.common.enums import (
     AnswerabilityStatus,
     ExecutionStatus,
@@ -157,10 +161,12 @@ def handle_document_summary(
 
     공통 Contract인 AgentExecutionResult를 돌려준다.
 
-    계획의 section_scopes가 비어 있지 않으면 범위 묶음 경로(Q05)다. 그 밖의 계획은
-    범위 하나의 경로(Q04)이며 이번 변경 전과 같다.
+    계획의 section_scopes가 Q05의 범위 묶음(BUSINESS_PROFILE_SECTION_SCOPES)과 정확히 같을
+    때만 범위 묶음 경로다. 그 경로는 정정본을 후보에 포함하는 조회 규칙을 쓰므로, 묶음이
+    비어 있지 않다는 것만으로 열면 다른 묶음이 그 규칙을 물려받는다. 다른 묶음은 범위 하나의
+    경로로 보내 입구 가드(_reject_unsupported_plan)가 막게 한다. 범위 하나로 바꿔 읽지 않는다.
     """
-    if plan.section_scopes:
+    if plan.section_scopes == BUSINESS_PROFILE_SECTION_SCOPES:
         return _handle_multi_scope_summary(
             plan,
             corpus_root=corpus_root,
@@ -349,7 +355,26 @@ def _reject_unsupported_plan(plan: QueryPlan) -> BlockedInfo | None:
 
     section_scope가 비어 있는 계획은 QueryPlan.__post_init__이 아예 만들지 못하게 막으므로
     여기서 다시 보지 않는다.
+
+    범위 묶음은 Q05의 묶음 하나만 받는다:
+        범위 묶음 경로는 정정본을 후보에 포함하는 조회 규칙과 두 범위의 충돌 검사를 그
+        묶음에 맞춰 두었다. 다른 묶음(범위 하나짜리 묶음 포함)이 들어오면 그 규칙을
+        물려받거나, 범위 하나의 경로가 section_scope 없이 진행하게 된다. 어느 쪽도 계획이
+        요청한 것과 다르므로 입구에서 막는다.
     """
+    if plan.section_scopes and plan.section_scopes != BUSINESS_PROFILE_SECTION_SCOPES:
+        supported = ", ".join(scope.value for scope in BUSINESS_PROFILE_SECTION_SCOPES)
+        requested = ", ".join(scope.value for scope in plan.section_scopes)
+
+        return BlockedInfo(
+            stage=STAGE_PATTERN_ENTRY,
+            reason=REASON_UNSUPPORTED_SUMMARY_SECTION_SCOPE,
+            detail=(
+                f"지원하지 않는 범위 묶음입니다: ({requested}). 범위 묶음 요약은 "
+                f"({supported}) 하나만 실행합니다. 범위 하나의 요약으로 바꿔 읽지 않습니다."
+            ),
+        )
+
     if (
         plan.document_class != DOCUMENT_CLASS_PERIODIC
         or plan.document_subtype != DOCUMENT_SUBTYPE_ANNUAL

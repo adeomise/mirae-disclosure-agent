@@ -398,7 +398,11 @@ SECTION_SCOPE_TOKENS: tuple[tuple[SectionScope, tuple[str, ...]], ...] = (
 # Section에 있다는 것이 이 경로가 아는 서식 지식이다.
 #
 # 판정 전에 질문의 공백을 걷어낸다. SECTION_SCOPE_TOKENS와 같은 이유다.
-BUSINESS_DESCRIPTION_TOKENS = ("무슨사업", "어떤사업")
+#
+# 사업 서술 표기는 조사까지 요구한다("무슨 사업을", "어떤 사업을", "어떤 사업인지"). '무슨
+# 사업'만으로 보면 "무슨 사업부의 주요 제품이야?"처럼 사업부를 묻는 질문이 함께 걸리고, 그
+# 질문은 기업 소개가 아니다. 조사를 붙이면 '사업부'는 걸리지 않는다.
+BUSINESS_DESCRIPTION_TOKENS = ("무슨사업을", "어떤사업을", "어떤사업인지")
 PRODUCT_TOKENS = ("주력제품", "주요제품")
 
 # 이 질문 모양이 요약하는 범위. 순서는 사업보고서 서식의 Section 순서이며, 결과의

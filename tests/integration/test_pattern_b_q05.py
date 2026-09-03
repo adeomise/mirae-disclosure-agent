@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -379,3 +380,40 @@ def test_single_scope_path_still_excludes_corrections(
 
     assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
     assert [summary.doc_id for summary in result.document_summaries] == [ORIGINAL_DOC_ID]
+
+
+@pytest.mark.parametrize(
+    "section_scopes",
+    [
+        (SectionScope.FACILITY_INVESTMENT,),
+        (SectionScope.FACILITY_INVESTMENT, SectionScope.PRODUCTS),
+    ],
+)
+def test_non_canonical_bundles_do_not_inherit_the_q05_filing_policy(
+    plan: QueryPlan,
+    profile_document: dict[str, Any],
+    synthetic_manifest_path: Path,
+    nfd_corpus_root: Path,
+    parsed_document_stub,
+    section_scopes: tuple[SectionScope, ...],
+) -> None:
+    """
+    Q05의 묶음이 아닌 범위 묶음은 입구에서 막힌다.
+
+    정정본을 포함하는 조회 규칙은 Q05의 묶음에만 맞춰 둔 것이다. 이 manifest에는 FY2025
+    정정본이 있으므로, 다른 묶음이 그 규칙을 물려받았다면 ambiguous_filing이 됐을 것이고,
+    범위 하나로 바꿔 읽었다면 원본 1건으로 답했을 것이다. 어느 쪽도 아니어야 한다.
+    """
+    parsed_document_stub(profile_document)
+
+    result = handle_document_summary(
+        replace(plan, section_scopes=section_scopes),
+        corpus_root=nfd_corpus_root,
+        manifest_path=synthetic_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "pattern_entry"
+    assert result.execution_issue.reason == "unsupported_summary_section_scope"
+    assert result.document_summaries == []
+    assert result.evidence == []

@@ -484,7 +484,9 @@ def test_q12_is_not_routed_to_pattern_e_by_the_new_vocabulary() -> None:
     plan = build_query_plan(Q12, known_companies=REAL_COMPANIES)
 
     assert plan.intent != INTENT_EVENT_HISTORY
-    assert plan.document_subtype != EVENT_SUBTYPE_FACILITY_INVESTMENT
+    # Q12의 시설투자 subtype은 Pattern D 집계 계획에 명시적으로 남지만,
+    # intent가 event_history가 아니므로 Pattern E의 single-root 경로로는 들어가지 않는다.
+    assert plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
 
 
 def test_q12_wording_without_the_second_company_still_lacks_a_history_question() -> None:

@@ -7,6 +7,8 @@
 - 대표 질문 Q10 계열("2025년 <기업>이랑 <기업> 매출 비교해줘") — 원천 지표 직접 비교
 - 대표 질문 Q11 계열("<기업>이랑 <기업> 중에 <연도> 영업이익률이 더 높은 곳은 어디야?")
   — 기업별 파생지표 비교
+- 대표 질문 Q12 계열("대상 연도에 새로 발표한 시설투자를 회사별로 합산")
+  — root 집합 확정, 건별 최신 정정값, 기업별 집계 비교
 
     QueryPlan
       -> 계획 모양 확인            (이 모듈, _unsupported_plan)
@@ -22,6 +24,7 @@
 두 모양이 만드는 것의 개수가 다르다:
     Q10  Fact 2 · Calculation 0 · Comparison 1
     Q11  Fact 4 · Calculation 2 · Comparison 1
+    Q12  Fact 대상 event 수 · Calculation 2 · Comparison 1
 
     개수는 evidence_and_answerability.md의 Calculation cardinality가 정한다. 최종 우열
     판정은 Calculation이 아니므로 어느 쪽도 Calculation 개수에 더해지지 않는다.
@@ -46,30 +49,20 @@ guard가 걸리는 자리가 모양마다 다르다:
     등록한 뒤에도 막는 것은 같아야 하고, 다만 막는 자리가 Router에서 이 입구로 옮겨온다.
     Pattern C가 같은 이유로 같은 구조를 택했다(handlers/temporal_compare.py).
 
-Q12를 열지 않는 이유:
-    Q12("2024년에 LG이노텍하고 레인보우로보틱스가 새로 발표한 시설투자, 회사별로 다 합치면
-    어디가 더 커?")는 기업 2곳·연도 1개라는 점에서 Q10·Q11과 같은 모양이다. 앞의 두 검사만
-    두면 그대로 통과한다.
-
-    그러나 Q12는 정기공시가 아니라 거래소공시를 읽고, 기업별로 여러 이벤트를 모아 합산한
-    뒤에 견준다(agent_patterns.md Pattern D의 거래소공시 집계 경로, C6·C7). 그 경로는 이
-    파일에 없다. 지표 판정을 통과시키면 시설투자를 물은 질문이 매출 조회 경로로 흘러
-    형식만 맞고 근거가 틀린 답이 된다.
-
-    지금은 query_analyzer의 원천 지표 어휘에 시설투자가 없어 metric도 derived_metric도
-    None으로 남고, 아래 지표 판정이 그것을 unsupported_comparison_metric으로 막는다.
-    허용 목록으로 판정하므로, 어휘가 넓어져 시설투자가 metric에 담기더라도 이 자리는
-    계속 막는다.
+Q12를 열는 조건:
+    기업 2곳·연도 1개만으로는 열지 않는다. document_class=event,
+    신규시설투자 subtype, investment_amount, operations=(aggregate, compare), full_chain이
+    모두 있을 때만 거래소공시 집계 경로로 보낸다. 그 외 metric=None 계획이나
+    혼합 지표 계획은 기존처럼 입구에서 막힌다.
 
 무엇을 하지 않는가:
 - 기업을 하나로 줄이지 않는다. 두 기업 중 하나를 골라 답하면 나머지 기업이 사라진 사실이
   결과 어디에도 남지 않는다(pattern_f_safety_cases.json F6-04).
 - 자연어를 만들지 않는다. 문장 조립은 answer_builder의 몫이다.
 
-문서군을 다시 확인하지 않는 이유:
-    기업 간 비교 계획은 document_class·document_subtype을 기본값(정기공시·사업보고서)으로만
-    만든다. Pattern C와 같은 자리이며, 다른 값이 들어오면 확보 계층이 해당 공시를 찾지 못해
-    filing_discovery에서 멈춘다. 도달하지 않는 검사를 미리 두어 사유만 늘리지 않는다.
+문서군 경계:
+    Q10·Q11은 periodic 계획에서만 열리고 Q12는 event 계획에서만 열린다.
+    지표가 같더라도 문서군이 다르면 가까운 실행 경로로 대신 보내지 않는다.
 
 입력:
 - QueryPlan, corpus 루트, manifest 경로
@@ -82,7 +75,6 @@ Q12를 열지 않는 이유:
 TODO:
 - 결산월 일치 검사(agent_patterns.md Pattern D 검증 조건 5). Fact에도 Evidence에도 결산월을
   담을 자리가 없어 guard②가 아직 보지 못한다.
-- Q12(거래소공시 집계 경로)
 """
 
 from __future__ import annotations
@@ -105,9 +97,11 @@ from disclosure_agent.agent.answer_builder import (
 from disclosure_agent.agent.calculator import (
     OPERATION_RATIO,
     CalculationBlockedError,
+    aggregate,
     compare_calculations,
     compare_facts,
     ratio,
+    validate_aggregation_inputs,
     validate_calculation_inputs,
     validate_cross_entity_comparability,
     validate_cross_entity_fact_comparability,
@@ -118,16 +112,47 @@ from disclosure_agent.agent.derived_metrics import (
     get_derived_metric_spec,
     required_source_metrics,
 )
+from disclosure_agent.agent.facility_investment_aggregation import (
+    INVESTMENT_AMOUNT_UNIT,
+    REASON_AMBIGUOUS_LINK,
+    REASON_EXTRACTION_FAILED,
+    REASON_INCOMPATIBLE_UNIT,
+    REASON_INCOMPLETE_CHAIN,
+    REASON_LATEST_STATE_FAILED,
+    REASON_MISSING_PROVENANCE,
+    REASON_NO_MATCHING_FILING,
+    REASON_PARSE_FAILED,
+    REASON_UNSUPPORTED_COMPOSITE_CORRECTION,
+    FacilityInvestmentFailure,
+    collect_facility_investment_facts,
+)
 from disclosure_agent.agent.normalization import normalize_cross_entity_compare_result
 from disclosure_agent.agent.period_retrieval import collect_period_facts
-from disclosure_agent.agent.query_analyzer import QueryPlan
-from disclosure_agent.common.enums import MetricConcept
+from disclosure_agent.agent.query_analyzer import (
+    EVENT_SUBTYPE_FACILITY_INVESTMENT,
+    OPERATION_COMPARE,
+    QueryPlan,
+)
+from disclosure_agent.agent.query_analyzer import (
+    OPERATION_AGGREGATE as PLAN_OPERATION_AGGREGATE,
+)
+from disclosure_agent.common.enums import (
+    AnswerabilityReason,
+    AnswerabilityStatus,
+    ChainPolicy,
+    MetricConcept,
+)
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
     CalculationResult,
     ComparisonResult,
+    ConversionGap,
     Evidence,
     Fact,
+)
+from disclosure_agent.retrieval.metadata_filter import (
+    DOCUMENT_CLASS_EVENT,
+    DOCUMENT_CLASS_PERIODIC,
 )
 
 __all__ = [
@@ -179,6 +204,7 @@ class CrossEntityShape(StrEnum):
 
     SOURCE_METRIC = "source_metric"
     DERIVED_METRIC = "derived_metric"
+    FACILITY_EVENT_AGGREGATE = "facility_event_aggregate"
 
 
 @dataclass(frozen=True)
@@ -223,6 +249,10 @@ class CrossEntityCompareResult:
     evidence: tuple[Evidence, ...] = field(default_factory=tuple)
     calculations: tuple[CalculationResult, ...] = field(default_factory=tuple)
     comparisons: tuple[ComparisonResult, ...] = field(default_factory=tuple)
+    conversion_gaps: tuple[ConversionGap, ...] = field(default_factory=tuple)
+    answerability_status: AnswerabilityStatus | None = None
+    answerability_reason: AnswerabilityReason | None = None
+    answerability_detail: BlockedInfo | None = None
     blocked: BlockedInfo | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -234,6 +264,12 @@ class CrossEntityCompareResult:
             "evidence": [item.model_dump() for item in self.evidence],
             "calculations": [item.model_dump() for item in self.calculations],
             "comparisons": [item.model_dump() for item in self.comparisons],
+            "conversion_gaps": [item.model_dump() for item in self.conversion_gaps],
+            "answerability_status": self.answerability_status,
+            "answerability_reason": self.answerability_reason,
+            "answerability_detail": (
+                self.answerability_detail.to_dict() if self.answerability_detail else None
+            ),
             "blocked": self.blocked.to_dict() if self.blocked else None,
         }
 
@@ -245,9 +281,23 @@ def resolve_shape(plan: QueryPlan) -> CrossEntityShape | None:
     두 모양은 배타다. QueryPlan이 metric과 derived_metric을 함께 담지 못하게 이미 막고
     있으므로(QueryPlan.__post_init__), 여기서 둘 다 채워진 계획은 만들어질 수 없다.
 
-    둘 다 비어 있는 계획은 어느 모양도 아니다. 질문에서 지표를 읽지 못한 경우이며, Q12가
-    지금 그 상태다. 한쪽을 기본값으로 골라 주지 않는다.
+    둘 다 비어 있는 계획은 어느 모양도 아니다. Q12는 별도의 event,
+    aggregate/compare, full_chain 신호를 모두 요구하며, 한쪽을 기본값으로 골라
+    주지 않는다.
     """
+    if (
+        plan.document_class == DOCUMENT_CLASS_EVENT
+        and plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+        and plan.metric == MetricConcept.INVESTMENT_AMOUNT
+        and plan.derived_metric is None
+        and plan.operations == (PLAN_OPERATION_AGGREGATE, OPERATION_COMPARE)
+        and plan.chain_policy is ChainPolicy.FULL_CHAIN
+    ):
+        return CrossEntityShape.FACILITY_EVENT_AGGREGATE
+
+    if plan.document_class != DOCUMENT_CLASS_PERIODIC:
+        return None
+
     if plan.derived_metric is not None:
         if plan.derived_metric in SUPPORTED_DERIVED_METRICS:
             return CrossEntityShape.DERIVED_METRIC
@@ -280,6 +330,9 @@ def source_metrics_for(plan: QueryPlan) -> tuple[MetricConcept, ...]:
 
     if shape is CrossEntityShape.SOURCE_METRIC:
         return (MetricConcept(plan.metric),)
+
+    if shape is CrossEntityShape.FACILITY_EVENT_AGGREGATE:
+        return (MetricConcept.INVESTMENT_AMOUNT,)
 
     raise ValueError(
         "이번 구현이 다루지 않는 계획에서 원천 지표를 읽을 수 없습니다: "
@@ -742,6 +795,175 @@ def _execute_source_metric_comparison(
     )
 
 
+def _facility_failure_result(
+    plan: QueryPlan,
+    *,
+    facts: tuple[Fact, ...],
+    evidence: tuple[Evidence, ...],
+    failures: tuple[FacilityInvestmentFailure, ...],
+) -> CrossEntityCompareResult:
+    """해소하지 못한 Q12 root를 기존 답변 가능성 어휘로 옮긴다."""
+    gaps = tuple(failure.to_gap() for failure in failures)
+
+    execution_failure = next(
+        (
+            failure
+            for failure in failures
+            if failure.reason
+            in {
+                REASON_UNSUPPORTED_COMPOSITE_CORRECTION,
+                REASON_LATEST_STATE_FAILED,
+                REASON_PARSE_FAILED,
+                REASON_EXTRACTION_FAILED,
+            }
+        ),
+        None,
+    )
+    if execution_failure is not None:
+        return CrossEntityCompareResult(
+            plan=plan,
+            facts=facts,
+            evidence=evidence,
+            conversion_gaps=gaps,
+            blocked=BlockedInfo(
+                stage=execution_failure.stage,
+                reason=execution_failure.reason,
+                detail=execution_failure.detail,
+            ),
+        )
+
+    if any(failure.reason == REASON_AMBIGUOUS_LINK for failure in failures):
+        status = AnswerabilityStatus.UNRESOLVED
+        reason = AnswerabilityReason.AMBIGUOUS_LINK
+        judgement = next(
+            failure for failure in failures if failure.reason == REASON_AMBIGUOUS_LINK
+        )
+    elif any(failure.reason == REASON_MISSING_PROVENANCE for failure in failures):
+        status = AnswerabilityStatus.UNANSWERABLE
+        reason = AnswerabilityReason.INSUFFICIENT_EVIDENCE
+        judgement = next(
+            failure for failure in failures if failure.reason == REASON_MISSING_PROVENANCE
+        )
+    elif any(failure.reason == REASON_INCOMPATIBLE_UNIT for failure in failures):
+        status = AnswerabilityStatus.UNANSWERABLE
+        reason = AnswerabilityReason.NOT_COMPARABLE
+        judgement = next(
+            failure for failure in failures if failure.reason == REASON_INCOMPATIBLE_UNIT
+        )
+    elif any(failure.reason == REASON_NO_MATCHING_FILING for failure in failures):
+        status = AnswerabilityStatus.UNANSWERABLE
+        reason = AnswerabilityReason.NOT_FOUND
+        judgement = next(
+            failure for failure in failures if failure.reason == REASON_NO_MATCHING_FILING
+        )
+    elif facts and all(failure.reason == REASON_INCOMPLETE_CHAIN for failure in failures):
+        status = AnswerabilityStatus.PARTIALLY_ANSWERABLE
+        reason = AnswerabilityReason.INCOMPLETE_CHAIN
+        judgement = failures[0]
+    else:
+        status = AnswerabilityStatus.UNANSWERABLE
+        reason = AnswerabilityReason.INSUFFICIENT_EVIDENCE
+        judgement = failures[0]
+
+    return CrossEntityCompareResult(
+        plan=plan,
+        facts=facts,
+        evidence=evidence,
+        conversion_gaps=gaps,
+        answerability_status=status,
+        answerability_reason=reason,
+        answerability_detail=BlockedInfo(
+            stage=judgement.stage,
+            reason=judgement.reason,
+            detail=judgement.detail,
+        ),
+    )
+
+
+def _execute_facility_event_aggregate(
+    plan: QueryPlan,
+    *,
+    corpus_root: str | Path,
+    manifest_path: str | Path | None,
+) -> CrossEntityCompareResult:
+    """Q12 root 집합을 최신 금액 Fact로 확정한 뒤 기업별로 합산한다."""
+    collections = tuple(
+        collect_facility_investment_facts(
+            company=company,
+            target_year=plan.years[0],
+            corpus_root=corpus_root,
+            manifest_path=manifest_path,
+        )
+        for company in plan.companies
+    )
+    facts = tuple(fact for collection in collections for fact in collection.facts)
+    evidence = tuple(item for collection in collections for item in collection.evidence)
+    failures = tuple(
+        failure for collection in collections for failure in collection.failures
+    )
+
+    if failures:
+        return _facility_failure_result(
+            plan,
+            facts=facts,
+            evidence=evidence,
+            failures=failures,
+        )
+
+    calculations: list[CalculationResult] = []
+
+    try:
+        for company, collection in zip(plan.companies, collections, strict=True):
+            validate_aggregation_inputs(
+                collection.facts,
+                expected_company=company,
+                expected_metric=MetricConcept.INVESTMENT_AMOUNT,
+                expected_unit=INVESTMENT_AMOUNT_UNIT,
+            )
+            calculations.append(
+                aggregate(
+                    calculation_id=(
+                        f"calculation_investment_amount_aggregate_{plan.years[0]}_{company}"
+                    ),
+                    facts=collection.facts,
+                    output_unit=INVESTMENT_AMOUNT_UNIT,
+                )
+            )
+
+        left, right = calculations
+        validate_cross_entity_comparability(
+            left=left,
+            right=right,
+            left_sources=collections[0].facts,
+            right_sources=collections[1].facts,
+            expected_unit=INVESTMENT_AMOUNT_UNIT,
+        )
+        comparison = compare_calculations(
+            comparison_id=_comparison_id(plan),
+            left=left,
+            right=right,
+        )
+    except CalculationBlockedError as error:
+        return CrossEntityCompareResult(
+            plan=plan,
+            facts=facts,
+            evidence=evidence,
+            blocked=BlockedInfo(
+                stage=STAGE_COMPARABILITY,
+                reason=error.reason,
+                detail=error.detail,
+            ),
+        )
+
+    return CrossEntityCompareResult(
+        plan=plan,
+        facts=facts,
+        evidence=evidence,
+        calculations=tuple(calculations),
+        comparisons=(comparison,),
+    )
+
+
 def _execute_comparison(
     plan: QueryPlan,
     shape: CrossEntityShape,
@@ -779,6 +1001,13 @@ def _execute_comparison(
 
     if shape is CrossEntityShape.DERIVED_METRIC:
         return _execute_derived_metric_comparison(
+            plan,
+            corpus_root=corpus_root,
+            manifest_path=manifest_path,
+        )
+
+    if shape is CrossEntityShape.FACILITY_EVENT_AGGREGATE:
+        return _execute_facility_event_aggregate(
             plan,
             corpus_root=corpus_root,
             manifest_path=manifest_path,

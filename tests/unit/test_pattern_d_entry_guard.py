@@ -50,7 +50,10 @@ from disclosure_agent.agent.normalization import (
     normalize_cross_entity_compare_result,
 )
 from disclosure_agent.agent.query_analyzer import (
+    EVENT_SUBTYPE_FACILITY_INVESTMENT,
     INTENT_CROSS_ENTITY_COMPARE,
+    OPERATION_AGGREGATE,
+    OPERATION_COMPARE,
     PREVIOUS_YEAR_OFFSET,
     QueryPlan,
     RelativePeriod,
@@ -59,6 +62,7 @@ from disclosure_agent.agent.query_analyzer import (
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
+    ChainPolicy,
     ComparisonRelation,
     EvidenceLocationType,
     ExecutionStatus,
@@ -259,10 +263,10 @@ def test_subject_is_judged_before_the_metric() -> None:
 
 
 # --------------------------------------------------------------------------
-# 4. Q12는 열리지 않는다
+# 4. Q12는 명시적인 event aggregate 모양에서만 열린다
 #
-# Q12는 기업 2곳 · 연도 1개라는 점에서 Q10·Q11과 같은 모양이다. 앞의 두 검사만 두면 그대로
-# 통과하므로, 막는 것은 지표 판정 하나다. 그 자리가 실제로 막고 있는지 계획 단위로 본다.
+# 기업 2곳·연도 1개만으로는 부족하다. 시설투자 subtype, investment_amount,
+# aggregate+compare, full_chain이 모두 있을 때만 해소되고, 하나라도 비면 입구에서 막힌다.
 #
 # 질문 문자열부터 실행 결과까지는 tests/integration/test_pattern_d_q12_guard.py가 맡는다.
 # --------------------------------------------------------------------------
@@ -284,52 +288,67 @@ def test_q12_reaches_pattern_d_with_the_same_subject_and_period_shape(
     q12_plan: QueryPlan,
 ) -> None:
     """
-    Q12가 앞의 두 검사를 통과한다는 사실 자체를 고정한다.
-
-    이 성질이 유지되는 한 Q12를 막는 것은 지표 판정 하나뿐이다. 그 자리를 넓히는 변경이
-    Q12를 함께 여는지 여기서 드러난다.
+    Q12가 기업 2곳·root 선택 연도 1개를 잃지 않고 Pattern D에 도달한다.
     """
     assert q12_plan.intent == INTENT_CROSS_ENTITY_COMPARE
     assert len(q12_plan.companies) == cross_entity_compare.COMPARED_COMPANY_COUNT
     assert len(q12_plan.years) == cross_entity_compare.COMPARED_PERIOD_COUNT
 
 
-def test_q12_shape_is_not_resolvable(q12_plan: QueryPlan) -> None:
-    """시설투자는 두 모양 중 어느 쪽도 아니다."""
-    assert q12_plan.metric is None
+def test_q12_shape_is_explicitly_resolvable(q12_plan: QueryPlan) -> None:
+    """시설투자·집계·비교·최신 chain 신호가 모두 계획에 남는다."""
+    assert q12_plan.metric is MetricConcept.INVESTMENT_AMOUNT
     assert q12_plan.derived_metric is None
-    assert resolve_shape(q12_plan) is None
+    assert q12_plan.document_class == "event"
+    assert q12_plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+    assert q12_plan.operations == (OPERATION_AGGREGATE, OPERATION_COMPARE)
+    assert q12_plan.chain_policy is ChainPolicy.FULL_CHAIN
+    assert resolve_shape(q12_plan) is CrossEntityShape.FACILITY_EVENT_AGGREGATE
 
 
-def test_q12_is_blocked_at_the_metric_judgement(q12_plan: QueryPlan) -> None:
-    """
-    거래소공시를 모아 합산하는 경로는 아직 없다.
-
-    정기공시 경로로 흘려보내면 '새로 발표한 시설투자'와 무관한 값이 근거까지 갖춘 채
-    돌아간다.
-    """
-    blocked = _unsupported_plan(q12_plan)
-
-    assert blocked is not None
-    assert blocked.stage == STAGE_PATTERN_ENTRY
-    assert blocked.reason == REASON_UNSUPPORTED_COMPARISON_METRIC
+def test_q12_passes_pattern_entry(q12_plan: QueryPlan) -> None:
+    assert _unsupported_plan(q12_plan) is None
 
 
-def test_q12_produces_no_value_and_no_answerability_verdict(q12_plan: QueryPlan) -> None:
-    """
-    handler를 끝까지 돌려도 값이 하나도 없어야 한다.
+@pytest.mark.parametrize(
+    "question",
+    [
+        "2024년에 LG이노텍하고 레인보우로보틱스 경영 현황은 어디가 더 커?",
+        "2024년에 LG이노텍하고 레인보우로보틱스 회사별로 다 합치면 어디가 더 커?",
+        (
+            "2024년에 LG이노텍하고 레인보우로보틱스 시설투자와 매출을 "
+            "회사별로 다 합치면 어디가 더 커?"
+        ),
+    ],
+)
+def test_q12_entry_does_not_open_for_missing_or_mixed_semantics(question: str) -> None:
+    plan = build_query_plan(question, known_companies=Q12_COMPANIES)
 
-    답변 가능성도 비어 있다. 코퍼스를 보지 않았으므로 답이 있는지 없는지 알지 못한다.
-    """
-    result = handle_cross_entity_compare(q12_plan, corpus_root=ABSENT_CORPUS_ROOT)
+    assert plan.intent == INTENT_CROSS_ENTITY_COMPARE
+    assert resolve_shape(plan) is None
+    assert _unsupported_plan(plan).reason == REASON_UNSUPPORTED_COMPARISON_METRIC
 
-    assert result.execution_status is ExecutionStatus.BLOCKED
-    assert result.answerability_status is None
-    assert result.answerability_reason is None
-    assert result.facts == []
-    assert result.evidence == []
-    assert result.calculations == []
-    assert result.comparisons == []
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"operations": ()},
+        {"chain_policy": None},
+        {"document_subtype": "단일판매공급계약체결"},
+        {"metric": MetricConcept.REVENUE},
+    ],
+)
+def test_q12_like_plan_missing_one_exact_signal_is_blocked(
+    q12_plan: QueryPlan, overrides: dict
+) -> None:
+    fields = {
+        **q12_plan.__dict__,
+        **overrides,
+    }
+    plan = QueryPlan(**fields)
+
+    assert resolve_shape(plan) is None
+    assert _unsupported_plan(plan).reason == REASON_UNSUPPORTED_COMPARISON_METRIC
 
 
 # --------------------------------------------------------------------------
@@ -692,3 +711,4 @@ def test_a_plain_cross_entity_plan_records_no_relative_period() -> None:
         assert plan.relative_period is None
         assert not plan.has_unresolved_relative_period
         assert _unsupported_plan(plan) is None
+    ChainPolicy,

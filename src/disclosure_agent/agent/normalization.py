@@ -800,6 +800,23 @@ def normalize_cross_entity_compare_result(
             warnings=warnings,
             facts=result.facts,
             evidence=result.evidence,
+            conversion_gaps=result.conversion_gaps,
+        )
+
+    if result.answerability_status is not None:
+        return AgentExecutionResult(
+            execution_status=ExecutionStatus.COMPLETED,
+            answerability_status=result.answerability_status,
+            answerability_reason=result.answerability_reason,
+            answerability_detail=(
+                _answerability_detail(result.answerability_detail)
+                if result.answerability_detail is not None
+                else None
+            ),
+            facts=list(result.facts),
+            evidence=list(result.evidence),
+            warnings=warnings,
+            conversion_gaps=list(result.conversion_gaps),
         )
 
     return AgentExecutionResult(
@@ -810,6 +827,7 @@ def normalize_cross_entity_compare_result(
         calculations=list(result.calculations),
         comparisons=list(result.comparisons),
         warnings=warnings,
+        conversion_gaps=list(result.conversion_gaps),
     )
 
 

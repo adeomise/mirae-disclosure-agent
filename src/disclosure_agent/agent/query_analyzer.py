@@ -18,8 +18,8 @@
 출력:
 - QueryPlan
 
-- 여러 기업을 함께 묻는 질문은 기업 하나로 줄여서 답하지 않는다. cross_entity_compare로
-  분류해 Router가 routing 단계에서 막게 한다. Pattern D handler는 아직 없다.
+- 여러 기업을 함께 묻는 질문은 기업 하나로 줄여서 답하지 않는다.
+  cross_entity_compare로 분류하고 Pattern D handler가 지원 모양을 명시적으로 판정한다.
 
 - 여러 기간을 함께 묻는 질문도 같은 이유로 기간 하나로 줄이지 않는다. temporal_compare로
   분류해 Router가 막게 한다. Pattern C handler는 아직 없다.
@@ -245,6 +245,15 @@ MONTH_PATTERN = re.compile(r"(1[0-2]|0?[1-9])\s*월")
 # 거래소공시 세부유형. 값은 manifest의 doc_subtype 표기와 같아야 한다.
 EVENT_SUBTYPE_SUPPLY_CONTRACT = "단일판매공급계약체결"
 EVENT_SUBTYPE_FACILITY_INVESTMENT = "신규시설투자등"
+
+# Pattern D Q12의 결정적 후처리. Common Contract의 QueryPlan을 늘리지 않고
+# agent 내부 실행 계획에만 남긴다. 두 신호가 모두 있어야 시설투자 집계 경로가
+# 열리며, 하나라도 비면 유사한 이벤트 질문을 집계로 추측하지 않는다.
+OPERATION_AGGREGATE = "aggregate"
+OPERATION_COMPARE = "compare"
+
+AGGREGATE_REQUEST_TOKENS = ("합치", "합산", "합계")
+COMPARISON_REQUEST_TOKENS = ("더 커", "더 큰", "비교")
 
 
 @dataclass(frozen=True)
@@ -669,6 +678,9 @@ class QueryPlan:
     # 실행 계획 상태이며, Pattern 결과로 나가지 않는다. 공유 Contract가 미해결 기간을
     # 표현해야 할 때가 오면 common.schemas.Period.kind가 그 자리를 이미 갖고 있다.
     relative_period: RelativePeriod | None = None
+    # 원문 검색 후 수행할 결정적 처리. 현재 실행 경로에서는 Q12의
+    # aggregate + compare만 명시하며, 다른 Pattern의 기존 계획은 빈 튜플을 유지한다.
+    operations: tuple[str, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -1282,9 +1294,9 @@ def _looks_like_event_history(question: str) -> bool:
     유형 표현과 이력 표현이 함께 있어야 한다. 둘 중 하나만으로 판정하면 '공급계약 금액이
     얼마야'(단일 사실)까지 이력 조회로 끌려간다.
 
-    이력 표현을 함께 요구하는 것이 Q12를 막는 두 번째 가드다. Q12("...새로 발표한 시설투자,
-    회사별로 다 합치면 어디가 더 커?")는 유형 표현을 가지고 있지만 이력 표현이 없어 여기서
-    걸린다. 첫 번째 가드는 build_query_plan의 다중 기업 판정이며, 그쪽이 먼저 실행된다.
+    Q12("...새로 발표한 시설투자, 회사별로 다 합치면...")는 유형 표현은
+    있지만 이력 표현이 없다. 다중 기업 판정이 먼저 실행되어 Pattern D의
+    집계 계획을 만들고, 이 함수는 Pattern E로 보내지 않는다.
 
     유형이 둘 이상 맞는 질문도 여기서는 통과시킨다. 막는 자리는 계획을 만드는
     _extract_event_subtype_rule이며, 그래야 ambiguous_event_subtype으로 막힌다. 여기서
@@ -1293,6 +1305,23 @@ def _looks_like_event_history(question: str) -> bool:
     """
     return bool(_find_event_subtype_rules(question)) and any(
         token in question for token in HISTORY_TOKENS
+    )
+
+
+def _looks_like_facility_investment_aggregate(question: str) -> bool:
+    """Q12의 시설투자 집계 비교 의미가 모두 있는가.
+
+    시설투자 유형, 집계, 비교 세 신호를 모두 요구한다. 어느 하나라도 비면
+    metric이 없는 다른 다중 기업 질문이 Q12 실행 경로로 들어가지 않는다.
+    여러 거래소공시 유형이 동시에 맞으면 한 유형을 고르지 않는다.
+    """
+    matched = _find_event_subtype_rules(question)
+
+    return (
+        len(matched) == 1
+        and matched[0].subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+        and any(token in question for token in AGGREGATE_REQUEST_TOKENS)
+        and any(token in question for token in COMPARISON_REQUEST_TOKENS)
     )
 
 
@@ -1727,14 +1756,9 @@ def _build_cross_entity_compare_plan(
     """
     여러 기업을 함께 묻는 질문의 계획을 만든다.
 
-    Pattern D handler는 아직 없다. 그런데도 계획을 만들어 두는 이유는, Router가 routing
-    단계에서 '설계에는 있으나 아직 구현되지 않았다'를 구체적인 이유로 답할 수 있어야 하기
-    때문이다. intent를 붙이지 않고 single_fact로 흘려보내면 기업 하나만 남은 답이 Fact와
-    Evidence까지 갖춘 채로 ANSWERABLE로 돌아간다. 미지원보다 그쪽이 위험하다.
-
-    지표와 회계기준은 느슨하게 읽는다. 이 계획을 실행할 handler가 없으므로 여기서 거절하면
-    막힌 이유가 'Pattern D 미구현'이 아니라 '지표를 모르겠다'로 바뀌어, 무엇을 구현하면
-    풀리는 질문인지가 결과에서 사라진다.
+    Pattern D handler가 계획의 주체·기간·지표·문서군을 입구에서 다시 확인한다.
+    Q12는 시설투자·집계·비교 신호가 모두 있을 때만 event aggregate 계획을 만들고,
+    기존 Q10·Q11은 periodic 계획을 유지한다.
 
     한 가지만 예외다. 원천 지표와 파생지표를 함께 물은 질문은 여기서 막는다. 그것은 지표를
     모르는 상태가 아니라 한쪽을 골라야만 답이 되는 상태이고, 골라 담으면 나머지를 물었다는
@@ -1745,6 +1769,16 @@ def _build_cross_entity_compare_plan(
     """
     accounting_scope, scope_explicit = _extract_accounting_scope(question)
     metric, derived_metric = _resolve_requested_metrics(question)
+    facility_aggregate = _looks_like_facility_investment_aggregate(question)
+
+    # Q12에서 요청한 개념은 이벤트의 investment_amount이다. 시설투자 문구와
+    # 집계·비교 의미가 모두 확정된 경우에만 채운며, 질문이 다른 정기공시
+    # 지표까지 함께 물으면 한쪽을 고르지 않고 아래 입구 guard가 막게 둔다.
+    q12_metric = (
+        MetricConcept.INVESTMENT_AMOUNT
+        if facility_aggregate and metric is None and derived_metric is None
+        else metric
+    )
 
     # 상대 기간 표현을 읽었다는 사실은 옮기지 않더라도 계획에 남긴다.
     #
@@ -1764,10 +1798,20 @@ def _build_cross_entity_compare_plan(
         companies=companies,
         years=_require_years(_extract_years(question)),
         intent=INTENT_CROSS_ENTITY_COMPARE,
-        accounting_scope=accounting_scope,
-        metric=metric,
+        document_class=(DOCUMENT_CLASS_EVENT if facility_aggregate else DOCUMENT_CLASS_PERIODIC),
+        document_subtype=(
+            EVENT_SUBTYPE_FACILITY_INVESTMENT
+            if facility_aggregate
+            else DOCUMENT_SUBTYPE_ANNUAL
+        ),
+        accounting_scope=(
+            QueryAccountingScope.NOT_APPLICABLE.value
+            if facility_aggregate
+            else accounting_scope
+        ),
+        metric=q12_metric,
         derived_metric=derived_metric,
-        accounting_scope_explicit=scope_explicit,
+        accounting_scope_explicit=(False if facility_aggregate else scope_explicit),
         relative_period=(
             RelativePeriod(
                 expression=relative_expression,
@@ -1776,6 +1820,10 @@ def _build_cross_entity_compare_plan(
             if relative_expression is not None
             else None
         ),
+        operations=(
+            (OPERATION_AGGREGATE, OPERATION_COMPARE) if facility_aggregate else ()
+        ),
+        chain_policy=(ChainPolicy.FULL_CHAIN if facility_aggregate else None),
     )
 
 
@@ -2055,8 +2103,8 @@ def build_query_plan(
     # 의도와 무관한 기간 규칙은 의도 분기보다 먼저 본다.
     #
     # 의도별 builder 안으로 들여보내면 Pattern이 늘 때마다 같은 검사를 다시 붙여야 하고,
-    # 한 번 빠뜨린 Pattern만 조용히 검사를 건너뛴다. 지금은 Pattern D handler가 없어
-    # routing에서 막히지만, handler가 생기는 순간 그 경로가 기간 규칙을 우회하게 된다.
+    # 한 번 빠뜨린 Pattern만 조용히 검사를 건너뛴다. 모든 Pattern이 Router에
+    # 도달하기 전에 같은 기간 규칙을 통과하게 한다.
     _reject_out_of_scope_period(question)
 
     # 지원하지 않는 상대 기간 표현도 의도 분기보다 먼저 본다. 같은 자리에 두는 이유가 같다.

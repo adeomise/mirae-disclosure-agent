@@ -21,8 +21,9 @@ from disclosure_agent.common.enums import (
     FactAccountingScope,
     MetricConcept,
     ResultInputType,
+    SectionScope,
 )
-from disclosure_agent.common.schemas import AgentExecutionResult, Fact
+from disclosure_agent.common.schemas import AgentExecutionResult, DocumentSummary, Fact
 
 EVALUATION_DIR = Path(__file__).parent
 DEFAULT_QUESTIONS_PATH = EVALUATION_DIR / "questions.jsonl"
@@ -77,6 +78,7 @@ class CollectionCounts(BaseModel):
     resolved_event_states: int | None = Field(default=None, ge=0)
     calculations: int | None = Field(default=None, ge=0)
     comparisons: int | None = Field(default=None, ge=0)
+    document_summaries: int | None = Field(default=None, ge=0)
 
 
 class IntegrityExpectation(BaseModel):
@@ -87,6 +89,9 @@ class IntegrityExpectation(BaseModel):
     resolved_field_evidence_references: bool | None = None
     result_input_references: bool | None = None
     calculation_values_from_inputs: bool | None = None
+    document_summary_evidence_references: bool | None = None
+    document_summary_same_filing: bool | None = None
+    document_summary_evidence_same_filing: bool | None = None
 
 
 class ExpectedCalculation(BaseModel):
@@ -94,6 +99,14 @@ class ExpectedCalculation(BaseModel):
 
     operation: str
     unit: str | None = None
+
+
+class ExpectedDocumentSummary(BaseModel):
+    """Stable semantic fields for one document-scope summary."""
+
+    company: str | None = None
+    report_name: str | None = None
+    section_scope: SectionScope | None = None
 
 
 class GoldAnswer(BaseModel):
@@ -106,6 +119,7 @@ class GoldAnswer(BaseModel):
     fact: ExpectedFact | None = None
     facts: list[ExpectedFact] | None = None
     calculations: list[ExpectedCalculation] | None = None
+    document_summaries: list[ExpectedDocumentSummary] | None = None
     min_evidence_count: int = Field(ge=0)
     event_history: EventHistoryExpectation | None = None
     counts: CollectionCounts | None = None
@@ -189,7 +203,11 @@ def _validate_paired_gold(question: QuestionCase, gold: GoldAnswer) -> None:
     if gold.status is not AnswerabilityStatus.ANSWERABLE:
         return
 
-    has_semantic_expectation = bool(gold.expected_facts()) or gold.event_history is not None
+    has_semantic_expectation = (
+        bool(gold.expected_facts())
+        or gold.event_history is not None
+        or bool(gold.document_summaries)
+    )
     has_counts = (
         gold.counts is not None
         and bool(gold.counts.model_dump(exclude_none=True))
@@ -213,7 +231,9 @@ def _validate_paired_gold(question: QuestionCase, gold: GoldAnswer) -> None:
     if gold.min_evidence_count < 1:
         raise ValueError("answerable cases must require evidence")
     if not has_semantic_expectation:
-        raise ValueError("ANSWERABLE cases need a fact or event-history expectation")
+        raise ValueError(
+            "ANSWERABLE cases need a fact, document-summary, or event-history expectation"
+        )
 
 
 def load_dataset(
@@ -345,6 +365,73 @@ def _facts_match_distinctly(
         )
 
     return assign(0, set())
+
+
+def _document_summaries_match_distinctly(
+    expected: list[ExpectedDocumentSummary], actual: list[DocumentSummary]
+) -> bool:
+    """Return whether every scope expectation matches a distinct summary."""
+    candidates = [
+        [
+            index
+            for index, summary in enumerate(actual)
+            if all(
+                getattr(summary, field) == value
+                for field, value in item.model_dump(exclude_none=True).items()
+            )
+        ]
+        for item in expected
+    ]
+
+    def assign(position: int, used: set[int]) -> bool:
+        if position == len(candidates):
+            return True
+        return any(
+            assign(position + 1, used | {index})
+            for index in candidates[position]
+            if index not in used
+        )
+
+    return assign(0, set())
+
+
+def _document_summary_integrity(result: PredictionCase) -> dict[str, bool]:
+    """Check summary links and filing boundaries without assuming Evidence cardinality."""
+    evidence_by_id = {item.evidence_id: item for item in result.evidence}
+    references_by_summary = [
+        [
+            evidence_id
+            for item in summary.items
+            for evidence_id in item.evidence_ids
+        ]
+        for summary in result.document_summaries
+    ]
+    references = [
+        evidence_id
+        for summary_references in references_by_summary
+        for evidence_id in summary_references
+    ]
+    summary_doc_ids = {summary.doc_id for summary in result.document_summaries}
+    referenced_evidence = [evidence_by_id.get(evidence_id) for evidence_id in references]
+    return {
+        "document_summary_evidence_references": bool(references_by_summary)
+        and all(
+            summary.items
+            and summary_references
+            and all(evidence_id in evidence_by_id for evidence_id in summary_references)
+            for summary, summary_references in zip(
+                result.document_summaries, references_by_summary, strict=True
+            )
+        ),
+        "document_summary_same_filing": len(summary_doc_ids) == 1,
+        "document_summary_evidence_same_filing": bool(result.evidence)
+        and len(summary_doc_ids) == 1
+        and all(evidence.doc_id in summary_doc_ids for evidence in result.evidence)
+        and all(
+            evidence is not None and evidence.doc_id in summary_doc_ids
+            for evidence in referenced_evidence
+        ),
+    }
 
 
 def _dangling_references(result: PredictionCase, collection: str) -> list[str]:
@@ -502,6 +589,13 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
     if expected_facts and not _facts_match_distinctly(expected_facts, prediction.facts):
         failures.append("facts: expected fields did not match distinct predicted Facts")
 
+    if gold.document_summaries is not None and not _document_summaries_match_distinctly(
+        gold.document_summaries, prediction.document_summaries
+    ):
+        failures.append(
+            "document_summaries: expected fields did not match distinct predicted summaries"
+        )
+
     if gold.calculations is not None:
         expected = [(item.operation, item.unit) for item in gold.calculations]
         actual = [(item.operation, item.unit) for item in prediction.calculations]
@@ -546,6 +640,11 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
                     "integrity.calculation_values_from_inputs: "
                     f"expected {expected}, got {actual}; failures={value_failures}"
                 )
+        summary_integrity = _document_summary_integrity(prediction)
+        for field, actual in summary_integrity.items():
+            expected = getattr(gold.integrity, field)
+            if expected is not None and actual != expected:
+                failures.append(f"integrity.{field}: expected {expected}, got {actual}")
     return failures
 
 

@@ -131,11 +131,12 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q01",
         "q02",
         "q03",
+        "q05",
         "q07",
         "q13",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 12
+    assert sum(question.lifecycle == "future" for question in representative) == 11
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -237,6 +238,32 @@ def test_active_q02_gold_pins_actual_contract_facts_and_evidence() -> None:
     ]
     assert q02.min_evidence_count == 3
     assert q02.integrity.fact_evidence_references is True
+
+
+def test_active_q05_gold_pins_two_scopes_without_freezing_evidence_count() -> None:
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    q05 = {gold.case_id: gold for gold in loaded.gold_answers}["q05"]
+
+    assert questions["q05"].lifecycle == "active"
+    assert q05.execution_status is ExecutionStatus.COMPLETED
+    assert q05.status is AnswerabilityStatus.ANSWERABLE
+    assert q05.reason is None
+    assert q05.counts.model_dump(exclude_none=True) == {
+        "facts": 0,
+        "calculations": 0,
+        "comparisons": 0,
+        "document_summaries": 2,
+    }
+    assert [item.section_scope.value for item in q05.document_summaries] == [
+        "business_overview",
+        "products",
+    ]
+    assert q05.min_evidence_count == 1
+    assert q05.counts.evidence is None
+    assert q05.integrity.document_summary_evidence_references is True
+    assert q05.integrity.document_summary_same_filing is True
+    assert q05.integrity.document_summary_evidence_same_filing is True
 
 
 def test_active_q07_gold_pins_temporal_delta_contract() -> None:
@@ -354,7 +381,7 @@ def test_representative_calculation_counts_match_final_targets() -> None:
 def test_narrative_future_gold_does_not_require_zero_facts() -> None:
     gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
 
-    for case_id in ("q04", "q05", "q06", "q09"):
+    for case_id in ("q04", "q06", "q09"):
         counts = gold_by_id[case_id].counts
         assert counts is None or counts.facts is None
 
@@ -676,7 +703,8 @@ def test_active_answerable_without_semantic_expectation_fails(
     tmp_path: Path,
 ) -> None:
     with pytest.raises(
-        ValueError, match="ANSWERABLE cases need a fact or event-history expectation"
+        ValueError,
+        match="ANSWERABLE cases need a fact, document-summary, or event-history expectation",
     ):
         load_single_case(
             tmp_path,
@@ -826,6 +854,125 @@ def test_unspecified_comparisons_count_preserves_existing_behavior() -> None:
     )
 
     assert compare_prediction(answerable_gold("case"), actual) == []
+
+
+def q05_gold() -> GoldAnswer:
+    return GoldAnswer.model_validate(
+        {
+            "case_id": "case",
+            "execution_status": "COMPLETED",
+            "status": "ANSWERABLE",
+            "counts": {
+                "facts": 0,
+                "calculations": 0,
+                "comparisons": 0,
+                "document_summaries": 2,
+            },
+            "document_summaries": [
+                {"section_scope": "business_overview"},
+                {"section_scope": "products"},
+            ],
+            "min_evidence_count": 1,
+            "integrity": {
+                "document_summary_evidence_references": True,
+                "document_summary_same_filing": True,
+                "document_summary_evidence_same_filing": True,
+            },
+        }
+    )
+
+
+def summary_prediction(
+    *,
+    product_doc_id: str = "annual-filing",
+    product_evidence_id: str = "evidence-products",
+    extra_evidence_doc_id: str | None = None,
+) -> PredictionCase:
+    evidence = [
+        {"evidence_id": "evidence-overview", "doc_id": "annual-filing", "location_type": "text"},
+        {"evidence_id": "evidence-products", "doc_id": "annual-filing", "location_type": "table"},
+    ]
+    if extra_evidence_doc_id is not None:
+        evidence.append(
+            {
+                "evidence_id": "evidence-extra",
+                "doc_id": extra_evidence_doc_id,
+                "location_type": "text",
+            }
+        )
+    summaries = []
+    for name, scope, doc_id, evidence_id in (
+        ("overview", "business_overview", "annual-filing", "evidence-overview"),
+        ("products", "products", product_doc_id, product_evidence_id),
+    ):
+        summaries.append(
+            {
+                "summary_id": f"summary-{name}",
+                "doc_id": doc_id,
+                "company": "Synthetic Company",
+                "report_name": "Annual Report",
+                "section_scope": scope,
+                "items": [
+                    {
+                        "item_id": f"{name}-item",
+                        "item_type": "paragraph",
+                        "label": name,
+                        "evidence_ids": [evidence_id],
+                    }
+                ],
+            }
+        )
+    return prediction("case", facts=[], evidence=evidence, document_summaries=summaries)
+
+
+def test_document_summary_gold_matches_two_scopes_and_resolved_evidence() -> None:
+    assert compare_prediction(q05_gold(), summary_prediction()) == []
+
+
+def test_document_summary_scope_expectations_are_distinct() -> None:
+    actual = summary_prediction()
+    actual.document_summaries[1].section_scope = actual.document_summaries[0].section_scope
+
+    failures = compare_prediction(q05_gold(), actual)
+
+    assert any(item.startswith("document_summaries:") for item in failures)
+
+
+def test_document_summary_dangling_evidence_reference_is_not_vacuous() -> None:
+    failures = compare_prediction(
+        q05_gold(), summary_prediction(product_evidence_id="missing-evidence")
+    )
+
+    assert "integrity.document_summary_evidence_references: expected True, got False" in failures
+
+
+def test_each_expected_document_summary_requires_items_and_resolved_evidence() -> None:
+    actual = summary_prediction()
+    actual.document_summaries[0].items = []
+
+    failures = compare_prediction(q05_gold(), actual)
+
+    assert actual.evidence
+    assert {summary.section_scope.value for summary in actual.document_summaries} == {
+        "business_overview",
+        "products",
+    }
+    assert "integrity.document_summary_evidence_references: expected True, got False" in failures
+
+
+def test_document_summaries_and_evidence_must_stay_in_selected_filing() -> None:
+    split_summaries = compare_prediction(
+        q05_gold(), summary_prediction(product_doc_id="other-filing")
+    )
+    stray_evidence = compare_prediction(
+        q05_gold(), summary_prediction(extra_evidence_doc_id="other-filing")
+    )
+
+    assert "integrity.document_summary_same_filing: expected True, got False" in split_summaries
+    assert (
+        "integrity.document_summary_evidence_same_filing: expected True, got False"
+        in stray_evidence
+    )
 
 
 def resolved_event_state(*, evidence_ids: list[str]) -> dict:

@@ -1484,6 +1484,85 @@ def test_partial_source_support_preserves_supported_fact_and_states_limitation()
     )
 
 
+@pytest.mark.parametrize(
+    ("metric", "raw_value", "expected_sentence", "absent_text"),
+    [
+        (
+            MetricConcept.HOLDING_SHARES,
+            "1,234",
+            f"{SYNTHETIC_COMPANY}의 이번 보고 시점 보유주식 수는 1,234주입니다.",
+            "보유비율",
+        ),
+        (
+            MetricConcept.HOLDING_RATIO,
+            "12.34",
+            f"{SYNTHETIC_COMPANY}의 이번 보고 시점 보유비율은 12.34%입니다.",
+            "보유주식 수",
+        ),
+    ],
+)
+def test_partial_holding_fact_uses_holding_specific_sentence(
+    metric: MetricConcept,
+    raw_value: str,
+    expected_sentence: str,
+    absent_text: str,
+) -> None:
+    evidence = make_evidence()
+    fact = make_fact(
+        metric=metric,
+        fiscal_year=None,
+        accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+        raw_value=raw_value,
+        raw_unit="주" if metric is MetricConcept.HOLDING_SHARES else "%",
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.PARTIAL_SOURCE_SUPPORT,
+        facts=[fact],
+        evidence=[evidence],
+    )
+
+    response = build_answer_response(result)
+
+    assert response.answer == (
+        expected_sentence
+        + " "
+        + LIMITATION_MESSAGE_BY_REASON[AnswerabilityReason.PARTIAL_SOURCE_SUPPORT]
+    )
+    assert absent_text not in response.answer
+    assert response.facts == [fact]
+    assert response.evidence == [evidence]
+
+
+def test_full_holding_fact_sentence_remains_unchanged() -> None:
+    shares = make_fact(
+        fact_id="fact_SYNTHETIC_shares",
+        metric=MetricConcept.HOLDING_SHARES,
+        fiscal_year=None,
+        accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+        raw_value="1,234",
+    )
+    ratio = make_fact(
+        fact_id="fact_SYNTHETIC_ratio",
+        metric=MetricConcept.HOLDING_RATIO,
+        fiscal_year=None,
+        accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+        raw_value="12.34",
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=[shares, ratio],
+        evidence=[make_evidence()],
+    )
+
+    assert build_answer_response(result).answer == (
+        f"{SYNTHETIC_COMPANY}의 이번 보고 시점 보유주식 수는 "
+        "1,234주이고, 보유비율은 12.34%입니다."
+    )
+
+
 
 def test_event_history_without_documents_does_not_produce_a_sentence() -> None:
     result = AgentExecutionResult(

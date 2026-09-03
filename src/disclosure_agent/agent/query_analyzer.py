@@ -2080,6 +2080,20 @@ def build_query_plan(
                 reason="ambiguous_holding_entities",
                 detail="지분공시 질문에서 보고자와 발행회사를 하나씩 확정해야 합니다.",
             )
+        normalized_question = normalize_company_name(question)
+        filer_end = normalized_question.find(normalize_company_name(companies[0])) + len(
+            normalize_company_name(companies[0])
+        )
+        filing_verb = normalized_question.find("낸", filer_end)
+        issuer_start = normalized_question.find(normalize_company_name(companies[1]), filer_end)
+        if filing_verb < filer_end or issuer_start < filing_verb:
+            raise UnsupportedQuestionError(
+                reason="ambiguous_holding_entities",
+                detail=(
+                    "현재 지원하는 지분공시 질문 순서에서 보고자와 발행회사를 "
+                    "확정할 수 없습니다."
+                ),
+            )
         years = _require_years(_extract_years(question))
         if len(years) != 1:
             raise UnsupportedQuestionError(

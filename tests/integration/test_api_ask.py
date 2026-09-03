@@ -242,6 +242,42 @@ def test_completed_answerable_agent_result_returns_200() -> None:
     assert len(response.json()["facts"]) == 1
 
 
+def test_completed_partial_holding_shares_result_returns_200() -> None:
+    evidence = Evidence(
+        evidence_id="synthetic-holding-evidence-1",
+        doc_id="synthetic-holding-doc-1",
+        location_type=EvidenceLocationType.TABLE,
+    )
+    fact = Fact(
+        fact_id="synthetic-holding-fact-1",
+        company="Synthetic Issuer",
+        metric=MetricConcept.HOLDING_SHARES,
+        accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+        raw_value="1,234",
+        raw_unit="주",
+        evidence_ids=[evidence.evidence_id],
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.PARTIAL_SOURCE_SUPPORT,
+        facts=[fact],
+        evidence=[evidence],
+    )
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "synthetic partial holding"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "PARTIALLY_ANSWERABLE"
+    assert payload["reason"] == "partial_source_support"
+    assert payload["facts"] == [fact.model_dump(mode="json")]
+    assert payload["evidence"] == [evidence.model_dump(mode="json")]
+    assert "1,234주" in payload["answer"]
+    assert "보유비율" not in payload["answer"]
+
+
 @pytest.mark.parametrize(
     ("status", "reason"),
     [

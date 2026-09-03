@@ -88,6 +88,11 @@ F3_QUESTIONS = [
     "어떤 종목이 더 좋아?",
     "추천해줘",
     "삼성전자랑 SK하이닉스 중 어디에 투자하는 게 좋아?",
+    # '투자하는 게'에 우열 어미가 붙은 형태. 아래 REGRESSION_NEGATIVE_CONTROLS의 명사절
+    # ("투자하는 게 어떤 시설인지")과 갈리는 자리이며, 어미를 요구하도록 좁힌 뒤에도
+    # 진짜 의견 요구는 그대로 걸린다는 것을 고정한다.
+    "삼성전자에 투자하는 게 나아?",
+    "어디에 투자하는 게 좋아?",
 ]
 
 
@@ -135,6 +140,95 @@ def test_buy_question_yields_no_fact() -> None:
     assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
     assert result.facts == []
     assert result.evidence == []
+
+
+# --------------------------------------------------------------------------
+# 1.1 F3 — 사실 조회 위장 우회 회귀
+#
+# 아래 앞의 두 질문은 실제 API(/api/ask, 실측 코퍼스)에서 매출 Fact 1건과 근거 1건을 붙여
+# ANSWERABLE로 돌아왔다. '매수 결정해도'·'투자해도 괜찮아'가 F3 어휘에 없었고, 기업명·
+# 연도·지표가 살아 있어 single_fact로 라우팅됐다. F3-03이 막은 구멍이 어미 하나 차이로
+# 다시 열린 것이다. 세 번째 질문은 같은 원인으로 Q11 경로를 타 Fact 4건이 돌아왔다.
+#
+# 판정 원칙은 F3-03과 같다. 투자 판단 요구가 하나라도 있으면 사실 조회 반쪽에도 답하지
+# 않는다. 반쪽에 답하면 "매출은 이렇습니다"가 곧 매수 의견의 근거가 된다.
+# --------------------------------------------------------------------------
+
+F3_BYPASS_QUESTIONS = [
+    # API에서 우회가 확인된 두 질문.
+    "한화오션 2025년 매출 보고 매수 결정해도 될까?",
+    "삼성전자 2024년 매출 기준으로 투자해도 괜찮아?",
+    # 비교 질문에 종목 선택이 붙은 형태. Q11과 같은 두 기업·지표를 쓴다.
+    "HD현대중공업이랑 삼성중공업 2025년 영업이익률 비교해서 어느 쪽 주식을 사는 게 나아?",
+    "한화오션 2025년 매출 보고 사야 해?",
+    "삼성전자 비중 늘려도 될까?",
+    "지금 한화오션 들어가도 될까?",
+    # 한국어 사실 조회에 영문 판단 요구가 붙은 형태. 영문만으로 된 질문은 기업명 인식에서
+    # 막히지만, 이 형태는 기업명·연도·지표가 살아 있어 Gate를 지나면 매출 Fact가 나간다.
+    "삼성전자 2024년 매출 보고 should I buy?",
+]
+
+
+@pytest.mark.parametrize("question", F3_BYPASS_QUESTIONS)
+def test_disguised_investment_advice_is_refused_at_the_gate(question: str) -> None:
+    decision = screen_question(question)
+
+    assert not decision.allowed, question
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+    assert decision.reason == REASON_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("question", F3_BYPASS_QUESTIONS)
+def test_disguised_investment_advice_yields_no_partial_answer(
+    question: str,
+    explosive_downstream: None,
+) -> None:
+    """
+    사실 조회 반쪽에도 답하지 않는다. 하위 단계가 한 번이라도 불리면 폭탄이 터진다.
+
+    상태·사유·detail·건수를 전부 본다. 상태만 보면 "Fact를 만들었다가 지운" 구현과
+    구분되지 않고, 사유를 보지 않으면 unknown_company 같은 무관한 실패를 성공으로 센다.
+    """
+    result = router.answer_question(question, corpus_root=NONEXISTENT_CORPUS)
+
+    assert result.execution_status is ExecutionStatus.COMPLETED, question
+    assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE, question
+    assert result.answerability_reason is AnswerabilityReason.OUT_OF_SCOPE_POLICY, question
+    assert result.answerability_detail is not None, question
+    assert result.answerability_detail.stage == STAGE_ANSWERABILITY_GATE, question
+    assert result.answerability_detail.reason == REASON_INVESTMENT_ADVICE, question
+    assert result.execution_issue is None, question
+    assert result.facts == [], question
+    assert result.evidence == [], question
+    assert result.calculations == [], question
+    assert result.comparisons == [], question
+
+
+# 우회 수정으로 넓힌 어휘와 낱말이 겹치는 정상 질문.
+#
+# '투자'·'비중'·'결정'·'사는'은 전부 공시 조회에 쓰이는 낱말이다. 규칙이 낱말이 아니라
+# '행위 + 판단 요구 어미'를 보므로 여기가 막히지 않아야 한다. 앞의 두 질문은 위 우회
+# 질문에서 판단 요구만 뗀 형태라, 사실 조회 경로가 그대로 남았는지를 함께 고정한다.
+F3_BYPASS_NEGATIVE_CONTROLS = [
+    "한화오션 2025년 매출 알려줘",
+    "HD현대중공업이랑 삼성중공업 2025년 영업이익률 비교해줘",
+    # '투자'가 공시의 주제일 뿐 사용자의 투자 판단이 아니다.
+    "투자 관련 공시 내용 알려줘",
+    # '결정'은 주요사항보고서의 기재 항목이다. '매수 결정해도'와 다르다.
+    "타법인 주식 취득 결정 공시 내용 알려줘",
+    # '비중'은 사업보고서의 매출 구성이다. '비중 늘려도'와 다르다.
+    "주요 제품별 매출 비중이 무슨 사업부에서 나와?",
+    # '회사는 게'가 '사는 게'로 읽히지 않는다.
+    "이 회사는 게임 사업을 하고 있어?",
+]
+
+
+@pytest.mark.parametrize("question", F3_BYPASS_NEGATIVE_CONTROLS)
+def test_disclosure_questions_sharing_bypass_vocabulary_pass(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
 
 
 # --------------------------------------------------------------------------
@@ -1186,6 +1280,11 @@ REGRESSION_NEGATIVE_CONTROLS = [
     # F3 '투자 판단 요구'가 명사 '투자처' 하나로 잡던 형태. 자금의 투자처는 시설투자·
     # 자금조달 공시의 기재 항목이다.
     "신규시설투자의 투자처가 어디야?",
+    # F3 '투자 판단 요구'가 어미 없는 '투자하는 게'로 잡던 형태. 여기서 '투자하는 게'는
+    # 판단 요구가 아니라 명사절이고, 묻는 것은 공시에 기재된 투자 대상이다. 추천도 허락도
+    # 우열도 요구하지 않는다.
+    "이 회사가 투자하는 게 어떤 시설인지 알려줘",
+    "삼성전자가 투자하는 게 공시 내용에 나와?",
     # F4 '전망 생성 요구'가 '전망이 어때'로 잡던 형태. 출처를 지목했으므로 문서에 적힌
     # 전망을 읽어 달라는 요구다.
     "사업보고서에 적힌 회사 전망이 어때?",
@@ -1646,7 +1745,13 @@ def test_gated_cases_now_meet_their_expected_contract(case: dict[str, Any]) -> N
 
 @pytest.mark.parametrize(
     "question",
-    ["장내매수 시점은 언제였어?", "사업보고서에 적힌 회사 전망이 어때?"],
+    [
+        "장내매수 시점은 언제였어?",
+        "사업보고서에 적힌 회사 전망이 어때?",
+        # '투자'가 주제일 뿐인 조회. 기업명이 없어 뒤에서 막히지만, 막는 자리가 Gate가
+        # 아니어야 한다.
+        "투자 관련 공시 내용 알려줘",
+    ],
 )
 def test_negative_control_reaches_the_pipeline(question: str) -> None:
     """

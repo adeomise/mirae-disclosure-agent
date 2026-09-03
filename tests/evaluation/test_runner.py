@@ -129,10 +129,12 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
     }
     assert {question.case_id for question in representative if question.lifecycle == "active"} == {
         "q01",
+        "q02",
+        "q07",
         "q13",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 15
+    assert sum(question.lifecycle == "future" for question in representative) == 13
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -187,6 +189,71 @@ def test_active_q01_gold_pins_corpus_verified_fact() -> None:
     ]
     assert q01.min_evidence_count == 1
     assert q01.integrity.fact_evidence_references is True
+
+
+def test_active_q02_gold_pins_actual_contract_facts_and_evidence() -> None:
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    q02 = {gold.case_id: gold for gold in loaded.gold_answers}["q02"]
+
+    assert questions["q02"].question == (
+        "한화오션이 2025년 9월 Yang Ming과 체결한 계약의 계약금액과 계약기간은?"
+    )
+    assert q02.execution_status is ExecutionStatus.COMPLETED
+    assert q02.status is AnswerabilityStatus.ANSWERABLE
+    assert q02.reason is None
+    assert q02.counts.model_dump(exclude_none=True) == {"facts": 3, "evidence": 3}
+    actual_facts = [
+        fact.model_dump(exclude_none=True, mode="json")
+        for fact in q02.expected_facts()
+    ]
+    assert actual_facts == [
+        {
+            "company": "한화오션",
+            "metric": "contract_amount",
+            "normalized_value": "1933600000000",
+            "normalized_unit": "KRW",
+            "evidence_ids": [
+                "evidence_exchange_20250917800008_contract_amount"
+            ],
+        },
+        {
+            "company": "한화오션",
+            "metric": "contract_start_date",
+            "normalized_value": "2025-09-16",
+            "evidence_ids": [
+                "evidence_exchange_20250917800008_contract_start_date"
+            ],
+        },
+        {
+            "company": "한화오션",
+            "metric": "contract_end_date",
+            "normalized_value": "2029-05-31",
+            "evidence_ids": [
+                "evidence_exchange_20250917800008_contract_end_date"
+            ],
+        },
+    ]
+    assert q02.min_evidence_count == 3
+    assert q02.integrity.fact_evidence_references is True
+
+
+def test_active_q07_gold_pins_temporal_delta_contract() -> None:
+    q07 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q07"]
+
+    assert q07.counts.model_dump(exclude_none=True) == {
+        "facts": 2,
+        "calculations": 2,
+        "comparisons": 0,
+    }
+    assert [(item.operation, item.unit) for item in q07.calculations] == [
+        ("delta", "원"),
+        ("delta_pct", "percent"),
+    ]
+    assert q07.integrity.fact_evidence_references is True
+    assert q07.integrity.calculation_evidence_references is True
+    assert q07.integrity.result_input_references is True
+    assert q07.integrity.calculation_values_from_inputs is True
 
 
 def test_active_q13_gold_pins_corpus_verified_chain_structure() -> None:
@@ -835,6 +902,61 @@ def test_multiple_fact_expectations_fail_without_distinct_matches() -> None:
     assert any(item.startswith("facts:") for item in failures)
 
 
+def test_expected_fact_company_mismatch_fails() -> None:
+    gold = answerable_gold(
+        "case",
+        facts=[{"company": "Expected Company", "metric": "revenue"}],
+    )
+
+    failures = compare_prediction(gold, prediction("case"))
+
+    assert failures == ["facts: expected fields did not match distinct predicted Facts"]
+
+
+def test_expected_fact_evidence_ids_require_an_exact_non_dangling_match() -> None:
+    gold = answerable_gold(
+        "case",
+        facts=[
+            {
+                "metric": "contract_amount",
+                "normalized_value": "100",
+                "normalized_unit": "KRW",
+                "evidence_ids": ["evidence-expected"],
+            }
+        ],
+        integrity={"fact_evidence_references": True},
+    )
+
+    def contract_prediction(evidence_id: str) -> PredictionCase:
+        return prediction(
+            "case",
+            facts=[
+                {
+                    "fact_id": "fact-1",
+                    "company": "Synthetic Company",
+                    "metric": "contract_amount",
+                    "accounting_scope": "not_applicable",
+                    "normalized_value": "100",
+                    "normalized_unit": "KRW",
+                    "evidence_ids": [evidence_id],
+                }
+            ],
+            evidence=[
+                {
+                    "evidence_id": evidence_id,
+                    "doc_id": "doc-1",
+                    "location_type": "table",
+                }
+            ],
+        )
+
+    assert compare_prediction(gold, contract_prediction("evidence-expected")) == []
+
+    failures = compare_prediction(gold, contract_prediction("evidence-wrong"))
+
+    assert failures == ["facts: expected fields did not match distinct predicted Facts"]
+
+
 def test_dangling_fact_evidence_reference_fails() -> None:
     gold = answerable_gold(
         "case", integrity={"fact_evidence_references": True}
@@ -865,6 +987,160 @@ def test_calculation_evidence_reference_integrity_is_supported() -> None:
     failures = compare_prediction(gold, actual)
 
     assert any("dangling Calculation evidence_ids=['missing']" in item for item in failures)
+
+
+@pytest.mark.parametrize("collection", ["fact", "calculation"])
+def test_empty_evidence_references_fail_non_vacuous_integrity(collection: str) -> None:
+    integrity = {f"{collection}_evidence_references": True}
+    overrides = (
+        {
+            "facts": [
+                {
+                    "fact_id": "fact-1",
+                    "company": "Synthetic Company",
+                    "metric": "revenue",
+                    "accounting_scope": "consolidated",
+                    "raw_value": "100",
+                    "evidence_ids": [],
+                }
+            ]
+        }
+        if collection == "fact"
+        else {
+            "calculations": [
+                {
+                    "calculation_id": "calculation-1",
+                    "operation": "identity",
+                    "inputs": [{"input_type": "fact", "input_id": "fact-1"}],
+                    "evidence_ids": [],
+                }
+            ]
+        }
+    )
+
+    failures = compare_prediction(
+        answerable_gold("case", integrity=integrity), prediction("case", **overrides)
+    )
+
+    assert any("evidence_ids=['<missing>']" in item for item in failures)
+
+
+def q07_prediction(*, delta_value: str = "50.0000") -> PredictionCase:
+    facts = [
+        {
+            "fact_id": "revenue-2024",
+            "company": "한미반도체(주)",
+            "metric": "revenue",
+            "fiscal_year": 2024,
+            "accounting_scope": "consolidated",
+            "normalized_value": "100",
+            "normalized_unit": "원",
+            "evidence_ids": ["evidence-1"],
+        },
+        {
+            "fact_id": "revenue-2025",
+            "company": "한미반도체(주)",
+            "metric": "revenue",
+            "fiscal_year": 2025,
+            "accounting_scope": "consolidated",
+            "normalized_value": "150",
+            "normalized_unit": "원",
+            "evidence_ids": ["evidence-2"],
+        },
+    ]
+    inputs = [
+        {"input_type": "fact", "input_id": "revenue-2024"},
+        {"input_type": "fact", "input_id": "revenue-2025"},
+    ]
+    return prediction(
+        "case",
+        facts=facts,
+        evidence=[
+            {"evidence_id": "evidence-1", "doc_id": "doc-2024", "location_type": "table"},
+            {"evidence_id": "evidence-2", "doc_id": "doc-2025", "location_type": "table"},
+        ],
+        calculations=[
+            {
+                "calculation_id": "delta",
+                "operation": "delta",
+                "inputs": inputs,
+                "value": delta_value,
+                "unit": "원",
+                "evidence_ids": ["evidence-1", "evidence-2"],
+            },
+            {
+                "calculation_id": "delta-pct",
+                "operation": "delta_pct",
+                "inputs": inputs,
+                "value": "50.0000",
+                "unit": "percent",
+                "evidence_ids": ["evidence-1", "evidence-2"],
+            },
+        ],
+    )
+
+
+def test_q07_calculation_semantics_recompute_exact_values_from_ordered_facts() -> None:
+    gold = answerable_gold(
+        "case",
+        calculations=[
+            {"operation": "delta", "unit": "원"},
+            {"operation": "delta_pct", "unit": "percent"},
+        ],
+        integrity={"calculation_values_from_inputs": True},
+    )
+
+    assert compare_prediction(gold, q07_prediction()) == []
+
+    failures = compare_prediction(gold, q07_prediction(delta_value="49.9999"))
+
+    assert any("expected value 50.0000, got 49.9999" in item for item in failures)
+
+
+def test_q07_calculation_semantics_reject_reversed_fact_inputs() -> None:
+    actual = q07_prediction().model_dump(mode="python")
+    reversed_inputs = list(reversed(actual["calculations"][0]["inputs"]))
+    for calculation in actual["calculations"]:
+        calculation["inputs"] = reversed_inputs
+        calculation["evidence_ids"] = ["evidence-2", "evidence-1"]
+    actual["calculations"][0]["value"] = "-50.0000"
+    actual["calculations"][1]["value"] = "-33.3333"
+
+    failures = compare_prediction(
+        answerable_gold(
+            "case", integrity={"calculation_values_from_inputs": True}
+        ),
+        PredictionCase.model_validate(actual),
+    )
+
+    assert any("Fact inputs are not previous/current" in item for item in failures)
+    assert not any("expected value" in item for item in failures)
+
+
+def test_q07_calculation_semantics_reject_unrelated_valid_evidence() -> None:
+    actual = q07_prediction().model_dump(mode="python")
+    actual["evidence"].append(
+        {"evidence_id": "evidence-unrelated", "doc_id": "doc-other", "location_type": "table"}
+    )
+    actual["calculations"][0]["evidence_ids"] = ["evidence-unrelated"]
+
+    failures = compare_prediction(
+        answerable_gold(
+            "case",
+            integrity={
+                "calculation_evidence_references": True,
+                "calculation_values_from_inputs": True,
+            },
+        ),
+        PredictionCase.model_validate(actual),
+    )
+
+    assert not any("dangling Calculation" in item for item in failures)
+    assert any(
+        "expected input Evidence ['evidence-1', 'evidence-2'], "
+        "got ['evidence-unrelated']" in item
+        for item in failures
+    )
 
 
 def test_resolved_field_evidence_reference_integrity_passes() -> None:

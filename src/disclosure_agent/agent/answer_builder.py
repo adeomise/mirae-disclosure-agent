@@ -1103,11 +1103,20 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
 
 def _document_summary_sentence(summaries: list[DocumentSummary]) -> str:
     """
-    DocumentSummary 1건을 문장으로 옮긴다.
+    DocumentSummary를 문장으로 옮긴다.
 
-    여러 건이면 막는다. Pattern B는 문서 1건의 지정 범위를 정리하는 Pattern이고, 여러 문서를
+    문서 1건의 범위 여러 건은 허용한다(Q05):
+        같은 doc_id의 DocumentSummary가 서로 다른 범위를 담고 있으면, 범위마다 같은 형태의
+        문장을 만들어 원문 Section 순서(결과에 실린 순서)대로 잇는다. 범위별 문장을 하나로
+        녹이지 않는다. 녹이려면 두 범위의 내용을 함께 서술하는 새 문장이 필요하고, 그것은
+        확정된 결과를 표현만 하는 이 모듈의 일이 아니다.
+
+    여러 문서면 막는다. Pattern B는 문서 1건의 지정 범위를 정리하는 Pattern이고, 여러 문서를
     한 문장으로 잇는 형태는 정해지지 않았다. 첫 건만 고르면 나머지 문서를 요약했다는 사실이
     사라진다(_single_fact_sentence와 같은 이유).
+
+    같은 문서의 같은 범위가 거듭 실린 결과도 막는다. 그런 결과를 만드는 producer가 없으며,
+    한 건만 고르면 나머지가 왜 있었는지가 사라진다.
 
     구조화 결과에 적힌 것만 말한다:
         문서와 범위는 DocumentSummary가, 항목 수는 items가 정한다. 요약문을 여기서 새로
@@ -1131,14 +1140,27 @@ def _document_summary_sentence(summaries: list[DocumentSummary]) -> str:
         (periodic.sections의 TODO). 그래서 "어느 범위를 골랐는가"와 "그 범위에 무엇이 얼마나
         있는가"를 나눠 적는다.
     """
-    if len(summaries) > 1:
+    if len({summary.doc_id for summary in summaries}) > 1:
         raise UnsupportedResultShapeError(
             f"DocumentSummary가 {len(summaries)}건입니다. 단일 문서 요약은 문서 1건을 "
             "대상으로 하며, 여러 문서를 한 문장으로 잇는 형태는 정해지지 않았습니다."
         )
 
-    summary = summaries[0]
+    scopes = [summary.section_scope for summary in summaries]
 
+    if len(set(scopes)) != len(scopes):
+        listed = ", ".join(scope.value for scope in scopes)
+
+        raise UnsupportedResultShapeError(
+            f"같은 문서의 DocumentSummary {len(summaries)}건이 범위를 거듭 담고 있습니다: "
+            f"{listed}. 같은 범위를 두 번 실은 결과를 만드는 producer가 없습니다."
+        )
+
+    return _join(*(_single_document_summary_sentence(summary) for summary in summaries))
+
+
+def _single_document_summary_sentence(summary: DocumentSummary) -> str:
+    """DocumentSummary 1건을 '어느 범위를 골랐는가'와 '무엇이 얼마나 있는가'로 옮긴다."""
     scope_label = SECTION_SCOPE_LABELS.get(summary.section_scope)
 
     if scope_label is None:

@@ -6,6 +6,7 @@ import argparse
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,6 +20,7 @@ from disclosure_agent.common.enums import (
     ExecutionStatus,
     FactAccountingScope,
     MetricConcept,
+    ResultInputType,
 )
 from disclosure_agent.common.schemas import AgentExecutionResult, Fact
 
@@ -84,6 +86,14 @@ class IntegrityExpectation(BaseModel):
     calculation_evidence_references: bool | None = None
     resolved_field_evidence_references: bool | None = None
     result_input_references: bool | None = None
+    calculation_values_from_inputs: bool | None = None
+
+
+class ExpectedCalculation(BaseModel):
+    """Stable semantic fields for one deterministic calculation."""
+
+    operation: str
+    unit: str | None = None
 
 
 class GoldAnswer(BaseModel):
@@ -95,6 +105,7 @@ class GoldAnswer(BaseModel):
     reason: AnswerabilityReason | None = None
     fact: ExpectedFact | None = None
     facts: list[ExpectedFact] | None = None
+    calculations: list[ExpectedCalculation] | None = None
     min_evidence_count: int = Field(ge=0)
     event_history: EventHistoryExpectation | None = None
     counts: CollectionCounts | None = None
@@ -348,14 +359,15 @@ def _dangling_references(result: PredictionCase, collection: str) -> list[str]:
             for state in result.resolved_event_states
             for field in state.fields.values()
         ]
-    return sorted(
-        {
-            evidence_id
-            for item in items
-            for evidence_id in item.evidence_ids
-            if evidence_id not in evidence_ids
-        }
-    )
+    dangling = {
+        evidence_id
+        for item in items
+        for evidence_id in item.evidence_ids
+        if evidence_id not in evidence_ids
+    }
+    if any(not item.evidence_ids for item in items):
+        dangling.add("<missing>")
+    return sorted(dangling)
 
 
 def _dangling_result_input_references(result: PredictionCase) -> list[str]:
@@ -379,6 +391,59 @@ def _dangling_result_input_references(result: PredictionCase) -> list[str]:
             if reference.input_id not in known_ids[reference.input_type.value]
         }
     )
+
+
+def _calculation_value_failures(result: PredictionCase) -> list[str]:
+    """Independently recompute supported calculations from their ordered Fact inputs."""
+    facts = {fact.fact_id: fact for fact in result.facts}
+    failures: list[str] = []
+    for calculation in result.calculations:
+        if calculation.operation not in {"delta", "delta_pct"}:
+            failures.append(f"{calculation.calculation_id}: unsupported operation")
+            continue
+        if len(calculation.inputs) != 2 or any(
+            item.input_type is not ResultInputType.FACT for item in calculation.inputs
+        ):
+            failures.append(f"{calculation.calculation_id}: expected two Fact inputs")
+            continue
+        previous = facts.get(calculation.inputs[0].input_id)
+        current = facts.get(calculation.inputs[1].input_id)
+        if previous is None or current is None:
+            failures.append(f"{calculation.calculation_id}: input Fact is missing")
+            continue
+        if (
+            previous.fiscal_year is None
+            or current.fiscal_year is None
+            or current.fiscal_year != previous.fiscal_year + 1
+        ):
+            failures.append(f"{calculation.calculation_id}: Fact inputs are not previous/current")
+            continue
+        try:
+            previous_value = Decimal(str(previous.normalized_value))
+            current_value = Decimal(str(current.normalized_value))
+            with localcontext() as context:
+                context.prec = 28
+                expected = current_value - previous_value
+                if calculation.operation == "delta_pct":
+                    expected = expected / previous_value * Decimal(100)
+                expected_value = str(expected.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+        except (InvalidOperation, TypeError, ValueError, ZeroDivisionError):
+            failures.append(f"{calculation.calculation_id}: unusable Fact values")
+            continue
+        if str(calculation.value) != expected_value:
+            failures.append(
+                f"{calculation.calculation_id}: expected value {expected_value}, "
+                f"got {calculation.value}"
+            )
+        expected_evidence = list(
+            dict.fromkeys((*previous.evidence_ids, *current.evidence_ids))
+        )
+        if calculation.evidence_ids != expected_evidence:
+            failures.append(
+                f"{calculation.calculation_id}: expected input Evidence "
+                f"{expected_evidence}, got {calculation.evidence_ids}"
+            )
+    return failures
 
 
 def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str]:
@@ -437,6 +502,12 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
     if expected_facts and not _facts_match_distinctly(expected_facts, prediction.facts):
         failures.append("facts: expected fields did not match distinct predicted Facts")
 
+    if gold.calculations is not None:
+        expected = [(item.operation, item.unit) for item in gold.calculations]
+        actual = [(item.operation, item.unit) for item in prediction.calculations]
+        if actual != expected:
+            failures.append(f"calculations: expected operation/unit {expected}, got {actual}")
+
     if gold.integrity is not None:
         checks = {
             "fact_evidence_references": ("facts", "Fact"),
@@ -465,6 +536,15 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
                 failures.append(
                     "integrity.result_input_references: "
                     f"expected {expected}, got {actual}; dangling inputs={dangling}"
+                )
+        expected = gold.integrity.calculation_values_from_inputs
+        if expected is not None:
+            value_failures = _calculation_value_failures(prediction)
+            actual = not value_failures
+            if actual != expected:
+                failures.append(
+                    "integrity.calculation_values_from_inputs: "
+                    f"expected {expected}, got {actual}; failures={value_failures}"
                 )
     return failures
 

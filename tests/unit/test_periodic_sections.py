@@ -246,3 +246,79 @@ def test_empty_section_is_reported_instead_of_being_filled(
         collect(document)
 
     assert error.value.reason == REASON_EMPTY_SECTION
+
+
+# --------------------------------------------------------------------------
+# 4. 주요 제품(products) 범위
+# --------------------------------------------------------------------------
+
+PRODUCTS_SECTION_ID = "section_0002"
+
+
+def test_products_scope_selects_the_major_products_section(
+    summary_document: dict[str, Any],
+) -> None:
+    selection = select_scope_section(summary_document, section_scope=SectionScope.PRODUCTS)
+
+    assert selection.section_id == PRODUCTS_SECTION_ID
+    assert selection.section_path == ("II. 사업의 내용", "2. 주요 제품 및 서비스")
+
+    items = collect_section_content(summary_document, selection=selection)
+
+    assert items
+    assert all(item.section_id == PRODUCTS_SECTION_ID for item in items)
+
+
+def test_products_scope_without_a_matching_section_fails_closed(
+    summary_document: dict[str, Any],
+) -> None:
+    document = copy.deepcopy(summary_document)
+
+    document["sections"] = [
+        section
+        for section in document["sections"]
+        if section["section_id"] != PRODUCTS_SECTION_ID
+    ]
+
+    with pytest.raises(SectionNavigationError) as error:
+        select_scope_section(document, section_scope=SectionScope.PRODUCTS)
+
+    assert error.value.reason == REASON_NO_MATCHING_SECTION
+
+
+def test_products_scope_with_two_matching_sections_is_ambiguous(
+    summary_document: dict[str, Any],
+) -> None:
+    document = copy.deepcopy(summary_document)
+
+    duplicate = copy.deepcopy(
+        next(
+            section
+            for section in document["sections"]
+            if section["section_id"] == PRODUCTS_SECTION_ID
+        )
+    )
+    duplicate["section_id"] = "section_0099"
+
+    document["sections"].append(duplicate)
+
+    with pytest.raises(SectionNavigationError) as error:
+        select_scope_section(document, section_scope=SectionScope.PRODUCTS)
+
+    assert error.value.reason == REASON_AMBIGUOUS_SECTION
+
+
+def test_products_title_without_the_business_ancestor_is_not_selected(
+    summary_document: dict[str, Any],
+) -> None:
+    """제목에 '주요 제품'이 있어도 상위 Section이 '사업의 내용'이 아니면 고르지 않는다."""
+    document = copy.deepcopy(summary_document)
+
+    for section in document["sections"]:
+        if section["section_id"] == PRODUCTS_SECTION_ID:
+            section["section_path"] = ["III. 재무에 관한 사항", "2. 주요 제품 및 서비스"]
+
+    with pytest.raises(SectionNavigationError) as error:
+        select_scope_section(document, section_scope=SectionScope.PRODUCTS)
+
+    assert error.value.reason == REASON_NO_MATCHING_SECTION

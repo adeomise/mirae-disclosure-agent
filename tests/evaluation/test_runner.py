@@ -131,11 +131,10 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q01",
         "q02",
         "q07",
-        "q09",
         "q13",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 12
+    assert sum(question.lifecycle == "future" for question in representative) == 13
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -273,26 +272,6 @@ def test_active_q13_gold_pins_corpus_verified_chain_structure() -> None:
     assert q13.min_evidence_count == 3
 
 
-def test_active_q09_gold_pins_actual_ambiguous_narrative_shape() -> None:
-    q09 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q09"]
-
-    assert q09.execution_status is ExecutionStatus.COMPLETED
-    assert q09.status is AnswerabilityStatus.UNRESOLVED
-    assert q09.reason is AnswerabilityReason.AMBIGUOUS_MATCH
-    assert q09.counts.model_dump(exclude_none=True) == {
-        "facts": 0,
-        "events": 0,
-        "event_links": 0,
-        "event_histories": 0,
-        "resolved_event_states": 0,
-        "document_summaries": 0,
-        "calculations": 0,
-        "comparisons": 0,
-        "narrative_comparisons": 0,
-    }
-    assert q09.min_evidence_count == 1
-
-
 def test_active_q18_gold_pins_actual_safety_gate_contract() -> None:
     q18 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q18"]
 
@@ -339,7 +318,7 @@ def test_representative_calculation_counts_match_final_targets() -> None:
 def test_narrative_future_gold_does_not_require_zero_facts() -> None:
     gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
 
-    for case_id in ("q04", "q05", "q06"):
+    for case_id in ("q04", "q05", "q06", "q09"):
         counts = gold_by_id[case_id].counts
         assert counts is None or counts.facts is None
 

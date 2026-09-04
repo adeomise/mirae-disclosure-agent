@@ -60,6 +60,7 @@ from disclosure_agent.agent.handlers.cross_entity_compare import (
 )
 from disclosure_agent.agent.handlers.document_summary import handle_document_summary
 from disclosure_agent.agent.handlers.event_history import handle_event_history
+from disclosure_agent.agent.handlers.holding_fact import handle_holding_fact
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
 from disclosure_agent.agent.handlers.temporal_compare import handle_temporal_compare
 from disclosure_agent.agent.normalization import (
@@ -71,6 +72,7 @@ from disclosure_agent.agent.query_analyzer import (
     INTENT_CONTRACT_FACT,
     INTENT_CROSS_ENTITY_COMPARE,
     INTENT_DOCUMENT_SUMMARY,
+    INTENT_HOLDING_FACT,
     INTENT_TEMPORAL_COMPARE,
     KNOWN_INTENTS,
     QueryPlan,
@@ -108,6 +110,7 @@ HANDLERS: dict[str, Handler] = {
     INTENT_CROSS_ENTITY_COMPARE: handle_cross_entity_compare,
     # contract_fact도 Contract v0.1의 Intent에 아직 없어 query_analyzer의 문자열 상수를 쓴다.
     INTENT_CONTRACT_FACT: handle_contract_fact,
+    INTENT_HOLDING_FACT: handle_holding_fact,
 }
 
 
@@ -238,6 +241,22 @@ def answer_question(
         return blocked_execution(STAGE_FILING_DISCOVERY, error.reason, error.detail)
 
     known_companies = list_company_names(manifest_records)
+
+    # 지분공시의 보고자는 corp_name(발행회사) 목록에 없을 수 있다. 지분공시
+    # 질문에서만 manifest의 flr_nm을 인식 후보에 더한다.
+    if "대량보유" in question:
+        known_companies = tuple(
+            dict.fromkeys(
+                (
+                    *known_companies,
+                    *(
+                        str(row.get("flr_nm"))
+                        for row in manifest_records
+                        if row.get("flr_nm")
+                    ),
+                )
+            )
+        )
 
     # 상대 기간("작년")을 옮길 기준 연도도 같은 manifest에서 유도해 넘긴다.
     #

@@ -130,11 +130,12 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
     assert {question.case_id for question in representative if question.lifecycle == "active"} == {
         "q01",
         "q02",
+        "q03",
         "q07",
         "q13",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 13
+    assert sum(question.lifecycle == "future" for question in representative) == 12
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -254,6 +255,41 @@ def test_active_q07_gold_pins_temporal_delta_contract() -> None:
     assert q07.integrity.calculation_evidence_references is True
     assert q07.integrity.result_input_references is True
     assert q07.integrity.calculation_values_from_inputs is True
+
+
+def test_active_q03_gold_pins_actual_holding_facts_and_evidence() -> None:
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    q03 = {gold.case_id: gold for gold in loaded.gold_answers}["q03"]
+
+    assert questions["q03"].lifecycle == "active"
+    assert q03.execution_status is ExecutionStatus.COMPLETED
+    assert q03.status is AnswerabilityStatus.ANSWERABLE
+    assert q03.counts.model_dump(exclude_none=True) == {"facts": 2, "evidence": 2}
+    assert [
+        fact.model_dump(exclude_none=True, mode="json") for fact in q03.expected_facts()
+    ] == [
+        {
+            "company": "삼성전자",
+            "metric": "holding_shares",
+            "normalized_value": "1237964708",
+            "normalized_unit": "shares",
+            "evidence_ids": [
+                "evidence_holding_20230120000563_table_0016_r3_c4_ths_stk_cnt"
+            ],
+        },
+        {
+            "company": "삼성전자",
+            "metric": "holding_ratio",
+            "normalized_value": "20.74",
+            "normalized_unit": "percent",
+            "evidence_ids": [
+                "evidence_holding_20230120000563_table_0016_r3_c5_ths_stk_rt"
+            ],
+        },
+    ]
+    assert q03.min_evidence_count == 2
+    assert q03.integrity.fact_evidence_references is True
 
 
 def test_active_q13_gold_pins_corpus_verified_chain_structure() -> None:

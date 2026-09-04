@@ -1116,6 +1116,43 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
             _limitation(result, partial=partial),
         )
 
+    holding_metrics = {MetricConcept.HOLDING_SHARES, MetricConcept.HOLDING_RATIO}
+    fact_metrics = {fact.metric for fact in result.facts}
+    if result.facts and fact_metrics == holding_metrics:
+        by_metric = {fact.metric: fact for fact in result.facts}
+        shares = by_metric[MetricConcept.HOLDING_SHARES]
+        ratio = by_metric[MetricConcept.HOLDING_RATIO]
+        if len(result.facts) != 2 or shares.company != ratio.company:
+            raise UnsupportedResultShapeError("지분공시 Fact 묶음의 회사·지표가 일치하지 않습니다.")
+        return _join(
+            f"{shares.company}의 이번 보고 시점 보유주식 수는 "
+            f"{shares.raw_value}주이고, 보유비율은 {ratio.raw_value}%입니다.",
+            _limitation(result, partial=partial),
+        )
+
+    # 지분공시 일부 항목만 원문 근거를 확보한 결과도 재무제표 단일 Fact 문장으로 보내지 않는다.
+    # 그 문장은 회계연도·연결기준 축을 전제하며, 지분 지표를 METRIC_LABELS에 넣어 우회하면
+    # 어느 보유 내역인지 특정하지 않은 문장이 된다. singleton은 Q03 handler가 만드는 canonical
+    # partial 조합에서만 열고, 그 밖의 단일 지분 Fact는 기존처럼 fail-closed 한다.
+    if (
+        len(result.facts) == 1
+        and fact_metrics <= holding_metrics
+        and partial
+        and result.answerability_reason is AnswerabilityReason.PARTIAL_SOURCE_SUPPORT
+    ):
+        fact = result.facts[0]
+        if fact.metric is MetricConcept.HOLDING_SHARES:
+            sentence = (
+                f"{fact.company}의 이번 보고 시점 보유주식 수는 "
+                f"{fact.raw_value}주입니다."
+            )
+        else:
+            sentence = (
+                f"{fact.company}의 이번 보고 시점 보유비율은 "
+                f"{fact.raw_value}%입니다."
+            )
+        return _join(sentence, _limitation(result, partial=partial))
+
     if result.facts:
         return _join(
             _single_fact_sentence(result.facts),

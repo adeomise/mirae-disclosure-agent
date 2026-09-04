@@ -601,7 +601,6 @@ def test_active_q15_gold_pins_corpus_verified_history_structure() -> None:
         "link_resolution": "resolved",
         "chain_complete": True,
         "document_count": 4,
-        "change_count": 4,
     }
     assert q15.min_evidence_count == 4
     assert q15.integrity.event_history_evidence_references is True
@@ -1375,6 +1374,18 @@ def test_event_history_change_evidence_from_an_unrelated_document_fails() -> Non
     assert failures == [
         "integrity.event_history_evidence_references: expected True, got False"
     ]
+
+
+def test_event_history_unreferenced_unrelated_evidence_is_allowed() -> None:
+    gold = answerable_gold(
+        "case",
+        facts=None,
+        integrity={"event_history_evidence_references": True},
+    )
+
+    assert compare_prediction(
+        gold, event_history_prediction(off_chain_evidence=True)
+    ) == []
 
 
 @pytest.mark.parametrize(

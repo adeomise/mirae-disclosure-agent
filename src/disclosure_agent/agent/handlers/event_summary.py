@@ -59,7 +59,7 @@ TODO:
 from __future__ import annotations
 
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -637,7 +637,18 @@ def _summarize_selected_event(
             blocked=blocked,
         )
 
-    status, reason, missing, withheld = judge_summary_answerability(state, required_fields)
+    # 근거를 먼저 모은다. 판정이 그것을 보고 내려지기 때문이다.
+    #
+    # 이 튜플이 결과에 실리는 Evidence 전부이고(normalization이 그대로 옮긴다), 판정은 필수
+    # 항목의 값이 그중 하나에 실제로 이어지는지를 본다. 판정을 먼저 하고 근거를 나중에
+    # 실으면 두 계산이 서로 다른 것을 보게 되어, 근거 없는 값이 ANSWERABLE로 나갈 수 있다.
+    evidence = _state_evidence(state, adapted)
+
+    status, reason, missing, withheld = judge_summary_answerability(
+        state,
+        required_fields,
+        available_evidence_ids={item.evidence_id for item in evidence},
+    )
 
     return EventSummaryResult(
         plan=plan,
@@ -646,7 +657,7 @@ def _summarize_selected_event(
         event=root_event,
         state=state,
         links=conversion.links,
-        evidence=_state_evidence(state, adapted),
+        evidence=evidence,
         conversion_gaps=conversion.conversion_gaps,
         root_candidate_doc_ids=(root.doc_id,),
         missing_fields=missing,
@@ -785,6 +796,8 @@ def _resolve_state(
 def judge_summary_answerability(
     state: ResolvedEventState,
     required_fields: Sequence[str],
+    *,
+    available_evidence_ids: Collection[str],
 ) -> tuple[
     AnswerabilityStatus,
     AnswerabilityReason | None,
@@ -813,7 +826,27 @@ def judge_summary_answerability(
     둘이 섞이면 근거 미확보 쪽을 사유로 삼는다. 유보는 원문이 밝힌 사실이고 미확보는 이
     파이프라인이 확인하지 못한 것이라, 후자를 감추면 확인하지 못한 항목이 "원문이 공개하지
     않았다"로 잘못 보고된다.
+
+    값만으로는 답한 것이 아니다:
+        필수 항목이 '해결됐다'고 세려면 값과 함께 그 값이 어느 문서의 어느 행에서 왔는지가
+        응답 안에 있어야 한다. ResolvedFieldValue.evidence_ids는 비어 있을 수 있고, 담겨
+        있어도 그 식별자가 가리키는 Evidence가 이 응답에 실리지 않을 수 있다
+        (_state_evidence는 source_doc_id로 찾지 못한 문서나 그 문서에 없는 식별자를
+        건너뛴다). 값만 보고 세면 근거 없는 값이 ANSWERABLE로 나가고, 받는 쪽은 그 값을
+        확인할 방법이 없는 채로 확인된 값과 구별하지 못한다.
+
+        그래서 available_evidence_ids를 요구한다. 이 결과가 실제로 싣는 Evidence의 식별자
+        집합이며, 호출자가 evidence를 만든 뒤에 넘긴다. 기본값을 두지 않는 이유는 기본값이
+        곧 "근거를 보지 않는다"는 뜻이 되어 지금 막으려는 상태를 되살리기 때문이다.
+
+    근거가 없는 값은 미확보로 센다:
+        새 사유를 만들지 않는다. missing이 이미 "원문에서 근거를 확보하지 못했다"는 자리이고
+        (PARTIAL_SOURCE_SUPPORT / INSUFFICIENT_EVIDENCE), 근거 없는 값은 정확히 그 상태다.
+        유보(WITHHELD_IN_SOURCE)로 세지 않는다. 유보는 원문이 값을 공개하지 않았다는 원문
+        쪽 사실이지만, 여기서 일어난 일은 이 파이프라인이 값을 근거에 잇지 못한 것이다.
     """
+    available = set(available_evidence_ids)
+
     missing: list[str] = []
     withheld: list[str] = []
     resolved: list[str] = []
@@ -826,6 +859,15 @@ def judge_summary_answerability(
 
         elif resolved_field.value is None or str(resolved_field.value).strip() == "":
             withheld.append(field_name)
+
+        elif not resolved_field.evidence_ids or not available.issuperset(
+            resolved_field.evidence_ids
+        ):
+            # 값은 있으나 그 값을 뒷받침할 근거가 응답에 없다. 값이 있다는 이유로 세지
+            # 않는다. 가리키는 근거가 하나라도 응답에 없으면 통째로 미확보다. 남은
+            # 식별자만으로 "일부는 확인됐다"고 말하려면 어느 근거가 어느 값을 뒷받침하는지
+            # 필드 안에서 갈라야 하는데, ResolvedFieldValue에는 그 자리가 없다.
+            missing.append(field_name)
 
         else:
             resolved.append(field_name)

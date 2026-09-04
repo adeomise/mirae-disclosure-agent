@@ -152,6 +152,25 @@ INTENT_UNANSWERABLE_CHECK = "unanswerable_check"
 #     single_fact를 재사용하지 않은 것과 같은 이유다.
 INTENT_EVENT_SUMMARY = "event_summary"
 
+# 거래소공시 단건 요약이 지원하는 판본 정책의 전부.
+#
+# 이 둘만인 이유:
+#     Q06이 답하는 것은 이벤트 하나의 '어느 시점 상태'다. latest_valid는 정정을 반영한 최신
+#     유효 상태, original_only는 원공시 시점 상태이며, handler는 이 두 갈래만 실제로 만든다
+#     (handlers.event_summary._summarize_selected_event).
+#
+#     full_chain은 상태가 아니라 변경 이력 전체를 답으로 삼는 정책이고, 그 답을 만드는 것은
+#     Pattern E(event_history)다. 그 정책이 실린 요약 계획을 그대로 실행하면 handler의
+#     else 가지가 받아 최신 상태를 만든다. 질문이 요구하지 않은 시점의 값이 요구한 것처럼
+#     나가며, 어느 정책으로 답했는지는 결과에 남지 않는다. None도 같다.
+#
+# 여기 한 곳에만 적는다. _allows_absent_years와 __post_init__이 모두 이 값을 읽으므로,
+# 정책이 늘어날 때 두 곳이 어긋날 수 없다.
+EVENT_SUMMARY_CHAIN_POLICIES: tuple[ChainPolicy, ...] = (
+    ChainPolicy.LATEST_VALID,
+    ChainPolicy.ORIGINAL_ONLY,
+)
+
 KNOWN_INTENTS: tuple[str, ...] = (
     INTENT_SINGLE_FACT,
     INTENT_CONTRACT_FACT,
@@ -964,6 +983,31 @@ class QueryPlan:
         if not self.companies:
             raise ValueError("companies는 최소 한 곳의 기업을 담아야 합니다.")
 
+        # 이벤트 단건 요약 계획은 지원하는 판본 정책만 담을 수 있다.
+        #
+        # handler는 original_only만 명시적으로 갈라 보고 나머지는 최신 유효 상태를 만드는
+        # 가지로 떨어진다. 그래서 이 자리를 비워 두면 full_chain(또는 None)이 실린 계획이
+        # 조용히 '최신'으로 실행되고, 질문이 요구하지 않은 시점의 값이 요구한 것처럼 나간다.
+        # handler에서 되돌려 잡지 않고 계획이 만들어지는 순간 막는다. 정책 규칙의 정본은
+        # EVENT_SUMMARY_CHAIN_POLICIES 하나이며, 이 검사와 _allows_absent_years가 함께
+        # 그것을 읽는다.
+        #
+        # 연도 검사보다 앞에 둔다. 뒤에 두면 연도를 담은 계획에서만 이 사유가 나오고,
+        # 연도 없는 full_chain 계획은 "years가 없다"로 막혀 무엇이 잘못됐는지 어긋나게
+        # 보고된다. 어차피 _allows_absent_years도 같은 집합을 보므로 순서를 앞으로 옮기면
+        # 그쪽은 이미 허용된 정책만 보게 된다.
+        if (
+            self.intent == INTENT_EVENT_SUMMARY
+            and self.chain_policy not in EVENT_SUMMARY_CHAIN_POLICIES
+        ):
+            supported = ", ".join(policy.value for policy in EVENT_SUMMARY_CHAIN_POLICIES)
+
+            raise ValueError(
+                "이벤트 단건 요약 계획이 지원하지 않는 chain_policy입니다: "
+                f"chain_policy={self.chain_policy!r}. 지원하는 값: {supported}. "
+                "지원하지 않는 정책을 최신 유효 상태로 바꿔 읽지 않습니다."
+            )
+
         if not self.years and not self._allows_absent_years():
             raise ValueError(
                 "years는 최소 한 개의 연도를 담아야 합니다: "
@@ -1109,10 +1153,9 @@ class QueryPlan:
         두 곳에 같은 규칙을 두면 어긋날 수 있어 한쪽만 정본으로 둔다.
         """
         if self.intent == INTENT_EVENT_SUMMARY:
-            return self.chain_policy in (
-                ChainPolicy.LATEST_VALID,
-                ChainPolicy.ORIGINAL_ONLY,
-            )
+            # __post_init__이 이미 이 집합 밖의 정책을 막는다. 여기서 다시 목록을 적지 않고
+            # 같은 정본을 읽어, 정책이 늘어날 때 두 곳이 어긋나지 않게 한다.
+            return self.chain_policy in EVENT_SUMMARY_CHAIN_POLICIES
 
         return (
             self.intent == INTENT_EVENT_HISTORY

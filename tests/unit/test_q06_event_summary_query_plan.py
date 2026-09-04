@@ -218,6 +218,74 @@ def test_event_summary_plan_cannot_be_built_without_subject_tokens() -> None:
         )
 
 
+# --------------------------------------------------------------------------
+# 판본 정책은 지원하는 값만 실린다
+# --------------------------------------------------------------------------
+
+
+# 연도를 담는다. 연도가 비면 _allows_absent_years가 먼저 걸려 이 규칙이 실제로 정책을 보고
+# 막는지 확인할 수 없다. 연도를 담은 계획에서도 걸린다는 것이 이 묶음의 요점이다.
+def event_summary_plan(chain_policy: ChainPolicy | None) -> QueryPlan:
+    return QueryPlan(
+        question=Q06,
+        companies=("LG유플러스",),
+        years=(2025,),
+        intent=INTENT_EVENT_SUMMARY,
+        document_class="event",
+        document_subtype=None,
+        accounting_scope="not_applicable",
+        metric=None,
+        chain_policy=chain_policy,
+        event_subject_tokens=("파주", "AIDC"),
+    )
+
+
+@pytest.mark.parametrize(
+    "chain_policy",
+    [ChainPolicy.LATEST_VALID, ChainPolicy.ORIGINAL_ONLY],
+)
+def test_supported_chain_policies_build_an_event_summary_plan(
+    chain_policy: ChainPolicy,
+) -> None:
+    """handler가 실제로 만드는 두 시점만 계획에 실린다."""
+    assert event_summary_plan(chain_policy).chain_policy is chain_policy
+
+
+@pytest.mark.parametrize("chain_policy", [ChainPolicy.FULL_CHAIN, None])
+def test_unsupported_chain_policy_is_rejected_instead_of_read_as_latest(
+    chain_policy: ChainPolicy | None,
+) -> None:
+    """지원하지 않는 정책은 계획이 만들어지는 순간 막힌다.
+
+    handler는 original_only만 명시적으로 갈라 보고 나머지는 최신 유효 상태를 만드는 가지로
+    떨어진다. 그래서 이 규칙이 없으면 full_chain(이력 전체를 답으로 삼는 Pattern E의 정책)이
+    실린 요약 계획이 조용히 '최신'으로 실행되고, 질문이 요구하지 않은 시점의 값이 요구한
+    것처럼 나간다. 결과만 봐서는 드러나지 않는 실패다.
+
+    연도가 있어도 걸린다는 것을 함께 고정한다. 연도가 없을 때만 보는 _allows_absent_years로
+    막았다면 이 계획들은 그대로 통과했다.
+    """
+    with pytest.raises(ValueError, match="chain_policy"):
+        event_summary_plan(chain_policy)
+
+
+def test_pattern_e_history_plan_still_accepts_full_chain() -> None:
+    """같은 규칙이 이력 계획으로 새지 않는다. full_chain은 그쪽의 정본 정책이다."""
+    plan = QueryPlan(
+        question="HD현대일렉트릭이 2024년 8월에 공시한 공급계약, 나중에 바뀐 내용 있어?",
+        companies=("HD현대일렉트릭",),
+        years=(2024,),
+        intent=INTENT_EVENT_HISTORY,
+        document_class="event",
+        document_subtype="단일판매공급계약체결",
+        accounting_scope="not_applicable",
+        metric=None,
+        chain_policy=ChainPolicy.FULL_CHAIN,
+    )
+
+    assert plan.chain_policy is ChainPolicy.FULL_CHAIN
+
+
 def test_event_subject_tokens_are_rejected_on_other_intents() -> None:
     """다른 의도에 실리면 그 handler가 읽지 않아 조건이 조용히 사라진다."""
     with pytest.raises(ValueError, match="event_subject_tokens"):

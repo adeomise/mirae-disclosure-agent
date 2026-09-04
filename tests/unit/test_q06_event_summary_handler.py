@@ -11,11 +11,13 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from disclosure_agent.agent.handlers import event_summary as event_summary_module
 from disclosure_agent.agent.handlers.event_summary import (
     REASON_UNREPRESENTABLE_CORRECTION_CHANGE,
     REASON_UNSUPPORTED_COMPOSITE_CORRECTION,
@@ -23,6 +25,7 @@ from disclosure_agent.agent.handlers.event_summary import (
     REQUIRED_SUMMARY_FIELDS_BY_EVENT_TYPE,
     build_event_summary_result,
     handle_event_summary,
+    judge_summary_answerability,
 )
 from disclosure_agent.agent.query_analyzer import (
     INTENT_EVENT_SUMMARY,
@@ -35,6 +38,10 @@ from disclosure_agent.common.enums import (
     ChainPolicy,
     EventType,
     ExecutionStatus,
+)
+from disclosure_agent.common.schemas import (
+    ResolvedEventState,
+    ResolvedFieldValue,
 )
 from disclosure_agent.event.correction_fields import (
     classify_latest_state_blocking_correction,
@@ -457,6 +464,180 @@ def test_fully_withheld_required_fields_use_withheld_in_source(tmp_path: Path) -
     assert set(result.withheld_fields) == set(
         REQUIRED_SUMMARY_FIELDS_BY_EVENT_TYPE[EventType.FACILITY_INVESTMENT]
     )
+
+
+# --------------------------------------------------------------------------
+# E-2. 값만으로는 답한 것이 아니다 — 필수 항목의 근거 불변식
+# --------------------------------------------------------------------------
+
+REQUIRED_FACILITY_FIELDS = REQUIRED_SUMMARY_FIELDS_BY_EVENT_TYPE[
+    EventType.FACILITY_INVESTMENT
+]
+
+
+def resolved_state(
+    *,
+    evidence_ids_by_field: dict[str, list[str]],
+) -> ResolvedEventState:
+    """필수 항목이 전부 값을 갖는 상태. 근거 식별자만 항목별로 달리 준다.
+
+    값 쪽은 고정한다. 이 묶음이 가르는 것은 '값이 있는가'가 아니라 '그 값에 근거가 붙어
+    응답 안에 있는가'이며, 값을 함께 흔들면 무엇이 판정을 바꿨는지 알 수 없다.
+    """
+    return ResolvedEventState(
+        event_id=ROOT_DOC_ID,
+        event_type=EventType.FACILITY_INVESTMENT,
+        company=COMPANY,
+        as_of=date(2025, 1, 10),
+        fields={
+            field_name: ResolvedFieldValue(
+                value="가상 값",
+                source_doc_id=ROOT_DOC_ID,
+                evidence_ids=evidence_ids_by_field[field_name],
+            )
+            for field_name in REQUIRED_FACILITY_FIELDS
+        },
+    )
+
+
+def grounded_ids(missing_for: str | None = None, *, dangling: bool = False) -> tuple[
+    dict[str, list[str]],
+    set[str],
+]:
+    """필드별 근거 식별자와, 응답이 실제로 싣는 근거 식별자 집합을 함께 만든다.
+
+    missing_for가 가리키는 항목만 근거를 잃는다. dangling이면 식별자는 있으나 그 식별자가
+    응답의 Evidence에 없다.
+    """
+    by_field = {
+        field_name: [f"{ROOT_DOC_ID}:{field_name}"] for field_name in REQUIRED_FACILITY_FIELDS
+    }
+
+    available = set()
+
+    for field_name, ids in by_field.items():
+        if field_name == missing_for:
+            if dangling:
+                by_field[field_name] = ["evidence-that-does-not-exist"]
+
+            else:
+                by_field[field_name] = []
+
+            continue
+
+        available.update(ids)
+
+    return by_field, available
+
+
+def test_required_field_without_evidence_ids_is_not_answerable() -> None:
+    """A. 값은 있는데 근거 식별자가 비어 있으면 해결된 것으로 세지 않는다.
+
+    ResolvedFieldValue.evidence_ids는 비어 있을 수 있고, 최신 상태 확정은 그런 값을 만들 수
+    있다. 값만 보고 세면 근거 없는 값이 ANSWERABLE로 나가며, 받는 쪽은 그 값을 확인할 방법이
+    없는 채로 확인된 값과 구별하지 못한다.
+    """
+    by_field, available = grounded_ids(missing_for="investment_amount")
+
+    status, reason, missing, withheld = judge_summary_answerability(
+        resolved_state(evidence_ids_by_field=by_field),
+        REQUIRED_FACILITY_FIELDS,
+        available_evidence_ids=available,
+    )
+
+    assert status is not AnswerabilityStatus.ANSWERABLE
+    assert status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert reason is AnswerabilityReason.PARTIAL_SOURCE_SUPPORT
+    assert missing == ("investment_amount",)
+    # 유보로 세지 않는다. 유보는 원문이 값을 공개하지 않았다는 원문 쪽 사실이고, 여기서
+    # 일어난 일은 이 파이프라인이 값을 근거에 잇지 못한 것이다.
+    assert withheld == ()
+
+
+def test_required_field_with_dangling_evidence_id_is_not_answerable() -> None:
+    """B. 식별자가 있어도 그것이 가리키는 Evidence가 응답에 없으면 세지 않는다.
+
+    식별자 유무만 보면 이 경우가 통과한다. _state_evidence는 source_doc_id로 찾지 못한
+    문서나 그 문서에 없는 식별자를 건너뛰므로, 상태가 가리키는 근거가 응답에 실리지 않는
+    상태가 실제로 만들어질 수 있다.
+    """
+    by_field, available = grounded_ids(missing_for="investment_amount", dangling=True)
+
+    status, reason, missing, withheld = judge_summary_answerability(
+        resolved_state(evidence_ids_by_field=by_field),
+        REQUIRED_FACILITY_FIELDS,
+        available_evidence_ids=available,
+    )
+
+    assert status is not AnswerabilityStatus.ANSWERABLE
+    assert status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert reason is AnswerabilityReason.PARTIAL_SOURCE_SUPPORT
+    assert missing == ("investment_amount",)
+    assert withheld == ()
+
+
+def test_required_fields_with_valid_evidence_stay_answerable() -> None:
+    """C. 값과 근거가 모두 갖춰지면 기존 판정 그대로다.
+
+    불변식이 답할 수 있는 질문까지 막지 않는다는 것을 고정한다.
+    """
+    by_field, available = grounded_ids()
+
+    status, reason, missing, withheld = judge_summary_answerability(
+        resolved_state(evidence_ids_by_field=by_field),
+        REQUIRED_FACILITY_FIELDS,
+        available_evidence_ids=available,
+    )
+
+    assert status is AnswerabilityStatus.ANSWERABLE
+    assert reason is None
+    assert missing == ()
+    assert withheld == ()
+
+
+def test_no_required_field_has_evidence_is_unanswerable() -> None:
+    """필수 항목 전체가 근거를 잃으면 부분 답변이 아니라 UNANSWERABLE이다.
+
+    미확보가 전부이므로 사유는 insufficient_evidence다. 여기서도 새 사유를 만들지 않는다.
+    """
+    by_field = {field_name: [] for field_name in REQUIRED_FACILITY_FIELDS}
+
+    status, reason, missing, withheld = judge_summary_answerability(
+        resolved_state(evidence_ids_by_field=by_field),
+        REQUIRED_FACILITY_FIELDS,
+        available_evidence_ids=set(),
+    )
+
+    assert status is AnswerabilityStatus.UNANSWERABLE
+    assert reason is AnswerabilityReason.INSUFFICIENT_EVIDENCE
+    assert set(missing) == set(REQUIRED_FACILITY_FIELDS)
+    assert withheld == ()
+
+
+def test_handler_judges_against_the_evidence_it_actually_carries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """판정이 응답에 실제로 실리는 근거를 본다.
+
+    앞의 세 테스트는 판정 함수만 고정한다. 그것만으로는 handler가 그 함수에 무엇을 넘기는지
+    모른다. 근거를 하나도 싣지 못하는 상황을 만들어, 값이 전부 갖춰진 실행이 그래도
+    ANSWERABLE로 나가지 않는지 실행 경로에서 확인한다.
+
+    이 배치가 없으면 판정과 응답이 서로 다른 것을 보게 되는 회귀를 잡지 못한다.
+    """
+    corpus = build_corpus(tmp_path, [root_filing()])
+
+    monkeypatch.setattr(event_summary_module, "_state_evidence", lambda state, adapted: ())
+
+    execution = handle_event_summary(plan(), corpus_root=corpus)
+
+    assert execution.execution_status is ExecutionStatus.COMPLETED
+    assert execution.resolved_event_states
+    assert not execution.evidence
+    assert execution.answerability_status is not AnswerabilityStatus.ANSWERABLE
+    assert execution.answerability_status is AnswerabilityStatus.UNANSWERABLE
+    assert execution.answerability_reason is AnswerabilityReason.INSUFFICIENT_EVIDENCE
 
 
 # --------------------------------------------------------------------------

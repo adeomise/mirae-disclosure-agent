@@ -517,50 +517,85 @@ def _dangling_result_input_references(result: PredictionCase) -> list[str]:
 
 
 def _calculation_value_failures(result: PredictionCase) -> list[str]:
-    """Independently recompute supported calculations from their ordered Fact inputs."""
+    """Independently recompute supported calculations from their ordered inputs."""
     facts = {fact.fact_id: fact for fact in result.facts}
+    recomputed: dict[str, Decimal] = {}
     failures: list[str] = []
     for calculation in result.calculations:
-        if calculation.operation not in {"delta", "delta_pct"}:
+        if calculation.operation not in {"delta", "delta_pct", "ratio", "diff_pp"}:
             failures.append(f"{calculation.calculation_id}: unsupported operation")
             continue
-        if len(calculation.inputs) != 2 or any(
-            item.input_type is not ResultInputType.FACT for item in calculation.inputs
-        ):
-            failures.append(f"{calculation.calculation_id}: expected two Fact inputs")
-            continue
-        previous = facts.get(calculation.inputs[0].input_id)
-        current = facts.get(calculation.inputs[1].input_id)
-        if previous is None or current is None:
-            failures.append(f"{calculation.calculation_id}: input Fact is missing")
-            continue
-        if (
-            previous.fiscal_year is None
-            or current.fiscal_year is None
-            or current.fiscal_year != previous.fiscal_year + 1
-        ):
-            failures.append(f"{calculation.calculation_id}: Fact inputs are not previous/current")
-            continue
         try:
-            previous_value = Decimal(str(previous.normalized_value))
-            current_value = Decimal(str(current.normalized_value))
+            if calculation.operation == "diff_pp":
+                if len(calculation.inputs) != 2 or any(
+                    item.input_type is not ResultInputType.CALCULATION
+                    for item in calculation.inputs
+                ):
+                    failures.append(
+                        f"{calculation.calculation_id}: expected two Calculation inputs"
+                    )
+                    continue
+                old = recomputed.get(calculation.inputs[0].input_id)
+                new = recomputed.get(calculation.inputs[1].input_id)
+                if old is None or new is None:
+                    failures.append(
+                        f"{calculation.calculation_id}: input Calculation is missing or not prior"
+                    )
+                    continue
+                expected_evidence = list(
+                    dict.fromkeys(
+                        evidence_id
+                        for item in calculation.inputs
+                        for source in result.calculations
+                        if source.calculation_id == item.input_id
+                        for evidence_id in source.evidence_ids
+                    )
+                )
+                expected = new - old
+            else:
+                if len(calculation.inputs) != 2 or any(
+                    item.input_type is not ResultInputType.FACT for item in calculation.inputs
+                ):
+                    failures.append(f"{calculation.calculation_id}: expected two Fact inputs")
+                    continue
+                first = facts.get(calculation.inputs[0].input_id)
+                second = facts.get(calculation.inputs[1].input_id)
+                if first is None or second is None:
+                    failures.append(f"{calculation.calculation_id}: input Fact is missing")
+                    continue
+                first_value = Decimal(str(first.normalized_value))
+                second_value = Decimal(str(second.normalized_value))
+                expected_evidence = list(
+                    dict.fromkeys((*first.evidence_ids, *second.evidence_ids))
+                )
+                if calculation.operation in {"delta", "delta_pct"}:
+                    if (
+                        first.fiscal_year is None
+                        or second.fiscal_year is None
+                        or second.fiscal_year != first.fiscal_year + 1
+                    ):
+                        failures.append(
+                            f"{calculation.calculation_id}: Fact inputs are not previous/current"
+                        )
+                        continue
+                    expected = second_value - first_value
+                    if calculation.operation == "delta_pct":
+                        expected = expected / first_value * Decimal(100)
+                else:
+                    expected = first_value / second_value * Decimal(100)
             with localcontext() as context:
                 context.prec = 28
-                expected = current_value - previous_value
-                if calculation.operation == "delta_pct":
-                    expected = expected / previous_value * Decimal(100)
-                expected_value = str(expected.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+                expected = expected.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
         except (InvalidOperation, TypeError, ValueError, ZeroDivisionError):
-            failures.append(f"{calculation.calculation_id}: unusable Fact values")
+            failures.append(f"{calculation.calculation_id}: unusable input values")
             continue
+        expected_value = str(expected)
+        recomputed[calculation.calculation_id] = expected
         if str(calculation.value) != expected_value:
             failures.append(
                 f"{calculation.calculation_id}: expected value {expected_value}, "
                 f"got {calculation.value}"
             )
-        expected_evidence = list(
-            dict.fromkeys((*previous.evidence_ids, *current.evidence_ids))
-        )
         if calculation.evidence_ids != expected_evidence:
             failures.append(
                 f"{calculation.calculation_id}: expected input Evidence "

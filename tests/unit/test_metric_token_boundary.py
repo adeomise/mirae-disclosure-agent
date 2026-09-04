@@ -27,10 +27,16 @@
     모르는 어형은 열지 않는다. "매출얼마야"처럼 조사를 생략하고 붙여 쓴 표기도 읽지 않으며,
     그것을 읽으려고 경계를 늘리면 위의 개념들이 같은 문으로 함께 들어온다.
 
-지원·미지원이 섞인 질문(6절):
+지원·미지원이 섞인 질문(7절):
     "매출원가와 매출 알려줘"에는 읽히는 어휘가 함께 있다. 읽히는 쪽만 담아 계획을 만들면
     매출원가를 물었다는 사실이 어디에도 남지 않은 채 매출 답이 나간다. 질문의 일부를 조용히
     버리는 것이므로 거절한다. 사유는 기존 unsupported_metric 그대로다.
+
+파생지표와 섞인 질문(8절):
+    파생 개념을 먼저 찾아 걷어낸 뒤 남은 글자에서 원천 지표를 읽는다. 남은 글자가
+    "매출원가"뿐이면 읽히는 어휘가 없어 None이 되고, 그대로 두면 원천 지표 쪽 요청이 사라진
+    채 파생지표만 담긴 계획이 만들어진다. 그 계획은 막히지 않고 실행돼 영업이익률만 답한다.
+    걷어낸 나머지도 7절과 같은 잣대로 본다.
 
 무엇을 검증하지 않는가:
     지원하지 않는 개념을 어떻게 답할지는 여기서 정하지 않는다. 기존 계약(query_plan 단계의
@@ -46,6 +52,7 @@ from __future__ import annotations
 import pytest
 
 from disclosure_agent.agent import query_analyzer
+from disclosure_agent.agent.derived_metrics import DerivedMetric
 from disclosure_agent.agent.query_analyzer import (
     INTENT_CROSS_ENTITY_COMPARE,
     INTENT_SINGLE_FACT,
@@ -450,3 +457,116 @@ def test_valid_revenue_aliases_alone_still_answer(question: str) -> None:
     plan = _plan(question)
 
     assert plan.metric == METRIC_REVENUE
+
+
+# --------------------------------------------------------------------------
+# 8. 파생지표와 섞인 질문 — 걷어낸 나머지도 같은 잣대로 본다
+# --------------------------------------------------------------------------
+
+
+DERIVED_MIXED_QUESTIONS = (
+    # 시계열 비교(Q08 모양)
+    "한미반도체 2024년이랑 2025년 매출원가랑 영업이익률 어떻게 달라졌어?",
+    # 기업 간 비교(Q11 모양)
+    "삼성전자랑 SK하이닉스 2025년 매출채권과 영업이익률 비교해줘",
+)
+
+
+@pytest.mark.parametrize("question", DERIVED_MIXED_QUESTIONS)
+def test_unsupported_source_does_not_vanish_behind_a_derived_metric(
+    question: str,
+) -> None:
+    """
+    파생 개념이 읽혔다고 해서 나머지 요청이 사라지지 않는다.
+
+    파생 개념을 걷어낸 나머지("매출원가랑")에는 읽히는 어휘가 없다. 그 상태를 '원천 지표를
+    묻지 않았다'로 읽으면 파생지표만 담긴 계획이 만들어지고, 그 계획은 Q08·Q11과 구분되지
+    않아 막히지 않고 실행된다. 물어본 것은 둘인데 답은 영업이익률 하나이며, 나머지 하나가
+    빠졌다는 사실은 계획에도 결과에도 남지 않는다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        _plan(question)
+
+    assert error.value.reason == "unsupported_metric"
+
+
+@pytest.mark.parametrize("question", DERIVED_MIXED_QUESTIONS)
+def test_derived_mixed_questions_name_the_unsupported_expression(
+    question: str,
+) -> None:
+    """무엇 때문에 막혔는지가 사유에 남는다."""
+    with pytest.raises(UnsupportedQuestionError) as error:
+        _plan(question)
+
+    assert "매출원가" in error.value.detail or "매출채권" in error.value.detail
+
+
+def test_derived_mixed_signal_is_not_a_phrase_list() -> None:
+    """예시 두 줄에 없는 조합도 같은 판정에 걸린다."""
+    for question in (
+        "한미반도체 2024년이랑 2025년 매출총이익이랑 영업이익률 어떻게 달라졌어?",
+        "삼성전자랑 SK하이닉스 2025년 금융수익과 영업이익률 비교해줘",
+    ):
+        with pytest.raises(UnsupportedQuestionError) as error:
+            _plan(question)
+
+        assert error.value.reason == "unsupported_metric"
+
+
+def test_canonical_derived_only_questions_are_unchanged() -> None:
+    """
+    대조군. 파생 개념만 물은 질문은 그대로 파생지표 계획이 된다.
+
+    이 두 줄이 막히면 Q08·Q11이 함께 막힌다.
+    """
+    q08 = _plan("한미반도체 영업이익률이 2024년이랑 2025년에 어떻게 달라졌어?")
+
+    assert q08.intent == INTENT_TEMPORAL_COMPARE
+    assert q08.metric is None
+    assert q08.derived_metric is DerivedMetric.OPERATING_MARGIN
+
+    q11 = _plan("삼성전자랑 SK하이닉스 중에 2025년 영업이익률이 더 높은 곳은 어디야?")
+
+    assert q11.intent == INTENT_CROSS_ENTITY_COMPARE
+    assert q11.metric is None
+    assert q11.derived_metric is DerivedMetric.OPERATING_MARGIN
+
+
+def test_valid_source_with_derived_keeps_its_own_reason() -> None:
+    """
+    원천 지표와 파생지표를 함께 물은 질문의 판정은 건드리지 않는다.
+
+    사유는 같은 unsupported_metric이지만 진단은 다르다. 그 자리가 이 판정으로 덮이면 무엇을
+    함께 물어 막혔는지가 결과에서 사라진다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        _plan("한미반도체 2024년이랑 2025년 매출이랑 영업이익률 어떻게 달라졌어?")
+
+    assert error.value.reason == "unsupported_metric"
+    assert "operating_margin" in error.value.detail
+    assert "revenue" in error.value.detail
+
+
+def test_find_metric_contract_is_untouched_by_the_derived_guard() -> None:
+    """
+    _find_metric은 그대로다.
+
+    읽히는 어휘가 없는 질문에서 여전히 None이며, 파생 개념 쪽 판정이 이 계약을 예외로
+    바꾸지 않는다. 바뀌면 1절·4절이 고정한 계약이 사유만 다른 것으로 갈린다.
+    """
+    assert query_analyzer._find_metric("삼성전자 2024년 매출원가가 얼마야?") is None
+    assert query_analyzer._find_metric("매출얼마야") is None
+
+
+def test_unsupported_occurrence_definition_stays_in_one_place() -> None:
+    """
+    '지원하지 않는 지표 표기'의 정의는 한 곳이다.
+
+    파생 경로가 자기 목록을 따로 들면 지표 어휘가 늘 때 두 벌이 되고, 한쪽만 고친 날 두
+    판정이 갈린다. 두 경로가 같은 헬퍼와 같은 구간 계산을 쓰는지 본다.
+    """
+    remainder = "한미반도체 2024년이랑 2025년 매출원가랑   어떻게 달라졌어?"
+    spans = query_analyzer._revenue_token_spans(remainder)
+
+    assert spans == ()
+    assert query_analyzer._find_unsupported_revenue_occurrence(remainder, spans) == "매출원가랑"

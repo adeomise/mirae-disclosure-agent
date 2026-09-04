@@ -1322,6 +1322,18 @@ def _hangul_run(question: str, start: int, end: int) -> str:
     return question[left:right]
 
 
+def _revenue_token_spans(question: str) -> tuple[tuple[int, int], ...]:
+    """
+    경계로 읽힌 지표 어휘 구간.
+
+    어휘와 회계기준 어휘는 호출 시점 값을 쓴다. 이 함수를 거치지 않고 패턴을 따로 만들면
+    '무엇을 읽었는가'의 정의가 두 벌이 되고, 한쪽만 고친 날 두 판정이 갈린다.
+    """
+    pattern = _metric_token_pattern(tuple(REVENUE_TOKENS), _accounting_scope_prefixes())
+
+    return tuple(match.span() for match in pattern.finditer(question))
+
+
 def _find_unsupported_revenue_occurrence(
     question: str,
     spans: tuple[tuple[int, int], ...],
@@ -1381,8 +1393,7 @@ def _find_metric(question: str) -> str | None:
     어휘는 호출 시점에 읽어 넘긴다. 모듈 수준에서 패턴을 붙들고 있으면 REVENUE_TOKENS를
     바꿔도 판정이 따라오지 않는다.
     """
-    pattern = _metric_token_pattern(tuple(REVENUE_TOKENS), _accounting_scope_prefixes())
-    spans = tuple(match.span() for match in pattern.finditer(question))
+    spans = _revenue_token_spans(question)
 
     if not spans:
         return None
@@ -1432,6 +1443,20 @@ def _resolve_requested_metrics(question: str) -> tuple[str | None, DerivedMetric
     둘 다 읽히면 고르지 않는다:
         "매출이랑 영업이익률"처럼 서로 다른 두 지표를 함께 물으면 한쪽만으로는 답이 되지
         않는다. 조용히 하나를 고르면 나머지를 물었다는 사실이 결과 어디에도 남지 않는다.
+
+    걷어낸 나머지도 같은 잣대로 본다:
+        나머지에 지원하지 않는 지표 표기만 남는 경우가 있다. "매출원가랑 영업이익률 어떻게
+        달라졌어?"가 그것이다. _find_metric은 읽히는 어휘가 없으면 None을 돌려주므로(그것이
+        그 함수의 계약이다) 여기서 더 보지 않으면 원천 지표 쪽 요청이 사라진 채 파생지표만
+        담긴 계획이 만들어진다. 그 계획은 막히지 않고 실행돼 영업이익률만 답한다.
+
+        물어본 것은 둘인데 답은 하나이고, 나머지 하나가 빠졌다는 사실은 계획에도 결과에도
+        남지 않는다. 원천 지표와 파생지표를 함께 물었을 때 한쪽을 고르지 않는 것과 같은
+        상황이므로 같은 사유로 거절한다.
+
+        판정은 _find_unsupported_revenue_occurrence 하나가 한다. 막을 표기를 여기에 따로
+        나열하지 않는다. 나열하면 목록에 없는 복합 개념이 그대로 통과하고, '지원하지 않는
+        지표 표기'의 정의가 두 벌로 갈린다.
     """
     found = _find_derived_metric(question)
 
@@ -1439,7 +1464,23 @@ def _resolve_requested_metrics(question: str) -> tuple[str | None, DerivedMetric
         return _find_metric(question), None
 
     derived, token = found
-    source = _find_metric(question.replace(token, " "))
+    remainder = question.replace(token, " ")
+
+    unsupported = _find_unsupported_revenue_occurrence(
+        remainder,
+        _revenue_token_spans(remainder),
+    )
+
+    if unsupported is not None:
+        raise UnsupportedQuestionError(
+            reason="unsupported_metric",
+            detail=(
+                f"질문이 파생지표({derived.value})와 지원하지 않는 표기"
+                f"('{unsupported}')를 함께 묻고 있습니다. 한쪽만 골라 답하지 않습니다."
+            ),
+        )
+
+    source = _find_metric(remainder)
 
     if source is not None:
         raise UnsupportedQuestionError(

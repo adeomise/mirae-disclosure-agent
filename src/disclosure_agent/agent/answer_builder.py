@@ -36,6 +36,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from disclosure_agent.agent.derived_metrics import (
+    OPERATION_RATIO,
     UNIT_PERCENT,
     DerivedMetric,
     get_derived_metric_spec,
@@ -464,25 +465,41 @@ DERIVED_METRIC_LABELS: dict[DerivedMetric, str] = {
     DerivedMetric.OPERATING_MARGIN: "영업이익률",
 }
 
+# 변화량의 결과 단위. 백분율 두 건의 차이는 %가 아니라 percentage point다.
+#
+# agent.calculator가 정본이며 아래 OPERATION_DELTA 주석이 적어 둔 순환 import 때문에 그쪽에서
+# 가져오지 않는다. 이름이 갈려도 조용히 틀리지 않는다. 표기를 찾지 못한 단위는
+# _calculation_value가 막으므로, 문장이 다른 단위로 나가는 쪽이 아니라 만들어지지 않는 쪽으로
+# 실패한다. 두 이름이 붙어 있는지는 tests/unit/test_answer_builder.py가 함께 고정한다.
+UNIT_PERCENTAGE_POINT = "percentage_point"
+
 # 계산 결과 단위의 한국어 표기.
 #
 # CalculationResult.unit은 계산 계층의 어휘("percent")다. 그대로 문장에 넣으면 한국어 문장에
 # 영문 식별자가 섞인다(METRIC_LABELS 주석과 같은 실패 모드).
+#
+# %와 %p를 함께 담되 같은 표기로 뭉개지 않는다. 영업이익률 45.69%와 그 변화량 -2.10%p는 서로
+# 다른 축의 값이고, 변화량에 %를 붙이면 비율 자체가 2.10% 달라졌다는 뜻으로 읽힌다.
 CALCULATION_UNIT_LABELS: dict[str, str] = {
     UNIT_PERCENT: "%",
+    UNIT_PERCENTAGE_POINT: "%p",
 }
 
-# Q07이 만드는 두 Calculation의 연산 이름.
+# Pattern C가 만드는 Calculation의 연산 이름. Q07은 앞의 둘을, Q08은 비율과 diff_pp를 쓴다.
 #
 # agent.calculator에서 가져오지 않는다. 그쪽이 이 모듈의 정지 사유 상수를 이미 가져가고 있어
-# 반대 방향을 열면 순환 import가 된다.
+# 반대 방향을 열면 순환 import가 된다. 비율(OPERATION_RATIO)만 예외로 agent.derived_metrics에서
+# 가져온다. 그 이름의 정본이 파생지표 대응표이고(_derived_metric_label이 같은 값을 대조한다)
+# 그쪽에는 순환이 없다.
 #
 # 같은 문자열이 두 곳에 있지만 어긋나도 조용히 틀리지 않는다. 이름이 갈리면
-# _is_temporal_delta_shape이 그 모양을 알아보지 못하고, 결과는 아래 단일 Fact 경로로 내려가
-# Fact 2건에서 멈춘다. 틀린 문장이 나가는 쪽이 아니라 문장을 만들지 않는 쪽으로 실패한다.
-# 두 이름이 붙어 있는지는 tests/unit/test_answer_builder.py가 함께 고정한다.
+# _is_temporal_delta_shape·_is_temporal_derived_delta_shape이 그 모양을 알아보지 못하고,
+# 결과는 아래 단일 Fact 경로로 내려가 Fact 여러 건에서 멈춘다. 틀린 문장이 나가는 쪽이 아니라
+# 문장을 만들지 않는 쪽으로 실패한다.
+# 세 이름이 붙어 있는지는 tests/unit/test_answer_builder.py가 함께 고정한다.
 OPERATION_DELTA = "delta"
 OPERATION_DELTA_PCT = "delta_pct"
+OPERATION_DIFF_PP = "diff_pp"
 
 # Fact 정규화 단위의 한국어 표기.
 #
@@ -1064,6 +1081,23 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
             _limitation(result, partial=partial),
         )
 
+    # 기간별 파생지표의 변화 결과도 같은 이유로 먼저 본다(Q08).
+    #
+    # 위 Q07 모양과 따로 둔다. 두 모양은 개수도(Fact 4건/Calculation 3건) 참조 구조도
+    # 다르다. Q07의 두 Calculation은 원천 Fact를 직접 참조하지만, Q08의 변화량은 기간별 비율
+    # Calculation 2건을 참조한다. 한 가드로 합치려면 "Fact 2건 또는 4건, Calculation 2건
+    # 또는 3건"처럼 개수를 느슨하게 열어야 하고, 그렇게 열면 두 모양 중 어느 쪽도 아닌 결과가
+    # 함께 통과한다.
+    #
+    # _is_temporal_derived_delta_shape은 연산 이름의 순서와 세 Calculation의 참조 배선까지
+    # 본다. 조건 하나라도 어긋나면 아래로 내려가 단일 Fact 경로에서 멈추므로, 계산 3건을 실은
+    # 임의의 결과가 이 경로로 답이 되지 않는다.
+    if result.facts and _is_temporal_derived_delta_shape(result):
+        return _join(
+            _temporal_derived_delta_sentence(result),
+            _limitation(result, partial=partial),
+        )
+
     # 계약 조회 결과를 단일 Fact 경로보다 먼저 본다.
     #
     # Q02는 한 계약을 서술하는 여러 값을 함께 확보한다. 아래 단일 Fact 경로는 여러 건에서
@@ -1339,6 +1373,249 @@ def _delta_amount(calculation: CalculationResult) -> str:
         )
 
     return rendered
+
+
+def _is_temporal_derived_delta_shape(result: AgentExecutionResult) -> bool:
+    """
+    같은 기업 두 기간의 파생지표 변화 결과인가(Q08, Pattern C의 파생지표 모양).
+
+    Q07 모양과 같은 방식으로 좁게 본다. 개수만 맞는 결과를 통과시키면 다른 Pattern이 우연히
+    Fact 4건과 Calculation 3건을 실었을 때 그것이 파생지표 변화 문장으로 나간다. 그래서
+    다섯 가지를 함께 본다.
+
+        Fact 4건 / Calculation 3건
+        세 Calculation의 연산이 비율, 비율, 변화량이고 그 순서다
+        앞의 두 비율이 서로 다른 Calculation이다
+        변화량의 입력이 그 두 비율이고 순서까지 같다
+        두 비율의 입력이 각각 Fact 2건이고, 넷을 합치면 결과에 실린 Fact 4건이다
+
+    셋째·넷째 조건이 필요한 이유:
+        아래 문장 조립은 이전·이후를 Calculation 목록의 앞 두 건에서 읽고, 변화량은 값을
+        그대로 옮긴다. 변화량이 다른 값을 참조하거나 순서가 반대이면, 문장에 적힌 두 비율과
+        변화량의 부호가 서로 어긋난다. 받는 쪽은 어느 쪽이 맞는지 알 수 없다.
+
+        두 비율의 식별자가 같으면 변화량의 두 참조가 같은 값을 가리켜도 순서 검사를 통과한다.
+        그때 참조를 따라가면 한 기간의 비율이 두 번 나오고, 문장은 같은 해를 두 번 적으면서
+        그 둘의 변화량을 말하게 된다.
+
+    Calculation 목록의 순서를 시간 순서로 읽는 근거:
+        변화량의 inputs가 old, new 순서라는 것이 계산 계층의 계약이고(calculator.diff),
+        그 두 참조가 앞의 두 비율과 순서까지 같은지를 여기서 확인한다. 확인을 통과한 뒤에는
+        목록 앞이 이전 기간, 뒤가 이후 기간이다.
+
+    Fact 목록의 순서는 보지 않는다. 확보 순서일 뿐이고, 어느 Fact가 어느 기간의 것인지는
+    비율 Calculation의 참조가 정한다(_temporal_derived_delta_sentence).
+
+    ComparisonResult는 보지 않는다. Q07 모양과 같은 이유로, 이 함수에 닿기 전에 우열 판정
+    분기가 먼저 갈라진다.
+    """
+    if len(result.facts) != 4 or len(result.calculations) != 3:
+        return False
+
+    if tuple(item.operation for item in result.calculations) != (
+        OPERATION_RATIO,
+        OPERATION_RATIO,
+        OPERATION_DIFF_PP,
+    ):
+        return False
+
+    previous, current, change = result.calculations
+
+    if previous.calculation_id == current.calculation_id:
+        return False
+
+    if [(item.input_type, item.input_id) for item in change.inputs] != [
+        (ResultInputType.CALCULATION, previous.calculation_id),
+        (ResultInputType.CALCULATION, current.calculation_id),
+    ]:
+        return False
+
+    referenced: list[tuple[ResultInputType, str]] = []
+
+    for ratio in (previous, current):
+        if len(ratio.inputs) != 2:
+            return False
+
+        referenced.extend((item.input_type, item.input_id) for item in ratio.inputs)
+
+    if [input_type for input_type, _ in referenced] != [ResultInputType.FACT] * 4:
+        return False
+
+    # 같은 Fact를 두 번 가리키는 참조는 여기서 걸린다. 그 경우 아래 집합의 크기가 4보다 작아져
+    # Fact 4건의 식별자 집합과 같아지지 않는다.
+    return {input_id for _, input_id in referenced} == {
+        fact.fact_id for fact in result.facts
+    }
+
+
+@dataclass(frozen=True)
+class _DerivedPeriodValue:
+    """
+    한 회계연도의 파생값 표기.
+
+        company  그 값이 누구의 것인가.
+        scope    연결/별도 중 어느 기준인가.
+        label    파생 개념의 이름. 대응표에서 되짚은 값이며 여기서 짓지 않는다.
+        period   회계기간 구절("2024년 ").
+        value    계산 계층이 확정한 값. 여기서 만들지 않는다.
+
+    다섯을 함께 담는 이유는 두 기간이 같은 대상의 값인지 확인해야 하기 때문이다. 값만 들고
+    다니면 기업·기준·개념이 갈린 두 값을 한 문장에 나란히 적게 된다.
+    """
+
+    company: str
+    scope: FactAccountingScope
+    label: str
+    period: str
+    value: str
+
+
+def _derived_period_value(
+    result: AgentExecutionResult,
+    calculation: CalculationResult,
+) -> _DerivedPeriodValue:
+    """
+    비율 Calculation 1건을 '누구의 어느 기간 무엇'과 그 값으로 옮긴다.
+
+    _calculation_operand(Q11)와 같은 방식으로 읽는다. 참조를 따라가는 것은 대상을 부르기
+    위해서이고, 수치는 계산 계층이 확정한 calculation.value를 그대로 쓴다. 여기서 비율을 다시
+    만들면 반올림 자릿수가 계산 계층과 달라질 수 있고, 그러면 문장의 두 비율을 빼서 검산했을
+    때 변화량과 맞지 않는다.
+
+    회계연도가 없으면 멈춘다. Q08은 어느 두 해가 달라졌는지를 묻는 질문이므로, 연도를 적지
+    못하면 답이 질문에 대응하지 않는다. 기간 구절은 원천 Fact 양쪽에서 읽어 두 Fact가 모두
+    연간 표기인지까지 확인한다(_period_phrase). 한쪽만 보면 분기 값이 섞인 비율이 연간 비율로
+    적힐 수 있다.
+    """
+    sources = [_referenced_fact(result, item.input_id) for item in calculation.inputs]
+
+    company = _single_source_attribute(calculation, sources, attribute="company")
+
+    scope = _single_source_attribute(calculation, sources, attribute="accounting_scope")
+
+    fiscal_year = _single_source_attribute(calculation, sources, attribute="fiscal_year")
+
+    if fiscal_year is None:
+        raise MissingAnswerSupportError(
+            f"Calculation {calculation.calculation_id!r}의 입력에 회계연도가 없습니다. "
+            "어느 해의 값인지 적지 못하면 기간 변화 질문의 답이 되지 않습니다."
+        )
+
+    periods = {_period_phrase(fact) for fact in sources}
+
+    if len(periods) != 1:
+        raise UnsupportedResultShapeError(
+            f"Calculation {calculation.calculation_id!r}의 입력이 서로 다른 기간 구절을 "
+            f"만듭니다: {sorted(periods)}. 어느 기간의 값인지 정해지지 않아 표기를 만들지 "
+            "않습니다."
+        )
+
+    return _DerivedPeriodValue(
+        company=company,
+        scope=scope,
+        label=_derived_metric_label(calculation, sources),
+        period=periods.pop(),
+        value=_calculation_value_in_unit(
+            calculation, expected_unit=UNIT_PERCENT, subject="기간별 비율"
+        ),
+    )
+
+
+def _calculation_value_in_unit(
+    calculation: CalculationResult,
+    *,
+    expected_unit: str,
+    subject: str,
+) -> str:
+    """
+    계산 결과의 단위가 그 자리의 계약과 같은지 확인한 뒤 문장 표기로 옮긴다.
+
+    표기 대응표만으로는 부족하다:
+        CALCULATION_UNIT_LABELS는 "이 단위를 어떻게 적는가"만 정하고 "이 자리에 어떤 단위가
+        와야 하는가"는 정하지 않는다. 백분율 두 건의 차이는 percentage point이고 백분율 자체와
+        축이 다르다. 대응표만 보면 percent가 실린 변화량도 %로 적혀 나가고, 그 문장은 형식이
+        정상인 데다 수치도 계산 계층의 값 그대로라서 축이 바뀐 사실이 어디에도 남지 않는다.
+
+        영업이익률이 2.1017% 달라졌다는 말과 2.1017%p 달라졌다는 말은 서로 다른 사실이다.
+        앞의 것은 45.69%가 46.65%가 됐다는 뜻이고, 뒤의 것은 43.59%가 됐다는 뜻이다.
+
+    그래서 자리마다 기대 단위를 적어 두고 어긋나면 멈춘다. 계산 계층이 단위를 바꾸는 날
+    문장이 조용히 다른 뜻이 되는 대신, 문장이 만들어지지 않는다.
+
+    단위를 여기서 고쳐 맞추지 않는다. 그것은 계산 계층의 결정을 표현 계층이 대신 내리는 일이며,
+    응답에 실린 Calculation과 문장이 서로 다른 단위를 말하게 된다.
+    """
+    if calculation.unit != expected_unit:
+        raise UnsupportedResultShapeError(
+            f"{subject} {calculation.calculation_id!r}의 단위가 {expected_unit!r}가 아닙니다: "
+            f"{calculation.unit!r}. 계산 계층이 정한 것과 다른 축의 표기로 옮기지 않습니다."
+        )
+
+    return _calculation_value(calculation)
+
+
+def _temporal_derived_delta_sentence(result: AgentExecutionResult) -> str:
+    """
+    두 기간의 파생지표 값과 그 변화량을 문장으로 옮긴다(Q08).
+
+    값을 만들지 않는다. 두 기간의 비율과 그 변화량은 모두 Calculation에서 그대로 읽는다.
+    원천 Fact는 대상을 부르는 데에만 쓴다(_derived_period_value). 여기서 나누거나 빼면 응답에
+    실린 수치와 문장의 수치가 어긋날 수 있고, 그 어긋남은 검산하는 쪽에서만 드러난다.
+
+    세 수치를 한 문장에 담되 단위 축은 나눈다. 기간별 비율은 %, 두 비율의 차이는 %p다. 셋을
+    같은 표기로 적으면 "영업이익률이 2.1017% 달라졌다"가 되어 계산 계층이 만든 값과 다른
+    사실을 말하게 된다. 두 자리 모두 기대 단위를 적어 두고 확인한다
+    (_calculation_value_in_unit).
+
+    늘었다/줄었다도, 왜 달라졌는지도 적지 않는다. 방향은 변화량의 부호에 이미 담겨 있고,
+    원인은 결과가 담고 있지 않다. 둘 다 결과에 없는 판정을 문장이 새로 만드는 일이다
+    (_temporal_delta_sentence와 같은 자리).
+
+    두 기간이 같은 대상의 값인지 확인한다. 기업·기준·개념이 갈리면 멈춘다. 정상 경로에서는
+    guard②가 같은 것을 이미 확인하므로(calculator.validate_temporal_comparability) 새로 걸릴
+    일이 없고, 그래도 확인하는 이유는 한쪽을 골라 적으면 나머지가 문장에서 사라지기 때문이다.
+
+    두 기간이 같은 해이면 멈춘다. 같은 해끼리는 변화량이 정의되지 않으며, 그대로 적으면 한 해가
+    자기 자신과 달라졌다는 문장이 나간다.
+    """
+    previous_calculation, current_calculation, change = result.calculations
+
+    previous = _derived_period_value(result, previous_calculation)
+
+    current = _derived_period_value(result, current_calculation)
+
+    if (previous.company, previous.scope, previous.label) != (
+        current.company,
+        current.scope,
+        current.label,
+    ):
+        raise UnsupportedResultShapeError(
+            f"변화량 {change.calculation_id!r}이 서로 다른 대상의 값을 잇습니다: "
+            f"{previous.company}/{previous.scope.value}/{previous.label} vs "
+            f"{current.company}/{current.scope.value}/{current.label}. "
+            "한 대상의 두 기간이 아니면 변화량 문장을 만들지 않습니다."
+        )
+
+    if previous.period == current.period:
+        raise UnsupportedResultShapeError(
+            f"변화량 {change.calculation_id!r}의 두 입력이 같은 기간({previous.period.strip()})"
+            "입니다. 같은 기간끼리는 변화량이 정의되지 않습니다."
+        )
+
+    difference = _calculation_value_in_unit(
+        change, expected_unit=UNIT_PERCENTAGE_POINT, subject="변화량"
+    )
+
+    # 두 비율과 그 차이를 한 문장으로 잇는다. 차이를 별도 문장으로 떼면 그 수치가 어느 두 값
+    # 사이의 것인지가 문장 구조에서 사라지고, %와 %p가 서로 다른 문장에 흩어져 같은 축의
+    # 값처럼 읽힌다.
+    return (
+        f"{previous.company}의 {_scope_phrase(previous.scope)}{previous.label}"
+        f"{_topic_particle(previous.label)} "
+        f"{previous.period}{previous.value}, "
+        f"{current.period}{current.value}이며, "
+        f"두 연도의 차이는 {difference}입니다."
+    )
 
 
 def _is_contract_fact_bundle(facts: list[Fact]) -> bool:

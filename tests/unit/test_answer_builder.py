@@ -29,6 +29,7 @@ from disclosure_agent.agent.answer_builder import (
     METRIC_LABELS,
     OPERATION_DELTA,
     OPERATION_DELTA_PCT,
+    OPERATION_DIFF_PP,
     POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON,
     REASON_INCOMPARABLE_CALCULATION_INPUTS,
     REASON_INCOMPARABLE_PERIODS,
@@ -37,6 +38,7 @@ from disclosure_agent.agent.answer_builder import (
     STAGE_COMPARABILITY,
     STATUSES_ALLOWING_NO_REASON,
     UNAVAILABLE_MESSAGE_BY_REASON,
+    UNIT_PERCENTAGE_POINT,
     UNMAPPED_ANSWERABILITY_REASONS,
     UNRESOLVED_WITHOUT_REASON_MESSAGE,
     MissingAnswerabilityStatusError,
@@ -51,6 +53,15 @@ from disclosure_agent.agent.calculator import (
 )
 from disclosure_agent.agent.calculator import (
     OPERATION_DELTA_PCT as CALCULATOR_OPERATION_DELTA_PCT,
+)
+from disclosure_agent.agent.calculator import (
+    OPERATION_DIFF_PP as CALCULATOR_OPERATION_DIFF_PP,
+)
+from disclosure_agent.agent.calculator import (
+    OPERATION_RATIO as CALCULATOR_OPERATION_RATIO,
+)
+from disclosure_agent.agent.calculator import (
+    UNIT_PERCENTAGE_POINT as CALCULATOR_UNIT_PERCENTAGE_POINT,
 )
 from disclosure_agent.agent.derived_metrics import (
     OPERATION_RATIO,
@@ -2387,6 +2398,21 @@ def test_temporal_delta_result_becomes_a_sentence() -> None:
     assert "20.0000%" in answer
 
 
+def test_temporal_delta_wording_is_unchanged_by_the_derived_metric_path() -> None:
+    """
+    Q07 문장 전체를 리터럴로 고정한다.
+
+    Q08 경로가 같은 보조 함수들(_period_phrase·_scope_phrase·_topic_particle·
+    _calculation_value)을 함께 쓰므로, 그쪽 문구를 손볼 때 이 문장이 함께 흔들릴 수 있다.
+    두 문항은 묻는 것이 다르고 답의 형태도 다르다. 한쪽 문구가 다른 쪽을 따라가면 증감액과
+    변화량의 구분이 사라진다.
+    """
+    assert build_answer_response(temporal_delta_result()).answer == (
+        f"{SYNTHETIC_COMPANY}의 연결 기준 매출액은 2024년 1,000백만원, 2025년 1,200백만원입니다. "
+        "증감액은 200000000.0000원, 증감률은 20.0000%입니다."
+    )
+
+
 def test_temporal_delta_sentence_is_deterministic() -> None:
     result = temporal_delta_result()
 
@@ -2539,6 +2565,401 @@ def test_delta_referencing_one_fact_twice_stops() -> None:
     with pytest.raises(UnsupportedResultShapeError):
         build_answer_response(result)
 
+
+
+# --------------------------------------------------------------------------
+# Pattern C — 기간별 파생지표의 변화(Q08)
+#
+# Fact 4건과 Calculation 3건(기간별 비율 2건 + 변화량 1건)을 함께 실은 결과만 문장이 된다.
+# 단일 Fact 경로의 가드도, 위 Q07 경로도 그대로 두고 이 모양만 연다.
+# --------------------------------------------------------------------------
+
+Q08_COMPANY = "합성반도체(주)"
+Q08_PREVIOUS_MARGIN_ID = "calculation_operating_margin_2024"
+Q08_CURRENT_MARGIN_ID = "calculation_operating_margin_2025"
+Q08_CHANGE_ID = "calculation_operating_margin_diff_pp_2024_2025"
+
+
+def make_change(
+    *,
+    calculation_id: str = Q08_CHANGE_ID,
+    operation: str = OPERATION_DIFF_PP,
+    value: str = "-2.1017",
+    unit: str | None = UNIT_PERCENTAGE_POINT,
+    input_ids: tuple[str, str] = (Q08_PREVIOUS_MARGIN_ID, Q08_CURRENT_MARGIN_ID),
+) -> CalculationResult:
+    """calculator.diff가 만드는 것과 같은 모양(old, new 순서의 Calculation 참조)."""
+    return CalculationResult(
+        calculation_id=calculation_id,
+        operation=operation,
+        inputs=[calculation_reference(input_id) for input_id in input_ids],
+        value=value,
+        unit=unit,
+        evidence_ids=["evidence_SYNTHETIC_01"],
+    )
+
+
+def temporal_derived_delta_result(
+    *,
+    previous_year: int = 2024,
+    current_year: int = 2025,
+    previous_margin: str = "45.6940",
+    current_margin: str = "43.5923",
+    change: CalculationResult | None = None,
+) -> AgentExecutionResult:
+    """
+    Pattern C의 Q08 성공 결과와 같은 모양: Fact 4 · Calculation 3 · Comparison 0.
+
+    개수와 참조 배선은 handlers.temporal_compare._derived_metric_calculations가 정본이다.
+    우열 판정을 만들지 않는 것도 그쪽과 같다(evidence_and_answerability.md Calculation
+    cardinality).
+
+    비율 값을 원천 Fact에서 다시 계산해도 같은 값이 나오도록 두지 않는다. 같게 두면
+    "다시 계산하지 않는다"를 시험할 수 없다.
+    """
+    previous_income = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_PREVIOUS_OPERATING_INCOME",
+        company=Q08_COMPANY,
+        metric=MetricConcept.OPERATING_INCOME,
+        fiscal_year=previous_year,
+        raw_value="250",
+        normalized_value="250000000",
+    )
+    previous_revenue = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_PREVIOUS_REVENUE",
+        company=Q08_COMPANY,
+        fiscal_year=previous_year,
+        raw_value="2,000",
+        normalized_value="2000000000",
+    )
+    current_income = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_CURRENT_OPERATING_INCOME",
+        company=Q08_COMPANY,
+        metric=MetricConcept.OPERATING_INCOME,
+        fiscal_year=current_year,
+        raw_value="300",
+        normalized_value="300000000",
+    )
+    current_revenue = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_CURRENT_REVENUE",
+        company=Q08_COMPANY,
+        fiscal_year=current_year,
+        raw_value="2,500",
+        normalized_value="2500000000",
+    )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=[previous_income, previous_revenue, current_income, current_revenue],
+        evidence=[make_evidence()],
+        calculations=[
+            make_margin(
+                calculation_id=Q08_PREVIOUS_MARGIN_ID,
+                numerator=previous_income,
+                denominator=previous_revenue,
+                value=previous_margin,
+            ),
+            make_margin(
+                calculation_id=Q08_CURRENT_MARGIN_ID,
+                numerator=current_income,
+                denominator=current_revenue,
+                value=current_margin,
+            ),
+            change if change is not None else make_change(),
+        ],
+    )
+
+
+def test_temporal_derived_delta_names_match_the_calculator() -> None:
+    """
+    변화량의 연산 이름과 단위는 agent.calculator가, 비율의 연산 이름은 대응표가 정본이다.
+
+    순환 import 때문에 이 모듈이 calculator에서 가져오지 못하므로 같은 문자열을 두 곳에 둔다.
+    어긋나면 Q08 문장이 조용히 사라지므로 여기서 붙여 둔다(Q07의 같은 검사와 같은 자리).
+    """
+    assert OPERATION_DIFF_PP == CALCULATOR_OPERATION_DIFF_PP
+    assert UNIT_PERCENTAGE_POINT == CALCULATOR_UNIT_PERCENTAGE_POINT
+    assert OPERATION_RATIO == CALCULATOR_OPERATION_RATIO
+
+
+def test_q08_shape_renders_both_years_both_margins_and_the_change() -> None:
+    """Fact 4 · Calculation 3이 하나의 답변으로 나간다."""
+    result = temporal_derived_delta_result()
+
+    response = build_answer_response(result)
+
+    assert response.answer == (
+        f"{Q08_COMPANY}의 연결 기준 영업이익률은 2024년 45.6940%, 2025년 43.5923%이며, "
+        "두 연도의 차이는 -2.1017%p입니다."
+    )
+    assert response.status is AnswerabilityStatus.ANSWERABLE
+    assert response.reason is None
+    assert response.facts == result.facts
+    assert response.evidence == result.evidence
+
+
+def test_q08_answer_is_deterministic() -> None:
+    result = temporal_derived_delta_result()
+
+    assert build_answer_response(result).answer == build_answer_response(result).answer
+
+
+def test_q08_values_are_read_from_the_calculations_not_recomputed_from_the_facts() -> None:
+    """
+    문장의 세 수치는 모두 Calculation에서 온다.
+
+    원천 Fact로 다시 계산하면 12.50%와 12.00%가 나오는 결과에 계산 계층이 확정한 값을
+    실었다. 문장이 다시 계산하면 응답에 실린 근거와 문장의 수치가 어긋난다.
+    """
+    answer = build_answer_response(temporal_derived_delta_result()).answer
+
+    assert "45.6940%" in answer
+    assert "43.5923%" in answer
+    assert "12.50" not in answer
+    assert "12.00" not in answer
+
+
+def test_q08_ratio_values_are_written_in_percent() -> None:
+    """기간별 영업이익률은 백분율이다. 두 값 모두 %로 적힌다."""
+    answer = build_answer_response(temporal_derived_delta_result()).answer
+
+    assert "2024년 45.6940%," in answer
+    assert "2025년 43.5923%이며" in answer
+
+
+def test_q08_change_is_written_in_percentage_points_not_percent() -> None:
+    """
+    영업이익률 45.69%와 그 차이 -2.10%p는 서로 다른 축의 값이다.
+
+    차이에 %를 붙이면 "영업이익률이 2.1017% 달라졌다"가 된다. 그것은 45.69%가 46.65%가 됐다는
+    뜻이고, 계산 계층이 만든 값(43.59%가 됐다)과 다른 사실이다.
+    """
+    answer = build_answer_response(temporal_derived_delta_result()).answer
+
+    assert "두 연도의 차이는 -2.1017%p입니다" in answer
+    assert "-2.1017%입니다" not in answer
+
+
+def test_q08_change_value_is_never_followed_by_a_bare_percent_sign() -> None:
+    """
+    회귀 자리를 값 하나가 아니라 표기 규칙으로 고정한다.
+
+    위 테스트는 현재 문장의 리터럴을 본다. 문구가 바뀌면 그 단언은 함께 바뀌고, 그때 %p가
+    %로 되돌아가도 알아채지 못할 수 있다. 그래서 "변화량 값 뒤에는 반드시 p가 온다"를 따로
+    고정한다.
+    """
+    change_value = "-2.1017"
+
+    answer = build_answer_response(temporal_derived_delta_result()).answer
+
+    assert f"{change_value}%p" in answer
+
+    remainder = answer.split(f"{change_value}%", 1)[1]
+
+    assert remainder.startswith("p")
+
+
+def test_a_percentage_point_change_cannot_be_rendered_as_percent() -> None:
+    """
+    단위를 대응표에만 맡기지 않는다.
+
+    대응표는 "이 단위를 어떻게 적는가"만 정한다. 변화량 자리에 percent가 실리면 그 값은 %로
+    적혀 나가고, 문장은 형식이 정상이며 수치도 계산 계층의 값 그대로다. 축이 바뀐 사실이
+    어디에도 남지 않으므로, 표기를 고르기 전에 자리별 기대 단위를 확인한다.
+    """
+    result = temporal_derived_delta_result(change=make_change(unit=UNIT_PERCENT))
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert UNIT_PERCENTAGE_POINT in str(error.value)
+
+
+def test_a_period_ratio_carrying_percentage_points_stops() -> None:
+    """반대 방향도 같다. 기간별 비율 자리에 percentage point가 오면 그 값은 비율이 아니다."""
+    result = temporal_derived_delta_result()
+    result.calculations[0].unit = UNIT_PERCENTAGE_POINT
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert UNIT_PERCENT in str(error.value)
+
+
+def test_the_two_percent_axes_keep_separate_labels() -> None:
+    """
+    %와 %p가 같은 표기로 수렴하면 위 검사들이 모두 통과하면서 뜻이 사라진다.
+
+    두 단위는 대응표의 이웃한 두 줄이라 한쪽을 고칠 때 다른 쪽에 맞춰 버리기 쉽다.
+    """
+    percent_label = CALCULATION_UNIT_LABELS[UNIT_PERCENT]
+    percentage_point_label = CALCULATION_UNIT_LABELS[UNIT_PERCENTAGE_POINT]
+
+    assert percent_label.strip()
+    assert percentage_point_label.strip()
+    assert percent_label != percentage_point_label
+
+
+def test_q08_answer_does_not_add_a_direction_or_a_cause() -> None:
+    """방향은 부호에 담겨 있고 원인은 결과에 없다. 둘 다 문장이 새로 만들지 않는다."""
+    answer = build_answer_response(temporal_derived_delta_result()).answer
+
+    for invented in ("늘", "줄", "증가", "감소", "때문", "영향", "덕분"):
+        assert invented not in answer
+
+
+def test_four_facts_without_the_derived_calculations_still_stop() -> None:
+    """일반 다중 Fact 가드는 그대로다. Calculation이 없으면 문장을 만들지 않는다."""
+    result = temporal_derived_delta_result()
+    result.calculations = []
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_four_facts_with_three_unrelated_calculations_still_stop() -> None:
+    """
+    개수만 맞는 결과로 이 경로가 열리지 않는다.
+
+    "Fact 4건과 Calculation 3건"만 보는 가드였다면 이 결과가 파생지표 변화 문장으로 나간다.
+    """
+    result = temporal_derived_delta_result()
+    result.calculations[0].operation = OPERATION_DELTA
+    result.calculations[1].operation = OPERATION_DELTA_PCT
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_change_pointing_at_something_other_than_the_two_ratios_stops() -> None:
+    """변화량이 결과에 실린 두 비율만 참조해야 한다."""
+    result = temporal_derived_delta_result(
+        change=make_change(input_ids=(Q08_PREVIOUS_MARGIN_ID, "calculation_SYNTHETIC_9999"))
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_change_referencing_the_two_ratios_in_reverse_order_stops() -> None:
+    """
+    변화량의 inputs는 old, new 순서다(calculator.diff).
+
+    뒤집힌 참조를 통과시키면 문장은 목록 순서대로 2024년, 2025년을 적으면서 부호가 반대인
+    변화량을 나란히 싣는다. 부호가 뒤집힌 변화량도 그럴듯해서 받는 쪽이 알아챌 수 없다.
+    """
+    result = temporal_derived_delta_result(
+        change=make_change(input_ids=(Q08_CURRENT_MARGIN_ID, Q08_PREVIOUS_MARGIN_ID))
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_change_referencing_facts_instead_of_the_ratios_stops() -> None:
+    """원천 Fact를 직접 뺀 값은 백분율의 변화량이 아니다."""
+    result = temporal_derived_delta_result()
+    result.calculations[2].inputs = [
+        fact_reference("fact_SYNTHETIC_PREVIOUS_OPERATING_INCOME"),
+        fact_reference("fact_SYNTHETIC_CURRENT_OPERATING_INCOME"),
+    ]
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_ratio_inputs_pointing_outside_the_result_stop() -> None:
+    """
+    두 비율의 입력 넷이 결과에 실린 Fact 4건이어야 한다.
+
+    결과에 없는 값을 가리키는 참조로 문장을 만들면 문장의 근거가 결과와 어긋난다.
+    """
+    result = temporal_derived_delta_result()
+    result.calculations[0].inputs = [
+        fact_reference("fact_SYNTHETIC_PREVIOUS_OPERATING_INCOME"),
+        fact_reference("fact_SYNTHETIC_9999"),
+    ]
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_a_ratio_referencing_one_fact_twice_stops() -> None:
+    """분자와 분모가 같은 Fact이면 그 비율은 기간별 영업이익률이 아니다."""
+    result = temporal_derived_delta_result()
+    result.calculations[0].inputs = [
+        fact_reference("fact_SYNTHETIC_PREVIOUS_OPERATING_INCOME"),
+        fact_reference("fact_SYNTHETIC_PREVIOUS_OPERATING_INCOME"),
+    ]
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_change_unit_without_a_label_stops() -> None:
+    """표기를 정하지 않은 단위를 그대로 적으면 문장에 계산 계층의 어휘가 실린다."""
+    result = temporal_derived_delta_result(change=make_change(unit="synthetic-unit"))
+
+    with pytest.raises(UnsupportedResultShapeError) as error:
+        build_answer_response(result)
+
+    assert "synthetic-unit" in str(error.value)
+
+
+def test_two_ratios_of_the_same_year_stop() -> None:
+    """같은 기간끼리는 변화량이 정의되지 않는다(guard②와 같은 규칙)."""
+    result = temporal_derived_delta_result(previous_year=2025, current_year=2025)
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_two_ratios_from_two_companies_stop() -> None:
+    """기업이 갈린 두 값은 한 기업의 시계열이 아니다. 한쪽을 골라 적지 않는다."""
+    result = temporal_derived_delta_result()
+    result.facts[0].company = "합성전자(주)"
+    result.facts[1].company = "합성전자(주)"
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_a_ratio_whose_inputs_span_two_scopes_stops() -> None:
+    """연결과 별도를 섞은 비율은 어느 기준의 값도 아니다."""
+    result = temporal_derived_delta_result()
+    result.facts[0].accounting_scope = FactAccountingScope.SEPARATE
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_a_period_without_a_fiscal_year_does_not_produce_an_answer() -> None:
+    """어느 해의 값인지 적지 못하면 '두 해가 어떻게 달라졌나'의 답이 되지 않는다."""
+    result = temporal_derived_delta_result()
+    result.facts[0].fiscal_year = None
+    result.facts[1].fiscal_year = None
+
+    with pytest.raises(MissingAnswerSupportError):
+        build_answer_response(result)
+
+
+def test_a_non_annual_source_period_is_not_written_as_a_year() -> None:
+    """분기 값이 섞인 비율을 연간 비율처럼 적지 않는다."""
+    result = temporal_derived_delta_result()
+    result.facts[0].fiscal_period = "Q1"
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+def test_a_ratio_outside_the_derived_metric_table_stops() -> None:
+    """정의를 되짚을 수 없는 값에 영업이익률이라는 이름을 붙이지 않는다."""
+    result = temporal_derived_delta_result()
+    result.facts[0].metric = MetricConcept.REVENUE
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
 
 
 def test_partial_source_support_has_a_partial_limitation_message() -> None:

@@ -131,12 +131,13 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q01",
         "q02",
         "q03",
+        "q04",
         "q05",
         "q07",
         "q13",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 11
+    assert sum(question.lifecycle == "future" for question in representative) == 10
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -267,6 +268,31 @@ def test_active_q05_gold_pins_two_scopes_without_freezing_evidence_count() -> No
     assert q05.integrity.document_summary_evidence_same_filing is True
 
 
+def test_active_q04_gold_pins_facility_scope_without_corpus_values() -> None:
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    q04 = {gold.case_id: gold for gold in loaded.gold_answers}["q04"]
+
+    assert questions["q04"].lifecycle == "active"
+    assert q04.execution_status is ExecutionStatus.COMPLETED
+    assert q04.status is AnswerabilityStatus.ANSWERABLE
+    assert q04.reason is None
+    assert q04.counts.model_dump(exclude_none=True) == {
+        "facts": 0,
+        "calculations": 0,
+        "comparisons": 0,
+        "document_summaries": 1,
+    }
+    assert [item.model_dump(exclude_none=True, mode="json") for item in q04.document_summaries] == [
+        {"section_scope": "facility_investment", "fiscal_year": 2025}
+    ]
+    assert q04.min_evidence_count == 1
+    assert q04.counts.evidence is None
+    assert q04.integrity.document_summary_evidence_references is True
+    assert q04.integrity.document_summary_same_filing is True
+    assert q04.integrity.document_summary_evidence_same_filing is True
+
+
 def test_active_q07_gold_pins_temporal_delta_contract() -> None:
     q07 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q07"]
 
@@ -382,7 +408,7 @@ def test_representative_calculation_counts_match_final_targets() -> None:
 def test_narrative_future_gold_does_not_require_zero_facts() -> None:
     gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
 
-    for case_id in ("q04", "q06", "q09"):
+    for case_id in ("q06", "q09"):
         counts = gold_by_id[case_id].counts
         assert counts is None or counts.facts is None
 

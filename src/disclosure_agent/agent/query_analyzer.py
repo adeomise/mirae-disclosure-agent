@@ -2796,16 +2796,33 @@ def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> Quer
         열어야 알 수 있어 이 계층이 판정할 수 없으므로, 막는 자리를 후보 개수가 보이는
         handler로 옮긴다.
 
-        handler는 공시일 창 없이 원공시 후보를 찾고, 후보가 여럿이면 ambiguous_root로
-        막는다(agent.handlers.event_history). 계획도 handler도 후보 하나를 고르지 않으며,
-        Q14는 그 경로로 COMPLETED·UNRESOLVED·AMBIGUOUS_MATCH가 된다.
+        handler는 공시일 창 없이 원공시 후보를 찾는다(agent.handlers.event_history). 계획도
+        handler도 후보 하나를 고르지 않으며, 무엇으로 막는지는 후보 개수와 이 계획이 담은
+        counterparty가 함께 정한다.
 
-        후보가 하나뿐인 기업에서는 답이 나간다(C3 잔여 경계):
-            질문이 상대방("포드")을 적었어도 이 구현은 그 이름을 본문과 대조하지 않는다.
-            그래서 그 기업의 원공시가 한 건뿐이면 상대방이 맞는지 확인하지 않은 채 그 한 건의
-            이력을 답하게 된다. 계약상대방 기반 문서 확정(C3)이 들어오기 전까지 남는 경계이며,
-            보장으로 읽히지 않도록 회귀에 고정해 두었다
-            (tests/integration/test_pattern_e_q15.py의 C3 잔여 경계 시험).
+            원공시가 여럿                    ambiguous_root. 상대방을 적었든 아니든 이 판정이
+                                             먼저다. Q14가 이 경로로
+                                             COMPLETED·UNRESOLVED·AMBIGUOUS_MATCH가 된다.
+
+            원공시 1건 + counterparty 있음    unverified_counterparty. 아래 참조.
+
+            원공시 1건 + counterparty 없음    그 1건의 이력을 답한다. 예전과 같다.
+
+        상대방을 적은 질문에서 1건을 답으로 삼지 않는 이유:
+            이 계획이 담는 counterparty는 조회 조건이 아니다(_extract_event_counterparty).
+            상대방으로 문서를 확정하는 능력(C3)은 없으며 이 PR이 만들지도 않는다. 이름을 담는
+            것은 그 능력을 흉내 내려는 것이 아니라, 질문이 확인할 수 없는 조건을 걸었다는
+            사실을 handler에 넘기려는 것이다.
+
+            그 조건을 무시하고 후보 1건을 답하면 "그 상대방과 맺은 계약의 이력"을 물었는데
+            "이 기업의 공급계약 중 코퍼스에 하나뿐인 것의 이력"을 답하게 된다. 후보가 하나뿐인
+            것은 코퍼스가 그렇다는 뜻이지 질문이 가리킨 계약이라는 뜻이 아니다.
+
+            그래서 handler가 unverified_counterparty로 막는다. 공개 사유는 ambiguous_root와
+            같은 AMBIGUOUS_MATCH이며, 대상 문서를 확정하지 못한 판정이라는 점이 같다. 내부
+            사유를 나눈 것은 후보 개수가 1과 N으로 달라 같은 진단 문장을 쓸 수 없어서다.
+
+        세 갈래 모두 tests/integration/test_pattern_e_q15.py에 대조군으로 고정해 두었다.
 
     월만 있고 연도가 없는 질문:
         연도 요구가 남아 있는 자리는 여기 하나다. 월은 공시일 창을 좁히는 조건인데 연도가

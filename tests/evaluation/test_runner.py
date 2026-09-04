@@ -133,10 +133,11 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q03",
         "q05",
         "q07",
+        "q08",
         "q13",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 11
+    assert sum(question.lifecycle == "future" for question in representative) == 10
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -1347,6 +1348,80 @@ def test_q07_calculation_semantics_reject_unrelated_valid_evidence() -> None:
         "got ['evidence-unrelated']" in item
         for item in failures
     )
+
+
+def q08_prediction(*, change_value: str = "-5.0000") -> PredictionCase:
+    facts = []
+    evidence = []
+    for year, operating_income, revenue in ((2024, "40", "100"), (2025, "45", "150")):
+        for metric, value in (("operating_income", operating_income), ("revenue", revenue)):
+            evidence_id = f"evidence-{metric}-{year}"
+            facts.append(
+                {
+                    "fact_id": f"{metric}-{year}",
+                    "company": "Synthetic Company",
+                    "metric": metric,
+                    "fiscal_year": year,
+                    "accounting_scope": "consolidated",
+                    "normalized_value": value,
+                    "normalized_unit": "원",
+                    "evidence_ids": [evidence_id],
+                }
+            )
+            evidence.append(
+                {"evidence_id": evidence_id, "doc_id": f"doc-{year}", "location_type": "table"}
+            )
+    calculations = []
+    for year, value in ((2024, "40.0000"), (2025, "30.0000")):
+        calculations.append(
+            {
+                "calculation_id": f"margin-{year}",
+                "operation": "ratio",
+                "inputs": [
+                    {"input_type": "fact", "input_id": f"operating_income-{year}"},
+                    {"input_type": "fact", "input_id": f"revenue-{year}"},
+                ],
+                "value": value,
+                "unit": "percent",
+                "evidence_ids": [
+                    f"evidence-operating_income-{year}",
+                    f"evidence-revenue-{year}",
+                ],
+            }
+        )
+    calculations.append(
+        {
+            "calculation_id": "margin-change",
+            "operation": "diff_pp",
+            "inputs": [
+                {"input_type": "calculation", "input_id": "margin-2024"},
+                {"input_type": "calculation", "input_id": "margin-2025"},
+            ],
+            "value": change_value,
+            "unit": "percentage_point",
+            "evidence_ids": [
+                "evidence-operating_income-2024",
+                "evidence-revenue-2024",
+                "evidence-operating_income-2025",
+                "evidence-revenue-2025",
+            ],
+        }
+    )
+    return prediction(
+        "case", facts=facts, evidence=evidence, calculations=calculations
+    )
+
+
+def test_ratio_and_diff_pp_recompute_from_facts() -> None:
+    gold = answerable_gold(
+        "case", integrity={"calculation_values_from_inputs": True}
+    )
+
+    assert compare_prediction(gold, q08_prediction(change_value="-10.0000")) == []
+
+    failures = compare_prediction(gold, q08_prediction())
+
+    assert any("expected value -10.0000, got -5.0000" in item for item in failures)
 
 
 def test_resolved_field_evidence_reference_integrity_passes() -> None:

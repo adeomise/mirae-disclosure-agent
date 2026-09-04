@@ -64,6 +64,10 @@ SUPPLY_CONTRACT_FIELDS = {
         "기타투자판단과관련한중요사항",
         "기타투자판단과관련한중요사항",
     ): "notes",
+    (
+        "기타투자판단에참고할사항",
+        "기타투자판단에참고할사항",
+    ): "notes",
 }
 
 
@@ -349,6 +353,15 @@ def extract_event(document: dict[str, Any]) -> dict[str, Any]:
             raw_unit,
         )
 
+        provenance = {
+            "table_id": row.get("table_id"),
+            "row_index": row.get("row_index"),
+            "field_cell_index": row.get("field_cell_index"),
+            "value_cell_index": row.get("value_cell_index"),
+        }
+        if row.get("field_row_index") is not None:
+            provenance["field_row_index"] = row["field_row_index"]
+
         extracted = {
             "raw_group": row.get("group"),
             "raw_field": row.get("raw_field"),
@@ -356,12 +369,7 @@ def extract_event(document: dict[str, Any]) -> dict[str, Any]:
             "raw_unit": raw_unit,
             "normalized_value": normalized_value,
             "normalized_unit": normalized_unit,
-            "provenance": {
-                "table_id": row.get("table_id"),
-                "row_index": row.get("row_index"),
-                "field_cell_index": row.get("field_cell_index"),
-                "value_cell_index": row.get("value_cell_index"),
-            },
+            "provenance": provenance,
         }
 
         if canonical_field in fields:

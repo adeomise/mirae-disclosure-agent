@@ -897,9 +897,15 @@ def test_samsung_supply_contract_actual_latest_state() -> None:
         if field_name in expected
     } == expected
 
-    # notes는 Extractor에서는 change로 보이지만 EventHistory vocabulary에서는
-    # 지원하지 않으므로 latest state에 새 field로 추가하지 않는다.
-    assert "notes" not in state.fields
+    # 원공시 현재 본문의 notes는 Parser/Extractor/Adapter를 거쳐 initial state와
+    # provenance에 보존된다. EventHistory vocabulary 밖의 correction change를
+    # 이를 근거로 적용하는 것은 아니다.
+    notes = state.fields["notes"]
+    assert notes.value
+    assert notes.source_doc_id == filings[0].doc_id
+    assert notes.evidence_ids == [
+        f"evidence_{filings[0].doc_id}_notes"
+    ]
 
     for field_name, (_, _, source_doc_id) in expected.items():
         assert state.fields[field_name].evidence_ids == [

@@ -44,7 +44,11 @@ from disclosure_agent.event.diff import (
     resolve_field_name,
     unmapped_changes,
 )
-from disclosure_agent.event.extractor import match_correction_field
+from disclosure_agent.event.extractor import match_correction_field, match_field
+
+FACILITY_AMOUNT_RATIO_COMPOSITE = (
+    "투자내역 / 투자금액(원) / 자기자본대비(%)"
+)
 
 # --------------------------------------------------------------------------
 # 1. 필드 이름 대응
@@ -224,6 +228,87 @@ def test_latest_state_blocking_policy_is_event_scoped() -> None:
         )
         is None
     )
+    assert (
+        classify_latest_state_blocking_correction(
+            FACILITY_AMOUNT_RATIO_COMPOSITE,
+            event_type="facility_investment",
+        )
+        == UNSAFE_SOURCE_COMPOSITE
+    )
+    assert (
+        classify_latest_state_blocking_correction(
+            FACILITY_AMOUNT_RATIO_COMPOSITE,
+            event_type="supply_contract",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_field",
+    [
+        FACILITY_AMOUNT_RATIO_COMPOSITE,
+        "2.투자내역 / 투자금액(원) / 자기자본대비(%)",
+        "투자금액(원) - 자기자본대비(%)",
+    ],
+)
+def test_facility_amount_ratio_composite_is_unsafe_not_a_single_field(
+    raw_field: str,
+) -> None:
+    assert (
+        classify_latest_state_blocking_correction(
+            raw_field,
+            event_type="facility_investment",
+        )
+        == UNSAFE_SOURCE_COMPOSITE
+    )
+    assert (
+        resolve_correction_field(
+            raw_field,
+            event_type="facility_investment",
+        )
+        is None
+    )
+    assert match_correction_field("facility_investment", raw_field) is None
+    assert resolve_field_name(raw_field, event_type="facility_investment") is None
+
+
+def test_normal_facility_fields_are_not_blocked_by_composite_policy() -> None:
+    assert (
+        resolve_correction_field(
+            "2. 투자내역 - 투자금액(원)",
+            event_type="facility_investment",
+        )
+        == FIELD_INVESTMENT_AMOUNT
+    )
+    assert (
+        resolve_correction_field(
+            "4. 투자기간 - 종료일",
+            event_type="facility_investment",
+        )
+        == FIELD_INVESTMENT_END_DATE
+    )
+    assert (
+        match_field(
+            "facility_investment",
+            "투자내역",
+            "자기자본대비(%)",
+        )
+        == "equity_ratio"
+    )
+
+    for raw_field in (
+        "2. 투자내역 - 투자금액(원)",
+        "자기자본대비(%)",
+        "4. 투자기간 - 종료일",
+    ):
+        assert (
+            classify_latest_state_blocking_correction(
+                raw_field,
+                event_type="facility_investment",
+            )
+            is None
+        )
 
 
 @pytest.mark.parametrize(
@@ -413,6 +498,36 @@ def test_diff_correction_reads_the_correction_block(make_exchange_document) -> N
     assert changes[0].field == FIELD_CONTRACT_END_DATE
     assert changes[0].before == "2026-01-31"
     assert changes[0].after == "2026-06-30"
+
+
+def test_facility_composite_diff_preserves_unsafe_change_for_latest_state(
+    make_exchange_document,
+) -> None:
+    document = make_exchange_document(
+        is_correction=True,
+        changes=[
+            (
+                FACILITY_AMOUNT_RATIO_COMPOSITE,
+                "OLD_AMOUNT_AND_RATIO",
+                "NEW_AMOUNT_AND_RATIO",
+            )
+        ],
+    )
+
+    changes = diff_correction(document, event_type="facility_investment")
+
+    assert len(changes) == 1
+    assert changes[0].field is None
+    assert changes[0].raw_field == FACILITY_AMOUNT_RATIO_COMPOSITE
+    assert changes[0].before == "OLD_AMOUNT_AND_RATIO"
+    assert changes[0].after == "NEW_AMOUNT_AND_RATIO"
+    assert (
+        classify_latest_state_blocking_correction(
+            changes[0].raw_field,
+            event_type="facility_investment",
+        )
+        == UNSAFE_SOURCE_COMPOSITE
+    )
 
 
 def test_diff_correction_returns_empty_for_original_filing(make_exchange_document) -> None:

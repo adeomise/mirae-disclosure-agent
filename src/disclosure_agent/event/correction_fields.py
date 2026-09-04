@@ -110,7 +110,15 @@ LATEST_STATE_BLOCKING_CORRECTIONS: dict[str, dict[str, str]] = {
         normalize_correction_label(
             "5. 계약기간 - 시작일 - 종료일"
         ): UNSAFE_SOURCE_COMPOSITE,
-    }
+    },
+    EVENT_FACILITY_INVESTMENT: {
+        normalize_correction_label(
+            "투자내역 / 투자금액(원) / 자기자본대비(%)"
+        ): UNSAFE_SOURCE_COMPOSITE,
+        normalize_correction_label(
+            "투자금액(원) - 자기자본대비(%)"
+        ): UNSAFE_SOURCE_COMPOSITE,
+    },
 }
 
 

@@ -98,6 +98,7 @@ class IntegrityExpectation(BaseModel):
 class ExpectedCalculation(BaseModel):
     """Stable semantic fields for one deterministic calculation."""
 
+    calculation_id: str | None = None
     operation: str
     unit: str | None = None
     value: float | str | None = None
@@ -731,13 +732,22 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
 
     if gold.calculations is not None:
         expected = [item.model_dump(exclude_none=True, mode="json") for item in gold.calculations]
+        calculations_by_id = {
+            item.calculation_id: item for item in prediction.calculations
+        }
         actual = [
             {
                 field: value
-                for field, value in item.model_dump(mode="json").items()
+                for field, value in (
+                    calculations_by_id.get(expected_item["calculation_id"], item)
+                    if "calculation_id" in expected_item
+                    else item
+                ).model_dump(mode="json").items()
                 if field in expected[index]
             }
-            for index, item in enumerate(prediction.calculations)
+            for index, (expected_item, item) in enumerate(
+                zip(expected, prediction.calculations, strict=True)
+            )
         ] if len(prediction.calculations) == len(expected) else []
         if actual != expected:
             failures.append(f"calculations: expected fields {expected}, got {actual}")

@@ -377,12 +377,70 @@ def test_active_q12_gold_pins_actual_aggregate_comparison_structure() -> None:
         "375900000000",
         "28533520000",
     ]
-    assert [calculation.value for calculation in q12.calculations] == [
-        "758900000000",
-        "28533520000",
+    assert [
+        calculation.model_dump(exclude_none=True, mode="json")
+        for calculation in q12.calculations
+    ] == [
+        {
+            "calculation_id": "calculation_investment_amount_aggregate_2024_LG이노텍",
+            "operation": "aggregate",
+            "unit": "KRW",
+            "value": "758900000000",
+            "inputs": [
+                {
+                    "input_type": "fact",
+                    "input_id": (
+                        "fact_event_facility_investment_exchange_20240220800842_"
+                        "investment_amount"
+                    ),
+                },
+                {
+                    "input_type": "fact",
+                    "input_id": (
+                        "fact_event_facility_investment_exchange_20241121800444_"
+                        "investment_amount"
+                    ),
+                },
+            ],
+            "evidence_ids": [
+                "evidence_exchange_20240220800842_investment_amount",
+                "evidence_exchange_20241121800444_investment_amount",
+            ],
+        },
+        {
+            "calculation_id": "calculation_investment_amount_aggregate_2024_레인보우로보틱스",
+            "operation": "aggregate",
+            "unit": "KRW",
+            "value": "28533520000",
+            "inputs": [
+                {
+                    "input_type": "fact",
+                    "input_id": (
+                        "fact_event_facility_investment_exchange_20240430900455_"
+                        "investment_amount"
+                    ),
+                }
+            ],
+            "evidence_ids": [
+                "evidence_exchange_20251205900454_investment_amount"
+            ],
+        },
     ]
-    assert [len(calculation.inputs) for calculation in q12.calculations] == [2, 1]
-    assert q12.comparisons[0].relation.value == "left_greater"
+    assert [
+        comparison.model_dump(mode="json") for comparison in q12.comparisons
+    ] == [
+        {
+            "left": {
+                "input_type": "calculation",
+                "input_id": "calculation_investment_amount_aggregate_2024_LG이노텍",
+            },
+            "right": {
+                "input_type": "calculation",
+                "input_id": "calculation_investment_amount_aggregate_2024_레인보우로보틱스",
+            },
+            "relation": "left_greater",
+        }
+    ]
     assert q12.integrity.fact_evidence_references is True
     assert q12.integrity.calculation_evidence_references is True
     assert q12.integrity.result_input_references is True
@@ -1679,6 +1737,47 @@ def aggregate_gold() -> GoldAnswer:
             "calculation_values_from_inputs": True,
         },
     )
+
+
+def test_q12_swapped_calculation_ids_fail_even_when_other_fields_are_unchanged() -> None:
+    actual = aggregate_prediction().model_copy(update={"case_id": "q12"})
+    calculation_ids = [
+        "calculation_investment_amount_aggregate_2024_LG이노텍",
+        "calculation_investment_amount_aggregate_2024_레인보우로보틱스",
+    ]
+    actual = actual.model_copy(
+        update={
+            "calculations": [
+                item.model_copy(update={"calculation_id": calculation_id})
+                for item, calculation_id in zip(
+                    actual.calculations, calculation_ids, strict=True
+                )
+            ]
+        }
+    )
+    gold = aggregate_gold().model_copy(
+        update={
+            "case_id": "q12",
+            "calculations": [
+                item.model_copy(update={"calculation_id": actual.calculation_id})
+                for item, actual in zip(
+                    aggregate_gold().calculations,
+                    actual.calculations,
+                    strict=True,
+                )
+            ]
+        }
+    )
+    swapped = actual.model_dump(mode="python")
+    first_id = swapped["calculations"][0]["calculation_id"]
+    swapped["calculations"][0]["calculation_id"] = swapped["calculations"][1][
+        "calculation_id"
+    ]
+    swapped["calculations"][1]["calculation_id"] = first_id
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(swapped))
+
+    assert any(item.startswith("calculations:") for item in failures)
 
 
 def test_aggregate_structure_and_provenance_pass() -> None:

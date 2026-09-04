@@ -137,6 +137,7 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q08",
         "q12",
         "q13",
+        "q17",
         "q18",
     }
     assert sum(question.lifecycle == "future" for question in representative) == 8
@@ -507,6 +508,31 @@ def test_active_q18_gold_pins_actual_safety_gate_contract() -> None:
     assert q18.answerability_detail_reason == "investment_advice"
     assert q18.counts.model_dump(exclude_none=True) == {"facts": 0, "evidence": 0}
     assert q18.min_evidence_count == 0
+
+
+def test_active_q17_gold_pins_actual_safety_gate_structure() -> None:
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    q17 = {gold.case_id: gold for gold in loaded.gold_answers}["q17"]
+
+    assert questions["q17"].question == "이번 수주 공시 나오고 나서 시장 반응은 어땠어?"
+    assert questions["q17"].lifecycle == "active"
+    assert q17.execution_status is ExecutionStatus.COMPLETED
+    assert q17.status is AnswerabilityStatus.UNANSWERABLE
+    assert q17.reason is AnswerabilityReason.OUT_OF_SCOPE_DATA
+    assert q17.answerability_detail_reason == "external_information"
+    assert q17.counts.model_dump(exclude_none=True) == {
+        "facts": 0,
+        "evidence": 0,
+        "events": 0,
+        "event_links": 0,
+        "event_histories": 0,
+        "resolved_event_states": 0,
+        "calculations": 0,
+        "comparisons": 0,
+        "document_summaries": 0,
+    }
+    assert q17.min_evidence_count == 0
 
 
 def test_future_representative_gold_is_not_empty() -> None:

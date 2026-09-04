@@ -135,10 +135,11 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q05",
         "q07",
         "q08",
+        "q12",
         "q13",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 10
+    assert sum(question.lifecycle == "future" for question in representative) == 9
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -357,6 +358,35 @@ def test_active_q08_gold_pins_actual_operating_margin_inputs() -> None:
             "normalized_unit": "원",
         },
     ]
+
+
+def test_active_q12_gold_pins_actual_aggregate_comparison_structure() -> None:
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    q12 = {gold.case_id: gold for gold in loaded.gold_answers}["q12"]
+
+    assert questions["q12"].lifecycle == "active"
+    assert q12.counts.model_dump(exclude_none=True) == {
+        "facts": 3,
+        "evidence": 3,
+        "calculations": 2,
+        "comparisons": 1,
+    }
+    assert [fact.normalized_value for fact in q12.expected_facts()] == [
+        "383000000000",
+        "375900000000",
+        "28533520000",
+    ]
+    assert [calculation.value for calculation in q12.calculations] == [
+        "758900000000",
+        "28533520000",
+    ]
+    assert [len(calculation.inputs) for calculation in q12.calculations] == [2, 1]
+    assert q12.comparisons[0].relation.value == "left_greater"
+    assert q12.integrity.fact_evidence_references is True
+    assert q12.integrity.calculation_evidence_references is True
+    assert q12.integrity.result_input_references is True
+    assert q12.integrity.calculation_values_from_inputs is True
 
 
 def test_active_q03_gold_pins_actual_holding_facts_and_evidence() -> None:
@@ -1543,6 +1573,177 @@ def test_q08_rejects_wrong_source_fact_with_internally_consistent_calculations()
     failures = compare_prediction(q08, PredictionCase.model_validate(actual))
 
     assert failures == ["facts: expected fields did not match distinct predicted Facts"]
+
+
+def aggregate_prediction() -> PredictionCase:
+    facts = [
+        {
+            "fact_id": "left-1",
+            "company": "Left Company",
+            "metric": "investment_amount",
+            "accounting_scope": "not_applicable",
+            "normalized_value": "100",
+            "normalized_unit": "KRW",
+            "evidence_ids": ["evidence-left-1"],
+        },
+        {
+            "fact_id": "left-2",
+            "company": "Left Company",
+            "metric": "investment_amount",
+            "accounting_scope": "not_applicable",
+            "normalized_value": "50",
+            "normalized_unit": "KRW",
+            "evidence_ids": ["evidence-left-2"],
+        },
+        {
+            "fact_id": "right-1",
+            "company": "Right Company",
+            "metric": "investment_amount",
+            "accounting_scope": "not_applicable",
+            "normalized_value": "25",
+            "normalized_unit": "KRW",
+            "evidence_ids": ["evidence-right-1"],
+        },
+    ]
+    evidence = [
+        {"evidence_id": evidence_id, "doc_id": evidence_id, "location_type": "table"}
+        for evidence_id in ("evidence-left-1", "evidence-left-2", "evidence-right-1")
+    ]
+    calculations = [
+        {
+            "calculation_id": "left-total",
+            "operation": "aggregate",
+            "inputs": [
+                {"input_type": "fact", "input_id": "left-1"},
+                {"input_type": "fact", "input_id": "left-2"},
+            ],
+            "value": "150",
+            "unit": "KRW",
+            "evidence_ids": ["evidence-left-1", "evidence-left-2"],
+        },
+        {
+            "calculation_id": "right-total",
+            "operation": "aggregate",
+            "inputs": [{"input_type": "fact", "input_id": "right-1"}],
+            "value": "25",
+            "unit": "KRW",
+            "evidence_ids": ["evidence-right-1"],
+        },
+    ]
+    return prediction(
+        "case",
+        facts=facts,
+        evidence=evidence,
+        calculations=calculations,
+        comparisons=[
+            {
+                "comparison_id": "aggregate-comparison",
+                "left": {"input_type": "calculation", "input_id": "left-total"},
+                "right": {"input_type": "calculation", "input_id": "right-total"},
+                "relation": "left_greater",
+            }
+        ],
+    )
+
+
+def aggregate_gold() -> GoldAnswer:
+    actual = aggregate_prediction()
+    return answerable_gold(
+        "case",
+        facts=[
+            {"company": fact.company, "metric": fact.metric}
+            for fact in actual.facts
+        ],
+        counts={"facts": 3, "calculations": 2, "comparisons": 1},
+        calculations=[
+            {
+                "operation": item.operation,
+                "inputs": item.inputs,
+                "value": item.value,
+                "unit": item.unit,
+                "evidence_ids": item.evidence_ids,
+            }
+            for item in actual.calculations
+        ],
+        comparisons=[
+            {
+                "left": actual.comparisons[0].left,
+                "right": actual.comparisons[0].right,
+                "relation": actual.comparisons[0].relation,
+            }
+        ],
+        integrity={
+            "fact_evidence_references": True,
+            "calculation_evidence_references": True,
+            "result_input_references": True,
+            "calculation_values_from_inputs": True,
+        },
+    )
+
+
+def test_aggregate_structure_and_provenance_pass() -> None:
+    assert compare_prediction(aggregate_gold(), aggregate_prediction()) == []
+
+
+def test_aggregate_missing_fact_fails() -> None:
+    actual = aggregate_prediction().model_dump(mode="python")
+    actual["facts"].pop()
+
+    failures = compare_prediction(aggregate_gold(), PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("counts.facts:") for item in failures)
+    assert any("fact:right-1" in item for item in failures)
+
+
+def test_aggregate_wrong_value_fails_recomputation() -> None:
+    actual = aggregate_prediction().model_dump(mode="python")
+    actual["calculations"][0]["value"] = "149"
+
+    failures = compare_prediction(aggregate_gold(), PredictionCase.model_validate(actual))
+
+    assert any("expected value 150, got 149" in item for item in failures)
+
+
+def test_aggregate_missing_calculation_input_fails() -> None:
+    actual = aggregate_prediction().model_dump(mode="python")
+    actual["calculations"][0]["inputs"].pop()
+
+    failures = compare_prediction(aggregate_gold(), PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("calculations:") for item in failures)
+    assert any("expected value 100, got 150" in item for item in failures)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("comparisons", []),
+        ("relation", "right_greater"),
+        ("right", {"input_type": "calculation", "input_id": "left-total"}),
+    ],
+)
+def test_aggregate_comparison_shape_failures_are_detected(field: str, value: object) -> None:
+    actual = aggregate_prediction().model_dump(mode="python")
+    if field == "comparisons":
+        actual[field] = value
+    else:
+        actual["comparisons"][0][field] = value
+
+    failures = compare_prediction(aggregate_gold(), PredictionCase.model_validate(actual))
+
+    assert any(
+        item.startswith("counts.comparisons:") or item.startswith("comparisons:")
+        for item in failures
+    )
+
+
+def test_aggregate_dangling_evidence_fails() -> None:
+    actual = aggregate_prediction().model_dump(mode="python")
+    actual["evidence"].pop()
+
+    failures = compare_prediction(aggregate_gold(), PredictionCase.model_validate(actual))
+
+    assert any("evidence-right-1" in item for item in failures)
 
 
 def test_resolved_field_evidence_reference_integrity_passes() -> None:

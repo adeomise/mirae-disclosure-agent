@@ -42,8 +42,9 @@ DocumentSummary expectations, canonical execution/answerability fields, and non-
 Fact/Calculation/DocumentSummary to Evidence reference integrity. DocumentSummary
 integrity can also require one selected filing and require all Evidence to belong to it.
 Expected fields that are omitted are not compared. Calculation gold can fix
-operation/unit order and independently recompute
-`delta`/`delta_pct` values from their ordered Fact inputs. Event, EventLink, and
+operation/unit/value/input/Evidence structure and
+independently recompute `delta`/`delta_pct` or `aggregate` values from their Fact inputs.
+Comparison gold can fix its typed left/right inputs and relation. Event, EventLink, and
 EventHistory content rubrics remain future extensions; their collection counts can
 already be checked.
 
@@ -75,10 +76,10 @@ Live mode executes the active regression cases through the public Agent entry po
 and evaluates the returned `AgentExecutionResult` objects with the same deterministic
 comparator:
 
-The current active regression set contains exactly eight representative questions:
-`Q01`, `Q02`, `Q03`, `Q05`, `Q07`, `Q08`, `Q13`, and `Q18`. Therefore, a reported live-Agent
-result of `8/8` applies only to those eight active cases; it is not a result for all 18
-representative questions.
+The current active regression set contains exactly nine representative questions:
+`Q01`, `Q02`, `Q03`, `Q05`, `Q07`, `Q08`, `Q12`, `Q13`, and `Q18`. Therefore, a reported
+live-Agent result of `9/9` applies only to those nine active cases; it is not a result
+for all 18 representative questions.
 
 ```text
 uv run python -m evaluation.runner --run-agent --corpus-root path/to/corpus

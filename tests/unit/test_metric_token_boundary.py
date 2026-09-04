@@ -16,12 +16,21 @@
 
 경계 규약(_metric_token_pattern):
     왼쪽    앞 글자가 한글 음절이면 지표로 읽지 않는다. "기타영업수익"·"제품매출액".
+            예외는 회계기준 어휘(연결·별도·개별)가 붙은 형태다. "연결매출액"은 이 모듈이
+            이미 회계기준으로 읽는 낱말에 지표 어휘가 붙은 것이고, 띄어 쓴 "연결 매출액"은
+            처음부터 읽고 있었다. 허용 목록은 회계기준 어휘 그 자체이며 여기에 다른 접두어를
+            더하지 않는다. 2절에서 고정한다.
     오른쪽  뒤에 한글 음절이 이어지면 읽지 않는다. 다만 METRIC_TOKEN_SUFFIXES의 조사·어미
             하나가 통째로 이어지고 그 뒤가 다시 경계이면 같은 낱말로 본다. "매출액이"는 읽고
             "매출채권"은 읽지 않는다.
 
     모르는 어형은 열지 않는다. "매출얼마야"처럼 조사를 생략하고 붙여 쓴 표기도 읽지 않으며,
     그것을 읽으려고 경계를 늘리면 위의 개념들이 같은 문으로 함께 들어온다.
+
+지원·미지원이 섞인 질문(6절):
+    "매출원가와 매출 알려줘"에는 읽히는 어휘가 함께 있다. 읽히는 쪽만 담아 계획을 만들면
+    매출원가를 물었다는 사실이 어디에도 남지 않은 채 매출 답이 나간다. 질문의 일부를 조용히
+    버리는 것이므로 거절한다. 사유는 기존 unsupported_metric 그대로다.
 
 무엇을 검증하지 않는가:
     지원하지 않는 개념을 어떻게 답할지는 여기서 정하지 않는다. 기존 계약(query_plan 단계의
@@ -42,6 +51,8 @@ from disclosure_agent.agent.query_analyzer import (
     INTENT_SINGLE_FACT,
     INTENT_TEMPORAL_COMPARE,
     METRIC_REVENUE,
+    SCOPE_CONSOLIDATED,
+    SCOPE_SEPARATE,
     UnsupportedQuestionError,
     build_query_plan,
 )
@@ -275,3 +286,167 @@ def test_business_profile_exclusion_keeps_substring_semantics() -> None:
     assert not query_analyzer._looks_like_business_profile(
         "무슨 사업을 하고 주력 제품 매출원가가 뭐야?"
     )
+
+
+# --------------------------------------------------------------------------
+# 6. 회계기준 어휘를 붙여 쓴 표기 — 띄어쓰기로 답이 갈리지 않는다
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_scope"),
+    [
+        ("삼성전자 2024년 연결매출액이 얼마야?", SCOPE_CONSOLIDATED),
+        ("삼성전자 2024년 별도매출액이 얼마야?", SCOPE_SEPARATE),
+        ("삼성전자 2024년 개별매출액이 얼마야?", SCOPE_SEPARATE),
+    ],
+)
+def test_compact_accounting_scope_forms_are_read(
+    question: str,
+    expected_scope: str,
+) -> None:
+    """
+    붙여 썼다는 이유로 막지 않는다.
+
+    같은 질문을 띄어 쓴 "연결 매출액이 얼마야?"는 처음부터 읽고 있었다. 회계기준 어휘는
+    이 모듈이 이미 아는 낱말이므로, 그것이 붙어 있는 것은 다른 개념이 아니라 같은 질문의
+    다른 표기다. 기준도 함께 읽혀야 하며, 읽지 못하면 연결로 기본값 처리돼 별도를 물은
+    질문에 연결 값이 나간다.
+    """
+    plan = _plan(question)
+
+    assert plan.intent == INTENT_SINGLE_FACT
+    assert plan.metric == METRIC_REVENUE
+    assert plan.accounting_scope == expected_scope
+    assert plan.accounting_scope_explicit is True
+
+
+def test_scope_prefix_allowance_is_limited_to_accounting_vocabulary() -> None:
+    """
+    허용 목록은 회계기준 어휘 그 자체다.
+
+    왼쪽 경계를 통째로 열면 이 파일이 막으려던 것이 전부 다시 들어온다. 뜻을 바꾸는 접두어는
+    회계기준 어휘가 아니므로 열리지 않는다.
+    """
+    assert query_analyzer._find_metric("제품매출액") is None
+    assert query_analyzer._find_metric("순매출액") is None
+    assert query_analyzer._find_metric("총매출액") is None
+    assert query_analyzer._find_metric("해외매출액") is None
+
+
+def test_scope_prefix_itself_requires_a_left_boundary() -> None:
+    """접두어를 허용해도 그 접두어 앞은 다시 경계다. "비연결"은 "연결"이 아니다."""
+    assert query_analyzer._find_metric("비연결매출액") is None
+
+
+def test_scope_prefix_allowance_reads_the_current_scope_vocabulary() -> None:
+    """
+    허용 목록을 따로 적지 않는다.
+
+    따로 적으면 회계기준 어휘가 늘 때 두 벌이 되고, "연결 매출액"은 읽는데 "연결매출액"은
+    못 읽는 상태가 조용히 생긴다.
+    """
+    assert set(query_analyzer._accounting_scope_prefixes()) == {
+        *query_analyzer.CONSOLIDATED_TOKENS,
+        *query_analyzer.SEPARATE_TOKENS,
+    }
+
+
+def test_words_between_scope_and_metric_stay_closed() -> None:
+    """
+    "연결기준매출액"은 읽지 않는다.
+
+    회계기준 어휘와 지표 어휘 사이에 다른 낱말이 낀 표기까지 열려면 그 사이에 무엇이 올 수
+    있는지를 정해야 하고, 정하지 않은 채 넓히면 접두어 허용이 사실상 왼쪽 경계를 없앤다.
+    띄어 쓰면 읽히므로 답할 수 있는 길은 남아 있다.
+    """
+    assert query_analyzer._find_metric("연결기준매출액") is None
+    assert query_analyzer._find_metric("연결 기준 매출액") == METRIC_REVENUE
+
+
+# --------------------------------------------------------------------------
+# 7. 지원·미지원이 섞인 질문 — 읽히는 쪽만 골라 답하지 않는다
+# --------------------------------------------------------------------------
+
+
+MIXED_QUESTIONS = (
+    # 단일 사실 조회
+    "삼성전자 2024년 매출원가와 매출 알려줘",
+    # 시계열 비교
+    "삼성전자 2024년 매출원가와 2025년 매출 비교해줘",
+    # 기업 간 비교
+    "삼성전자와 SK하이닉스 2024년 매출채권과 매출 비교해줘",
+)
+
+
+@pytest.mark.parametrize("question", MIXED_QUESTIONS)
+def test_mixed_supported_and_unsupported_fails_closed(question: str) -> None:
+    """
+    읽히는 어휘가 함께 있어도 그것만 담지 않는다.
+
+    담으면 매출원가를 물었다는 사실이 계획에도 결과에도 남지 않은 채 매출 답이 나간다.
+    형식이 맞으므로 받는 쪽에서는 질문의 절반이 버려졌다는 것을 알 수 없다.
+
+    세 줄 모두 서로 다른 계획 경로(단일 사실·시계열 비교·기업 간 비교)로 들어간다. 한
+    자리에서만 막으면 나머지 경로는 그대로 축소된 답을 만든다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        _plan(question)
+
+    assert error.value.reason == "unsupported_metric"
+
+
+@pytest.mark.parametrize("question", MIXED_QUESTIONS)
+def test_mixed_questions_name_the_unsupported_expression(question: str) -> None:
+    """무엇 때문에 막혔는지가 사유에 남는다. 남지 않으면 다시 물을 수 없다."""
+    with pytest.raises(UnsupportedQuestionError) as error:
+        _plan(question)
+
+    assert "매출원가" in error.value.detail or "매출채권" in error.value.detail
+
+
+def test_mixed_signal_comes_from_the_token_list_not_a_phrase_list() -> None:
+    """
+    막을 표기를 나열해 두지 않는다.
+
+    나열하면 목록에 없는 복합 개념이 그대로 통과한다. 예시 세 줄에 없는 조합도 같은 판정에
+    걸려야 한다.
+    """
+    for question in (
+        "매출총이익과 매출액 알려줘",
+        "금융수익과 매출 알려줘",
+        "제품매출액과 연결매출액 알려줘",
+    ):
+        with pytest.raises(UnsupportedQuestionError) as error:
+            query_analyzer._find_metric(question)
+
+        assert error.value.reason == "unsupported_metric"
+
+
+def test_unsupported_alone_still_does_not_raise_from_find_metric() -> None:
+    """
+    읽히는 어휘가 하나도 없으면 여기서 앞질러 거절하지 않는다.
+
+    그 상태를 어떻게 다룰지는 호출부가 이미 정해 두었다. 단일 사실 조회는 _extract_metric이
+    거절하고, 비교 질의는 지표를 비운 계획을 만들어 Router가 막는다. 여기서 예외로 바꾸면
+    그 분업이 무너지고, 1·4절이 고정한 계약이 사유만 다른 것으로 바뀐다.
+    """
+    assert query_analyzer._find_metric("삼성전자 2024년 매출원가가 얼마야?") is None
+    assert query_analyzer._find_metric("매출얼마야") is None
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "삼성전자 2024년 연결 기준 매출액이 얼마야?",
+        "삼성전자 2024년 매출과 2025년 매출 비교해줘",
+        "삼성전자와 SK하이닉스 2024년 매출 비교해줘",
+        "삼성전자 2024년 매출과 2024년 매출액 알려줘",
+        "삼성전자 2024년 연결매출액이 얼마야?",
+    ],
+)
+def test_valid_revenue_aliases_alone_still_answer(question: str) -> None:
+    """대조군. 읽히는 어휘만 있는 질문은 혼합 판정에 걸리지 않는다."""
+    plan = _plan(question)
+
+    assert plan.metric == METRIC_REVENUE

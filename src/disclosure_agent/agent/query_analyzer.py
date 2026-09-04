@@ -309,10 +309,14 @@ METRIC_TOKEN_SUFFIXES: tuple[str, ...] = (
 
 # 지표 어휘의 좌우 경계로 쓰는 문자 부류. 한글 음절이 붙어 있으면 다른 낱말로 본다.
 _HANGUL_SYLLABLE_CLASS = "가-힣"
+_HANGUL_SYLLABLE_PATTERN = re.compile(f"[{_HANGUL_SYLLABLE_CLASS}]")
 
 
 @lru_cache(maxsize=8)
-def _metric_token_pattern(tokens: tuple[str, ...]) -> re.Pattern[str]:
+def _metric_token_pattern(
+    tokens: tuple[str, ...],
+    scope_prefixes: tuple[str, ...],
+) -> re.Pattern[str]:
     """
     지표 어휘를 낱말 경계까지 맞춰 찾는 패턴을 만든다.
 
@@ -324,20 +328,39 @@ def _metric_token_pattern(tokens: tuple[str, ...]) -> re.Pattern[str]:
         이미 안전하고, 뚫려 있는 자리는 질의 해석 한 곳이다.
 
     경계 규약:
-        왼쪽    앞 글자가 한글 음절이면 매치하지 않는다. "기타영업수익"·"제품매출액"·
-                "순매출액"·"이자수익"이 여기서 걸린다.
+        왼쪽    앞 글자가 한글 음절이면 매치하지 않는다. "제품매출액"·"순매출액"·
+                "기타영업수익"·"이자수익"이 여기서 걸린다.
+
+                예외는 회계기준 어휘 하나가 붙어 있는 경우다. "연결매출액"·"별도매출액"·
+                "개별매출액"은 이 모듈이 이미 회계기준으로 읽는 낱말(CONSOLIDATED_TOKENS,
+                SEPARATE_TOKENS)에 지표 어휘가 붙은 형태이며, 같은 질문을 띄어 쓴
+                "연결 매출액"은 처음부터 읽고 있었다. 붙여 썼다는 이유로 막으면 답할 수
+                있는 질문이 표기 차이로 막힌다.
+
+                허용 목록은 회계기준 어휘 그 자체다. 여기에 다른 접두어를 적지 않는다.
+                "제품"·"순"처럼 뜻을 바꾸는 접두어를 함께 열면 이 함수가 막으려던 것이
+                다시 들어온다. 접두어 자체도 왼쪽 경계를 요구하므로 "비연결매출액"은
+                걸린다.
+
         오른쪽  뒤에 한글 음절이 이어지면 매치하지 않는다. 다만 METRIC_TOKEN_SUFFIXES에
                 적힌 조사·어미 하나가 통째로 이어지고 그 뒤가 다시 경계이면 같은 낱말로
                 본다. "매출채권"·"수익성"·"수익률"이 여기서 걸린다.
 
         모르는 어형은 열지 않는다. 경계를 넓히는 쪽이 언제나 나중이며, 지금 넓히면 위의
-        개념들이 같은 문으로 함께 들어온다.
+        개념들이 같은 문으로 함께 들어온다. "연결기준매출액"처럼 회계기준 어휘와 지표
+        어휘 사이에 다른 낱말이 낀 표기도 여기서는 읽지 않는다. 띄어 쓰면 읽힌다.
+
+    매치 범위:
+        회계기준 접두어를 매치에 포함시킨다. 찾기만 할 때는 어느 쪽이든 같지만, 호출부가
+        '경계로 읽히지 않은 지표 어휘가 남아 있는가'를 매치 구간으로 판정한다
+        (_find_unsupported_revenue_occurrence). 접두어를 매치 밖에 두면 "연결매출액"의
+        "매출액"이 구간 안에 들어오지 않아 지원하지 않는 표기로 잘못 걸린다.
 
     캐시 키에 대해:
         REVENUE_TOKENS는 테스트가 monkeypatch로 바꾼다. 모듈 수준에서 한 번 컴파일해 두면
         그 패턴은 바뀐 어휘를 보지 못하고, 어휘를 늘려도 판정이 그대로인 상태가 조용히
-        만들어진다. 그래서 현재 어휘 자체를 인자로 받아 캐시 키에 넣는다. 호출부는 호출
-        시점의 REVENUE_TOKENS를 넘긴다.
+        만들어진다. 그래서 현재 어휘 자체를 인자로 받아 캐시 키에 넣는다. 회계기준 어휘도
+        같은 이유로 인자다. 호출부는 호출 시점의 값을 넘긴다.
     """
     if not tokens:
         raise ValueError("지표 어휘가 비어 있으면 경계 패턴을 만들 수 없습니다.")
@@ -351,13 +374,30 @@ def _metric_token_pattern(tokens: tuple[str, ...]) -> re.Pattern[str]:
         re.escape(suffix)
         for suffix in sorted(set(METRIC_TOKEN_SUFFIXES), key=len, reverse=True)
     )
+    prefixes = "|".join(
+        re.escape(prefix)
+        for prefix in sorted(set(scope_prefixes), key=len, reverse=True)
+    )
+    prefix_group = rf"(?:{prefixes})?" if prefixes else ""
 
     return re.compile(
         rf"(?<![{_HANGUL_SYLLABLE_CLASS}])"
+        rf"{prefix_group}"
         rf"(?:{alternation})"
         rf"(?:{suffixes})?"
         rf"(?![{_HANGUL_SYLLABLE_CLASS}])"
     )
+
+
+def _accounting_scope_prefixes() -> tuple[str, ...]:
+    """
+    지표 어휘 앞에 붙여 써도 되는 낱말. 회계기준 어휘가 정본이며 여기서 새로 적지 않는다.
+
+    따로 적으면 회계기준 어휘가 늘 때 두 벌이 되고, 갈라진 뒤에는 "연결 매출액"은 읽는데
+    "연결매출액"은 못 읽는 상태가 조용히 생긴다.
+    """
+    return (*CONSOLIDATED_TOKENS, *SEPARATE_TOKENS)
+
 
 # 파생지표 표기. 여기 담기는 값은 계산으로 만들어지는 요청 개념이며 원천 지표가 아니다.
 #
@@ -1269,6 +1309,51 @@ def _extract_accounting_scope(question: str) -> tuple[str, bool]:
     return SCOPE_CONSOLIDATED, False
 
 
+def _hangul_run(question: str, start: int, end: int) -> str:
+    """[start, end)를 품은 한글 음절 덩어리를 통째로 돌려준다. 진단 문자열용이다."""
+    left = start
+    while left > 0 and _HANGUL_SYLLABLE_PATTERN.match(question[left - 1]):
+        left -= 1
+
+    right = end
+    while right < len(question) and _HANGUL_SYLLABLE_PATTERN.match(question[right]):
+        right += 1
+
+    return question[left:right]
+
+
+def _find_unsupported_revenue_occurrence(
+    question: str,
+    spans: tuple[tuple[int, int], ...],
+) -> str | None:
+    """
+    지표 어휘를 품고 있으나 경계로 읽히지 않은 표기를 찾는다. 없으면 None.
+
+    spans는 _metric_token_pattern이 실제로 읽어 낸 구간이다. 어휘가 문자열로는 있는데
+    어느 구간에도 들어가지 않으면, 그 자리는 지표 어휘를 품은 다른 개념이다
+    ("매출원가"의 "매출", "매출채권"의 "매출", "금융수익"의 "수익").
+
+    어휘 목록에서 신호를 만드는 이유:
+        막을 표기를 따로 나열하지 않는다. 나열하면 목록에 없는 복합 개념이 그대로 통과하고,
+        REVENUE_TOKENS가 늘 때 이 목록도 함께 늘려야 한다는 사실이 어디에도 남지 않는다.
+        경계 판정이 이미 '읽은 자리'를 알고 있으므로, 읽지 못한 자리를 그 여집합으로 구한다.
+
+    돌려주는 값은 그 자리를 품은 한글 덩어리다. 진단에만 쓰며 판정에는 쓰지 않는다.
+    """
+    for token in REVENUE_TOKENS:
+        start = question.find(token)
+
+        while start != -1:
+            end = start + len(token)
+
+            if not any(span_start <= start and end <= span_end for span_start, span_end in spans):
+                return _hangul_run(question, start, end)
+
+            start = question.find(token, start + 1)
+
+    return None
+
+
 def _find_metric(question: str) -> str | None:
     """
     질문에서 지표를 읽는다. 없으면 None이며 추측하지 않는다.
@@ -1278,13 +1363,42 @@ def _find_metric(question: str) -> str | None:
     계획은 엉뚱한 질문에 매출 Fact를 근거까지 갖춰 돌려준다. 경계 규약은
     _metric_token_pattern에 적었다.
 
+    지원하는 표기와 지원하지 않는 표기가 함께 있으면 고르지 않는다:
+        "매출원가와 매출 알려줘"에는 읽히는 어휘("매출")가 있다. 그것만 담아 계획을 만들면
+        매출원가를 물었다는 사실이 계획에도 결과에도 남지 않은 채 매출 답이 나간다. 질문의
+        일부를 조용히 버리는 것이며, _resolve_requested_metrics가 원천 지표와 파생지표를
+        함께 물은 질문에서 한쪽을 고르지 않는 것과 같은 이유다.
+
+        그래서 둘 다 있으면 거절한다. 사유는 새로 만들지 않고 기존 unsupported_metric을
+        그대로 쓴다.
+
+    읽히는 어휘가 하나도 없으면 거절하지 않고 None이다:
+        "매출원가가 얼마야?"는 지표를 읽지 못한 질문이며, 그 상태를 어떻게 다룰지는 이미
+        호출부가 정해 두었다(단일 사실 조회는 _extract_metric이 거절하고, 비교 질의는
+        지표를 비운 계획을 만들어 Router가 막는다). 여기서 앞질러 예외로 바꾸면 그 분업이
+        무너진다.
+
     어휘는 호출 시점에 읽어 넘긴다. 모듈 수준에서 패턴을 붙들고 있으면 REVENUE_TOKENS를
     바꿔도 판정이 따라오지 않는다.
     """
-    if _metric_token_pattern(tuple(REVENUE_TOKENS)).search(question):
-        return METRIC_REVENUE
+    pattern = _metric_token_pattern(tuple(REVENUE_TOKENS), _accounting_scope_prefixes())
+    spans = tuple(match.span() for match in pattern.finditer(question))
 
-    return None
+    if not spans:
+        return None
+
+    unsupported = _find_unsupported_revenue_occurrence(question, spans)
+
+    if unsupported is not None:
+        raise UnsupportedQuestionError(
+            reason="unsupported_metric",
+            detail=(
+                f"질문이 지원하는 지표(매출액)와 지원하지 않는 표기('{unsupported}')를 함께 "
+                "묻고 있습니다. 한쪽만 골라 답하지 않습니다."
+            ),
+        )
+
+    return METRIC_REVENUE
 
 
 def _find_derived_metric(question: str) -> tuple[DerivedMetric, str] | None:

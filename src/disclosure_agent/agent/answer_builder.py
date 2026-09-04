@@ -33,6 +33,7 @@ TODO:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from disclosure_agent.agent.derived_metrics import (
@@ -483,6 +484,12 @@ CALCULATION_UNIT_LABELS: dict[str, str] = {
 # 두 이름이 붙어 있는지는 tests/unit/test_answer_builder.py가 함께 고정한다.
 OPERATION_DELTA = "delta"
 OPERATION_DELTA_PCT = "delta_pct"
+
+# Q12가 만드는 기업별 합계 연산 이름. calculator가 이 모듈의 정지 사유를 import하므로 같은
+# 순환 import 제약이 있으며, 테스트에서 calculator의 정본 이름과 함께 고정한다. 이 이름을
+# 지원한다고 해서 generic aggregate 문장을 여는 것은 아니다. 아래 Q12 전용 shape 검증을 모두
+# 통과한 investment_amount 집계 비교에만 사용한다.
+OPERATION_AGGREGATE = "aggregate"
 
 # Fact 정규화 단위의 한국어 표기.
 #
@@ -1648,6 +1655,12 @@ def _comparison_sentence(result: AgentExecutionResult) -> str:
     계산하면 반올림 자릿수가 계산 계층과 달라질 수 있고, 그러면 답변에 실린 수치와 우열 판정의
     근거가 된 수치가 서로 다른 값이 된다(calculator.compare_calculations).
     """
+    if any(
+        calculation.operation == OPERATION_AGGREGATE
+        for calculation in result.calculations
+    ):
+        return _facility_investment_aggregate_comparison_sentence(result)
+
     if len(result.comparisons) > 1:
         raise UnsupportedResultShapeError(
             f"ComparisonResult가 {len(result.comparisons)}건입니다. "
@@ -1681,6 +1694,213 @@ def _comparison_sentence(result: AgentExecutionResult) -> str:
         f"{right.subject}{_topic_particle(right.subject)} {right.value}입니다.",
         _relation_clause(comparison.relation, left=left, right=right),
     )
+
+
+def _facility_investment_aggregate_comparison_sentence(
+    result: AgentExecutionResult,
+) -> str:
+    """Q12의 기업별 시설투자 합계 두 건과 확정된 우열을 문장으로 옮긴다.
+
+    ``aggregate`` 일반 문장이 아니다. 두 Calculation이 결과의 모든 investment_amount Fact를
+    기업별로 나누어 직접 참조하고, 유일한 Comparison이 그 두 Calculation을 정확히 가리키는
+    모양만 받는다. 값은 CalculationResult에서, 관계는 ComparisonResult에서 읽으며 이 함수는
+    합산이나 대소 판정을 수행하지 않는다.
+    """
+    if len(result.comparisons) != 1:
+        raise UnsupportedResultShapeError(
+            f"시설투자 집계 비교에는 ComparisonResult가 1건이어야 합니다: "
+            f"{len(result.comparisons)}건."
+        )
+
+    if len(result.calculations) != 2:
+        raise UnsupportedResultShapeError(
+            f"시설투자 집계 비교에는 aggregate Calculation이 2건이어야 합니다: "
+            f"{len(result.calculations)}건."
+        )
+
+    operations = [calculation.operation for calculation in result.calculations]
+
+    if any(operation != OPERATION_AGGREGATE for operation in operations):
+        raise UnsupportedResultShapeError(
+            "시설투자 집계 비교에 aggregate가 아닌 Calculation이 섞여 있습니다: "
+            f"{operations}."
+        )
+
+    calculation_ids = [
+        calculation.calculation_id for calculation in result.calculations
+    ]
+
+    if len(set(calculation_ids)) != len(calculation_ids):
+        raise UnsupportedResultShapeError(
+            "시설투자 집계 Calculation의 식별자가 중복되어 비교 참조를 하나로 "
+            "해소할 수 없습니다."
+        )
+
+    comparison = result.comparisons[0]
+
+    if (
+        comparison.left.input_type is not ResultInputType.CALCULATION
+        or comparison.right.input_type is not ResultInputType.CALCULATION
+    ):
+        raise UnsupportedResultShapeError(
+            f"시설투자 집계 우열 판정 {comparison.comparison_id!r}은 aggregate "
+            "Calculation 두 건을 참조해야 합니다."
+        )
+
+    if comparison.left == comparison.right:
+        raise UnsupportedResultShapeError(
+            f"시설투자 집계 우열 판정 {comparison.comparison_id!r}의 left와 right가 "
+            f"같은 Calculation({comparison.left.input_id!r})을 가리킵니다."
+        )
+
+    compared_ids = {comparison.left.input_id, comparison.right.input_id}
+
+    if compared_ids != set(calculation_ids):
+        raise UnsupportedResultShapeError(
+            f"시설투자 집계 우열 판정 {comparison.comparison_id!r}이 결과의 aggregate "
+            f"Calculation 두 건을 정확히 참조하지 않습니다: {sorted(compared_ids)}."
+        )
+
+    fact_ids = [fact.fact_id for fact in result.facts]
+
+    if len(set(fact_ids)) != len(fact_ids):
+        raise UnsupportedResultShapeError(
+            "시설투자 Fact 식별자가 중복되어 aggregate 입력을 하나로 해소할 수 없습니다."
+        )
+
+    left_calculation = _referenced_calculation(
+        result, comparison.left.input_id
+    )
+    right_calculation = _referenced_calculation(
+        result, comparison.right.input_id
+    )
+    left, left_fact_ids = _facility_investment_aggregate_operand(
+        result, left_calculation
+    )
+    right, right_fact_ids = _facility_investment_aggregate_operand(
+        result, right_calculation
+    )
+
+    if left.name == right.name:
+        raise UnsupportedResultShapeError(
+            f"시설투자 aggregate 두 건이 같은 company {left.name!r}를 가리킵니다. "
+            "서로 다른 두 기업의 비교가 아닙니다."
+        )
+
+    referenced_fact_ids = left_fact_ids | right_fact_ids
+
+    if referenced_fact_ids != set(fact_ids):
+        raise UnsupportedResultShapeError(
+            "시설투자 aggregate 두 건이 결과의 investment_amount Fact 전체를 정확히 "
+            "참조하지 않습니다. 참조되지 않거나 결과 밖인 Fact를 무시하지 않습니다."
+        )
+
+    if left_calculation.unit != right_calculation.unit:
+        raise UnsupportedResultShapeError(
+            "시설투자 aggregate 두 건의 단위가 다릅니다: "
+            f"{left_calculation.unit!r} / {right_calculation.unit!r}."
+        )
+
+    return _join(
+        f"{left.subject}{_topic_particle(left.subject)} {left.value}이고, "
+        f"{right.subject}{_topic_particle(right.subject)} {right.value}입니다.",
+        _relation_clause(comparison.relation, left=left, right=right),
+    )
+
+
+def _facility_investment_aggregate_operand(
+    result: AgentExecutionResult,
+    calculation: CalculationResult,
+) -> tuple[_ComparisonOperand, set[str]]:
+    """한 aggregate가 직접 참조하는 investment_amount Fact에서 기업명만 해소한다."""
+    input_ids: list[str] = []
+    sources: list[Fact] = []
+
+    for item in calculation.inputs:
+        if item.input_type is not ResultInputType.FACT:
+            raise UnsupportedResultShapeError(
+                f"시설투자 aggregate {calculation.calculation_id!r}이 원천 Fact가 아닌 "
+                f"{item.input_type.value!r} 입력 {item.input_id!r}을 참조합니다."
+            )
+
+        input_ids.append(item.input_id)
+        sources.append(_referenced_fact(result, item.input_id))
+
+    if len(set(input_ids)) != len(input_ids):
+        raise UnsupportedResultShapeError(
+            f"시설투자 aggregate {calculation.calculation_id!r}이 같은 Fact를 여러 번 "
+            "참조합니다. 중복 합산 여부를 문장 계층에서 추측하지 않습니다."
+        )
+
+    unsupported_metrics = sorted(
+        {
+            fact.metric.value
+            for fact in sources
+            if fact.metric is not MetricConcept.INVESTMENT_AMOUNT
+        }
+    )
+
+    if unsupported_metrics:
+        raise UnsupportedResultShapeError(
+            f"시설투자 aggregate {calculation.calculation_id!r}에 investment_amount가 "
+            f"아닌 지표가 있습니다: {unsupported_metrics}. generic aggregate 문장은 "
+            "지원하지 않습니다."
+        )
+
+    company = _single_source_attribute(
+        calculation, sources, attribute="company"
+    )
+
+    if not str(company).strip():
+        raise UnsupportedResultShapeError(
+            f"시설투자 aggregate {calculation.calculation_id!r}의 company가 비어 있습니다."
+        )
+
+    return (
+        _ComparisonOperand(
+            name=company,
+            subject=f"{company}의 시설투자 합계",
+            value=_aggregate_calculation_value(calculation),
+        ),
+        set(input_ids),
+    )
+
+
+def _aggregate_calculation_value(calculation: CalculationResult) -> str:
+    """aggregate의 저장된 값을 산술 없이 사용자 단위 표기로 옮긴다."""
+    if calculation.value is not None:
+        try:
+            numeric_value = Decimal(str(calculation.value))
+        except (InvalidOperation, ValueError):
+            numeric_value = None
+
+        if numeric_value is None or not numeric_value.is_finite():
+            raise UnsupportedResultShapeError(
+                f"시설투자 aggregate {calculation.calculation_id!r}의 value를 수치로 "
+                f"표현할 수 없습니다: {calculation.value!r}."
+            )
+
+    label = (
+        FACT_NORMALIZED_UNIT_LABELS.get(calculation.unit)
+        if calculation.unit is not None
+        else None
+    )
+
+    if calculation.unit is not None and label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 시설투자 aggregate 단위입니다: "
+            f"{calculation.unit!r}. FACT_NORMALIZED_UNIT_LABELS에 추가하십시오."
+        )
+
+    rendered = _value_with_unit(calculation.value, label)
+
+    if rendered is None:
+        raise MissingAnswerSupportError(
+            f"시설투자 aggregate {calculation.calculation_id!r}에 값과 단위가 모두 "
+            "갖춰진 표현이 없습니다."
+        )
+
+    return rendered
 
 
 def _relation_clause(

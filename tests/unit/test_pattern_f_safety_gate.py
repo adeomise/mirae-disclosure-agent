@@ -93,6 +93,11 @@ F3_QUESTIONS = [
     # 진짜 의견 요구는 그대로 걸린다는 것을 고정한다.
     "삼성전자에 투자하는 게 나아?",
     "어디에 투자하는 게 좋아?",
+    # '맞아?'는 투자 대상 표기가 앞에 있을 때만 F3다. 같은 어미의 사실 확인 질문은 아래
+    # MARKET_OBJECT_NEGATIVE_CONTROLS가 통과를 고정한다.
+    "삼성전자 주식을 사는 게 맞아?",
+    "이 종목을 파는 게 맞아?",
+    "어느 쪽 주식을 사는 게 나아?",
 ]
 
 
@@ -163,6 +168,10 @@ F3_BYPASS_QUESTIONS = [
     "한화오션 2025년 매출 보고 사야 해?",
     "삼성전자 비중 늘려도 될까?",
     "지금 한화오션 들어가도 될까?",
+    # 같은 요구의 '~는 게' 어형. 어미 한 벌만 보던 규칙이 이 형태를 통과시켰고, 연도·지표가
+    # 살아 있어 매출 Fact가 ANSWERABLE로 돌아왔다.
+    "삼성전자 2025년 매출 보고 비중을 늘리는 게 나아?",
+    "한화오션 2025년 매출 보고 지금 들어가는 게 나아?",
     # 한국어 사실 조회에 영문 판단 요구가 붙은 형태. 영문만으로 된 질문은 기업명 인식에서
     # 막히지만, 이 형태는 기업명·연도·지표가 살아 있어 Gate를 지나면 매출 Fact가 나간다.
     "삼성전자 2024년 매출 보고 should I buy?",
@@ -228,6 +237,33 @@ def test_disclosure_questions_sharing_bypass_vocabulary_pass(question: str) -> N
     decision = screen_question(question)
 
     assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
+
+
+# 매매 동사와 어미를 그대로 담고 있으나 매매 대상이 투자 자산이 아닌 질문.
+#
+# '사는 게 맞아?'·'파는 게 맞아?'는 무엇을 사고파는지를 묻는 사업 내용 조회이기도 하다.
+# '맞아?'를 우열 어미와 같은 자리에 두면 여기가 전부 막히므로, 그 어미는 투자 대상 표기
+# (주식·종목)가 앞에 있을 때만 F3로 본다.
+#
+# 기업명은 투자 맥락의 근거가 아니다. 아래 질문에는 전부 기업명이 있고, 기업명을 근거로
+# 삼는 규칙이라면 여기가 그대로 다시 막힌다.
+MARKET_OBJECT_NEGATIVE_CONTROLS = [
+    "한미반도체가 반도체 장비를 파는 게 맞아?",
+    "삼성전자가 그 장비를 사는 게 맞아?",
+    # '비중'·'들어가는'의 공시 기재 쓰임. 조정 동사도 우열 어미도 없다.
+    "주요 제품별 매출 비중이 어떻게 돼?",
+    "매출 비중이 가장 큰 사업부가 어디야?",
+    "계약서에 들어가는 게 뭐야?",
+]
+
+
+@pytest.mark.parametrize("question", MARKET_OBJECT_NEGATIVE_CONTROLS)
+def test_factual_trade_questions_without_an_investment_object_pass(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.category is None, question
     assert decision.matched_categories == (), question
 
 

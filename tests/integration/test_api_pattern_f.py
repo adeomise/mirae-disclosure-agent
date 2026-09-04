@@ -87,8 +87,18 @@ def test_pattern_f_rejects_before_corpus_access(
         "삼성전자 2024년 매출 기준으로 투자해도 괜찮아?",
         "HD현대중공업이랑 삼성중공업 2025년 영업이익률 비교해서 어느 쪽 주식을 사는 게 나아?",
         "한화오션 2025년 매출 보고 사야 해?",
+        # 같은 요구의 '~는 게' 어형. 어미 한 벌만 보던 규칙이 통과시키던 형태다.
+        "삼성전자 2025년 매출 보고 비중을 늘리는 게 나아?",
+        "한화오션 2025년 매출 보고 지금 들어가는 게 나아?",
     ],
-    ids=["buy-decision", "invest-okay", "compare-then-pick", "should-buy"],
+    ids=[
+        "buy-decision",
+        "invest-okay",
+        "compare-then-pick",
+        "should-buy",
+        "increase-weight",
+        "enter-now",
+    ],
 )
 def test_disguised_investment_advice_is_refused_before_corpus_access(
     question: str,

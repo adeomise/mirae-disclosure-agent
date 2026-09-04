@@ -19,6 +19,11 @@
   (다중 기간 질문 fail-closed 가드 반영분, base `develop` = `eb70f12`). 두 문항의 정지 지점이
   `query_plan/unsupported_metric`에서 `routing/unimplemented_intent`로 바뀌어 아래 표를
   갱신했습니다. 지원 상태(`NOT_IMPLEMENTED`)는 그대로입니다.
+- **Q14 재측정: 2026-09-04**, 브랜치 `fix/hcx-v3-transport-readiness`
+  (연도 없는 Pattern E 계획을 허용한 반영분). 정지 지점이 `query_plan/missing_year`에서
+  `filing_discovery`/`ambiguous_root`로 바뀌어 아래 표를 갱신했습니다. 지원 상태도
+  `NOT_IMPLEMENTED`에서 `PASS_ACTUAL`로 바뀝니다 — 이 문항의 정답이 답변이 아니라 모호
+  판정이고(D8), 그 판정을 실측 코퍼스에서 확인했기 때문입니다.
 - 위에 적은 문항 외에는 재측정하지 않았습니다. 나머지 문항의 값은 최초 측정일 기준입니다.
 
 본 문서에는 실제 공시 값·접수번호를 기재하지 않습니다. 상태와 건수만 기록합니다.
@@ -55,8 +60,8 @@
 | Q11 | D | `NOT_IMPLEMENTED` | – | 영업이익률 미지원으로 `query_plan/unsupported_metric` BLOCKED. Q10과 달리 지표에서 먼저 걸려 오라우팅되지 않음 | Q08과 함께 |
 | Q12 | D | `NOT_IMPLEMENTED` | – | 신규시설투자 subtype은 Q15에서 지원됐으나 집계 경로가 없음. 기업이 둘이라 `cross_entity_compare`로 분류되고 handler가 없어 `routing/unimplemented_intent`로 BLOCKED. 이력 표현이 없어 Pattern E로 새지도 않음 | 거래소공시 집계 경로. D1 확정 후 |
 | Q13 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 2 · Evidence 9, `chain_complete=True` | 회귀 fixture에 고정 완료(`Q13`) |
-| Q14 | E | `NOT_IMPLEMENTED` | Synthetic(능력 일부) | 질문이 연/월을 주지 않아 `query_plan/missing_year`로 BLOCKED. **정답은 `UNRESOLVED`/`AMBIGUOUS_MATCH`로 확정됨**(D8) — 같은 제출일·같은 계약상대방으로 원공시가 복수이고 질문이 둘을 구분하지 못하므로, 루트를 골라 `PARTIALLY_ANSWERABLE`을 내는 것은 정답이 아니다. 체인 미완결 → `PARTIALLY_ANSWERABLE` 경로 자체는 `tests/integration/test_pattern_e.py`에서 합성 검증됨 | `missing_year` 차단을 푸는 것. 루트가 복수임을 실제로 판정해 `ambiguous_root`에 닿게 해야 함. 공시유보(`WITHHELD_IN_SOURCE`)는 **Contract 확정됨**(D9), production 판정은 미구현 |
-| Q15 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 3 · Evidence 8, `chain_complete=True`. 질문에 연도가 없어도 신규시설투자는 공시일 창 없이 루트를 찾음(`requires_filing_anchor=False`). **"몇 번 바뀌었나"를 정정 3건으로 셀지 FieldChange 4건으로 셀지는 미정** — producer는 둘 다 보존하며 세는 규칙은 answer-builder 결정 | 회귀 fixture에 고정 완료(`Q15`). lifecycle은 `future` 유지 — active 전환은 "몇 번" 세는 규칙 확정과 함께 |
+| Q14 | E | `PASS_ACTUAL` | Actual | 없음. **정답이 답변 아님**(D8)이며 그 정답을 실측으로 확인함. `COMPLETED`/`UNRESOLVED`/`AMBIGUOUS_MATCH`, 정지 지점 `filing_discovery`/`ambiguous_root`, 원공시 후보 12건에서 루트를 고르지 않음 — EventHistory 0 · EventLink 0 · Evidence 0. API는 HTTP 200(실행이 끝나지 못한 BLOCKED가 아니라 끝난 뒤의 미해결 판정이므로 422가 아님). 이전에는 `query_plan/missing_year`로 막혔고 그 사유는 실제로 일어난 일과 달랐음 — 질문이 연도를 밝히지 않은 것이 원인이 아니라 루트를 하나로 좁힐 조건이 없는 것이 원인이며, 연도 없는 Pattern E 계획을 허용해 판정을 후보 개수가 보이는 handler로 옮김. **계약상대방 검증은 여전히 없음(C3)** — 원공시가 1건뿐인 기업에서는 상대방을 본문과 대조하지 않은 채 답이 나가며, 그 잔여 경계는 `tests/integration/test_pattern_e_q15.py`에 고정 | C3(계약상대방 기반 문서 확정). 루트가 1건으로 좁혀진 뒤에야 공시유보(`WITHHELD_IN_SOURCE`, **Contract 확정됨** D9, production 판정은 미구현)와 역방향·후속 연결 체인이 검증 대상이 됨. 회귀 fixture(`scripts/corpus_regression_cases.jsonl`) 등재는 미완 — 현재는 `tests/integration/test_pattern_e_q15.py`·`tests/integration/test_api_q14_corpus.py`가 고정 |
+| Q15 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 3 · Evidence 8, `chain_complete=True`. 질문에 연도가 없어도 공시일 창 없이 루트를 찾음. 공시 유형으로 가르지 않는다 — Pattern E는 유형과 무관하게 공시일 기준점 없는 계획을 만들고, 루트를 하나로 좁힐 수 있는지는 handler가 실제 후보 개수로 판정한다(후보가 여럿이면 `ambiguous_root`). 이 질문은 후보가 1건이라 답에 이른다. **"몇 번 바뀌었나"를 정정 3건으로 셀지 FieldChange 4건으로 셀지는 미정** — producer는 둘 다 보존하며 세는 규칙은 answer-builder 결정 | 회귀 fixture에 고정 완료(`Q15`). lifecycle은 `future` 유지 — active 전환은 "몇 번" 세는 규칙 확정과 함께 |
 | Q16 | F | `PARTIAL` | Actual | 거부되긴 하나 사유가 다름. `query_plan/unsupported_period`(분기·반기 미지원)로 BLOCKED이며 **기간 밖 판정이 아님**. 연 단위로 물으면(`삼성전자 2027년 매출액이 얼마야?`) 이 차단이 사라지고 `COMPLETED`/`UNANSWERABLE`/`not_found`(`filing_discovery`/`no_matching_filing`)로 답합니다 — 검색 실패이지 기간 밖 판정이 아님 | F1 Gate 구현. 사유 코드는 확정됨(`OUT_OF_DATA_RANGE`, PR #29) |
 | Q17 | F | `PARTIAL` | Actual | `query_plan/unknown_company`로 BLOCKED. 기업명이 없어서 막힌 것이지 "시장 반응은 보유 문서군이 아니다"라는 판정이 아님 | F2 Gate 구현. 사유 코드는 확정됨(`OUT_OF_SCOPE_DATA`, PR #29) |
 | Q18 | F | `PASS_ACTUAL` | Actual | 없음. F3 Gate가 retrieval 이전에 판정. `COMPLETED`/`UNANSWERABLE`/`out_of_scope_policy`, `answerability_detail`=`answerability_gate`/`investment_advice`, Fact 0 · Evidence 0. 이전에는 `query_plan/missing_year`(연도 부재)로 막힌 우연한 방어였고 **`삼성전자 2024년 매출 기준으로 지금 사도 될까?`는 그대로 통과**했으나, 그 형태도 같은 결과로 거부됨 | 판정 동작은 `tests/unit/test_pattern_f_safety_gate.py`에 고정 완료 |

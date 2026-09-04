@@ -477,23 +477,25 @@ class EventSubtypeRule:
         이 유형으로 끌려온다. 대상(사옥·제조시설)과 행위(신축·증설)가 함께 있어야 신규시설투자
         공시를 가리킨 것으로 본다.
 
-    requires_filing_anchor
-        원공시를 지목하려면 질문이 공시 시점(연도)을 밝혀야 하는가.
+    공시 시점(연도) 요구는 이 규칙이 정하지 않는다:
+        예전에는 유형마다 requires_filing_anchor를 두어 공급계약 이력 질문에 연도를
+        요구했다. 그 요구가 Q14("포드랑 맺었던 배터리 공급계약, 지금 어떻게 됐어?")를
+        missing_year로 막았고, 그 사유는 실제로 일어난 일과 달랐다. 질문은 연도를 밝히지
+        않았을 뿐이고, 실제로 답하지 못하는 까닭은 그 기업의 원공시 후보가 여럿이어서
+        어느 계약인지 좁히지 못하는 것이다.
 
-        공급계약은 한 기업이 해마다 여러 건을 공시하므로 시점이 없으면 어느 계약인지 정할 수
-        없다. 그래서 True다. 이 값이 Q14("포드랑 맺었던 배터리 공급계약")를 계속 막는다.
-        상대방으로 계약을 특정하려면 본문 대조가 필요하고 그것은 이번 범위 밖이다.
-
-        신규시설투자는 원공시가 유일하지 않을 수 있지만, 유일하지 않을 때 handler가
-        ambiguous_root로 막는다(agent.handlers.event_history). 시점 없이도 후보를 좁혀 볼 수
-        있고 좁히지 못하면 답하지 않으므로 False로 둔다. 값을 고르는 자리가 생기지 않는다.
+        후보가 여럿인지는 코퍼스를 열어야 알 수 있으므로 이 계층이 판정할 수 없다. 그래서
+        연도 없는 이력 질문을 계획 단계에서 막지 않고, 후보를 하나로 좁히지 못하면 handler가
+        ambiguous_root로 막는다(agent.handlers.event_history). 막는 자리를 후보 개수가
+        보이는 곳으로 옮긴 것이며, 답하지 못하는 질문이 답하게 되는 것이 아니다.
+        _reject_unsupported_relative_period·_looks_like_business_profile이 같은 이유로
+        같은 선택을 했다.
     """
 
     subtype: str
     tokens: tuple[str, ...] = ()
     target_tokens: tuple[str, ...] = ()
     action_tokens: tuple[str, ...] = ()
-    requires_filing_anchor: bool = True
 
     def matches(self, question: str) -> bool:
         if any(token in question for token in self.tokens):
@@ -522,7 +524,6 @@ EVENT_SUBTYPE_RULES: tuple[EventSubtypeRule, ...] = (
     EventSubtypeRule(
         subtype=EVENT_SUBTYPE_SUPPLY_CONTRACT,
         tokens=("공급계약", "수주계약", "판매계약"),
-        requires_filing_anchor=True,
     ),
     EventSubtypeRule(
         subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
@@ -533,7 +534,6 @@ EVENT_SUBTYPE_RULES: tuple[EventSubtypeRule, ...] = (
         # 행위는 시설을 새로 짓거나 늘리는 말이다. '투자'를 여기 두는 것은 대상 표현과 함께
         # 있을 때만 읽히기 때문이다. 단독으로는 어떤 유형도 열지 못한다.
         action_tokens=("신축", "증설", "건설", "투자"),
-        requires_filing_anchor=False,
     ),
 )
 
@@ -1147,10 +1147,12 @@ class QueryPlan:
             Q07("매출이 작년보다 얼마나 늘었어?")처럼 지금 missing_year로 막히는 질문들이
             연도 없이 흘러 들어간다.
 
-        어떤 공시 유형이 기준점 없이 열려도 되는가는 여기서 정하지 않는다.
-        EventSubtypeRule.requires_filing_anchor가 정하며, 이 계획을 만드는
-        _build_event_history_plan이 그 값을 보고 _require_years를 부를지 말지 고른다.
-        두 곳에 같은 규칙을 두면 어긋날 수 있어 한쪽만 정본으로 둔다.
+        공시 유형으로 나누지 않는다:
+            예전에는 EventSubtypeRule.requires_filing_anchor가 유형마다 기준점을 요구할지
+            정했고, 공급계약은 요구하는 쪽이었다. 그 요구를 없앴다. 기준점이 없을 때 답할 수
+            있는지는 유형이 아니라 그 기업의 원공시 후보가 몇 건인지가 정하며, 그것은 코퍼스를
+            열어야 알 수 있어 이 계층이 판정할 수 없다. 유형으로 미리 가르면 후보가 하나뿐인
+            질문까지 막고, 막힌 사유도 실제와 달라진다(EventSubtypeRule 참조).
         """
         if self.intent == INTENT_EVENT_SUMMARY:
             # __post_init__이 이미 이 집합 밖의 정책을 막는다. 여기서 다시 목록을 적지 않고
@@ -1731,9 +1733,9 @@ def _extract_event_subtype_rule(question: str) -> EventSubtypeRule:
         선언 순서로 고르는 것은 근거가 아니다. 순서는 이 파일을 쓴 사람이 정한 것이지 질문이
         정한 것이 아니다.
 
-    세부유형 문자열이 아니라 규칙을 돌려주는 이유는, 호출부가 유형 이름뿐 아니라 그 유형이
-    공시 시점을 요구하는지(requires_filing_anchor)까지 알아야 하기 때문이다. 두 값을 각각
-    다시 조회하면 같은 질문을 두 번 해석하게 되고, 어휘가 바뀔 때 한쪽만 고쳐질 수 있다.
+    세부유형 문자열이 아니라 규칙을 돌려주는 이유는, 호출부가 유형 이름뿐 아니라 그 유형을
+    무엇으로 알아봤는지까지 함께 다룰 수 있어야 하기 때문이다. 두 값을 각각 다시 조회하면
+    같은 질문을 두 번 해석하게 되고, 어휘가 바뀔 때 한쪽만 고쳐질 수 있다.
     """
     matched = _find_event_subtype_rules(question)
 
@@ -2395,8 +2397,13 @@ def _build_contract_fact_plan(
 
     연도를 요구하는 이유:
         한 기업이 해마다 여러 건의 공급계약을 공시한다. 시점이 없으면 어느 계약인지 정할 수
-        없고, 상대방만으로 좁히는 경로는 아직 없다. EventSubtypeRule.requires_filing_anchor가
-        공급계약에 대해 True인 것과 같은 판단이다.
+        없고, 상대방만으로 좁히는 경로는 아직 없다.
+
+        이력 조회(_build_event_history_plan)와 다른 자리다. 그쪽은 연도가 없어도 계획을
+        만들고, 후보를 하나로 좁히지 못하면 handler가 ambiguous_root로 막는다. 이쪽에는
+        그 자리가 없다. 계약 1건의 값을 묻는 질문이라 후보가 여럿일 때 무엇으로 막을지는
+        handler의 missing_counterparty가 따로 정하고 있으며, 그 경로는 상대방을 읽은
+        계획을 전제한다. 두 경로의 요구가 다른 것은 답의 모양이 다르기 때문이다.
 
     요구 필드를 SUPPORTED_CONTRACT_FIELDS로 고정하는 이유:
         이 구현이 답 문장까지 옮길 수 있는 형태가 그 하나다. 부분집합을 통과시키면 계획은
@@ -2712,17 +2719,33 @@ def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> Quer
     판정이 다중 기간 판정보다 앞이라 이 builder에 먼저 도달하며, 그 순서가 규약이다.
 
     연도가 없는 질문:
+        Q14("LG에너지솔루션이 포드랑 맺었던 배터리 공급계약, 지금 어떻게 됐어?")와
         Q15("레인보우로보틱스 사옥·제조시설 신축 투자, 그동안 계획이 몇 번 바뀌었어?")처럼
-        공시 시점을 밝히지 않는 이력 질문이 있다. 그때 연도를 요구할지는 공시 유형이 정한다
-        (EventSubtypeRule.requires_filing_anchor).
+        공시 시점을 밝히지 않는 이력 질문이 있다. 유형과 무관하게 years를 비운 계획을
+        만든다.
 
-        요구하는 유형(공급계약)에서는 예전과 똑같이 missing_year로 막는다. 한 기업이 해마다
-        여러 건을 공시하므로 시점이 없으면 어느 계약인지 정할 수 없고, 상대방 이름으로
-        좁히려면 본문 대조가 필요하다. Q14가 이 자리에서 계속 막힌다.
+        예전에는 유형이 정했다(EventSubtypeRule.requires_filing_anchor). 공급계약은 요구하는
+        쪽이었고, 그래서 Q14가 이 자리에서 missing_year로 막혔다. 그 사유는 실제로 일어난
+        일과 달랐다. 질문이 연도를 못 밝힌 것이 문제가 아니라, 그 기업의 공급계약 원공시가
+        여러 건이라 어느 계약인지 좁히지 못하는 것이 문제다. 후보가 몇 건인지는 코퍼스를
+        열어야 알 수 있어 이 계층이 판정할 수 없으므로, 막는 자리를 후보 개수가 보이는
+        handler로 옮긴다.
 
-        요구하지 않는 유형(신규시설투자)에서는 years를 비운 계획을 만든다. handler가 공시일
-        창 없이 원공시 후보를 찾고, 후보가 여럿이면 ambiguous_root로 막는다. 계획도 handler도
-        후보 하나를 고르지 않는다.
+        handler는 공시일 창 없이 원공시 후보를 찾고, 후보가 여럿이면 ambiguous_root로
+        막는다(agent.handlers.event_history). 계획도 handler도 후보 하나를 고르지 않으며,
+        Q14는 그 경로로 COMPLETED·UNRESOLVED·AMBIGUOUS_MATCH가 된다.
+
+        후보가 하나뿐인 기업에서는 답이 나간다(C3 잔여 경계):
+            질문이 상대방("포드")을 적었어도 이 구현은 그 이름을 본문과 대조하지 않는다.
+            그래서 그 기업의 원공시가 한 건뿐이면 상대방이 맞는지 확인하지 않은 채 그 한 건의
+            이력을 답하게 된다. 계약상대방 기반 문서 확정(C3)이 들어오기 전까지 남는 경계이며,
+            보장으로 읽히지 않도록 회귀에 고정해 두었다
+            (tests/integration/test_pattern_e_q15.py의 C3 잔여 경계 시험).
+
+    월만 있고 연도가 없는 질문:
+        연도 요구가 남아 있는 자리는 여기 하나다. 월은 공시일 창을 좁히는 조건인데 연도가
+        없으면 창을 만들 수 없고, 그대로 두면 질문이 밝힌 '4월'이 계획에는 담기지만 조회에는
+        쓰이지 않아 사용자가 좁힌 범위가 조용히 사라진다. 후보 개수와 무관하게 막는다.
     """
     rule = _extract_event_subtype_rule(question)
 
@@ -2730,10 +2753,7 @@ def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> Quer
 
     month = _extract_month(question)
 
-    # 월만 있고 연도가 없으면 공시일 창을 만들 수 없다. 그대로 두면 질문이 밝힌 '4월'이
-    # 계획에는 담기지만 조회에는 쓰이지 않아, 사용자가 좁힌 범위가 조용히 사라진다.
-    # 유형이 기준점을 요구하지 않더라도 이 경우는 연도를 요구한다.
-    if rule.requires_filing_anchor or month is not None:
+    if month is not None:
         years = _require_years(years)
 
     return QueryPlan(

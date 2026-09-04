@@ -46,6 +46,10 @@ from typing import Any
 
 import pytest
 
+from disclosure_agent.agent.answer_builder import (
+    REASON_AMBIGUOUS_ROOT,
+    STAGE_FILING_DISCOVERY,
+)
 from disclosure_agent.agent.handlers.event_history import (
     EVENT_TYPE_BY_DOCUMENT_SUBTYPE,
     build_event_history_result,
@@ -63,6 +67,7 @@ from disclosure_agent.agent.query_analyzer import (
 )
 from disclosure_agent.agent.router import answer_question
 from disclosure_agent.common.enums import (
+    AnswerabilityReason,
     AnswerabilityStatus,
     ChainPolicy,
     EventLinkResolutionStatus,
@@ -89,6 +94,15 @@ Q12 = (
 Q14 = "LG에너지솔루션이 포드랑 맺었던 배터리 공급계약, 지금 어떻게 됐어?"
 
 REAL_COMPANIES = ("레인보우로보틱스", "LG이노텍", "LG에너지솔루션", "HD현대일렉트릭")
+
+# C3 잔여 경계를 고정하는 질문. 실측 코퍼스에서 공급계약 원공시가 한 건뿐인 기업을 쓴다.
+#
+# Q14와 같은 모양이되 상대방을 적지 않는다. 상대방을 적어도 결과는 같지만(이 구현은 그
+# 이름을 읽지 않는다), 적지 않아야 이 시험이 무엇을 고정하는지가 분명해진다. 고정하는 것은
+# '상대방을 확인했다'가 아니라 '후보가 하나뿐이면 답이 나간다'이다.
+SINGLE_ROOT_SUPPLY_CONTRACT_QUESTION = "삼성전자 공급계약, 지금 어떻게 됐어?"
+
+SINGLE_ROOT_COMPANIES = ("삼성전자",)
 
 # 합성 코퍼스에서 쓰는 이름. 실제 기업명을 쓰지 않는다.
 COMPANY = "테스트반도체(주)"
@@ -410,16 +424,48 @@ def test_facility_investment_question_with_a_month_still_requires_a_year() -> No
     assert error.value.reason == "missing_year"
 
 
-def test_supply_contract_history_question_still_requires_a_year() -> None:
+def test_supply_contract_history_question_no_longer_requires_a_year() -> None:
     """
-    공급계약 이력 질문의 연도 요구는 그대로다.
+    공급계약 이력 질문도 연도 없이 계획된다.
 
-    Q14가 이 자리에서 계속 막힌다. 상대방 이름('포드')으로 계약을 특정하려면 본문 대조가
-    필요하고 그것은 이번 범위 밖이다. 연도 요구를 유형과 무관하게 풀면 Q14가 근거 없이
-    어느 한 계약의 이력을 답하게 된다.
+    예전에는 이 자리가 Q14를 missing_year로 막았다. 그 사유는 실제로 일어난 일과 달랐다.
+    질문이 연도를 못 밝힌 것이 문제가 아니라, 그 기업의 공급계약 원공시가 여러 건이라 어느
+    계약인지 좁히지 못하는 것이 문제다. 후보가 몇 건인지는 코퍼스를 열어야 알 수 있으므로
+    질의 해석 계층이 판정할 수 없고, 막는 자리는 후보 개수가 보이는 handler다
+    (test_q14_is_unresolved_as_ambiguous_in_the_actual_corpus).
+
+    연도를 지어내지도 않는다. years가 비어 있는 것과 아무 연도나 채워 넣은 것은 다르며,
+    후자면 그 해에 공시된 다른 건의 이력을 답하게 된다.
+    """
+    plan = build_query_plan(Q14, known_companies=REAL_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_SUPPLY_CONTRACT
+    assert plan.chain_policy is ChainPolicy.FULL_CHAIN
+    assert plan.years == ()
+    assert plan.month is None
+
+    # 공시일 창을 만들지 않는다. 창이 있으면 그 밖의 원공시가 통째로 빠진다.
+    assert root_filing_window(plan) is None
+
+    # 상대방('포드')을 계획에 담지 않는다. handler가 읽지 않는 값을 담으면 질문이 좁힌
+    # 조건이 조용히 사라진 계획이 되고, 담기지 않았다는 사실이 C3 잔여 경계의 근거다.
+    assert plan.counterparty is None
+
+
+def test_supply_contract_history_question_with_a_month_still_requires_a_year() -> None:
+    """
+    공급계약 이력 질문도 월만 있고 연도가 없으면 막는다.
+
+    연도 요구가 남은 자리는 이 하나다. 월은 공시일 창을 좁히는 조건인데 연도가 없으면 창을
+    만들 수 없고, 그대로 진행하면 질문이 밝힌 '4월'이 조회에 쓰이지 않은 채 사라진다.
+    신규시설투자에 대해 같은 것을 고정하는 시험이 위에 있다.
     """
     with pytest.raises(UnsupportedQuestionError) as error:
-        build_query_plan(Q14, known_companies=REAL_COMPANIES)
+        build_query_plan(
+            "테스트반도체 4월에 공시한 공급계약, 나중에 바뀐 내용 있어?",
+            known_companies=KNOWN_COMPANIES,
+        )
 
     assert error.value.reason == "missing_year"
 
@@ -1009,12 +1055,21 @@ def test_q13_is_unchanged_in_the_actual_corpus() -> None:
 
 
 @pytest.mark.corpus
-def test_q14_stays_fail_closed_in_the_actual_corpus() -> None:
+def test_q14_is_unresolved_as_ambiguous_in_the_actual_corpus() -> None:
     """
-    Q14는 이번 PR에서 열리지 않는다.
+    Q14는 계획 단계를 지나 handler의 기존 모호 경로로 막힌다.
 
-    같은 Pattern E이고 같은 이력 표현을 쓰지만, 계약을 특정할 근거가 상대방 이름뿐이다.
-    연도 요구를 유형과 무관하게 풀었다면 여기서 값이 만들어지고 이 테스트가 깨진다.
+    예전에는 이 질문이 query_plan 단계에서 missing_year로 막혔다. 지금은 계획이 만들어지고,
+    그 기업의 공급계약 원공시가 여러 건이라 handler가 ambiguous_root로 막는다. 답하지 못하는
+    것은 같지만 사유가 실제로 일어난 일과 맞는다.
+
+    execution_status가 COMPLETED인 것이 이 변경의 핵심이다. 실행이 끝나지 못한 것(BLOCKED)이
+    아니라 실행을 끝까지 하고 나서 답을 확정하지 못했다는 판정이며, 그래야 API가 422가 아니라
+    200으로 이 판정을 그대로 내보낸다(tests/integration/test_api_q14_corpus.py).
+
+    루트를 하나 지어내지 않는 것을 함께 고정한다. 후속 정정·해지 체인이 한쪽에만 있다는
+    이유로 루트를 역으로 고르면 다른 계약의 이력을 그 계약의 이력이라고 말하게 되고, 그
+    오답은 형식상 완전한 답변으로 보인다.
     """
     corpus_root = _resolve_corpus_root()
 
@@ -1023,11 +1078,70 @@ def test_q14_stays_fail_closed_in_the_actual_corpus() -> None:
 
     result = answer_question(Q14, corpus_root=corpus_root)
 
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
+    assert result.answerability_reason is AnswerabilityReason.AMBIGUOUS_MATCH
+
+    # 루트를 고르지 않았다는 것이 이 판정의 내용이다.
     assert result.event_histories == []
     assert result.event_links == []
     assert result.evidence == []
-    assert result.answerability_status not in (
-        AnswerabilityStatus.ANSWERABLE,
-        AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+
+    # 막힌 자리가 계획이 아니라 문서 확정 단계여야 한다. 같은 UNRESOLVED라도 계획 단계에서
+    # 나온 것이면 이 변경이 되돌아간 것이다.
+    plan = build_query_plan(Q14, known_companies=REAL_COMPANIES)
+
+    internal = build_event_history_result(plan, corpus_root=corpus_root)
+
+    assert internal.blocked is not None
+    assert internal.blocked.stage == STAGE_FILING_DISCOVERY
+    assert internal.blocked.reason == REASON_AMBIGUOUS_ROOT
+
+
+@pytest.mark.corpus
+def test_single_root_supply_contract_history_is_answerable_c3_residual_gap() -> None:
+    """
+    C3 잔여 경계. **보장이 아니라 알려진 구멍이다.**
+
+    무엇을 고정하는가:
+        원공시가 한 건뿐인 기업에 연도 없는 공급계약 이력 질문을 하면 답이 나간다. 질문이
+        상대방을 적었더라도 이 구현은 그 이름을 본문과 대조하지 않으므로, 적힌 상대방이 그
+        계약의 상대방이 맞는지 확인하지 않은 채 그 한 건의 이력을 답하게 된다.
+
+    왜 고정하는가:
+        이 동작을 옳다고 주장하려는 것이 아니다. 고정해 두지 않으면 "연도 없는 이력 질문은
+        상대방을 확인하고 답한다"가 아무도 정하지 않은 채 보장으로 굳는다. 계약상대방 기반
+        문서 확정(C3)이 들어오면 이 시험이 깨져야 하고, 깨진 자리에서 무엇이 바뀌는지가
+        드러나야 한다.
+
+        같은 구멍이 신규시설투자에는 이미 있었다(requires_filing_anchor=False 시절). 이번
+        변경이 그 범위를 공급계약까지 넓혔다는 것이 여기 적어 두는 사실이다.
+
+    범위를 좁혀 두는 것:
+        연도를 밝힌 질문에는 해당하지 않는다. 그쪽은 공시일 창이 후보를 좁히고, 창 안에서도
+        여럿이면 ambiguous_root로 막힌다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    plan = build_query_plan(
+        SINGLE_ROOT_SUPPLY_CONTRACT_QUESTION,
+        known_companies=SINGLE_ROOT_COMPANIES,
     )
-    assert result.execution_issue is not None or result.answerability_reason is not None
+
+    assert plan.years == ()
+    assert plan.counterparty is None
+
+    internal = build_event_history_result(plan, corpus_root=corpus_root)
+
+    if internal.blocked is not None:
+        pytest.skip(
+            "이 코퍼스에서는 해당 기업의 공급계약 원공시가 한 건이 아닙니다: "
+            f"{internal.blocked.reason}."
+        )
+
+    # 상대방을 대조하지 않은 채 한 건이 선택되었다. C3가 들어오면 이 단언이 깨진다.
+    assert internal.status is AnswerabilityStatus.ANSWERABLE
+    assert internal.history is not None

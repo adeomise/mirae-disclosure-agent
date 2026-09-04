@@ -144,6 +144,19 @@ REASON_AMBIGUOUS_CANDIDATES = "ambiguous_candidates"
 REASON_NO_ORIGINAL_FILING = "no_original_filing"
 REASON_AMBIGUOUS_ROOT = "ambiguous_root"
 
+# 질문이 계약 상대방을 지목했는데 그 이름을 대조할 수 없어 원공시 1건을 확정하지 못한 경우.
+#
+# ambiguous_root와 나눈다. 그쪽은 후보가 여럿이라 못 고른 것이고, 이쪽은 후보가 하나인데 그
+# 하나가 질문이 가리킨 계약인지 확인할 수 없는 것이다. 후보 개수가 1과 N으로 다르므로 같은
+# 사유로 묶으면 진단이 사실과 어긋난다("후보가 1건이라 특정할 수 없습니다"는 말이 안 된다).
+#
+# canonical 사유는 ambiguous_root와 같은 AMBIGUOUS_MATCH다. 둘 다 대상 문서를 확정하지 못한
+# 판정이고, 새 공개 사유를 만들 만큼 다른 것이 아니다. 어느 판정이었는지는 이 값으로 구분된다.
+#
+# 계약상대방 기반 문서 확정(C3)이 들어오면 이 사유는 사라진다. 그때는 이름을 대조해 후보를
+# 좁히므로, 맞으면 답하고 틀리면 no_matching_counterparty가 된다.
+REASON_UNVERIFIED_COUNTERPARTY = "unverified_counterparty"
+
 # Pattern E가 계획 입구에서 만드는 사유.
 #
 # 계획이 지목한 공시 세부유형에 대응하는 이벤트 유형이 없다. 위의 두 사유와 달리 코퍼스를

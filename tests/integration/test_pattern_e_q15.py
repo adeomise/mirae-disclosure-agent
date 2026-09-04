@@ -46,6 +46,11 @@ from typing import Any
 
 import pytest
 
+from disclosure_agent.agent.answer_builder import (
+    REASON_AMBIGUOUS_ROOT,
+    REASON_UNVERIFIED_COUNTERPARTY,
+    STAGE_FILING_DISCOVERY,
+)
 from disclosure_agent.agent.handlers.event_history import (
     EVENT_TYPE_BY_DOCUMENT_SUBTYPE,
     build_event_history_result,
@@ -63,6 +68,7 @@ from disclosure_agent.agent.query_analyzer import (
 )
 from disclosure_agent.agent.router import answer_question
 from disclosure_agent.common.enums import (
+    AnswerabilityReason,
     AnswerabilityStatus,
     ChainPolicy,
     EventLinkResolutionStatus,
@@ -89,6 +95,24 @@ Q12 = (
 Q14 = "LG에너지솔루션이 포드랑 맺었던 배터리 공급계약, 지금 어떻게 됐어?"
 
 REAL_COMPANIES = ("레인보우로보틱스", "LG이노텍", "LG에너지솔루션", "HD현대일렉트릭")
+
+# 실측 코퍼스에서 공급계약 원공시가 한 건뿐인 기업을 쓰는 대조쌍.
+#
+# 두 질문의 차이는 상대방을 적었는가 하나뿐이다. 그 하나가 결과를 가른다는 것이 이 쌍이
+# 고정하는 내용이며, fail-close의 기준이 '후보가 하나'가 아니라 '확인할 수 없는 조건을 걸고
+# 물었다'임을 보인다.
+SINGLE_ROOT_SUPPLY_CONTRACT_QUESTION = "삼성전자 공급계약, 지금 어떻게 됐어?"
+
+# Q14와 같은 표기('<상대방>랑 맺었던')를 쓴다. 상대방 이름은 실제 계약 상대가 아니어도 된다.
+# 이 구현은 그 이름을 대조하지 않으며, 대조하지 못한다는 것이 막는 이유이기 때문이다.
+SINGLE_ROOT_COUNTERPARTY_QUESTION = "삼성전자가 테슬라랑 맺었던 공급계약 지금 어떻게 됐어?"
+
+SINGLE_ROOT_COMPANIES = ("삼성전자",)
+
+# 상대방을 적었지만 원공시가 여럿인 질문. 상대방 판정이 ambiguous_root를 가로채지 않는지 본다.
+MULTI_ROOT_COUNTERPARTY_QUESTION = (
+    "LG에너지솔루션이 테슬라랑 맺었던 공급계약 지금 어떻게 됐어?"
+)
 
 # 합성 코퍼스에서 쓰는 이름. 실제 기업명을 쓰지 않는다.
 COMPANY = "테스트반도체(주)"
@@ -410,16 +434,49 @@ def test_facility_investment_question_with_a_month_still_requires_a_year() -> No
     assert error.value.reason == "missing_year"
 
 
-def test_supply_contract_history_question_still_requires_a_year() -> None:
+def test_supply_contract_history_question_no_longer_requires_a_year() -> None:
     """
-    공급계약 이력 질문의 연도 요구는 그대로다.
+    공급계약 이력 질문도 연도 없이 계획된다.
 
-    Q14가 이 자리에서 계속 막힌다. 상대방 이름('포드')으로 계약을 특정하려면 본문 대조가
-    필요하고 그것은 이번 범위 밖이다. 연도 요구를 유형과 무관하게 풀면 Q14가 근거 없이
-    어느 한 계약의 이력을 답하게 된다.
+    예전에는 이 자리가 Q14를 missing_year로 막았다. 그 사유는 실제로 일어난 일과 달랐다.
+    질문이 연도를 못 밝힌 것이 문제가 아니라, 그 기업의 공급계약 원공시가 여러 건이라 어느
+    계약인지 좁히지 못하는 것이 문제다. 후보가 몇 건인지는 코퍼스를 열어야 알 수 있으므로
+    질의 해석 계층이 판정할 수 없고, 막는 자리는 후보 개수가 보이는 handler다
+    (test_q14_is_unresolved_as_ambiguous_in_the_actual_corpus).
+
+    연도를 지어내지도 않는다. years가 비어 있는 것과 아무 연도나 채워 넣은 것은 다르며,
+    후자면 그 해에 공시된 다른 건의 이력을 답하게 된다.
+    """
+    plan = build_query_plan(Q14, known_companies=REAL_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_SUPPLY_CONTRACT
+    assert plan.chain_policy is ChainPolicy.FULL_CHAIN
+    assert plan.years == ()
+    assert plan.month is None
+
+    # 공시일 창을 만들지 않는다. 창이 있으면 그 밖의 원공시가 통째로 빠진다.
+    assert root_filing_window(plan) is None
+
+    # 상대방('포드')은 계획에 담긴다. 조회 조건으로 쓰이지는 않으며, handler가 이 값을 보고
+    # 원공시 1건을 확정하지 않는다(unverified_counterparty). 담고도 아무도 읽지 않는 값이
+    # 아니라, 읽는 쪽이 정해져 있고 그 쪽이 하는 일이 '고르지 않기'다.
+    assert plan.counterparty == "포드"
+
+
+def test_supply_contract_history_question_with_a_month_still_requires_a_year() -> None:
+    """
+    공급계약 이력 질문도 월만 있고 연도가 없으면 막는다.
+
+    연도 요구가 남은 자리는 이 하나다. 월은 공시일 창을 좁히는 조건인데 연도가 없으면 창을
+    만들 수 없고, 그대로 진행하면 질문이 밝힌 '4월'이 조회에 쓰이지 않은 채 사라진다.
+    신규시설투자에 대해 같은 것을 고정하는 시험이 위에 있다.
     """
     with pytest.raises(UnsupportedQuestionError) as error:
-        build_query_plan(Q14, known_companies=REAL_COMPANIES)
+        build_query_plan(
+            "테스트반도체 4월에 공시한 공급계약, 나중에 바뀐 내용 있어?",
+            known_companies=KNOWN_COMPANIES,
+        )
 
     assert error.value.reason == "missing_year"
 
@@ -1009,12 +1066,21 @@ def test_q13_is_unchanged_in_the_actual_corpus() -> None:
 
 
 @pytest.mark.corpus
-def test_q14_stays_fail_closed_in_the_actual_corpus() -> None:
+def test_q14_is_unresolved_as_ambiguous_in_the_actual_corpus() -> None:
     """
-    Q14는 이번 PR에서 열리지 않는다.
+    Q14는 계획 단계를 지나 handler의 기존 모호 경로로 막힌다.
 
-    같은 Pattern E이고 같은 이력 표현을 쓰지만, 계약을 특정할 근거가 상대방 이름뿐이다.
-    연도 요구를 유형과 무관하게 풀었다면 여기서 값이 만들어지고 이 테스트가 깨진다.
+    예전에는 이 질문이 query_plan 단계에서 missing_year로 막혔다. 지금은 계획이 만들어지고,
+    그 기업의 공급계약 원공시가 여러 건이라 handler가 ambiguous_root로 막는다. 답하지 못하는
+    것은 같지만 사유가 실제로 일어난 일과 맞는다.
+
+    execution_status가 COMPLETED인 것이 이 변경의 핵심이다. 실행이 끝나지 못한 것(BLOCKED)이
+    아니라 실행을 끝까지 하고 나서 답을 확정하지 못했다는 판정이며, 그래야 API가 422가 아니라
+    200으로 이 판정을 그대로 내보낸다(tests/integration/test_api_q14_corpus.py).
+
+    루트를 하나 지어내지 않는 것을 함께 고정한다. 후속 정정·해지 체인이 한쪽에만 있다는
+    이유로 루트를 역으로 고르면 다른 계약의 이력을 그 계약의 이력이라고 말하게 되고, 그
+    오답은 형식상 완전한 답변으로 보인다.
     """
     corpus_root = _resolve_corpus_root()
 
@@ -1023,11 +1089,180 @@ def test_q14_stays_fail_closed_in_the_actual_corpus() -> None:
 
     result = answer_question(Q14, corpus_root=corpus_root)
 
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
+    assert result.answerability_reason is AnswerabilityReason.AMBIGUOUS_MATCH
+
+    # 루트를 고르지 않았다는 것이 이 판정의 내용이다.
     assert result.event_histories == []
     assert result.event_links == []
     assert result.evidence == []
-    assert result.answerability_status not in (
-        AnswerabilityStatus.ANSWERABLE,
-        AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+
+    # 막힌 자리가 계획이 아니라 문서 확정 단계여야 한다. 같은 UNRESOLVED라도 계획 단계에서
+    # 나온 것이면 이 변경이 되돌아간 것이다.
+    plan = build_query_plan(Q14, known_companies=REAL_COMPANIES)
+
+    internal = build_event_history_result(plan, corpus_root=corpus_root)
+
+    assert internal.blocked is not None
+    assert internal.blocked.stage == STAGE_FILING_DISCOVERY
+    assert internal.blocked.reason == REASON_AMBIGUOUS_ROOT
+
+
+def test_supply_contract_history_plan_carries_the_named_counterparty() -> None:
+    """
+    이력 계획이 질문의 상대방을 담는다. 조회 조건이 아니라 fail-close 신호로 담는다.
+
+    Q02(단건 조회)와 어휘를 나눈 것이 여기서 드러난다. Q02의 패턴은 '<이름>과/와 체결·계약·맺'
+    이고, 이 경로는 '<이름>과/와/랑/이랑 체결·맺'이다. Q14가 쓰는 '포드랑 맺었던'은 앞 패턴에
+    걸리지 않으므로 이 경로가 따로 읽는다.
+    """
+    plan = build_query_plan(Q14, known_companies=REAL_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_SUPPLY_CONTRACT
+    assert plan.counterparty == "포드"
+
+
+def test_contract_field_conjunction_is_not_read_as_a_counterparty() -> None:
+    """
+    '이랑'이 접속 조사로 쓰인 문장을 상대방으로 읽지 않는다.
+
+    조사를 넓히면서 생기는 유일한 위험이 이것이다. "계약금액이랑 계약기간은?"에서 '이랑'은
+    두 필드를 함께 묻는 말이지 상대를 가리키는 말이 아니며, 뒤따르는 말에 '계약'을 넣으면
+    '계약금액이'가 상대방으로 읽힌다. 체결·맺음만 남긴 이유다.
+
+    이 문장은 Q02 계열이 실제로 쓰는 표기다(tests/unit/test_q02_query_plan.py).
+    """
+    from disclosure_agent.agent.query_analyzer import EVENT_COUNTERPARTY_PATTERN
+
+    assert EVENT_COUNTERPARTY_PATTERN.search("계약금액이랑 계약기간은?") is None
+
+    # 상대를 가리키는 '이랑'은 그대로 읽는다.
+    matched = EVENT_COUNTERPARTY_PATTERN.search("테슬라랑 맺은 공급계약")
+
+    assert matched is not None
+    assert matched.group(1) == "테슬라"
+
+
+@pytest.mark.corpus
+def test_single_root_supply_contract_with_a_named_counterparty_fails_closed() -> None:
+    """
+    원공시가 1건이어도 질문이 상대방을 지목했으면 답하지 않는다.
+
+    무엇을 막는가:
+        이 구현은 상대방 이름을 본문과 대조하지 못한다(C3 미구현). 그 상태에서 후보가 하나라는
+        이유로 그 하나를 답하면, "그 상대방과 맺은 계약의 이력"을 물었는데 "이 기업의 공급계약
+        중 코퍼스에 하나뿐인 것의 이력"을 답하게 된다. 둘이 같은 계약인지는 확인하지 않았고,
+        확인하지 않았다는 사실은 답 어디에도 남지 않는다.
+
+        후보가 하나뿐인 것은 코퍼스가 그렇다는 뜻이지 질문이 가리킨 계약이라는 뜻이 아니다.
+        개수가 맞아떨어진 것을 근거로 삼지 않는다.
+
+    사유를 ambiguous_root와 나누는 이유:
+        후보 개수가 1과 N으로 다르다. 같은 사유로 묶으면 "후보가 1건이라 특정할 수 없습니다"라는
+        말이 되어 진단이 사실과 어긋난다. 공개 사유(AMBIGUOUS_MATCH)는 같다 — 둘 다 대상 문서를
+        확정하지 못한 판정이며, 새 공개 사유를 만들 만큼 다르지 않다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    plan = build_query_plan(
+        SINGLE_ROOT_COUNTERPARTY_QUESTION,
+        known_companies=SINGLE_ROOT_COMPANIES,
     )
-    assert result.execution_issue is not None or result.answerability_reason is not None
+
+    assert plan.years == ()
+    assert plan.counterparty == "테슬라"
+
+    internal = build_event_history_result(plan, corpus_root=corpus_root)
+
+    if len(internal.root_candidate_doc_ids) != 1:
+        pytest.skip(
+            "이 코퍼스에서는 해당 기업의 공급계약 원공시가 한 건이 아닙니다: "
+            f"{len(internal.root_candidate_doc_ids)}건."
+        )
+
+    assert internal.status is AnswerabilityStatus.UNRESOLVED
+    assert internal.history is None
+    assert internal.blocked is not None
+    assert internal.blocked.stage == STAGE_FILING_DISCOVERY
+    assert internal.blocked.reason == REASON_UNVERIFIED_COUNTERPARTY
+
+    result = answer_question(
+        SINGLE_ROOT_COUNTERPARTY_QUESTION, corpus_root=corpus_root
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
+    assert result.answerability_reason is AnswerabilityReason.AMBIGUOUS_MATCH
+    assert result.event_histories == []
+    assert result.evidence == []
+
+
+@pytest.mark.corpus
+def test_single_root_supply_contract_without_a_counterparty_still_answers() -> None:
+    """
+    대조군. 상대방을 적지 않은 질문의 동작은 달라지지 않는다.
+
+    fail-close의 기준은 '후보가 하나'가 아니라 '확인할 수 없는 조건을 걸고 물었다'이다. 이
+    질문은 상대방을 걸지 않았으므로 확인하지 못한 조건이 없고, 그 기업의 공급계약이 코퍼스에
+    하나뿐이라는 사실이 그대로 답이 된다.
+
+    위 시험과 질문 문자열의 차이는 상대방 구절 하나뿐이다. 둘을 나란히 두어야 이번 변경이
+    무엇을 기준으로 막는지가 드러난다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    plan = build_query_plan(
+        SINGLE_ROOT_SUPPLY_CONTRACT_QUESTION,
+        known_companies=SINGLE_ROOT_COMPANIES,
+    )
+
+    assert plan.years == ()
+    assert plan.counterparty is None
+
+    internal = build_event_history_result(plan, corpus_root=corpus_root)
+
+    if internal.blocked is not None:
+        pytest.skip(
+            "이 코퍼스에서는 해당 기업의 공급계약 원공시가 한 건이 아닙니다: "
+            f"{internal.blocked.reason}."
+        )
+
+    assert internal.status is AnswerabilityStatus.ANSWERABLE
+    assert internal.history is not None
+
+
+@pytest.mark.corpus
+def test_named_counterparty_with_several_roots_still_stops_at_ambiguous_root() -> None:
+    """
+    상대방 판정이 ambiguous_root를 가로채지 않는다.
+
+    후보가 여럿이면 상대방을 적었든 아니든 ambiguous_root다. 순서가 뒤집히면 Q14의 사유가
+    바뀌고, "후보가 12건"이라는 진단이 "상대방을 확인할 수 없다"로 대체된다. 둘 다 사실이지만
+    먼저 말해야 하는 것은 후보가 여럿이라는 쪽이다 — 상대방을 대조할 수 있게 되어도 후보가
+    여럿인 상황은 그대로 남기 때문이다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    plan = build_query_plan(
+        MULTI_ROOT_COUNTERPARTY_QUESTION,
+        known_companies=REAL_COMPANIES,
+    )
+
+    assert plan.counterparty == "테슬라"
+
+    internal = build_event_history_result(plan, corpus_root=corpus_root)
+
+    assert len(internal.root_candidate_doc_ids) > 1
+    assert internal.blocked is not None
+    assert internal.blocked.reason == REASON_AMBIGUOUS_ROOT

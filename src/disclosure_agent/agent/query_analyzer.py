@@ -477,23 +477,25 @@ class EventSubtypeRule:
         이 유형으로 끌려온다. 대상(사옥·제조시설)과 행위(신축·증설)가 함께 있어야 신규시설투자
         공시를 가리킨 것으로 본다.
 
-    requires_filing_anchor
-        원공시를 지목하려면 질문이 공시 시점(연도)을 밝혀야 하는가.
+    공시 시점(연도) 요구는 이 규칙이 정하지 않는다:
+        예전에는 유형마다 requires_filing_anchor를 두어 공급계약 이력 질문에 연도를
+        요구했다. 그 요구가 Q14("포드랑 맺었던 배터리 공급계약, 지금 어떻게 됐어?")를
+        missing_year로 막았고, 그 사유는 실제로 일어난 일과 달랐다. 질문은 연도를 밝히지
+        않았을 뿐이고, 실제로 답하지 못하는 까닭은 그 기업의 원공시 후보가 여럿이어서
+        어느 계약인지 좁히지 못하는 것이다.
 
-        공급계약은 한 기업이 해마다 여러 건을 공시하므로 시점이 없으면 어느 계약인지 정할 수
-        없다. 그래서 True다. 이 값이 Q14("포드랑 맺었던 배터리 공급계약")를 계속 막는다.
-        상대방으로 계약을 특정하려면 본문 대조가 필요하고 그것은 이번 범위 밖이다.
-
-        신규시설투자는 원공시가 유일하지 않을 수 있지만, 유일하지 않을 때 handler가
-        ambiguous_root로 막는다(agent.handlers.event_history). 시점 없이도 후보를 좁혀 볼 수
-        있고 좁히지 못하면 답하지 않으므로 False로 둔다. 값을 고르는 자리가 생기지 않는다.
+        후보가 여럿인지는 코퍼스를 열어야 알 수 있으므로 이 계층이 판정할 수 없다. 그래서
+        연도 없는 이력 질문을 계획 단계에서 막지 않고, 후보를 하나로 좁히지 못하면 handler가
+        ambiguous_root로 막는다(agent.handlers.event_history). 막는 자리를 후보 개수가
+        보이는 곳으로 옮긴 것이며, 답하지 못하는 질문이 답하게 되는 것이 아니다.
+        _reject_unsupported_relative_period·_looks_like_business_profile이 같은 이유로
+        같은 선택을 했다.
     """
 
     subtype: str
     tokens: tuple[str, ...] = ()
     target_tokens: tuple[str, ...] = ()
     action_tokens: tuple[str, ...] = ()
-    requires_filing_anchor: bool = True
 
     def matches(self, question: str) -> bool:
         if any(token in question for token in self.tokens):
@@ -522,7 +524,6 @@ EVENT_SUBTYPE_RULES: tuple[EventSubtypeRule, ...] = (
     EventSubtypeRule(
         subtype=EVENT_SUBTYPE_SUPPLY_CONTRACT,
         tokens=("공급계약", "수주계약", "판매계약"),
-        requires_filing_anchor=True,
     ),
     EventSubtypeRule(
         subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
@@ -533,7 +534,6 @@ EVENT_SUBTYPE_RULES: tuple[EventSubtypeRule, ...] = (
         # 행위는 시설을 새로 짓거나 늘리는 말이다. '투자'를 여기 두는 것은 대상 표현과 함께
         # 있을 때만 읽히기 때문이다. 단독으로는 어떤 유형도 열지 못한다.
         action_tokens=("신축", "증설", "건설", "투자"),
-        requires_filing_anchor=False,
     ),
 )
 
@@ -758,6 +758,32 @@ SUPPORTED_CONTRACT_FIELDS: frozenset[MetricConcept] = frozenset(
 COUNTERPARTY_PATTERN = re.compile(
     r"([A-Za-z][A-Za-z0-9&.\-]*(?:\s+[A-Za-z][A-Za-z0-9&.\-]*)*|[가-힣]{2,})"
     r"\s*(?:과|와)\s*(?:체결|계약|맺)"
+)
+
+# 이력 조회(Pattern E)에서 "질문이 계약 상대방을 지목했는가"를 읽는 표현.
+#
+# 위 COUNTERPARTY_PATTERN과 나눠 두는 이유:
+#     두 패턴이 같은 개념을 읽지만 잘못 읽었을 때의 방향이 반대다.
+#
+#     Q02(단건 조회)는 읽은 이름으로 문서를 고른다. 잘못 읽으면 틀린 계약의 금액을 답하게
+#     되므로 좁게 잡아야 한다.
+#
+#     Pattern E는 읽은 이름으로 문서를 고르지 않는다. 이름이 있다는 사실만으로 원공시 1건을
+#     확정하지 않고 막는 데 쓴다(handlers.event_history의 unverified_counterparty). 잘못
+#     읽으면 답할 수 있었던 질문이 막히고, 그것은 틀린 계약의 이력을 답하는 것보다 안전한
+#     방향이다.
+#
+#     그래서 조사는 넓히고("포드랑 맺었던"이 Q14의 표기다) 뒤따르는 말은 좁힌다.
+#
+# 뒤따르는 말에서 '계약'을 뺀 이유:
+#     넣으면 "계약금액이랑 계약기간은?"에서 '계약금액이'가 상대방으로 읽힌다. 거기서 '이랑'은
+#     두 필드를 함께 묻는 접속 조사이지 상대를 가리키는 조사가 아니다. 체결·맺음을 뜻하는 말만
+#     남기면 그 문장은 걸리지 않는다(tests/unit/test_q02_query_plan.py가 쓰는 실제 문장이다).
+#
+# 조사 나열은 긴 것이 앞이다. '이랑'을 뒤에 두면 '랑'이 먼저 맞아 이름 끝에 '이'가 남는다.
+EVENT_COUNTERPARTY_PATTERN = re.compile(
+    r"([A-Za-z][A-Za-z0-9&.\-]*(?:\s+[A-Za-z][A-Za-z0-9&.\-]*)*|[가-힣]{2,})"
+    r"\s*(?:이랑|랑|과|와)\s*(?:체결|맺)"
 )
 
 
@@ -1147,10 +1173,12 @@ class QueryPlan:
             Q07("매출이 작년보다 얼마나 늘었어?")처럼 지금 missing_year로 막히는 질문들이
             연도 없이 흘러 들어간다.
 
-        어떤 공시 유형이 기준점 없이 열려도 되는가는 여기서 정하지 않는다.
-        EventSubtypeRule.requires_filing_anchor가 정하며, 이 계획을 만드는
-        _build_event_history_plan이 그 값을 보고 _require_years를 부를지 말지 고른다.
-        두 곳에 같은 규칙을 두면 어긋날 수 있어 한쪽만 정본으로 둔다.
+        공시 유형으로 나누지 않는다:
+            예전에는 EventSubtypeRule.requires_filing_anchor가 유형마다 기준점을 요구할지
+            정했고, 공급계약은 요구하는 쪽이었다. 그 요구를 없앴다. 기준점이 없을 때 답할 수
+            있는지는 유형이 아니라 그 기업의 원공시 후보가 몇 건인지가 정하며, 그것은 코퍼스를
+            열어야 알 수 있어 이 계층이 판정할 수 없다. 유형으로 미리 가르면 후보가 하나뿐인
+            질문까지 막고, 막힌 사유도 실제와 달라진다(EventSubtypeRule 참조).
         """
         if self.intent == INTENT_EVENT_SUMMARY:
             # __post_init__이 이미 이 집합 밖의 정책을 막는다. 여기서 다시 목록을 적지 않고
@@ -1731,9 +1759,9 @@ def _extract_event_subtype_rule(question: str) -> EventSubtypeRule:
         선언 순서로 고르는 것은 근거가 아니다. 순서는 이 파일을 쓴 사람이 정한 것이지 질문이
         정한 것이 아니다.
 
-    세부유형 문자열이 아니라 규칙을 돌려주는 이유는, 호출부가 유형 이름뿐 아니라 그 유형이
-    공시 시점을 요구하는지(requires_filing_anchor)까지 알아야 하기 때문이다. 두 값을 각각
-    다시 조회하면 같은 질문을 두 번 해석하게 되고, 어휘가 바뀔 때 한쪽만 고쳐질 수 있다.
+    세부유형 문자열이 아니라 규칙을 돌려주는 이유는, 호출부가 유형 이름뿐 아니라 그 유형을
+    무엇으로 알아봤는지까지 함께 다룰 수 있어야 하기 때문이다. 두 값을 각각 다시 조회하면
+    같은 질문을 두 번 해석하게 되고, 어휘가 바뀔 때 한쪽만 고쳐질 수 있다.
     """
     matched = _find_event_subtype_rules(question)
 
@@ -2366,6 +2394,45 @@ def _extract_counterparty(question: str, company: str) -> str | None:
     return found
 
 
+def _extract_event_counterparty(question: str, company: str) -> str | None:
+    """
+    이력 질문이 지목한 계약 상대방. 없으면 None이며 추정하지 않는다.
+
+    _extract_counterparty와 규칙만 다르고 하는 일은 같다. 어느 표현을 읽는지는
+    EVENT_COUNTERPARTY_PATTERN에 적어 두었다.
+
+    이 값을 무엇에 쓰는지가 Q02와 다르다:
+        Q02는 이 이름으로 후보 문서를 좁힌다. Pattern E는 좁히지 않는다. 상대방으로 문서를
+        확정하는 능력(C3)이 아직 없기 때문이며, 여기서 이름을 담는 것은 그 능력을 흉내 내려는
+        것이 아니라 **없다는 사실을 handler에 전달**하려는 것이다.
+
+        handler는 이 값이 있고 원공시 후보가 1건일 때 그 1건을 답으로 삼지 않고 막는다
+        (handlers.event_history의 unverified_counterparty). 질문이 상대방으로 계약을 지목했는데
+        이 구현은 그 이름을 본문과 대조하지 못하므로, 후보가 하나라는 것만으로 "그 상대방의
+        계약"이라고 말할 수 없다. 후보가 하나뿐인 것은 코퍼스가 그렇다는 뜻이지 질문이 가리킨
+        계약이라는 뜻이 아니다.
+
+        그래서 이 값은 계획에 담기지만 조회 조건으로는 쓰이지 않는다. 담고도 아무도 읽지 않는
+        값이 아니라, 읽는 쪽이 정해져 있고 그 쪽이 하는 일이 '고르지 않기'다.
+
+    대상 기업과 같은 이름이면 상대방으로 읽지 않는다. _extract_counterparty와 같은 이유다.
+    """
+    match = EVENT_COUNTERPARTY_PATTERN.search(question)
+
+    if not match:
+        return None
+
+    found = match.group(1).strip()
+
+    if not found:
+        return None
+
+    if normalize_company_name(found) == normalize_company_name(company):
+        return None
+
+    return found
+
+
 def _looks_like_contract_fact(question: str) -> bool:
     """
     거래소공시 계약 1건의 값을 묻는 질문인가.
@@ -2395,8 +2462,13 @@ def _build_contract_fact_plan(
 
     연도를 요구하는 이유:
         한 기업이 해마다 여러 건의 공급계약을 공시한다. 시점이 없으면 어느 계약인지 정할 수
-        없고, 상대방만으로 좁히는 경로는 아직 없다. EventSubtypeRule.requires_filing_anchor가
-        공급계약에 대해 True인 것과 같은 판단이다.
+        없고, 상대방만으로 좁히는 경로는 아직 없다.
+
+        이력 조회(_build_event_history_plan)와 다른 자리다. 그쪽은 연도가 없어도 계획을
+        만들고, 후보를 하나로 좁히지 못하면 handler가 ambiguous_root로 막는다. 이쪽에는
+        그 자리가 없다. 계약 1건의 값을 묻는 질문이라 후보가 여럿일 때 무엇으로 막을지는
+        handler의 missing_counterparty가 따로 정하고 있으며, 그 경로는 상대방을 읽은
+        계획을 전제한다. 두 경로의 요구가 다른 것은 답의 모양이 다르기 때문이다.
 
     요구 필드를 SUPPORTED_CONTRACT_FIELDS로 고정하는 이유:
         이 구현이 답 문장까지 옮길 수 있는 형태가 그 하나다. 부분집합을 통과시키면 계획은
@@ -2712,17 +2784,50 @@ def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> Quer
     판정이 다중 기간 판정보다 앞이라 이 builder에 먼저 도달하며, 그 순서가 규약이다.
 
     연도가 없는 질문:
+        Q14("LG에너지솔루션이 포드랑 맺었던 배터리 공급계약, 지금 어떻게 됐어?")와
         Q15("레인보우로보틱스 사옥·제조시설 신축 투자, 그동안 계획이 몇 번 바뀌었어?")처럼
-        공시 시점을 밝히지 않는 이력 질문이 있다. 그때 연도를 요구할지는 공시 유형이 정한다
-        (EventSubtypeRule.requires_filing_anchor).
+        공시 시점을 밝히지 않는 이력 질문이 있다. 유형과 무관하게 years를 비운 계획을
+        만든다.
 
-        요구하는 유형(공급계약)에서는 예전과 똑같이 missing_year로 막는다. 한 기업이 해마다
-        여러 건을 공시하므로 시점이 없으면 어느 계약인지 정할 수 없고, 상대방 이름으로
-        좁히려면 본문 대조가 필요하다. Q14가 이 자리에서 계속 막힌다.
+        예전에는 유형이 정했다(EventSubtypeRule.requires_filing_anchor). 공급계약은 요구하는
+        쪽이었고, 그래서 Q14가 이 자리에서 missing_year로 막혔다. 그 사유는 실제로 일어난
+        일과 달랐다. 질문이 연도를 못 밝힌 것이 문제가 아니라, 그 기업의 공급계약 원공시가
+        여러 건이라 어느 계약인지 좁히지 못하는 것이 문제다. 후보가 몇 건인지는 코퍼스를
+        열어야 알 수 있어 이 계층이 판정할 수 없으므로, 막는 자리를 후보 개수가 보이는
+        handler로 옮긴다.
 
-        요구하지 않는 유형(신규시설투자)에서는 years를 비운 계획을 만든다. handler가 공시일
-        창 없이 원공시 후보를 찾고, 후보가 여럿이면 ambiguous_root로 막는다. 계획도 handler도
-        후보 하나를 고르지 않는다.
+        handler는 공시일 창 없이 원공시 후보를 찾는다(agent.handlers.event_history). 계획도
+        handler도 후보 하나를 고르지 않으며, 무엇으로 막는지는 후보 개수와 이 계획이 담은
+        counterparty가 함께 정한다.
+
+            원공시가 여럿                    ambiguous_root. 상대방을 적었든 아니든 이 판정이
+                                             먼저다. Q14가 이 경로로
+                                             COMPLETED·UNRESOLVED·AMBIGUOUS_MATCH가 된다.
+
+            원공시 1건 + counterparty 있음    unverified_counterparty. 아래 참조.
+
+            원공시 1건 + counterparty 없음    그 1건의 이력을 답한다. 예전과 같다.
+
+        상대방을 적은 질문에서 1건을 답으로 삼지 않는 이유:
+            이 계획이 담는 counterparty는 조회 조건이 아니다(_extract_event_counterparty).
+            상대방으로 문서를 확정하는 능력(C3)은 없으며 이 PR이 만들지도 않는다. 이름을 담는
+            것은 그 능력을 흉내 내려는 것이 아니라, 질문이 확인할 수 없는 조건을 걸었다는
+            사실을 handler에 넘기려는 것이다.
+
+            그 조건을 무시하고 후보 1건을 답하면 "그 상대방과 맺은 계약의 이력"을 물었는데
+            "이 기업의 공급계약 중 코퍼스에 하나뿐인 것의 이력"을 답하게 된다. 후보가 하나뿐인
+            것은 코퍼스가 그렇다는 뜻이지 질문이 가리킨 계약이라는 뜻이 아니다.
+
+            그래서 handler가 unverified_counterparty로 막는다. 공개 사유는 ambiguous_root와
+            같은 AMBIGUOUS_MATCH이며, 대상 문서를 확정하지 못한 판정이라는 점이 같다. 내부
+            사유를 나눈 것은 후보 개수가 1과 N으로 달라 같은 진단 문장을 쓸 수 없어서다.
+
+        세 갈래 모두 tests/integration/test_pattern_e_q15.py에 대조군으로 고정해 두었다.
+
+    월만 있고 연도가 없는 질문:
+        연도 요구가 남아 있는 자리는 여기 하나다. 월은 공시일 창을 좁히는 조건인데 연도가
+        없으면 창을 만들 수 없고, 그대로 두면 질문이 밝힌 '4월'이 계획에는 담기지만 조회에는
+        쓰이지 않아 사용자가 좁힌 범위가 조용히 사라진다. 후보 개수와 무관하게 막는다.
     """
     rule = _extract_event_subtype_rule(question)
 
@@ -2730,10 +2835,7 @@ def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> Quer
 
     month = _extract_month(question)
 
-    # 월만 있고 연도가 없으면 공시일 창을 만들 수 없다. 그대로 두면 질문이 밝힌 '4월'이
-    # 계획에는 담기지만 조회에는 쓰이지 않아, 사용자가 좁힌 범위가 조용히 사라진다.
-    # 유형이 기준점을 요구하지 않더라도 이 경우는 연도를 요구한다.
-    if rule.requires_filing_anchor or month is not None:
+    if month is not None:
         years = _require_years(years)
 
     return QueryPlan(
@@ -2748,6 +2850,10 @@ def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> Quer
         accounting_scope=QueryAccountingScope.NOT_APPLICABLE.value,
         metric=None,
         month=month,
+        # 조회 조건이 아니라 handler에 넘기는 fail-close 신호다. 상대방으로 후보를 좁히지
+        # 않으며, 이 값이 있으면 후보 1건을 답으로 확정하지 않는다
+        # (_extract_event_counterparty 참조).
+        counterparty=_extract_event_counterparty(question, companies[0]),
         chain_policy=ChainPolicy.FULL_CHAIN,
     )
 

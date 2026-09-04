@@ -69,6 +69,7 @@ from disclosure_agent.agent.answer_builder import (
     REASON_NO_METRIC_ACODE,
     REASON_NO_ORIGINAL_FILING,
     REASON_UNCONVERTIBLE_FACT,
+    REASON_UNVERIFIED_COUNTERPARTY,
     STAGE_COMPARABILITY,
     STAGE_CONTRACT_ADAPTATION,
     STAGE_EXTRACTION,
@@ -198,6 +199,13 @@ ANSWERABILITY_BY_STOP: dict[tuple[str, str], Answerability] = {
     # 요약 대상 공시를 하나로 좁히지 못했다. 문서 목록을 모두 보고 내린 대상 선택 판정이므로
     # ambiguous_root와 같은 계열이며, 연결 판정이 아니라 AMBIGUOUS_MATCH다(아래 주석 참조).
     (STAGE_FILING_DISCOVERY, REASON_AMBIGUOUS_FILING): Answerability(
+        AnswerabilityStatus.UNRESOLVED,
+        AnswerabilityReason.AMBIGUOUS_MATCH,
+    ),
+    # 질문이 계약 상대방을 지목했는데 그 이름을 대조할 수 없어 원공시 1건을 확정하지 못했다.
+    # 후보 개수만 다를 뿐 대상 문서를 고르지 못한 것은 위 둘과 같으므로 AMBIGUOUS_MATCH다.
+    # 새 공개 사유를 만들지 않는다(answer_builder의 REASON_UNVERIFIED_COUNTERPARTY 참조).
+    (STAGE_FILING_DISCOVERY, REASON_UNVERIFIED_COUNTERPARTY): Answerability(
         AnswerabilityStatus.UNRESOLVED,
         AnswerabilityReason.AMBIGUOUS_MATCH,
     ),

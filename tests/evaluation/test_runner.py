@@ -131,6 +131,7 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q01",
         "q02",
         "q03",
+        "q04",
         "q05",
         "q07",
         "q08",
@@ -266,6 +267,36 @@ def test_active_q05_gold_pins_two_scopes_without_freezing_evidence_count() -> No
     assert q05.integrity.document_summary_evidence_references is True
     assert q05.integrity.document_summary_same_filing is True
     assert q05.integrity.document_summary_evidence_same_filing is True
+
+
+def test_active_q04_gold_pins_facility_scope_without_corpus_values() -> None:
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    q04 = {gold.case_id: gold for gold in loaded.gold_answers}["q04"]
+
+    assert questions["q04"].lifecycle == "active"
+    assert q04.execution_status is ExecutionStatus.COMPLETED
+    assert q04.status is AnswerabilityStatus.ANSWERABLE
+    assert q04.reason is None
+    assert q04.counts.model_dump(exclude_none=True) == {
+        "facts": 0,
+        "calculations": 0,
+        "comparisons": 0,
+        "document_summaries": 1,
+    }
+    assert [item.model_dump(exclude_none=True, mode="json") for item in q04.document_summaries] == [
+        {
+            "company": "삼성바이오로직스",
+            "report_name": "사업보고서",
+            "section_scope": "facility_investment",
+            "fiscal_year": 2025,
+        }
+    ]
+    assert q04.min_evidence_count == 1
+    assert q04.counts.evidence is None
+    assert q04.integrity.document_summary_evidence_references is True
+    assert q04.integrity.document_summary_same_filing is True
+    assert q04.integrity.document_summary_evidence_same_filing is True
 
 
 def test_active_q07_gold_pins_temporal_delta_contract() -> None:
@@ -425,7 +456,7 @@ def test_representative_calculation_counts_match_final_targets() -> None:
 def test_narrative_future_gold_does_not_require_zero_facts() -> None:
     gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
 
-    for case_id in ("q04", "q06", "q09"):
+    for case_id in ("q06", "q09"):
         counts = gold_by_id[case_id].counts
         assert counts is None or counts.facts is None
 
@@ -989,6 +1020,31 @@ def test_document_summary_gold_rejects_stale_filing_with_identical_structure() -
             filing_fiscal_year=2024,
         ),
     )
+
+    assert failures == [
+        "document_summaries: expected fields did not match distinct predicted summaries"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("company", "다른기업"),
+        ("report_name", "분기보고서"),
+    ],
+)
+def test_q04_gold_rejects_wrong_document_identity(field: str, wrong_value: str) -> None:
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q04"]
+    actual = summary_prediction()
+    actual.document_summaries = actual.document_summaries[:1]
+    actual.evidence = actual.evidence[:1]
+    summary = actual.document_summaries[0]
+    summary.company = "삼성바이오로직스"
+    summary.report_name = "사업보고서"
+    summary.section_scope = runner.SectionScope.FACILITY_INVESTMENT
+    setattr(summary, field, wrong_value)
+
+    failures = compare_prediction(gold, actual)
 
     assert failures == [
         "document_summaries: expected fields did not match distinct predicted summaries"

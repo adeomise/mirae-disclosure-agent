@@ -120,6 +120,92 @@ def test_prompt_and_payload_are_sent_as_separate_roles() -> None:
     assert messages[1]["content"] == "USER"
 
 
+def test_output_budget_is_sent_with_the_request() -> None:
+    """
+    출력 길이를 서버 기본값에 맡기지 않는다.
+
+    맡기면 그 값이 작을 때 응답이 JSON을 닫지 못한 채 잘리고, verbalizer가 not_json으로
+    거절한다. 틀린 답이 나가지는 않지만 표현 단계가 조용히 무력해진다.
+    """
+    post = RecordingPost(json_response(200, ok_payload()))
+
+    client(post, max_tokens=777).complete(system_prompt="S", user_message="U")
+
+    assert post.calls[0]["json"]["maxTokens"] == 777
+
+
+def test_default_output_budget_reaches_the_request_body() -> None:
+    """설정을 건드리지 않은 실행도 상한을 명시한다. 기본값이 전송되지 않으면 고친 것이 없다."""
+    post = RecordingPost(json_response(200, ok_payload()))
+
+    client(post).complete(system_prompt="S", user_message="U")
+
+    assert post.calls[0]["json"]["maxTokens"] == 512
+
+
+def test_request_body_keys_are_a_fixed_set() -> None:
+    """
+    보내는 것이 무엇인지 한 자리에 고정한다.
+
+    키가 조용히 늘면 무엇을 외부로 내보내고 있는지가 코드를 읽어야만 드러난다.
+    """
+    post = RecordingPost(json_response(200, ok_payload()))
+
+    client(post).complete(system_prompt="S", user_message="U")
+
+    assert set(post.calls[0]["json"]) == {
+        "messages",
+        "temperature",
+        "topP",
+        "repetitionPenalty",
+        "maxTokens",
+    }
+
+
+def test_repetition_penalty_uses_the_v3_spelling_and_range() -> None:
+    """
+    v3 규격은 repetitionPenalty이며 v1의 repeatPenalty와 이름도 범위도 다르다.
+
+    v1 이름을 보내면 그 값이 조용히 무시되고 서버 기본값이 적용된다. 기본값은 입력에 있던
+    토큰을 다시 쓰는 쪽에 벌점을 주므로, 확보한 수치를 그대로 옮겨야 하는 이 호출과 방향이
+    반대다. 틀린 답이 나가지는 않지만 검증 단계에서 걸릴 확률이 올라간다.
+    """
+    post = RecordingPost(json_response(200, ok_payload()))
+
+    client(post).complete(system_prompt="S", user_message="U")
+
+    body = post.calls[0]["json"]
+
+    assert "repeatPenalty" not in body
+    assert body["repetitionPenalty"] == 1.0
+
+    # v3 허용 범위: 0.0 초과 2.0 이하.
+    assert 0.0 < body["repetitionPenalty"] <= 2.0
+
+
+def test_sampling_parameters_stay_inside_the_v3_ranges() -> None:
+    """
+    보내는 값이 규격 범위 안에 있는지 고정한다.
+
+    범위를 벗어난 값은 400으로 거절되고, 400은 재시도하지 않으므로 결정론 문장으로 조용히
+    돌아간다. 연동이 켜져 있는데 표현 단계가 한 번도 채택되지 않는 상태가 그렇게 만들어진다.
+    """
+    post = RecordingPost(json_response(200, ok_payload()))
+
+    client(post).complete(system_prompt="S", user_message="U")
+
+    body = post.calls[0]["json"]
+
+    # v3 temperature는 0.00 이상 1.00 이하로 0을 포함한다(v1은 0을 제외한다).
+    assert 0.0 <= body["temperature"] <= 1.0
+
+    # v3 topP는 0.00 초과 1.00 이하.
+    assert 0.0 < body["topP"] <= 1.0
+
+    # v3 maxTokens는 1 이상이며 HCX-005 상한이 4096이다.
+    assert 1 <= body["maxTokens"] <= 4096
+
+
 def test_configured_timeout_reaches_the_transport() -> None:
     post = RecordingPost(json_response(200, ok_payload()))
 

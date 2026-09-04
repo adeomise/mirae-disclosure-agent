@@ -22,6 +22,11 @@
   같은 답이 온다.
 - 재시도 횟수는 설정 상한(HyperClovaSettings.max_retries)이 정한다.
 
+출력 길이 정책:
+- 출력 토큰 상한을 요청에 명시한다(HyperClovaSettings.max_tokens). 보내지 않으면 서버
+  기본값이 정하는데, 그 값이 작으면 응답이 JSON을 닫지 못한 채 잘리고 검증 단계가 이를
+  거절한다. 틀린 답이 나가지는 않지만 표현 단계가 조용히 무력해진다.
+
 TODO:
 - 공식 API 규격 확인 후 응답 파싱 경로 확정(현재는 v3 chat-completions 형태를 전제하고,
   본문 위치를 찾지 못하면 값을 추측하지 않고 HyperClovaResponseError로 멈춘다)
@@ -100,6 +105,15 @@ class HttpHyperClovaClient:
     settings.api_url은 모델 경로까지 포함한 완전한 엔드포인트로 받는다. 여기서 model 값을
     경로에 이어 붙이지 않는다. 배포마다 경로 규칙이 다르고, 코드가 규칙을 추측하면 URL이
     틀렸을 때 그 사실이 404로만 나타난다.
+
+    요청 본문은 Chat Completions v3 규격이다. api_url도 v3 경로여야 한다.
+
+        https://clovastudio.stream.ntruss.com/v3/chat-completions/{modelName}
+
+    v1과 본문이 호환되지 않는다. 반복 패널티의 이름이 다르고(repetitionPenalty 대
+    repeatPenalty) 범위도 다르므로, v1 경로에 이 본문을 보내면 그 값이 조용히 기본값으로
+    적용된다. 코드가 경로에서 버전을 읽어 본문을 바꾸지는 않는다. 추측할 자리를 만들지 않고
+    한 규격만 지원한다.
     """
 
     settings: HyperClovaSettings
@@ -115,7 +129,18 @@ class HttpHyperClovaClient:
             # 옮겨져야 평가가 대조할 것이 생긴다.
             "temperature": 0.0,
             "topP": 1.0,
-            "repeatPenalty": 1.0,
+            # v3 철자는 repetitionPenalty다. v1의 repeatPenalty와 이름도 범위도 다르다
+            # (v1: 0.0 초과 10.0 이하, 기본 5.0 / v3: 0.0 초과 2.0 이하, 기본 1.1).
+            #
+            # 값은 1.0으로 둔다. payload에 적힌 수치를 그대로 옮기는 것이 이 호출의 목적이라,
+            # 같은 토큰이 다시 나오는 것을 억제할 이유가 없다. 기본값 1.1은 입력에 있던 숫자를
+            # 다시 쓰는 쪽에 벌점을 주므로 이 용도와 방향이 반대다.
+            "repetitionPenalty": 1.0,
+            # 출력 길이를 서버 기본값에 맡기지 않는다. 기본값은 배포가 정하는 것이라 이쪽에서
+            # 알 수 없고, 그 값이 작으면 응답이 JSON을 닫지 못한 채 잘린다. 잘린 응답은
+            # verbalizer가 not_json으로 거절하므로 틀린 답이 나가지는 않지만, 연동이 정상인데도
+            # 표현 단계가 한 번도 채택되지 않는 상태가 조용히 이어진다.
+            "maxTokens": self.settings.max_tokens,
         }
 
         attempts = self.settings.max_retries + 1

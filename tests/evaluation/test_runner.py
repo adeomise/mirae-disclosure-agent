@@ -286,6 +286,48 @@ def test_active_q07_gold_pins_temporal_delta_contract() -> None:
     assert q07.integrity.calculation_values_from_inputs is True
 
 
+def test_active_q08_gold_pins_actual_operating_margin_inputs() -> None:
+    q08 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q08"]
+
+    assert [
+        fact.model_dump(exclude_none=True, mode="json")
+        for fact in q08.expected_facts()
+    ] == [
+        {
+            "company": "한미반도체(주)",
+            "metric": "revenue",
+            "fiscal_year": 2024,
+            "accounting_scope": "consolidated",
+            "normalized_value": "558917191547",
+            "normalized_unit": "원",
+        },
+        {
+            "company": "한미반도체(주)",
+            "metric": "operating_income",
+            "fiscal_year": 2024,
+            "accounting_scope": "consolidated",
+            "normalized_value": "255391604854",
+            "normalized_unit": "원",
+        },
+        {
+            "company": "한미반도체(주)",
+            "metric": "revenue",
+            "fiscal_year": 2025,
+            "accounting_scope": "consolidated",
+            "normalized_value": "576684619527",
+            "normalized_unit": "원",
+        },
+        {
+            "company": "한미반도체(주)",
+            "metric": "operating_income",
+            "fiscal_year": 2025,
+            "accounting_scope": "consolidated",
+            "normalized_value": "251390142142",
+            "normalized_unit": "원",
+        },
+    ]
+
+
 def test_active_q03_gold_pins_actual_holding_facts_and_evidence() -> None:
     loaded = load_dataset()
     questions = {question.case_id: question for question in loaded.questions}
@@ -1422,6 +1464,29 @@ def test_ratio_and_diff_pp_recompute_from_facts() -> None:
     failures = compare_prediction(gold, q08_prediction())
 
     assert any("expected value -10.0000, got -5.0000" in item for item in failures)
+
+
+def test_q08_rejects_wrong_source_fact_with_internally_consistent_calculations() -> None:
+    q08 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q08"]
+    actual = q08_prediction(change_value="-2.1017").model_dump(mode="python")
+    actual["case_id"] = "q08"
+    values = {
+        (2024, "revenue"): "558917191547",
+        (2024, "operating_income"): "255391604854",
+        (2025, "revenue"): "576684619527",
+        # Deliberately wrong by one won while preserving every reference.
+        (2025, "operating_income"): "251390142143",
+    }
+    for fact in actual["facts"]:
+        fact["company"] = "한미반도체(주)"
+        fact["normalized_value"] = values[(fact["fiscal_year"], fact["metric"])]
+    actual["calculations"][0]["value"] = "45.6940"
+    actual["calculations"][1]["value"] = "43.5923"
+    actual["calculations"][2]["value"] = "-2.1017"
+
+    failures = compare_prediction(q08, PredictionCase.model_validate(actual))
+
+    assert failures == ["facts: expected fields did not match distinct predicted Facts"]
 
 
 def test_resolved_field_evidence_reference_integrity_passes() -> None:

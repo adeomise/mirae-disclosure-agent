@@ -50,6 +50,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from typing import Any
 
 # 어휘는 그 값을 해석해야 하는 계층이 정의하고, 질의 해석 계층은 가져다 쓴다.
@@ -234,6 +235,129 @@ CONSOLIDATED_TOKENS = ("연결",)
 SEPARATE_TOKENS = ("별도", "개별")
 
 REVENUE_TOKENS = ("매출액", "매출", "영업수익", "수익")
+
+# 지표 어휘 뒤에 붙어도 같은 요청으로 읽는 조사·어미.
+#
+# 여기 적힌 어형만 어휘의 연장으로 본다. "매출액이"·"매출액은?"·"매출액인가요?"를
+# "매출액"과 같은 요청으로 읽기 위한 목록이며, 그 이상을 열지 않는다.
+#
+# 목록에 없는 음절이 이어지면 다른 낱말로 보고 지표를 읽지 않는다. "매출얼마야"처럼 조사를
+# 생략하고 붙여 쓴 표기도 여기서는 읽히지 않는다. 그것을 읽으려고 경계를 늘리면 "매출원가"·
+# "매출채권"이 같은 문으로 함께 들어온다. 모르는 어형은 막는 쪽이 먼저다
+# (_metric_token_pattern 참조).
+METRIC_TOKEN_SUFFIXES: tuple[str, ...] = (
+    # 격조사·보조사
+    "이",
+    "가",
+    "은",
+    "는",
+    "을",
+    "를",
+    "의",
+    "도",
+    "만",
+    "과",
+    "와",
+    "과는",
+    "와는",
+    "랑",
+    "이랑",
+    "하고",
+    "에",
+    "에는",
+    "에서",
+    "에서는",
+    "로",
+    "로는",
+    "으로",
+    "으로는",
+    "부터",
+    "까지",
+    "보다",
+    "처럼",
+    "만큼",
+    "밖에",
+    "나",
+    "이나",
+    "든",
+    "이든",
+    "든지",
+    "이든지",
+    "조차",
+    "마저",
+    "뿐",
+    "라도",
+    "이라도",
+    "란",
+    "이란",
+    "라는",
+    "이라는",
+    # 서술격 조사와 의문 어미
+    "야",
+    "이야",
+    "이다",
+    "임",
+    "인가",
+    "인가요",
+    "인지",
+    "이니",
+    "이냐",
+    "입니다",
+    "이에요",
+    "예요",
+)
+
+# 지표 어휘의 좌우 경계로 쓰는 문자 부류. 한글 음절이 붙어 있으면 다른 낱말로 본다.
+_HANGUL_SYLLABLE_CLASS = "가-힣"
+
+
+@lru_cache(maxsize=8)
+def _metric_token_pattern(tokens: tuple[str, ...]) -> re.Pattern[str]:
+    """
+    지표 어휘를 낱말 경계까지 맞춰 찾는 패턴을 만든다.
+
+    부분문자열 검사를 쓰지 않는 이유:
+        "매출원가"·"매출채권"·"매출총이익"·"금융수익"에는 모두 REVENUE_TOKENS의 표기가
+        연속 문자열로 들어 있다. 담고만 있는지 보면 이 개념들이 전부 매출로 분류되고,
+        그렇게 만들어진 계획은 실제로 매출 Fact를 근거까지 갖춘 채 돌려준다. 형식이 맞아
+        틀렸다는 사실이 결과 어디에도 드러나지 않는다. 추출 계층은 라벨을 정확히 비교하므로
+        이미 안전하고, 뚫려 있는 자리는 질의 해석 한 곳이다.
+
+    경계 규약:
+        왼쪽    앞 글자가 한글 음절이면 매치하지 않는다. "기타영업수익"·"제품매출액"·
+                "순매출액"·"이자수익"이 여기서 걸린다.
+        오른쪽  뒤에 한글 음절이 이어지면 매치하지 않는다. 다만 METRIC_TOKEN_SUFFIXES에
+                적힌 조사·어미 하나가 통째로 이어지고 그 뒤가 다시 경계이면 같은 낱말로
+                본다. "매출채권"·"수익성"·"수익률"이 여기서 걸린다.
+
+        모르는 어형은 열지 않는다. 경계를 넓히는 쪽이 언제나 나중이며, 지금 넓히면 위의
+        개념들이 같은 문으로 함께 들어온다.
+
+    캐시 키에 대해:
+        REVENUE_TOKENS는 테스트가 monkeypatch로 바꾼다. 모듈 수준에서 한 번 컴파일해 두면
+        그 패턴은 바뀐 어휘를 보지 못하고, 어휘를 늘려도 판정이 그대로인 상태가 조용히
+        만들어진다. 그래서 현재 어휘 자체를 인자로 받아 캐시 키에 넣는다. 호출부는 호출
+        시점의 REVENUE_TOKENS를 넘긴다.
+    """
+    if not tokens:
+        raise ValueError("지표 어휘가 비어 있으면 경계 패턴을 만들 수 없습니다.")
+
+    # 긴 표기를 먼저 시도한다. "매출액"이 "매출"보다 앞에 놓여야 조사 판정이 "액"에
+    # 걸려 넘어가지 않는다.
+    alternation = "|".join(
+        re.escape(token) for token in sorted(set(tokens), key=len, reverse=True)
+    )
+    suffixes = "|".join(
+        re.escape(suffix)
+        for suffix in sorted(set(METRIC_TOKEN_SUFFIXES), key=len, reverse=True)
+    )
+
+    return re.compile(
+        rf"(?<![{_HANGUL_SYLLABLE_CLASS}])"
+        rf"(?:{alternation})"
+        rf"(?:{suffixes})?"
+        rf"(?![{_HANGUL_SYLLABLE_CLASS}])"
+    )
 
 # 파생지표 표기. 여기 담기는 값은 계산으로 만들어지는 요청 개념이며 원천 지표가 아니다.
 #
@@ -1146,8 +1270,18 @@ def _extract_accounting_scope(question: str) -> tuple[str, bool]:
 
 
 def _find_metric(question: str) -> str | None:
-    """질문에서 지표를 읽는다. 없으면 None이며 추측하지 않는다."""
-    if any(token in question for token in REVENUE_TOKENS):
+    """
+    질문에서 지표를 읽는다. 없으면 None이며 추측하지 않는다.
+
+    낱말 경계까지 맞춰 찾는다. 담고만 있는지 보면 "매출원가"·"매출채권"·"매출총이익"·
+    "금융수익"처럼 이번 범위가 답할 수 없는 개념이 전부 매출로 분류되고, 그렇게 나온
+    계획은 엉뚱한 질문에 매출 Fact를 근거까지 갖춰 돌려준다. 경계 규약은
+    _metric_token_pattern에 적었다.
+
+    어휘는 호출 시점에 읽어 넘긴다. 모듈 수준에서 패턴을 붙들고 있으면 REVENUE_TOKENS를
+    바꿔도 판정이 따라오지 않는다.
+    """
+    if _metric_token_pattern(tuple(REVENUE_TOKENS)).search(question):
         return METRIC_REVENUE
 
     return None

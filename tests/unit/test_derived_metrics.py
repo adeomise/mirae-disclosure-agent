@@ -201,12 +201,22 @@ def test_derived_detection_runs_before_source_detection(
     이번 범위는 "영업이익"을 원천 어휘에 넣지 않는다(F6-01이 고정한 상태를 바꾸는 별건이다).
     그래서 그 토큰이 추가된 상황을 여기서 만들어 두고, 나중에 실제로 추가하는 작업이 이 판정을
     조용히 뒤집지 못하게 막는다.
+
+    주입한 어휘가 실제로 읽히는지 함께 확인한다. 확인하지 않으면 판정이 주입을 아예 보지
+    못하는 상태(예: 경계 패턴이 모듈 수준에서 한 번 컴파일돼 현재 어휘에서 떨어져 나간 경우)
+    에서도 아래 두 단언이 그대로 통과한다. 그러면 이 테스트는 순서를 지키는 것이 아니라
+    아무것도 지키지 않는다.
     """
+    assert query_analyzer._find_metric("영업이익이 얼마야?") is None
+
     monkeypatch.setattr(
         query_analyzer,
         "REVENUE_TOKENS",
         (*query_analyzer.REVENUE_TOKENS, "영업이익"),
     )
+
+    # 대조군: 주입한 어휘는 원천 지표로 읽힌다.
+    assert query_analyzer._find_metric("영업이익이 얼마야?") == METRIC_REVENUE
 
     plan = _plan(Q08)
 

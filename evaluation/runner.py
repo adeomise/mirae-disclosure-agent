@@ -62,10 +62,12 @@ class ExpectedFact(BaseModel):
 
 
 class EventHistoryExpectation(BaseModel):
-    """Legacy gold link and chain requirements for contract cases."""
+    """Structural link and chain requirements for event-history results."""
 
     link_resolution: EventLinkResolutionStatus
     chain_complete: bool
+    document_count: int | None = Field(default=None, ge=0)
+    change_count: int | None = Field(default=None, ge=0)
 
 
 class CollectionCounts(BaseModel):
@@ -93,6 +95,7 @@ class IntegrityExpectation(BaseModel):
     document_summary_evidence_references: bool | None = None
     document_summary_same_filing: bool | None = None
     document_summary_evidence_same_filing: bool | None = None
+    event_history_evidence_references: bool | None = None
 
 
 class ExpectedCalculation(BaseModel):
@@ -484,6 +487,59 @@ def _document_summary_integrity(result: PredictionCase) -> dict[str, bool]:
     }
 
 
+def _event_history_integrity(result: PredictionCase) -> bool:
+    """Check change references and document provenance for every history."""
+    evidence_by_id = {item.evidence_id: item for item in result.evidence}
+    evidence_doc_ids = {item.doc_id for item in result.evidence}
+    return bool(result.event_histories) and all(
+        history.document_ids
+        and all(doc_id in evidence_doc_ids for doc_id in history.document_ids)
+        and all(
+            change.before_evidence_id is not None
+            and change.after_evidence_id is not None
+            and change.before_evidence_id in evidence_by_id
+            and change.after_evidence_id in evidence_by_id
+            for change in history.changes
+        )
+        for history in result.event_histories
+    )
+
+
+def _event_history_failures(
+    expected: EventHistoryExpectation, prediction: PredictionCase
+) -> list[str]:
+    """Compare generic structural expectations across returned histories and links."""
+    failures: list[str] = []
+    resolutions = {link.resolution_status for link in prediction.event_links}
+    if not prediction.event_links or resolutions != {expected.link_resolution}:
+        actual = sorted(item.value for item in resolutions)
+        failures.append(
+            "event_history.link_resolution: "
+            f"expected {expected.link_resolution.value}, got {actual}"
+        )
+
+    chain_states = {history.chain_complete for history in prediction.event_histories}
+    if not prediction.event_histories or chain_states != {expected.chain_complete}:
+        failures.append(
+            "event_history.chain_complete: "
+            f"expected {expected.chain_complete}, got {sorted(chain_states)}"
+        )
+
+    for field, attribute in (
+        ("document_count", "document_ids"),
+        ("change_count", "changes"),
+    ):
+        expected_count = getattr(expected, field)
+        if expected_count is None:
+            continue
+        actual_counts = [len(getattr(history, attribute)) for history in prediction.event_histories]
+        if not actual_counts or any(count != expected_count for count in actual_counts):
+            failures.append(
+                f"event_history.{field}: expected {expected_count}, got {actual_counts}"
+            )
+    return failures
+
+
 def _dangling_references(result: PredictionCase, collection: str) -> list[str]:
     evidence_ids = {item.evidence_id for item in result.evidence}
     if collection == "facts":
@@ -765,6 +821,9 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
         if actual != expected:
             failures.append(f"comparisons: expected fields {expected}, got {actual}")
 
+    if gold.event_history is not None:
+        failures.extend(_event_history_failures(gold.event_history, prediction))
+
     if gold.integrity is not None:
         checks = {
             "fact_evidence_references": ("facts", "Fact"),
@@ -808,6 +867,14 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
             expected = getattr(gold.integrity, field)
             if expected is not None and actual != expected:
                 failures.append(f"integrity.{field}: expected {expected}, got {actual}")
+        expected = gold.integrity.event_history_evidence_references
+        if expected is not None:
+            actual = _event_history_integrity(prediction)
+            if actual != expected:
+                failures.append(
+                    "integrity.event_history_evidence_references: "
+                    f"expected {expected}, got {actual}"
+                )
     return failures
 
 

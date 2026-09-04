@@ -137,10 +137,11 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q08",
         "q12",
         "q13",
+        "q15",
         "q17",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 7
+    assert sum(question.lifecycle == "future" for question in representative) == 6
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -490,7 +491,7 @@ def test_active_q13_gold_pins_corpus_verified_chain_structure() -> None:
         "event_links": 2,
         "event_histories": 1,
     }
-    assert q13.event_history.model_dump(mode="json") == {
+    assert q13.event_history.model_dump(exclude_none=True, mode="json") == {
         "link_resolution": "resolved",
         "chain_complete": True,
     }
@@ -580,14 +581,30 @@ def test_narrative_future_gold_does_not_require_zero_facts() -> None:
         assert counts.evidence == 0
 
 
-def test_event_history_gold_records_only_supported_structural_invariants() -> None:
-    gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
+def test_active_q15_gold_pins_corpus_verified_history_structure() -> None:
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    q15 = {gold.case_id: gold for gold in loaded.gold_answers}["q15"]
 
-    # Remaining comparator gap: Q15 change cardinality cannot be asserted until
-    # corpus-verified cardinality is available. Do not substitute guessed values
-    # or link counts.
-    assert gold_by_id["q15"].counts.event_histories == 1
-    assert gold_by_id["q15"].counts.event_links is None
+    assert questions["q15"].lifecycle == "active"
+    assert q15.counts.model_dump(exclude_none=True) == {
+        "facts": 0,
+        "events": 0,
+        "event_links": 3,
+        "event_histories": 1,
+        "resolved_event_states": 0,
+        "calculations": 0,
+        "comparisons": 0,
+        "document_summaries": 0,
+    }
+    assert q15.event_history.model_dump(exclude_none=True, mode="json") == {
+        "link_resolution": "resolved",
+        "chain_complete": True,
+        "document_count": 4,
+        "change_count": 4,
+    }
+    assert q15.min_evidence_count == 4
+    assert q15.integrity.event_history_evidence_references is True
 
 
 def test_q14_gold_requires_ambiguity_instead_of_one_chosen_history() -> None:
@@ -1237,6 +1254,92 @@ def test_resolved_event_states_exact_count_match_passes() -> None:
     assert compare_prediction(
         answerable_gold("case", counts={"resolved_event_states": 1}), actual
     ) == []
+
+
+def event_history_prediction(*, after_evidence_id: str = "evidence-doc-2") -> PredictionCase:
+    return prediction(
+        "case",
+        facts=[],
+        event_links=[
+            {
+                "link_id": "link-1",
+                "source_doc_id": "doc-2",
+                "relation": "correction_of",
+                "raw_reference": {},
+                "resolved_doc_id": "doc-1",
+                "resolution_status": "resolved",
+            }
+        ],
+        event_histories=[
+            {
+                "event_id": "event-1",
+                "document_ids": ["doc-1", "doc-2"],
+                "changes": [
+                    {
+                        "field_name": "investment_amount",
+                        "before": "100",
+                        "after": "110",
+                        "before_evidence_id": "evidence-doc-2",
+                        "after_evidence_id": after_evidence_id,
+                    }
+                ],
+                "chain_complete": True,
+            }
+        ],
+        evidence=[
+            {
+                "evidence_id": "evidence-doc-1",
+                "doc_id": "doc-1",
+                "location_type": "event_field",
+            },
+            {
+                "evidence_id": "evidence-doc-2",
+                "doc_id": "doc-2",
+                "location_type": "event_field",
+            },
+        ],
+    )
+
+
+def test_event_history_structure_and_evidence_integrity_pass() -> None:
+    gold = answerable_gold(
+        "case",
+        facts=None,
+        event_history={
+            "link_resolution": "resolved",
+            "chain_complete": True,
+            "document_count": 2,
+            "change_count": 1,
+        },
+        integrity={"event_history_evidence_references": True},
+    )
+
+    assert compare_prediction(gold, event_history_prediction()) == []
+
+
+def test_event_history_structure_mismatch_and_dangling_evidence_fail() -> None:
+    gold = answerable_gold(
+        "case",
+        facts=None,
+        event_history={
+            "link_resolution": "resolved",
+            "chain_complete": True,
+            "document_count": 3,
+            "change_count": 2,
+        },
+        integrity={"event_history_evidence_references": True},
+    )
+
+    failures = compare_prediction(
+        gold, event_history_prediction(after_evidence_id="missing-evidence")
+    )
+
+    assert "event_history.document_count: expected 3, got [2]" in failures
+    assert "event_history.change_count: expected 2, got [1]" in failures
+    assert (
+        "integrity.event_history_evidence_references: expected True, got False"
+        in failures
+    )
 
 
 def test_resolved_event_states_exact_count_mismatch_fails() -> None:

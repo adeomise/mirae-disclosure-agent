@@ -20,6 +20,7 @@ from disclosure_agent.agent.query_analyzer import (
     INTENT_CROSS_ENTITY_COMPARE,
     INTENT_DOCUMENT_SUMMARY,
     INTENT_EVENT_HISTORY,
+    INTENT_EVENT_SUMMARY,
     INTENT_SINGLE_FACT,
     INTENT_TEMPORAL_COMPARE,
     UnsupportedQuestionError,
@@ -179,20 +180,36 @@ def test_multi_company_summary_stays_on_the_cross_entity_path() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_summary_without_a_report_type_is_blocked() -> None:
+def test_summary_without_a_report_type_is_not_a_pattern_b_plan() -> None:
     """
-    Q06 계열. 거래소공시 단건 요약은 판본 선택 정책(D5)이 미정이라 열려 있지 않다.
+    Q06 계열. 거래소공시 단건 요약은 Pattern B가 받지 않는다.
 
-    가까운 문서를 골라 요약하면 원공시와 정정본 중 무엇을 요약했는지가 결과에 남지 않는다.
+    정기공시 보고서 표기가 없으면 요약 판정 자체가 서지 않아 나머지 판정으로 넘어간다
+    (_looks_like_document_summary). 넘겨받는 쪽은 이제 이벤트 단건 요약(Q06)이며, 그쪽은
+    대상 문서를 회계연도가 아니라 이벤트 체인으로 고른다.
+
+    Pattern B가 이 질문을 받지 않는다는 것이 여기서 고정하는 사실이다. 받으면 정기공시
+    요약의 회계연도 요건을 이 질문 때문에 넓혀야 한다.
+    """
+    plan = plan_for("테스트전자 합성단지 투자 공시 내용 요약해줘.")
+
+    assert plan.intent == INTENT_EVENT_SUMMARY
+    assert plan.intent != INTENT_DOCUMENT_SUMMARY
+    assert plan.section_scope is None
+    assert plan.section_scopes == ()
+
+
+def test_summary_without_a_report_type_or_a_subject_is_still_blocked() -> None:
+    """
+    어느 공시인지 가릴 근거가 없으면 이벤트 요약 경로도 열리지 않는다.
 
     사유가 요약 경로의 것이 아닌 이유:
-        정기공시 보고서 표기가 없으면 요약 판정 자체가 서지 않아 나머지 판정으로 넘어간다
-        (_looks_like_document_summary). 넘겨받은 쪽이 Pattern B가 생기기 전과 같은 사유로
-        막으며, 그것이 이 질문에서 실제로 일어난 일이다. 요약 경로가 잡았다가 놓아준 것처럼
-        보이는 사유를 붙이지 않는다.
+        어느 요약 판정도 서지 않아 나머지 판정으로 넘어가며, 넘겨받은 쪽이 Pattern B가
+        생기기 전과 같은 사유로 막는다. 요약 경로가 잡았다가 놓아준 것처럼 보이는 사유를
+        붙이지 않는다.
     """
     with pytest.raises(UnsupportedQuestionError) as error:
-        plan_for("테스트전자 합성단지 투자 공시 내용 요약해줘.")
+        plan_for("테스트전자 공시 내용 요약해줘.")
 
     assert error.value.reason == "missing_year"
 

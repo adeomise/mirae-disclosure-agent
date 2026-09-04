@@ -52,6 +52,7 @@ from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
     ComparisonRelation,
+    EventType,
     ExecutionStatus,
     FactAccountingScope,
     MetricConcept,
@@ -66,6 +67,8 @@ from disclosure_agent.common.schemas import (
     DocumentSummary,
     EventHistory,
     Fact,
+    ResolvedEventState,
+    ResolvedFieldValue,
     ResultInputReference,
 )
 from disclosure_agent.periodic.extractor import BASE_CURRENCY_UNIT, FinancialFact
@@ -462,6 +465,30 @@ SUMMARY_ITEM_TYPE_LABELS: dict[SummaryItemType, str] = {
     SummaryItemType.TABLE: "표",
 }
 
+# 이벤트 공시 유형의 한글 표기. SECTION_SCOPE_LABELS와 같은 이유로 둔다. enum 값을 그대로
+# 문장에 넣으면 한국어 답변에 facility_investment가 섞인다.
+EVENT_TYPE_LABELS: dict[EventType, str] = {
+    EventType.SUPPLY_CONTRACT: "단일판매·공급계약",
+    EventType.FACILITY_INVESTMENT: "신규 시설투자",
+}
+
+# 이벤트 단건 요약(Q06) 문장이 적는 항목과 그 순서.
+#
+# 순서가 규약이다. 원문의 항목 순서(투자구분 -> 투자내역 -> 투자목적 -> 투자기간)를 따르며,
+# 같은 결과는 언제 문장으로 옮겨도 같은 차례로 적힌다. dict 정의 순서가 그 차례다.
+#
+# 여기 없는 필드는 문장에 적지 않는다. ResolvedEventState에는 문서에 있던 필드가 전부
+# 담기지만, 그중 무엇이 질문의 답인지는 handler의 필수 요약 집합이 정한다
+# (agent.handlers.event_summary.REQUIRED_SUMMARY_FIELDS_BY_EVENT_TYPE). 두 곳이 어긋나면
+# 문장은 적을 것이 없는 쪽으로, 즉 답을 만들지 않는 쪽으로 실패한다.
+EVENT_STATE_FIELD_LABELS: dict[str, str] = {
+    "investment_target": "투자 대상",
+    "investment_amount": "투자 금액",
+    "investment_purpose": "투자 목적",
+    "investment_start_date": "투자 시작일",
+    "investment_end_date": "투자 종료일",
+}
+
 DERIVED_METRIC_LABELS: dict[DerivedMetric, str] = {
     DerivedMetric.OPERATING_MARGIN: "영업이익률",
 }
@@ -832,9 +859,13 @@ def build_answer_response(result: AgentExecutionResult) -> AnswerResponse:
     새로 고를 것이 없고, 새로 고르면 평가가 대조하는 canonical 값이 두 벌이 된다.
 
     구조화 결과는 AnswerResponse에 자리가 있는 것만 손실 없이 옮긴다. calculations와
-    comparisons, warnings는 현재 AnswerResponse에 자리가 없어 실리지 않으며, 이번 범위에서
-    Contract를 고치지 않는다. 우열 판정은 자리가 생기기 전까지 문장으로만 나가고, 그 문장은
-    실행 결과에 적힌 relation을 그대로 옮긴 것이다(_comparison_sentence).
+    comparisons, warnings는 현재 AnswerResponse에 자리가 없어 실리지 않는다. 우열 판정은
+    자리가 생기기 전까지 문장으로만 나가고, 그 문장은 실행 결과에 적힌 relation을 그대로
+    옮긴 것이다(_comparison_sentence).
+
+    resolved_event_states는 자리를 만들어 싣는다. 이벤트 단건 요약(Q06)의 답이 그 상태
+    자체이기 때문이다. 우열 판정처럼 문장으로만 내보내면 어느 항목이 어느 문서에서 왔는지가
+    응답에서 사라지고, 값과 근거를 잇는 evidence_ids도 가리킬 대상을 잃는다.
 
     Evidence를 실행 결과에서 지우지 않는다. 거부 응답에 Evidence를 붙이지 않는 원칙
     (evidence_and_answerability.md 원칙 7)은 producer가 이미 지킨다. 여기서 다시 걸러내면
@@ -867,6 +898,7 @@ def build_answer_response(result: AgentExecutionResult) -> AnswerResponse:
         events=list(result.events),
         event_links=list(result.event_links),
         event_histories=list(result.event_histories),
+        resolved_event_states=list(result.resolved_event_states),
         evidence=list(result.evidence),
     )
 
@@ -1054,6 +1086,33 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
             _limitation(result, partial=partial),
         )
 
+    # 이벤트 단건 요약(Q06)을 이력 경로보다 먼저 본다.
+    #
+    # 두 결과는 서로 다른 질문의 답이다. ResolvedEventState는 "지금(또는 원공시 시점) 그
+    # 공시의 내용이 무엇인가"이고 EventHistory는 "그동안 무엇이 바뀌었는가"다. 뒤에 두면
+    # 요약 질문이 이력 문장으로 답해지고, 그 문장에는 사용자가 물은 항목이 하나도 나오지
+    # 않는다.
+    #
+    # 아래 가드는 다른 Pattern의 결과와 섞인 조합을 막는다. 현재 그런 producer는 없으며,
+    # 생기면 표현 방법을 먼저 정하라는 뜻으로 멈춘다. document_summaries와의 조합은 위
+    # 첫 가드가 이미 막는다.
+    if result.resolved_event_states and (
+        result.facts or result.comparisons or result.calculations
+    ):
+        raise UnsupportedResultShapeError(
+            f"ResolvedEventState {len(result.resolved_event_states)}건이 Fact "
+            f"{len(result.facts)}건 / ComparisonResult {len(result.comparisons)}건 / "
+            f"CalculationResult {len(result.calculations)}건과 함께 있습니다. "
+            "이벤트 단건 요약은 Fact도 계산도 만들지 않으므로 이 조합을 만드는 producer가 "
+            "없습니다."
+        )
+
+    if result.resolved_event_states:
+        return _join(
+            _event_state_summary_sentence(result.resolved_event_states),
+            _limitation(result, partial=partial),
+        )
+
     if result.comparisons and result.event_histories:
         raise UnsupportedResultShapeError(
             f"ComparisonResult {len(result.comparisons)}건과 "
@@ -1177,6 +1236,120 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
         "답할 수 있다고 판정됐지만 facts/events/event_histories/document_summaries가 모두 "
         "비어 있습니다. 근거 없이 문장을 만들지 않습니다."
     )
+
+
+def _event_state_summary_sentence(states: list[ResolvedEventState]) -> str:
+    """
+    ResolvedEventState 1건을 문장으로 옮긴다(Q06).
+
+    여러 건이면 막는다. 이벤트 단건 요약은 공시 1건을 대상으로 하고, 여러 이벤트의 상태를
+    한 문장으로 잇는 형태는 정해지지 않았다. 첫 건만 고르면 나머지를 요약했다는 사실이
+    사라진다(_document_summary_sentence와 같은 이유).
+
+    구조화 결과에 적힌 것만 말한다:
+        값도 단위도 상태가 정한 것을 옮기기만 하고, 여기서 계산하거나 다시 반올림하지 않는다.
+
+    시점을 문장에 적는 이유:
+        같은 공시라도 원공시 시점의 내용과 정정을 반영한 내용이 다를 수 있다. ``as_of``는
+        그 상태가 어느 공시일까지 반영한 것인지를 말하며, 이 값이 없으면 사용자는 자기가
+        받은 것이 최신인지 알 수 없다.
+
+    필수 항목이 하나도 없으면 문장을 만들지 않는다:
+        답할 수 있다고 판정됐는데 적을 항목이 없는 결과는 판정과 내용이 어긋난 것이다.
+        빈 문장을 만들어 형식만 맞추지 않는다.
+    """
+    if len(states) > 1:
+        raise UnsupportedResultShapeError(
+            f"ResolvedEventState가 {len(states)}건입니다. 이벤트 단건 요약은 공시 1건을 "
+            "대상으로 하며, 여러 이벤트를 한 문장으로 잇는 형태는 정해지지 않았습니다."
+        )
+
+    state = states[0]
+
+    type_label = EVENT_TYPE_LABELS.get(state.event_type)
+
+    if type_label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 event_type입니다: {state.event_type.value!r}. "
+            "EVENT_TYPE_LABELS에 추가하십시오."
+        )
+
+    entries = [
+        f"{label}{_topic_particle(label)} {_event_state_value(state.fields[field_name])}"
+        for field_name, label in EVENT_STATE_FIELD_LABELS.items()
+        if field_name in state.fields and state.fields[field_name].value is not None
+    ]
+
+    if not entries:
+        raise MissingAnswerSupportError(
+            f"ResolvedEventState {state.event_id!r}에 적을 수 있는 요약 항목이 없습니다. "
+            "항목 없이 요약 문장을 만들지 않습니다."
+        )
+
+    headline = f"{state.company}의 {type_label} 공시 내용입니다."
+
+    body = f"{', '.join(entries)}입니다."
+
+    basis = f"{state.as_of.isoformat()}자 공시까지 반영한 내용입니다."
+
+    return _join(headline, body, basis)
+
+
+def _event_state_value(field: ResolvedFieldValue) -> str:
+    """
+    확정된 필드 값 하나를 문장에 적을 표현으로 옮긴다.
+
+    단위가 있으면 붙이고, 없으면 값만 적는다. Fact와 달리 원문 표기(raw_value)를 담지 않는
+    타입이라 정규화 값을 그대로 쓴다. 여기서 자릿수를 다시 매기지 않는다. 그것은 새 수치를
+    만드는 일이다.
+
+    표기를 정하지 않은 단위에서는 멈춘다. generic 표기를 만들면 대응표가 두 벌이 되고,
+    한국어 문장에 추출 계층의 어휘("KRW")가 그대로 실린다(_normalized_value_with_unit와
+    같은 규약).
+    """
+    value = _event_state_number(field.value)
+
+    if value is None:
+        raise MissingAnswerSupportError(
+            "값이 없는 필드를 문장에 적지 않습니다. 호출부가 먼저 걸러야 합니다."
+        )
+
+    if field.unit is None:
+        return str(value).strip()
+
+    label = FACT_NORMALIZED_UNIT_LABELS.get(field.unit)
+
+    if label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 정규화 단위입니다: {field.unit!r}. "
+            "FACT_NORMALIZED_UNIT_LABELS에 추가하십시오."
+        )
+
+    rendered = _value_with_unit(value, label)
+
+    if rendered is None:
+        raise MissingAnswerSupportError(
+            f"값과 단위를 함께 적을 수 없습니다: value={value!r}, unit={field.unit!r}."
+        )
+
+    return rendered
+
+
+def _event_state_number(value: float | str | None) -> float | str | int | None:
+    """
+    소수부가 없는 실수를 정수 표기로 옮긴다. 그 밖의 값은 그대로 둔다.
+
+    값을 바꾸지 않는다. 표기만 고른다. Contract의 ResolvedFieldValue.value가
+    ``str | float | None``이라, 추출 계층이 정수로 만든 금액(615600000000)이 Contract를
+    지나면서 실수가 된다. 그대로 적으면 "615600000000.0원"이 되어 원문과 대조되지 않는
+    표기가 문장에 실린다.
+
+    소수부가 있는 값은 건드리지 않는다. 자리를 맞추거나 반올림하면 그것은 새 수치다.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+
+    return value
 
 
 def _document_summary_sentence(summaries: list[DocumentSummary]) -> str:

@@ -44,9 +44,14 @@ integrity can also require one selected filing and require all Evidence to belon
 Expected fields that are omitted are not compared. Calculation gold can fix
 operation/unit/value/input/Evidence structure and
 independently recompute `delta`/`delta_pct` or `aggregate` values from their Fact inputs.
-Comparison gold can fix its typed left/right inputs and relation. Event, EventLink, and
-EventHistory content rubrics remain future extensions; their collection counts can
-already be checked.
+Comparison gold can fix its typed left/right inputs and relation. The generic
+EventHistory evaluator supports exact `document_count` and `change_count`,
+`link_resolution`, and `chain_complete`. Its provenance integrity checks Evidence
+coverage for `history.document_ids`, requires each FieldChange's referenced Evidence
+to belong to that history's chain, and requires each EventLink's source and resolved
+documents to belong to the same history chain. Unrelated Evidence that is not referenced
+by an EventHistory or FieldChange is not restricted. Value-level EventHistory and other
+content rubrics remain future extensions.
 
 ## Corpus-dependent gold values
 

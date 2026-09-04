@@ -488,21 +488,37 @@ def _document_summary_integrity(result: PredictionCase) -> dict[str, bool]:
 
 
 def _event_history_integrity(result: PredictionCase) -> bool:
-    """Check change references and document provenance for every history."""
+    """Check history, change, and link provenance against each event chain."""
     evidence_by_id = {item.evidence_id: item for item in result.evidence}
     evidence_doc_ids = {item.doc_id for item in result.evidence}
-    return bool(result.event_histories) and all(
-        history.document_ids
-        and all(doc_id in evidence_doc_ids for doc_id in history.document_ids)
+    history_document_ids = [set(history.document_ids) for history in result.event_histories]
+
+    histories_are_grounded = bool(result.event_histories) and all(
+        document_ids
+        and document_ids <= evidence_doc_ids
         and all(
             change.before_evidence_id is not None
             and change.after_evidence_id is not None
-            and change.before_evidence_id in evidence_by_id
-            and change.after_evidence_id in evidence_by_id
+            and (before_evidence := evidence_by_id.get(change.before_evidence_id)) is not None
+            and (after_evidence := evidence_by_id.get(change.after_evidence_id)) is not None
+            and before_evidence.doc_id in document_ids
+            and after_evidence.doc_id in document_ids
             for change in history.changes
         )
-        for history in result.event_histories
+        for history, document_ids in zip(
+            result.event_histories, history_document_ids, strict=True
+        )
     )
+    links_stay_on_chain = all(
+        link.resolved_doc_id is not None
+        and any(
+            link.source_doc_id in document_ids
+            and link.resolved_doc_id in document_ids
+            for document_ids in history_document_ids
+        )
+        for link in result.event_links
+    )
+    return histories_are_grounded and links_stay_on_chain
 
 
 def _event_history_failures(

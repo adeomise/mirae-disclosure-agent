@@ -1256,17 +1256,44 @@ def test_resolved_event_states_exact_count_match_passes() -> None:
     ) == []
 
 
-def event_history_prediction(*, after_evidence_id: str = "evidence-doc-2") -> PredictionCase:
+def event_history_prediction(
+    *,
+    after_evidence_id: str = "evidence-doc-2",
+    off_chain_evidence: bool = False,
+    link_source_doc_id: str = "doc-2",
+    link_resolved_doc_id: str = "doc-1",
+) -> PredictionCase:
+    evidence = [
+        {
+            "evidence_id": "evidence-doc-1",
+            "doc_id": "doc-1",
+            "location_type": "event_field",
+        },
+        {
+            "evidence_id": "evidence-doc-2",
+            "doc_id": "doc-2",
+            "location_type": "event_field",
+        },
+    ]
+    if off_chain_evidence:
+        evidence.append(
+            {
+                "evidence_id": "evidence-off-chain",
+                "doc_id": "doc-off-chain",
+                "location_type": "event_field",
+            }
+        )
+
     return prediction(
         "case",
         facts=[],
         event_links=[
             {
                 "link_id": "link-1",
-                "source_doc_id": "doc-2",
+                "source_doc_id": link_source_doc_id,
                 "relation": "correction_of",
                 "raw_reference": {},
-                "resolved_doc_id": "doc-1",
+                "resolved_doc_id": link_resolved_doc_id,
                 "resolution_status": "resolved",
             }
         ],
@@ -1286,18 +1313,7 @@ def event_history_prediction(*, after_evidence_id: str = "evidence-doc-2") -> Pr
                 "chain_complete": True,
             }
         ],
-        evidence=[
-            {
-                "evidence_id": "evidence-doc-1",
-                "doc_id": "doc-1",
-                "location_type": "event_field",
-            },
-            {
-                "evidence_id": "evidence-doc-2",
-                "doc_id": "doc-2",
-                "location_type": "event_field",
-            },
-        ],
+        evidence=evidence,
     )
 
 
@@ -1340,6 +1356,90 @@ def test_event_history_structure_mismatch_and_dangling_evidence_fail() -> None:
         "integrity.event_history_evidence_references: expected True, got False"
         in failures
     )
+
+
+def test_event_history_change_evidence_from_an_unrelated_document_fails() -> None:
+    gold = answerable_gold(
+        "case",
+        facts=None,
+        integrity={"event_history_evidence_references": True},
+    )
+
+    failures = compare_prediction(
+        gold,
+        event_history_prediction(
+            after_evidence_id="evidence-off-chain", off_chain_evidence=True
+        ),
+    )
+
+    assert failures == [
+        "integrity.event_history_evidence_references: expected True, got False"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source_doc_id", "resolved_doc_id"),
+    [("doc-off-chain", "doc-1"), ("doc-2", "doc-off-chain")],
+)
+def test_event_history_link_with_an_off_chain_document_fails(
+    source_doc_id: str, resolved_doc_id: str
+) -> None:
+    gold = answerable_gold(
+        "case",
+        facts=None,
+        integrity={"event_history_evidence_references": True},
+    )
+
+    failures = compare_prediction(
+        gold,
+        event_history_prediction(
+            link_source_doc_id=source_doc_id,
+            link_resolved_doc_id=resolved_doc_id,
+        ),
+    )
+
+    assert failures == [
+        "integrity.event_history_evidence_references: expected True, got False"
+    ]
+
+
+def test_event_history_links_are_checked_against_their_own_history() -> None:
+    actual = event_history_prediction()
+    actual.event_histories.append(
+        actual.event_histories[0].model_copy(
+            update={
+                "event_id": "event-2",
+                "document_ids": ["doc-3", "doc-4"],
+                "changes": [],
+            }
+        )
+    )
+    actual.evidence.extend(
+        [
+            actual.evidence[0].model_copy(
+                update={"evidence_id": "evidence-doc-3", "doc_id": "doc-3"}
+            ),
+            actual.evidence[0].model_copy(
+                update={"evidence_id": "evidence-doc-4", "doc_id": "doc-4"}
+            ),
+        ]
+    )
+    actual.event_links.append(
+        actual.event_links[0].model_copy(
+            update={
+                "link_id": "link-2",
+                "source_doc_id": "doc-4",
+                "resolved_doc_id": "doc-3",
+            }
+        )
+    )
+    gold = answerable_gold(
+        "case",
+        facts=None,
+        integrity={"event_history_evidence_references": True},
+    )
+
+    assert compare_prediction(gold, actual) == []
 
 
 def test_resolved_event_states_exact_count_mismatch_fails() -> None:

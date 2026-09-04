@@ -16,6 +16,7 @@ from disclosure_agent.agent.router import answer_question
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
+    ComparisonRelation,
     EventLinkResolutionStatus,
     ExecutionStatus,
     FactAccountingScope,
@@ -23,7 +24,7 @@ from disclosure_agent.common.enums import (
     ResultInputType,
     SectionScope,
 )
-from disclosure_agent.common.schemas import AgentExecutionResult, Fact
+from disclosure_agent.common.schemas import AgentExecutionResult, Fact, ResultInputReference
 
 EVALUATION_DIR = Path(__file__).parent
 DEFAULT_QUESTIONS_PATH = EVALUATION_DIR / "questions.jsonl"
@@ -97,8 +98,20 @@ class IntegrityExpectation(BaseModel):
 class ExpectedCalculation(BaseModel):
     """Stable semantic fields for one deterministic calculation."""
 
+    calculation_id: str | None = None
     operation: str
     unit: str | None = None
+    value: float | str | None = None
+    inputs: list[ResultInputReference] | None = None
+    evidence_ids: list[str] | None = None
+
+
+class ExpectedComparison(BaseModel):
+    """Stable semantic fields for one deterministic comparison."""
+
+    left: ResultInputReference
+    right: ResultInputReference
+    relation: ComparisonRelation
 
 
 class ExpectedDocumentSummary(BaseModel):
@@ -121,6 +134,7 @@ class GoldAnswer(BaseModel):
     facts: list[ExpectedFact] | None = None
     calculations: list[ExpectedCalculation] | None = None
     document_summaries: list[ExpectedDocumentSummary] | None = None
+    comparisons: list[ExpectedComparison] | None = None
     min_evidence_count: int = Field(ge=0)
     event_history: EventHistoryExpectation | None = None
     counts: CollectionCounts | None = None
@@ -522,6 +536,55 @@ def _calculation_value_failures(result: PredictionCase) -> list[str]:
     recomputed: dict[str, Decimal] = {}
     failures: list[str] = []
     for calculation in result.calculations:
+        if calculation.operation == "aggregate":
+            if any(
+                item.input_type is not ResultInputType.FACT
+                for item in calculation.inputs
+            ):
+                failures.append(
+                    f"{calculation.calculation_id}: expected only Fact inputs"
+                )
+                continue
+            sources = [facts.get(item.input_id) for item in calculation.inputs]
+            if any(source is None for source in sources):
+                failures.append(f"{calculation.calculation_id}: input Fact is missing")
+                continue
+            resolved_sources = [source for source in sources if source is not None]
+            if any(
+                source.normalized_unit != calculation.unit
+                for source in resolved_sources
+            ):
+                failures.append(
+                    f"{calculation.calculation_id}: Fact input units do not match result"
+                )
+                continue
+            try:
+                expected = sum(
+                    (Decimal(str(source.normalized_value)) for source in resolved_sources),
+                    Decimal(0),
+                )
+                actual = Decimal(str(calculation.value))
+            except (InvalidOperation, TypeError, ValueError):
+                failures.append(f"{calculation.calculation_id}: unusable Fact values")
+                continue
+            if actual != expected:
+                failures.append(
+                    f"{calculation.calculation_id}: expected value {expected}, "
+                    f"got {calculation.value}"
+                )
+            expected_evidence = list(
+                dict.fromkeys(
+                    evidence_id
+                    for source in resolved_sources
+                    for evidence_id in source.evidence_ids
+                )
+            )
+            if calculation.evidence_ids != expected_evidence:
+                failures.append(
+                    f"{calculation.calculation_id}: expected input Evidence "
+                    f"{expected_evidence}, got {calculation.evidence_ids}"
+                )
+            continue
         if calculation.operation not in {"delta", "delta_pct", "ratio", "diff_pp"}:
             failures.append(f"{calculation.calculation_id}: unsupported operation")
             continue
@@ -668,10 +731,39 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
         )
 
     if gold.calculations is not None:
-        expected = [(item.operation, item.unit) for item in gold.calculations]
-        actual = [(item.operation, item.unit) for item in prediction.calculations]
+        expected = [item.model_dump(exclude_none=True, mode="json") for item in gold.calculations]
+        calculations_by_id = {
+            item.calculation_id: item for item in prediction.calculations
+        }
+        actual = [
+            {
+                field: value
+                for field, value in (
+                    calculations_by_id.get(expected_item["calculation_id"], item)
+                    if "calculation_id" in expected_item
+                    else item
+                ).model_dump(mode="json").items()
+                if field in expected[index]
+            }
+            for index, (expected_item, item) in enumerate(
+                zip(expected, prediction.calculations, strict=True)
+            )
+        ] if len(prediction.calculations) == len(expected) else []
         if actual != expected:
-            failures.append(f"calculations: expected operation/unit {expected}, got {actual}")
+            failures.append(f"calculations: expected fields {expected}, got {actual}")
+
+    if gold.comparisons is not None:
+        expected = [item.model_dump(mode="json") for item in gold.comparisons]
+        actual = [
+            {
+                "left": item.left.model_dump(mode="json"),
+                "right": item.right.model_dump(mode="json"),
+                "relation": item.relation.value,
+            }
+            for item in prediction.comparisons
+        ]
+        if actual != expected:
+            failures.append(f"comparisons: expected fields {expected}, got {actual}")
 
     if gold.integrity is not None:
         checks = {

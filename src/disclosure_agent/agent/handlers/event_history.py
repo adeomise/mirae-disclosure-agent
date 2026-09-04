@@ -71,6 +71,7 @@ from disclosure_agent.agent.answer_builder import (
     REASON_NO_ORIGINAL_FILING,
     REASON_PARSE_FAILED,
     REASON_UNSUPPORTED_EVENT_TYPE,
+    REASON_UNVERIFIED_COUNTERPARTY,
     STAGE_CONTRACT_ADAPTATION,
     STAGE_FILING_DISCOVERY,
     STAGE_PARSING,
@@ -360,6 +361,35 @@ def build_event_history_result(
                 detail=(
                     f"조건에 맞는 원공시가 {len(root_candidates)}건이라 어느 건의 이력인지 "
                     "특정할 수 없습니다. 본문 대조로 문서를 확정해야 합니다."
+                ),
+            ),
+        )
+
+    if plan.document_subtype == EVENT_SUBTYPE_SUPPLY_CONTRACT and plan.counterparty:
+        # 질문이 상대방을 지목했는데 이 구현은 그 이름을 본문과 대조하지 못한다.
+        #
+        # 여기까지 왔다는 것은 후보가 정확히 1건이라는 뜻이다. 그 1건을 답으로 삼으면 "그
+        # 상대방과 맺은 계약의 이력"을 물었는데 "이 기업의 공급계약 중 코퍼스에 하나뿐인 것의
+        # 이력"을 답하게 된다. 둘이 같은 계약인지는 확인하지 않았고, 확인하지 않았다는 사실은
+        # 답에 남지 않는다. 상대방이 다른 계약이었다면 그 답은 형식이 온전한 채로 틀린다.
+        #
+        # 후보가 하나뿐인 것은 코퍼스가 그렇다는 뜻이지 질문이 가리킨 계약이라는 뜻이 아니다.
+        # 개수가 맞아떨어진 것을 근거로 삼지 않는다. 후보가 여럿일 때 하나를 고르지 않는 것과
+        # 같은 규칙이며, 다른 것은 못 고르는 이유뿐이다(위 ambiguous_root).
+        #
+        # 상대방으로 후보를 좁히지는 않는다. 그것이 C3이고 이 자리에서 하지 않는다. 여기서
+        # 하는 일은 좁히지 못한다는 사실을 결과에 남기는 것뿐이다.
+        return EventHistoryResult(
+            plan=plan,
+            status=AnswerabilityStatus.UNRESOLVED,
+            root_candidate_doc_ids=tuple(_doc_id(filing) for filing in root_candidates),
+            blocked=BlockedInfo(
+                stage=STAGE_FILING_DISCOVERY,
+                reason=REASON_UNVERIFIED_COUNTERPARTY,
+                detail=(
+                    f"질문이 계약상대방('{plan.counterparty}')을 지목했지만 상대방으로 문서를 "
+                    "확정하는 기능이 없어 원공시 1건이 그 계약인지 확인할 수 없습니다. "
+                    "후보가 하나뿐이라는 이유로 그 건의 이력을 답하지 않습니다."
                 ),
             ),
         )

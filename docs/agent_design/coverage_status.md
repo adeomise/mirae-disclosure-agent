@@ -60,7 +60,7 @@
 | Q11 | D | `NOT_IMPLEMENTED` | – | 영업이익률 미지원으로 `query_plan/unsupported_metric` BLOCKED. Q10과 달리 지표에서 먼저 걸려 오라우팅되지 않음 | Q08과 함께 |
 | Q12 | D | `NOT_IMPLEMENTED` | – | 신규시설투자 subtype은 Q15에서 지원됐으나 집계 경로가 없음. 기업이 둘이라 `cross_entity_compare`로 분류되고 handler가 없어 `routing/unimplemented_intent`로 BLOCKED. 이력 표현이 없어 Pattern E로 새지도 않음 | 거래소공시 집계 경로. D1 확정 후 |
 | Q13 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 2 · Evidence 9, `chain_complete=True` | 회귀 fixture에 고정 완료(`Q13`) |
-| Q14 | E | `PASS_ACTUAL` | Actual | 없음. **정답이 답변 아님**(D8)이며 그 정답을 실측으로 확인함. `COMPLETED`/`UNRESOLVED`/`AMBIGUOUS_MATCH`, 정지 지점 `filing_discovery`/`ambiguous_root`, 원공시 후보 12건에서 루트를 고르지 않음 — EventHistory 0 · EventLink 0 · Evidence 0. API는 HTTP 200(실행이 끝나지 못한 BLOCKED가 아니라 끝난 뒤의 미해결 판정이므로 422가 아님). 이전에는 `query_plan/missing_year`로 막혔고 그 사유는 실제로 일어난 일과 달랐음 — 질문이 연도를 밝히지 않은 것이 원인이 아니라 루트를 하나로 좁힐 조건이 없는 것이 원인이며, 연도 없는 Pattern E 계획을 허용해 판정을 후보 개수가 보이는 handler로 옮김. **계약상대방 검증은 여전히 없음(C3)** — 원공시가 1건뿐인 기업에서는 상대방을 본문과 대조하지 않은 채 답이 나가며, 그 잔여 경계는 `tests/integration/test_pattern_e_q15.py`에 고정 | C3(계약상대방 기반 문서 확정). 루트가 1건으로 좁혀진 뒤에야 공시유보(`WITHHELD_IN_SOURCE`, **Contract 확정됨** D9, production 판정은 미구현)와 역방향·후속 연결 체인이 검증 대상이 됨. 회귀 fixture(`scripts/corpus_regression_cases.jsonl`) 등재는 미완 — 현재는 `tests/integration/test_pattern_e_q15.py`·`tests/integration/test_api_q14_corpus.py`가 고정 |
+| Q14 | E | `PASS_ACTUAL` | Actual | 없음. **정답이 답변 아님**(D8)이며 그 정답을 실측으로 확인함. `COMPLETED`/`UNRESOLVED`/`AMBIGUOUS_MATCH`, 정지 지점 `filing_discovery`/`ambiguous_root`, 원공시 후보 12건에서 루트를 고르지 않음 — EventHistory 0 · EventLink 0 · Evidence 0. API는 HTTP 200(실행이 끝나지 못한 BLOCKED가 아니라 끝난 뒤의 미해결 판정이므로 422가 아님). 이전에는 `query_plan/missing_year`로 막혔고 그 사유는 실제로 일어난 일과 달랐음 — 질문이 연도를 밝히지 않은 것이 원인이 아니라 루트를 하나로 좁힐 조건이 없는 것이 원인이며, 연도 없는 Pattern E 계획을 허용해 판정을 후보 개수가 보이는 handler로 옮김. **계약상대방 검증은 여전히 없음(C3)이며, 없다는 사실에 맞춰 막음** — 원공시가 1건뿐인 기업이라도 질문이 상대방을 지목했으면 그 1건을 답으로 삼지 않고 `filing_discovery`/`unverified_counterparty`로 막는다(같은 `UNRESOLVED`/`AMBIGUOUS_MATCH`). 후보가 하나인 것은 코퍼스가 그렇다는 뜻이지 질문이 가리킨 계약이라는 뜻이 아니므로 개수를 근거로 삼지 않는다. 상대방을 적지 않은 질문은 확인하지 못한 조건이 없어 그대로 답한다. 두 경우 모두 `tests/integration/test_pattern_e_q15.py`에 대조쌍으로 고정 | C3(계약상대방 기반 문서 확정). 루트가 1건으로 좁혀진 뒤에야 공시유보(`WITHHELD_IN_SOURCE`, **Contract 확정됨** D9, production 판정은 미구현)와 역방향·후속 연결 체인이 검증 대상이 됨. 회귀 fixture(`scripts/corpus_regression_cases.jsonl`) 등재는 미완 — 현재는 `tests/integration/test_pattern_e_q15.py`·`tests/integration/test_api_q14_corpus.py`가 고정 |
 | Q15 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 3 · Evidence 8, `chain_complete=True`. 질문에 연도가 없어도 공시일 창 없이 루트를 찾음. 공시 유형으로 가르지 않는다 — Pattern E는 유형과 무관하게 공시일 기준점 없는 계획을 만들고, 루트를 하나로 좁힐 수 있는지는 handler가 실제 후보 개수로 판정한다(후보가 여럿이면 `ambiguous_root`). 이 질문은 후보가 1건이라 답에 이른다. **"몇 번 바뀌었나"를 정정 3건으로 셀지 FieldChange 4건으로 셀지는 미정** — producer는 둘 다 보존하며 세는 규칙은 answer-builder 결정 | 회귀 fixture에 고정 완료(`Q15`). lifecycle은 `future` 유지 — active 전환은 "몇 번" 세는 규칙 확정과 함께 |
 | Q16 | F | `PARTIAL` | Actual | 거부되긴 하나 사유가 다름. `query_plan/unsupported_period`(분기·반기 미지원)로 BLOCKED이며 **기간 밖 판정이 아님**. 연 단위로 물으면(`삼성전자 2027년 매출액이 얼마야?`) 이 차단이 사라지고 `COMPLETED`/`UNANSWERABLE`/`not_found`(`filing_discovery`/`no_matching_filing`)로 답합니다 — 검색 실패이지 기간 밖 판정이 아님 | F1 Gate 구현. 사유 코드는 확정됨(`OUT_OF_DATA_RANGE`, PR #29) |
 | Q17 | F | `PARTIAL` | Actual | `query_plan/unknown_company`로 BLOCKED. 기업명이 없어서 막힌 것이지 "시장 반응은 보유 문서군이 아니다"라는 판정이 아님 | F2 Gate 구현. 사유 코드는 확정됨(`OUT_OF_SCOPE_DATA`, PR #29) |
@@ -70,9 +70,9 @@
 
 | 상태 | 문항 수 | 문항 |
 |---|---|---|
-| `PASS_ACTUAL` | 4 | Q01 Q13 Q15 Q18 |
+| `PASS_ACTUAL` | 5 | Q01 Q13 Q14 Q15 Q18 |
 | `PARTIAL` | 2 | Q16 Q17 |
-| `NOT_IMPLEMENTED` | 12 | Q02~Q12 Q14 |
+| `NOT_IMPLEMENTED` | 11 | Q02~Q12 |
 | `PASS_SYNTHETIC_ONLY` | 0 | – |
 | `BLOCKED_BY_DATA` | 0 | – |
 | `BLOCKED_BY_CONTRACT` | 0 | – |
@@ -95,9 +95,13 @@ Pattern D 작업에서, `WITHHELD_IN_SOURCE`는 D9 확정과 함께 추가됐습
 
 `ambiguous` 판정은 여기 해당하지 않습니다. Contract v0.1에 대응 값이 있어 그대로 표현됩니다.
 
-- `extraction` / `ambiguous_candidates`, `filing_discovery` / `ambiguous_root`
+- `extraction` / `ambiguous_candidates`, `filing_discovery` / `ambiguous_root`,
+  `filing_discovery` / `unverified_counterparty`
   → `ExecutionStatus.COMPLETED` · `AnswerabilityStatus.UNRESOLVED` ·
   `AnswerabilityReason.AMBIGUOUS_MATCH`
+- `unverified_counterparty`는 후보가 1건인데 질문이 건 조건(계약상대방)을 확인할 수 없어
+  그 1건을 대상으로 확정하지 못한 경우입니다. 후보가 여럿인 `ambiguous_root`와 공개 사유는
+  같고 내부 사유만 다릅니다 — 후보 개수가 1과 N으로 달라 같은 진단 문장을 쓸 수 없습니다.
 - 진단 정보는 `answerability_detail`(stage/reason/detail)에 기록합니다.
 - `conversion_gaps`는 Contract에 실을 자리가 없어 손실되는 정보 전용이므로 판정 근거를
   담지 않습니다.
@@ -114,7 +118,7 @@ Pattern D 작업에서, `WITHHELD_IN_SOURCE`는 D9 확정과 함께 추가됐습
 | B 문서 요약 | Q04 Q05 Q06 | 0/3. handler 없음 |
 | C 시계열 비교 | Q07 Q08 Q09 | 0/3. 상대 기간 해석은 완료(D8). Pattern F와 충돌하지 않음 — 과거 방향만 해석하고 Gate가 앞에 있음 |
 | D 기업 간 비교 | Q10 Q11 Q12 | 0/3. handler 없음. Q10 오라우팅은 해소되어 `routing`에서 BLOCKED |
-| E 정정·후속 추적 | Q13 Q14 Q15 | 2/3 실측 통과. 공급계약(연/월 지정)과 신규시설투자(연도 없음). 한 질문이 두 유형에 맞으면 고르지 않고 `query_plan/ambiguous_event_subtype`으로 BLOCKED |
+| E 정정·후속 추적 | Q13 Q14 Q15 | 3/3 실측 통과. 공급계약(연/월 지정)·신규시설투자(연도 없음)는 이력을 답하고, Q14는 **정답인 모호 판정**(`UNRESOLVED`/`AMBIGUOUS_MATCH`)에 도달. 연도는 유형과 무관하게 선택 사항이며, 루트를 1건으로 좁히지 못하면 `filing_discovery`에서 막는다 — 후보가 여럿이면 `ambiguous_root`, 후보가 1건이어도 질문이 상대방을 지목했으면 `unverified_counterparty`(C3 미구현). 한 질문이 두 유형에 맞으면 고르지 않고 `query_plan/ambiguous_event_subtype`으로 BLOCKED |
 | F 답변 불가 | Q16 Q17 Q18 | 1/3 정상 판정. Q18은 F3 Gate가 retrieval 이전에 판정. Q16·Q17은 여전히 우연히 거부됨(F1·F2 미구현) |
 
 ## Q01 계열 실측 스윕

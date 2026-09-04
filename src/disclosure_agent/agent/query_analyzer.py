@@ -760,6 +760,32 @@ COUNTERPARTY_PATTERN = re.compile(
     r"\s*(?:과|와)\s*(?:체결|계약|맺)"
 )
 
+# 이력 조회(Pattern E)에서 "질문이 계약 상대방을 지목했는가"를 읽는 표현.
+#
+# 위 COUNTERPARTY_PATTERN과 나눠 두는 이유:
+#     두 패턴이 같은 개념을 읽지만 잘못 읽었을 때의 방향이 반대다.
+#
+#     Q02(단건 조회)는 읽은 이름으로 문서를 고른다. 잘못 읽으면 틀린 계약의 금액을 답하게
+#     되므로 좁게 잡아야 한다.
+#
+#     Pattern E는 읽은 이름으로 문서를 고르지 않는다. 이름이 있다는 사실만으로 원공시 1건을
+#     확정하지 않고 막는 데 쓴다(handlers.event_history의 unverified_counterparty). 잘못
+#     읽으면 답할 수 있었던 질문이 막히고, 그것은 틀린 계약의 이력을 답하는 것보다 안전한
+#     방향이다.
+#
+#     그래서 조사는 넓히고("포드랑 맺었던"이 Q14의 표기다) 뒤따르는 말은 좁힌다.
+#
+# 뒤따르는 말에서 '계약'을 뺀 이유:
+#     넣으면 "계약금액이랑 계약기간은?"에서 '계약금액이'가 상대방으로 읽힌다. 거기서 '이랑'은
+#     두 필드를 함께 묻는 접속 조사이지 상대를 가리키는 조사가 아니다. 체결·맺음을 뜻하는 말만
+#     남기면 그 문장은 걸리지 않는다(tests/unit/test_q02_query_plan.py가 쓰는 실제 문장이다).
+#
+# 조사 나열은 긴 것이 앞이다. '이랑'을 뒤에 두면 '랑'이 먼저 맞아 이름 끝에 '이'가 남는다.
+EVENT_COUNTERPARTY_PATTERN = re.compile(
+    r"([A-Za-z][A-Za-z0-9&.\-]*(?:\s+[A-Za-z][A-Za-z0-9&.\-]*)*|[가-힣]{2,})"
+    r"\s*(?:이랑|랑|과|와)\s*(?:체결|맺)"
+)
+
 
 class UnsupportedQuestionError(ValueError):
     """이번 슬라이스가 결정론적으로 처리할 수 없는 질문."""
@@ -2368,6 +2394,45 @@ def _extract_counterparty(question: str, company: str) -> str | None:
     return found
 
 
+def _extract_event_counterparty(question: str, company: str) -> str | None:
+    """
+    이력 질문이 지목한 계약 상대방. 없으면 None이며 추정하지 않는다.
+
+    _extract_counterparty와 규칙만 다르고 하는 일은 같다. 어느 표현을 읽는지는
+    EVENT_COUNTERPARTY_PATTERN에 적어 두었다.
+
+    이 값을 무엇에 쓰는지가 Q02와 다르다:
+        Q02는 이 이름으로 후보 문서를 좁힌다. Pattern E는 좁히지 않는다. 상대방으로 문서를
+        확정하는 능력(C3)이 아직 없기 때문이며, 여기서 이름을 담는 것은 그 능력을 흉내 내려는
+        것이 아니라 **없다는 사실을 handler에 전달**하려는 것이다.
+
+        handler는 이 값이 있고 원공시 후보가 1건일 때 그 1건을 답으로 삼지 않고 막는다
+        (handlers.event_history의 unverified_counterparty). 질문이 상대방으로 계약을 지목했는데
+        이 구현은 그 이름을 본문과 대조하지 못하므로, 후보가 하나라는 것만으로 "그 상대방의
+        계약"이라고 말할 수 없다. 후보가 하나뿐인 것은 코퍼스가 그렇다는 뜻이지 질문이 가리킨
+        계약이라는 뜻이 아니다.
+
+        그래서 이 값은 계획에 담기지만 조회 조건으로는 쓰이지 않는다. 담고도 아무도 읽지 않는
+        값이 아니라, 읽는 쪽이 정해져 있고 그 쪽이 하는 일이 '고르지 않기'다.
+
+    대상 기업과 같은 이름이면 상대방으로 읽지 않는다. _extract_counterparty와 같은 이유다.
+    """
+    match = EVENT_COUNTERPARTY_PATTERN.search(question)
+
+    if not match:
+        return None
+
+    found = match.group(1).strip()
+
+    if not found:
+        return None
+
+    if normalize_company_name(found) == normalize_company_name(company):
+        return None
+
+    return found
+
+
 def _looks_like_contract_fact(question: str) -> bool:
     """
     거래소공시 계약 1건의 값을 묻는 질문인가.
@@ -2768,6 +2833,10 @@ def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> Quer
         accounting_scope=QueryAccountingScope.NOT_APPLICABLE.value,
         metric=None,
         month=month,
+        # 조회 조건이 아니라 handler에 넘기는 fail-close 신호다. 상대방으로 후보를 좁히지
+        # 않으며, 이 값이 있으면 후보 1건을 답으로 확정하지 않는다
+        # (_extract_event_counterparty 참조).
+        counterparty=_extract_event_counterparty(question, companies[0]),
         chain_policy=ChainPolicy.FULL_CHAIN,
     )
 

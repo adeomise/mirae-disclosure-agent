@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from disclosure_agent.periodic.parser import parse_periodic_xml
+import pytest
+
+from disclosure_agent.periodic.parser import (
+    parse_periodic_xml,
+    sanitize_dart_xml_text,
+)
 
 
 def parse_xml(tmp_path: Path, body: str) -> dict:
@@ -129,3 +134,140 @@ def test_malformed_text_tokens_do_not_break_following_sections(tmp_path: Path) -
         "S&P는 정상 entity이고 S&P와 <프로젝트>는 malformed 원문이다."
     )
     assert parsed["sections"][1]["title"] == "III. 재무에 관한 사항"
+
+
+def _comparison_document(comparison: str) -> str:
+    return f"""<DOCUMENT>
+      <DOCUMENT-NAME>합성 정기보고서</DOCUMENT-NAME>
+      <COMPANY-NAME>테스트기업</COMPANY-NAME>
+      <BODY>
+        <SECTION-1>
+          <TITLE>합성 재무정보</TITLE>
+          <P>비율 기준 {comparison}</P>
+          <TABLE-GROUP ACLASS="{{XBRL}}IS_C1" ADELETETABLE="N">
+            <TITLE>연결재무제표</TITLE>
+            <TABLE>
+              <TR><TD>(단위 : 백만원)</TD></TR>
+              <TR><TH>항목</TH><TH>제 1 기 2099</TH></TR>
+              <TR>
+                <TD>매출액</TD>
+                <TE ACODE="ifrs-full_Revenue"
+                    ACONTEXT="CFY2099dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember"
+                    AUNIT="KRW">123</TE>
+              </TR>
+            </TABLE>
+          </TABLE-GROUP>
+        </SECTION-1>
+      </BODY>
+    </DOCUMENT>"""
+
+
+def _parse_comparison_document(
+    tmp_path: Path,
+    *,
+    filename: str,
+    comparison: str,
+) -> dict:
+    source = tmp_path / filename
+    source.write_text(_comparison_document(comparison), encoding="utf-8")
+    return parse_periodic_xml(source)
+
+
+def test_malformed_percent_comparison_matches_valid_equivalent_with_provenance(
+    tmp_path: Path,
+) -> None:
+    malformed = _parse_comparison_document(
+        tmp_path,
+        filename="MALFORMED.xml",
+        comparison="< 10%",
+    )
+    valid = _parse_comparison_document(
+        tmp_path,
+        filename="VALID.xml",
+        comparison="&lt; 10%",
+    )
+
+    assert malformed["sections"] == valid["sections"]
+    assert malformed["table_groups"] == valid["table_groups"]
+    assert malformed["tables"] == valid["tables"]
+    assert malformed["sections"][0]["text"] == "비율 기준 < 10%"
+
+    group = malformed["table_groups"][0]
+    table = malformed["tables"][0]
+    cell = table["rows"][2][1]
+    assert group["title"] == "연결재무제표"
+    assert group["aclass"] == "{XBRL}IS_C1"
+    assert "합성 재무정보" in group["raw_context"]
+    assert table["title"] is None
+    assert table["unit"] == "(단위 : 백만원)"
+    assert table["table_id"] == "table_0001"
+    assert table["table_group_id"] == "table_group_0001"
+    assert table["section_path"] == ["합성 재무정보"]
+    assert [item["text"] for item in table["rows"][1]] == [
+        "항목",
+        "제 1 기 2099",
+    ]
+    assert table["rows"][2][0]["text"] == "매출액"
+    assert cell == {
+        "type": "TE",
+        "text": "123",
+        "provenance": {
+            "section_id": "section_0001",
+            "table_group_id": "table_group_0001",
+            "table_id": "table_0001",
+            "row_index": 2,
+            "col_index": 1,
+        },
+        "acode": "ifrs-full_Revenue",
+        "acontext": (
+            "CFY2099dFY_"
+            "ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_"
+            "ifrs-full_ConsolidatedMember"
+        ),
+        "aunit": "KRW",
+    }
+
+
+def test_valid_percent_comparison_is_sanitizer_noop() -> None:
+    valid_xml = _comparison_document("&lt; 10%")
+
+    assert sanitize_dart_xml_text(valid_xml) == valid_xml
+
+
+def test_repeated_malformed_percent_comparisons_preserve_order(
+    tmp_path: Path,
+) -> None:
+    parsed = parse_xml(
+        tmp_path,
+        """
+        <SECTION-1>
+          <TITLE>비교 기준</TITLE>
+          <P>첫째 < 10%, 둘째 < 5%</P>
+          <P>후속 문단</P>
+        </SECTION-1>
+        """,
+    )
+
+    assert parsed["sections"][0]["paragraphs"] == [
+        "첫째 < 10%, 둘째 < 5%",
+        "후속 문단",
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<SECTION-1><P>미지원 비교 <10%</P></SECTION-1>",
+        "<SECTION-1><P>모호한 비교 < 10 단위</P></SECTION-1>",
+        "<SECTION-1><P>닫힘 불일치</SECTION-1>",
+        "<SECTION-1><P>잘린 문서",
+        "<SECTION-1><TABLE><TR><TD>중첩 오류</TR></TABLE></SECTION-1>",
+        '<SECTION-1 BAD=="VALUE"><P>속성 오류</P></SECTION-1>',
+    ],
+)
+def test_unrelated_or_ambiguous_malformed_xml_still_fails_closed(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    with pytest.raises(ValueError, match="XML 파싱에 실패했습니다"):
+        parse_xml(tmp_path, body)

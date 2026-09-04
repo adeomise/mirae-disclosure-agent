@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +9,7 @@ from disclosure_agent.periodic.extractor import (
     extract_financial_fact,
     extract_financial_facts_with_evidence,
 )
+from disclosure_agent.periodic.parser import parse_periodic_xml
 
 
 def cell(
@@ -264,6 +266,54 @@ def test_targeted_revenue_prefers_existing_acode_path() -> None:
     assert fact.raw_value == "1,234"
     assert fact.acode == "ifrs-full_Revenue"
     assert fact.acontext == value_cell["acontext"]
+
+
+def test_malformed_percent_comparison_document_reaches_targeted_extractor(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "SYNTHETIC.xml"
+    source.write_text(
+        """<DOCUMENT>
+          <DOCUMENT-NAME>합성 정기보고서</DOCUMENT-NAME>
+          <COMPANY-NAME>테스트기업</COMPANY-NAME>
+          <BODY><SECTION-1><TITLE>합성 재무정보</TITLE>
+            <P>비율 기준 < 10%</P>
+            <TABLE-GROUP ACLASS="{XBRL}IS_C1">
+              <TITLE>연결재무제표</TITLE>
+              <TABLE>
+                <TR><TD>(단위 : 백만원)</TD></TR>
+                <TR><TH>항목</TH><TH>제 1 기 2099</TH></TR>
+                <TR><TD>매출액</TD><TE ACODE="ifrs-full_Revenue"
+                  ACONTEXT="CFY2099dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember">123</TE></TR>
+              </TABLE>
+            </TABLE-GROUP>
+          </SECTION-1></BODY>
+        </DOCUMENT>""",
+        encoding="utf-8",
+    )
+
+    parsed = parse_periodic_xml(source)
+    fact = extract_financial_fact(
+        parsed,
+        metric=MetricConcept.REVENUE,
+        fiscal_year=2099,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+    )
+
+    assert fact.metric is MetricConcept.REVENUE
+    assert fact.acode == "ifrs-full_Revenue"
+    assert fact.accounting_scope is FactAccountingScope.CONSOLIDATED
+    assert fact.fiscal_year == 2099
+    assert fact.raw_value == "123"
+    assert fact.value == Decimal("123")
+    assert fact.unit_token == "백만원"
+    assert fact.value_in_base_unit == Decimal("123000000")
+    assert fact.location.section_id == "section_0001"
+    assert fact.location.section_path == ("합성 재무정보",)
+    assert fact.location.table_id == "table_0001"
+    assert fact.location.row_index == 2
+    assert fact.location.column_index == 1
+    assert fact.location.label_text == "매출액"
 
 
 @pytest.mark.parametrize(

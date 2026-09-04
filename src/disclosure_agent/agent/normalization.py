@@ -110,6 +110,7 @@ if TYPE_CHECKING:  # pragma: no cover - 순환 import를 만들지 않기 위한
     )
     from disclosure_agent.agent.handlers.document_summary import DocumentSummaryResult
     from disclosure_agent.agent.handlers.event_history import EventHistoryResult
+    from disclosure_agent.agent.handlers.event_summary import EventSummaryResult
     from disclosure_agent.agent.handlers.single_fact import SingleFactResult
     from disclosure_agent.agent.handlers.temporal_compare import TemporalCompareResult
 
@@ -895,7 +896,81 @@ def _chain_reason(result: EventHistoryResult) -> AnswerabilityReason | None:
     return AnswerabilityReason.INCOMPLETE_CHAIN
 
 
-def _root_candidate_gaps(result: EventHistoryResult) -> list[ConversionGap]:
+# --------------------------------------------------------------------------
+# Q06 거래소공시 단건 요약
+# --------------------------------------------------------------------------
+
+
+def normalize_event_summary_result(result: EventSummaryResult) -> AgentExecutionResult:
+    """
+    Q06의 구조화 결과를 공통 실행 Contract로 옮긴다.
+
+    ResolvedEventState / EventHistory / EventLink / Evidence는 이미 Contract 타입이므로
+    다시 만들지 않고 그대로 싣는다. Pattern E를 옮길 때와 같은 규약이다.
+
+    판정을 여기서 새로 내리지 않는다:
+        status와 reason은 handler가 정한다. 필수 요약 항목이 무엇인지, 그중 무엇이 유보이고
+        무엇이 미확보인지는 그쪽이 알고 이쪽은 모른다. 여기서 다시 판정하면 같은 규칙이 두
+        벌이 된다.
+
+        예외는 정지 지점이다. 어느 정지가 '실행은 끝났고 답이 없다'이고 어느 정지가 '판정에
+        이르지 못했다'인지는 ANSWERABILITY_BY_STOP 하나가 정하며, 그 대응표가 이 모듈의
+        것이다.
+
+    상태가 없는 결과를 그대로 싣는다:
+        최신 유효 상태를 요구했는데 체인을 확정하지 못하면 handler가 상태 없이
+        PARTIALLY_ANSWERABLE + INCOMPLETE_CHAIN을 돌려준다. 그때 답의 근거는 EventHistory와
+        읽은 문서의 필드 근거이며, 원공시 값을 최신값 자리에 채워 넣지 않는다. 여기서 상태를
+        만들어 메우면 handler가 막은 일이 이 계층에서 그대로 일어난다.
+    """
+    warnings = [*result.plan.warnings, *result.warnings]
+
+    gaps = [to_conversion_gap(gap) for gap in result.conversion_gaps]
+
+    if result.blocked is not None:
+        if result.state is None and result.history is None:
+            gaps.extend(_root_candidate_gaps(result))
+
+        return _stopped_execution(
+            result.blocked,
+            warnings=warnings,
+            event_links=result.links,
+            evidence=result.evidence,
+            conversion_gaps=gaps,
+        )
+
+    if result.state is None and result.history is None:
+        # 루트를 확정하지 못해 event_id를 만들지 않은 경우다. 실행은 끝났고 판정만 미해결로
+        # 남는다(Pattern E의 같은 경로와 동일하다).
+        gaps.extend(_root_candidate_gaps(result))
+
+        return AgentExecutionResult(
+            execution_status=ExecutionStatus.COMPLETED,
+            answerability_status=result.status,
+            answerability_reason=result.reason,
+            event_links=list(result.links),
+            evidence=list(result.evidence),
+            warnings=warnings,
+            conversion_gaps=gaps,
+        )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=result.status,
+        answerability_reason=result.reason,
+        events=[result.event] if result.event is not None else [],
+        event_links=list(result.links),
+        event_histories=[result.history] if result.history is not None else [],
+        resolved_event_states=[result.state] if result.state is not None else [],
+        evidence=list(result.evidence),
+        warnings=warnings,
+        conversion_gaps=gaps,
+    )
+
+
+def _root_candidate_gaps(
+    result: EventHistoryResult | EventSummaryResult,
+) -> list[ConversionGap]:
     """루트 후보 목록을 담을 자리가 없을 때 그 목록을 남긴다."""
     if not result.root_candidate_doc_ids:
         return []

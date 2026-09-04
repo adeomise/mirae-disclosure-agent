@@ -140,11 +140,24 @@ INTENT_TEMPORAL_COMPARE = "temporal_compare"
 INTENT_CROSS_ENTITY_COMPARE = "cross_entity_compare"
 INTENT_UNANSWERABLE_CHECK = "unanswerable_check"
 
+# 거래소공시 단건 요약(Q06). document_summary를 재사용하지 않는다.
+#
+#     document_summary는 "정기공시 문서 1건의 지정 Section을 정리한다"는 뜻으로 이미
+#     Pattern B handler가 읽고 있다. Q06은 Section 구조가 아니라 번호가 매겨진 필드 구조를
+#     다루고(representative_questions.md 유형 2), 대상 문서를 고르는 규칙도 회계연도가 아니라
+#     이벤트 체인이다. 같은 intent에 담으면 Pattern B의 입구 가드를 Q06 때문에 넓혀야 하고,
+#     그 순간 정기공시 요약의 회계연도 요건이 함께 느슨해진다.
+#
+#     이름을 따로 두면 Pattern B는 그대로 두고 Router가 새 handler로 보낸다. Q02가
+#     single_fact를 재사용하지 않은 것과 같은 이유다.
+INTENT_EVENT_SUMMARY = "event_summary"
+
 KNOWN_INTENTS: tuple[str, ...] = (
     INTENT_SINGLE_FACT,
     INTENT_CONTRACT_FACT,
     INTENT_HOLDING_FACT,
     INTENT_DOCUMENT_SUMMARY,
+    INTENT_EVENT_SUMMARY,
     INTENT_TEMPORAL_COMPARE,
     INTENT_CROSS_ENTITY_COMPARE,
     INTENT_EVENT_HISTORY,
@@ -590,6 +603,68 @@ BUSINESS_PROFILE_SECTION_SCOPES: tuple[SectionScope, ...] = (
 )
 
 # --------------------------------------------------------------------------
+# 거래소공시 단건 요약(Q06)의 어휘
+# --------------------------------------------------------------------------
+
+# 요약 대상이 공시 문서 자체임을 밝히는 표기.
+#
+# 이 낱말 하나로 경로가 열리지는 않는다. 아래 세 조건이 모두 갖춰져야 한다
+# (_looks_like_event_summary 참조). 공시라는 말은 질문 어디에나 붙을 수 있다.
+EVENT_DISCLOSURE_TOKEN = "공시"
+
+# 문서에 적힌 것을 달라는 표기. 값 하나를 묻는 질문과 가르는 자리다.
+#
+# "내용"을 요구하는 이유:
+#     "공시 요약해줘"만으로 열면 "그 공시 금액 알려줘" 같은 값 조회까지 끌려온다. Q06은
+#     문서에 적힌 항목들을 정리해 달라는 질문이고, 그 요청은 실제로 '내용'이라는 말로 온다.
+#     대표 질문 셋(원문/원공시/처음 공시)이 모두 이 낱말을 쓴다.
+EVENT_SUMMARY_CONTENT_TOKEN = "내용"
+
+# 정리해 달라는 요청 표기.
+#
+# SUMMARY_REQUEST_TOKENS보다 넓다. Q06의 원공시 표현("처음 공시했을 때 내용 알려줘")은
+# '요약'도 '정리'도 쓰지 않는다. 다만 넓힌 낱말은 위의 공시·내용 조건과 함께일 때만 읽히므로,
+# "매출 알려줘" 같은 값 조회가 이 경로로 오지 않는다.
+EVENT_SUMMARY_REQUEST_TOKENS = ("요약", "정리", "알려", "설명")
+
+# 원공시 시점을 지목하는 표현.
+#
+# 공시라는 말과 붙어 있을 때만 읽는다. '처음'·'최초'만으로 판정하면 "처음 계약한 금액"처럼
+# 시점이 아닌 다른 것을 가리키는 표현까지 원공시 요청으로 읽힌다.
+#
+# 이 표현이 없으면 최신 유효 상태다. 기본값을 코드가 고르는 것이 아니라, 질문이 시점을
+# 밝히지 않았다는 사실이 "지금 유효한 내용"을 뜻한다(open_decisions.md D5의 chain_policy).
+ORIGINAL_STATE_PATTERN = re.compile(r"(?:원|최초|처음|당초)(?:으로|로|에)?공시")
+
+# 이벤트 주제어에서 걷어낼 낱말.
+#
+# 여기 담긴 것은 어느 공시를 가리키는지에 기여하지 않는 말이다. 남겨 두면 본문 대조에서
+# 걸리지 않아 실제로 있는 공시가 '없다'로 판정된다.
+#
+# 기업명·기간·공시 표기·요청 표기는 여기 담지 않는다. 그것들은 각각 다른 규칙이 이미
+# 걷어낸다(_event_summary_subject_tokens 참조).
+EVENT_SUBJECT_STOP_TOKENS: frozenset[str] = frozenset(
+    {
+        "당시",
+        "때",
+        "관련",
+        "건",
+        "중",
+        "그",
+        "이",
+        "저",
+        "좀",
+        "및",
+        "한",
+        "번",
+        "한번",
+    }
+)
+
+# 주제어에서 걷어낼 앞뒤 문장부호.
+EVENT_SUBJECT_TRIM_CHARS = " \t\n.,!?·ㆍ、'\"“”‘’()[]{}<>《》「」"
+
+# --------------------------------------------------------------------------
 # 거래소공시 단건 사실 조회(Q02)의 어휘
 # --------------------------------------------------------------------------
 
@@ -778,7 +853,13 @@ class QueryPlan:
     years: tuple[int, ...]
     intent: str = INTENT_SINGLE_FACT
     document_class: str = DOCUMENT_CLASS_PERIODIC
-    document_subtype: str = DOCUMENT_SUBTYPE_ANNUAL
+    # 질문이 지목한 공시 세부유형. None은 '질문이 밝히지 않았다'이며 '아무거나 좋다'가 아니다.
+    #
+    # 거래소공시 단건 요약(Q06)에서 그 경우가 생긴다. "파주 AIDC 투자 공시"는 어느 공시
+    # 유형인지 이름으로 말하지 않으므로, 유형을 추측해 채우면 그 추측이 후보를 잘못 좁힌다.
+    # 대신 handler가 지원하는 유형 전체를 후보로 두고 본문 주제어로 좁히며, 좁혀지지 않으면
+    # 답하지 않는다.
+    document_subtype: str | None = DOCUMENT_SUBTYPE_ANNUAL
     accounting_scope: str = SCOPE_CONSOLIDATED
     # 거래소공시 질의에는 지표가 없다. 값이 아니라 이력을 묻기 때문이다.
     #
@@ -836,6 +917,19 @@ class QueryPlan:
     #
     # section_scope와 서로 배타다(__post_init__ 참조). 단일 문서 요약 계획에서만 쓴다.
     section_scopes: tuple[SectionScope, ...] = ()
+    # 질문이 어느 이벤트를 가리키는지 밝힌 주제어. 거래소공시 단건 요약(Q06)이 쓴다.
+    #
+    # 왜 계획에 담는가:
+    #     Q06의 대상 문서는 회계연도로도 공시 세부유형으로도 좁혀지지 않는다. 한 기업이 같은
+    #     유형의 공시를 여러 건 낼 수 있고, 질문이 그중 하나를 가리키는 근거는 본문에 적힌
+    #     주제("파주 AIDC 투자")뿐이다. 그 주제를 계획에 담아야 handler가 질문 문자열을 다시
+    #     읽지 않는다. counterparty가 Q02에서 같은 자리에 있는 것과 같은 구조다.
+    #
+    # 문서 식별자를 담지 않는 이유:
+    #     doc_id나 접수번호를 계획에 넣으면 그 질문 하나만 답하고 같은 모양의 다른 질문은
+    #     답하지 못한다. 여기 담기는 것은 사용자가 실제로 쓴 말이며, 어느 문서가 그 말에
+    #     해당하는지는 코퍼스를 열어 본 handler가 정한다.
+    event_subject_tokens: tuple[str, ...] = ()
     # accounting_scope가 질문에 명시됐는지 기록한다. 기본값으로 채운 경우를 구분하기 위함이다.
     accounting_scope_explicit: bool = True
     # 질문에 상대 기간 표현이 있었다면 그 표현과 해석 결과.
@@ -888,6 +982,32 @@ class QueryPlan:
             raise ValueError(
                 "단일 문서 요약 계획에는 section_scope가 있어야 합니다: "
                 f"question={self.question!r}."
+            )
+
+        # 이벤트 단건 요약 계획은 주제어 없이 만들 수 없다.
+        #
+        # 주제어는 이 Pattern이 대상 문서를 고르는 유일한 근거다. 비어 있으면 실행하는 쪽이
+        # 기업의 거래소공시 중 하나를 스스로 골라야 하고, 무엇을 골랐는지는 계획에도 결과에도
+        # 남지 않는다. section_scope를 요구하는 규칙과 같은 자리다.
+        if self.intent == INTENT_EVENT_SUMMARY and not self.event_subject_tokens:
+            raise ValueError(
+                "이벤트 단건 요약 계획에는 event_subject_tokens가 있어야 합니다: "
+                f"question={self.question!r}."
+            )
+
+        # 문자열을 그대로 받으면 글자 단위로 순회된다. companies를 막는 것과 같다.
+        if isinstance(self.event_subject_tokens, str):
+            raise TypeError(
+                "event_subject_tokens는 주제어 하나가 아니라 튜플이어야 합니다: "
+                f"{self.event_subject_tokens!r}"
+            )
+
+        # 주제어는 이벤트 단건 요약에서만 뜻이 있다. 다른 의도에 실리면 그 handler는 이 값을
+        # 읽지 않으므로, 질문이 좁힌 조건이 조용히 사라진 계획이 된다.
+        if self.event_subject_tokens and self.intent != INTENT_EVENT_SUMMARY:
+            raise ValueError(
+                "event_subject_tokens는 이벤트 단건 요약 계획에서만 담을 수 있습니다: "
+                f"intent={self.intent!r}."
             )
 
         # SectionScope은 StrEnum이라 낱개로 넘겨도 문자열로 순회된다. companies를 막는
@@ -961,10 +1081,21 @@ class QueryPlan:
         """
         연도를 하나도 담지 않고 만들 수 있는 계획인가.
 
-        event_history + full_chain 하나만이다. 이 조합에서 연도는 비교 대상 기간이 아니라
-        원공시를 지목하는 공시일 기준점이고, 기준점 없이도 기업과 공시 유형만으로 체인을
-        찾아볼 수 있다. 찾은 원공시가 여럿이면 handler가 ambiguous_root로 막으므로 값을
-        고르는 자리가 생기지 않는다.
+        거래소공시를 대상으로 하는 두 계획뿐이다. 둘 다 연도가 비교 대상 기간이 아니라
+        원공시를 지목하는 공시일 기준점이고, 기준점 없이도 다른 조건이 후보를 좁힌다. 좁혀지지
+        않으면 handler가 ambiguous_root로 막으므로 값을 고르는 자리가 생기지 않는다.
+
+            event_history + full_chain
+                기업과 공시 유형이 후보를 좁힌다.
+
+            event_summary + latest_valid / original_only
+                기업과 질문이 밝힌 이벤트 주제어가 후보를 좁힌다(event_subject_tokens).
+                거래소공시 레코드에는 회계연도가 아예 없고(manifest의 base_year가 비어 있다)
+                공시일만 있으므로, 연도를 요구하면 사용자가 알 수 없는 값을 요구하게 된다.
+
+        정기공시 요약(Pattern B)은 여기 없다. 그쪽의 회계연도 요건은 그대로다. 기간을 밝히지
+        않은 정기공시 요약에서 어떤 문서를 기본값으로 고를지는 여전히 미정이며
+        (open_decisions.md D5-a), 이 완화가 그 결정을 대신하지 않는다.
 
         intent별로 나누는 이유:
             single_fact·temporal_compare·cross_entity_compare에서 연도는 답의 일부다. 그쪽에서
@@ -977,6 +1108,12 @@ class QueryPlan:
         _build_event_history_plan이 그 값을 보고 _require_years를 부를지 말지 고른다.
         두 곳에 같은 규칙을 두면 어긋날 수 있어 한쪽만 정본으로 둔다.
         """
+        if self.intent == INTENT_EVENT_SUMMARY:
+            return self.chain_policy in (
+                ChainPolicy.LATEST_VALID,
+                ChainPolicy.ORIGINAL_ONLY,
+            )
+
         return (
             self.intent == INTENT_EVENT_HISTORY
             and self.chain_policy == ChainPolicy.FULL_CHAIN
@@ -1895,6 +2032,247 @@ def _build_document_summary_plan(question: str, companies: tuple[str, ...]) -> Q
     )
 
 
+def _event_summary_subject_tokens(
+    question: str,
+    companies: tuple[str, ...],
+) -> tuple[str, ...]:
+    """
+    질문에서 어느 이벤트를 가리키는지 밝힌 주제어를 읽는다. 없으면 빈 튜플.
+
+    남기는 것이 아니라 걷어내는 방식이다. 무엇이 주제어인지 알아보는 규칙을 만들면 그 규칙에
+    없는 주제는 인식되지 않고, 인식되지 않은 주제는 '주제를 밝히지 않은 질문'으로 취급되어
+    실제로 답할 수 있는 질문이 막힌다. 반대로 걷어내는 쪽은 어떤 낱말이 주제가 될 수 있는지
+    정하지 않는다.
+
+    걷어내는 것은 다섯이다.
+
+        기업명          답의 주체이지 이벤트를 가르는 조건이 아니다. 기업은 companies가
+                        이미 담고 있고, 후보 조회의 조건으로 따로 쓰인다.
+        공시 표기       '공시'가 들어간 낱말('공시', '원공시', '공시했을')은 문서 종류를
+                        말할 뿐 어느 문서인지 가리지 않는다.
+        요청 표기       '요약해줘', '알려줘' 같은 요청 표현.
+        시점 표기       '처음', '당초' 같은 판본 지시어와 연·월 표기. 판본은 chain_policy가,
+                        기간은 years/month가 각각 따로 담는다.
+        일반 조사어     EVENT_SUBJECT_STOP_TOKENS.
+
+    남은 낱말은 그대로 둔다. 조사를 떼거나 어간을 뽑지 않는다. 그런 변형은 규칙이 만들어 낸
+    말이고, 그 말로 문서를 고르면 사용자가 쓰지 않은 조건으로 고른 것이 된다. 변형하지 않은
+    낱말이 본문에서 걸리지 않으면 그 질문은 답하지 않는 쪽으로 끝난다.
+
+    순서는 질문에 나온 순서다.
+    """
+    normalized_companies = {
+        normalize_company_name(company) for company in companies if company
+    }
+
+    tokens: list[str] = []
+
+    for raw_token in question.split():
+        token = raw_token.strip(EVENT_SUBJECT_TRIM_CHARS)
+
+        if not token:
+            continue
+
+        if EVENT_DISCLOSURE_TOKEN in token:
+            continue
+
+        if EVENT_SUMMARY_CONTENT_TOKEN in token:
+            continue
+
+        if any(request in token for request in EVENT_SUMMARY_REQUEST_TOKENS):
+            continue
+
+        if token in EVENT_SUBJECT_STOP_TOKENS:
+            continue
+
+        if ORIGINAL_STATE_PATTERN.search(token) or token in ("처음", "최초", "당초", "원래"):
+            continue
+
+        if YEAR_PATTERN.search(token) or MONTH_PATTERN.fullmatch(token):
+            continue
+
+        normalized_token = normalize_company_name(token)
+
+        if normalized_token and normalized_token in normalized_companies:
+            continue
+
+        # 기업명이 조사와 붙어 온 경우("LG유플러스가")도 주제어가 아니다. 정규화한 기업명으로
+        # 시작하는지 본다. 포함 여부로 보면 기업명이 우연히 들어간 다른 낱말까지 걸린다.
+        if normalized_token and any(
+            normalized_token.startswith(company) for company in normalized_companies
+        ):
+            continue
+
+        tokens.append(token)
+
+    return tuple(tokens)
+
+
+def _looks_like_event_summary(question: str, companies: tuple[str, ...]) -> bool:
+    """
+    거래소공시 1건의 내용을 정리해 달라는 질문인가.
+
+    넷을 모두 만족해야 참이다.
+
+        1. 정기공시 보고서 표기가 없다   "사업보고서"가 있으면 Pattern B의 질문이다.
+        2. 공시 표기가 있다              요약 대상이 공시 문서 자체임을 질문이 밝혔다.
+        3. 내용 요청 표기가 있다         "내용" + "요약/정리/알려/설명".
+        4. 이벤트 주제어를 읽었다        어느 공시인지 가릴 근거가 질문에 있다.
+
+    1번이 규약의 핵심이다. 이 판정이 정기공시 요약의 회계연도 요건을 건드리지 않는다는 것을
+    여기서 보장한다. "사업보고서 내용 요약해줘"처럼 연도를 밝히지 않은 정기공시 요약은 이
+    경로로 오지 않고, 예전과 같이 missing_year로 막힌다(_build_document_summary_plan).
+
+    4번이 두 번째 규약이다. 주제어가 없으면 이 경로를 열지 않으므로, 연도를 밝히지 않은
+    모든 요약 질문이 합법이 되지는 않는다. "공시 내용 요약해줘"는 어느 공시인지 가릴 근거가
+    없고, 그 질문은 이 판정을 통과하지 못한 채 예전 경로로 흘러간다.
+
+    판정 순서에 대해:
+        이 판정은 이력 판정보다 뒤다. "공시 내용 어떻게 바뀌었는지 정리해줘"처럼 두 표현이
+        함께 있는 질문은 Pattern E가 답하던 것이고, 앞에 두면 그 질문을 가로챈다.
+    """
+    if any(token in question for token in PERIODIC_REPORT_TOKENS):
+        return False
+
+    compact = "".join(question.split())
+
+    if EVENT_DISCLOSURE_TOKEN not in compact:
+        return False
+
+    if EVENT_SUMMARY_CONTENT_TOKEN not in compact:
+        return False
+
+    if not any(token in compact for token in EVENT_SUMMARY_REQUEST_TOKENS):
+        return False
+
+    return bool(_event_summary_subject_tokens(question, companies))
+
+
+def _extract_event_summary_chain_policy(question: str) -> ChainPolicy:
+    """
+    질문이 요구한 판본을 읽는다.
+
+    원공시 시점을 지목한 표현이 있으면 원공시 상태, 없으면 최신 유효 상태다. 두 값 모두
+    Contract v0.1의 ChainPolicy 어휘이며, 새 어휘를 만들지 않는다
+    (open_decisions.md D5가 "chain_policy 필드가 이 정책을 표현하는 자리"라고 적어 둔 곳).
+
+    기본값을 코드가 고르는 것이 아니다. 시점을 밝히지 않은 질문이 묻는 것은 "지금 유효한
+    내용"이며, 그것이 latest_valid다. 반대로 두면 정정이 반영된 공시에서 낡은 값이 기본
+    답이 되고, 사용자는 그것이 낡았다는 사실을 알 수 없다.
+    """
+    compact = "".join(question.split())
+
+    if ORIGINAL_STATE_PATTERN.search(compact):
+        return ChainPolicy.ORIGINAL_ONLY
+
+    return ChainPolicy.LATEST_VALID
+
+
+def _build_event_summary_plan(question: str, companies: tuple[str, ...]) -> QueryPlan:
+    """
+    Q06 계열 거래소공시 단건 요약 계획을 만든다.
+
+        "LG유플러스 파주 AIDC 투자 공시 내용 요약해줘."
+        -> 거래소공시 + event_subject_tokens=('파주', 'AIDC', '투자') + latest_valid
+
+    회계연도를 요구하지 않는다:
+        거래소공시 manifest 레코드에는 base_year가 없다. 공시일만 있으므로 회계연도를
+        요구하면 사용자가 알 수 없는 값을 요구하게 되고, 오늘 날짜에서 연도를 만들어 채우면
+        같은 질문이 실행한 날에 따라 다른 문서를 가리킨다. 어느 쪽도 하지 않는다.
+
+        대신 대상 문서는 기업과 이벤트 주제어가 좁힌다. 좁혀지지 않으면 handler가
+        ambiguous_root로 막는다. 정기공시 요약(Pattern B)의 회계연도 요건은 그대로다.
+
+    연도를 밝힌 질문에서는 그 연도를 버리지 않는다:
+        "LG유플러스 2024년 파주 AIDC 투자 공시 내용 요약해줘"에서 2024를 버리면, 사용자가
+        좁힌 범위가 조용히 사라진 채로 다른 해의 공시가 답이 된다. Pattern E와 같이 공시일
+        기준점으로 담고 handler가 원공시 후보를 그 창으로 좁힌다.
+
+    상대 기간 표현은 옮기지 않는다:
+        확정된 기준 연도 정책(D8)은 시계열 비교의 기준이며 요약 대상 문서를 고르는 기준까지
+        정하지 않았다. _build_document_summary_plan이 같은 이유로 같은 판정을 한다.
+
+    공시 세부유형은 질문이 밝힌 경우에만 담는다:
+        "시설투자 공시 내용 요약해줘"처럼 유형을 말한 질문에서는 그 유형으로 후보를 좁힌다.
+        말하지 않았으면 None이고, handler가 지원하는 유형 전체를 후보로 둔다. 유형을 추측해
+        채우면 그 추측이 후보를 잘못 좁혀 실제로 있는 공시가 '없다'로 판정된다.
+
+        두 유형이 함께 맞으면 고르지 않고 막는다. _extract_event_subtype_rule이 이력 질문에
+        대해 하는 판정과 같으며, 사유 이름도 같다.
+    """
+    relative_expression = _match_previous_year_expression(question)
+
+    if relative_expression is not None:
+        raise UnsupportedQuestionError(
+            reason="unsupported_event_summary_period",
+            detail=(
+                f"공시 요약 질문의 상대 기간 표현('{relative_expression}')은 해석하지 "
+                "않습니다. 확정된 기준 연도 정책(D8)은 시계열 비교의 기준이며, 요약 대상 "
+                "공시를 고르는 기준까지 정하지 않았습니다."
+            ),
+        )
+
+    years = _extract_years(question)
+
+    if len(years) > 1:
+        listed = ", ".join(str(year) for year in years)
+
+        raise UnsupportedQuestionError(
+            reason="unsupported_event_summary_period",
+            detail=(
+                f"질문이 {len(years)}개 기간({listed})을 함께 가리키고 있습니다. "
+                "공시 단건 요약은 공시 1건을 대상으로 합니다. 한 기간을 골라 답하지 않습니다."
+            ),
+        )
+
+    matched_rules = _find_event_subtype_rules(question)
+
+    if len(matched_rules) > 1:
+        listed = ", ".join(rule.subtype for rule in matched_rules)
+
+        raise UnsupportedQuestionError(
+            reason="ambiguous_event_subtype",
+            detail=(
+                f"질문이 거래소공시 유형 {len(matched_rules)}종({listed})을 함께 가리키고 "
+                "있어 어느 유형의 공시를 요약할지 특정할 수 없습니다. "
+                "한 유형을 골라 답하지 않습니다."
+            ),
+        )
+
+    subject_tokens = _event_summary_subject_tokens(question, companies)
+
+    if not subject_tokens:
+        raise UnsupportedQuestionError(
+            reason="missing_event_subject",
+            detail=(
+                "어느 공시를 요약할지 가릴 주제어를 질문에서 읽지 못했습니다. "
+                "기업의 거래소공시 중 하나를 임의로 고르지 않습니다."
+            ),
+        )
+
+    month = _extract_month(question)
+
+    # 월만 있고 연도가 없으면 공시일 창을 만들 수 없다. 질문이 밝힌 '4월'이 계획에는 담기지만
+    # 조회에는 쓰이지 않는 상태를 만들지 않는다. _build_event_history_plan과 같은 규칙이다.
+    if month is not None:
+        years = _require_years(years)
+
+    return QueryPlan(
+        question=question.strip(),
+        companies=companies,
+        years=years[:1],
+        intent=INTENT_EVENT_SUMMARY,
+        document_class=DOCUMENT_CLASS_EVENT,
+        document_subtype=matched_rules[0].subtype if matched_rules else None,
+        # 거래소공시에는 연결·별도 구분이 없다.
+        accounting_scope=QueryAccountingScope.NOT_APPLICABLE.value,
+        metric=None,
+        month=month,
+        chain_policy=_extract_event_summary_chain_policy(question),
+        event_subject_tokens=subject_tokens,
+    )
+
+
 def _find_contract_fields(question: str) -> tuple[MetricConcept, ...]:
     """
     질문이 요구한 계약 문서 필드를 읽는다. 없으면 빈 튜플이며 추측하지 않는다.
@@ -2468,6 +2846,22 @@ def build_query_plan(
     # 남은 의도를 가른다. 이후 단계는 의도마다 요구하는 것이 다르다.
     if _looks_like_event_history(question):
         return _build_event_history_plan(question, companies)
+
+    # 거래소공시 단건 요약(Q06)은 이력 판정보다 뒤, 정기공시 요약 판정보다 앞이다.
+    #
+    #   이력 판정보다 뒤      "공시 내용 어떻게 바뀌었는지 정리해줘"는 Pattern E가 답하던
+    #                        질문이다. 앞에 두면 그 질문을 가로챈다.
+    #
+    #   정기공시 요약보다 앞  순서가 결과를 바꾸지는 않는다. 두 판정은 서로 배타이며
+    #                        (_looks_like_event_summary가 "사업보고서"가 있으면 거짓),
+    #                        앞에 두는 것은 요약 판정 셋이 한자리에 모여 서로 다른 질문
+    #                        모양을 본다는 것을 드러내기 위해서다.
+    #
+    #   기간 판정보다 앞      이 질문은 회계연도를 밝히지 않는다. 뒤에 두면 _require_years가
+    #                        먼저 missing_year로 막고, 막힌 사유가 실제로 일어난 일과
+    #                        달라진다.
+    if _looks_like_event_summary(question, companies):
+        return _build_event_summary_plan(question, companies)
 
     # 요약 요청은 이력 판정보다 뒤, 기간 판정보다 앞이다.
     #

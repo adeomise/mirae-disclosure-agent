@@ -357,11 +357,22 @@ def _require_supported_shape(result: AgentExecutionResult) -> None:
     DocumentSummary는 그중에서도 이번 범위 밖이다. 결정론 경로는 Pattern B를 답하지만
     payload에는 요약을 옮길 자리가 없다. 요약을 빼고 나머지를 보내면 답의 본체가 사라지므로,
     요약이 실린 결과는 통째로 결정론 경로에 맡긴다.
+
+    ResolvedEventState도 같은 자리다. 이벤트 단건 요약(Q06)의 답은 그 상태의 필드 값들이고,
+    payload에는 그것을 담을 자리가 없다. 그대로 보내면 모델은 값을 하나도 받지 못한 채
+    EventHistory의 건수만 보고 요약 문장을 지어내게 된다.
     """
     if result.document_summaries:
         raise PayloadNotGroundableError(
             f"DocumentSummary {len(result.document_summaries)}건이 실려 있습니다. "
             "문서 요약은 아직 payload로 옮기지 않으며, 요약을 뺀 나머지만 보내지 않습니다."
+        )
+
+    if result.resolved_event_states:
+        raise PayloadNotGroundableError(
+            f"ResolvedEventState {len(result.resolved_event_states)}건이 실려 있습니다. "
+            "이벤트 단건 요약은 아직 payload로 옮기지 않으며, 상태를 뺀 나머지만 보내지 "
+            "않습니다."
         )
 
     if result.comparisons and result.event_histories:

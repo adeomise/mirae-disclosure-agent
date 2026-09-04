@@ -394,7 +394,13 @@ class AskRequest(BaseModel):
 
 
 class AnswerResponse(BaseModel):
-    """Answer and all structured evidence-bearing results."""
+    """Answer and all structured evidence-bearing results.
+
+    ``resolved_event_states`` carries the field-level state an event disclosure was
+    resolved to at one cutoff. 이벤트 단건 요약(Q06)의 답은 그 상태 자체이며, 자리가 없으면
+    답의 본체가 문장에만 남고 구조화 결과에서 사라진다. 최신 상태와 원공시 상태 중 어느
+    시점인지는 ``as_of``와 각 필드의 ``source_doc_id``가 밝힌다.
+    """
 
     answer: str
     status: AnswerabilityStatus
@@ -403,4 +409,5 @@ class AnswerResponse(BaseModel):
     events: list[Event] = Field(default_factory=list)
     event_links: list[EventLink] = Field(default_factory=list)
     event_histories: list[EventHistory] = Field(default_factory=list)
+    resolved_event_states: list[ResolvedEventState] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)

@@ -21,7 +21,10 @@
   cross_entity_compare가 그 경우이며, Pattern C·D가 다루지 못하는 계획은 handler 입구에서
   pattern_entry로 막힌다. 막는 자리가 옮겨졌을 뿐 축소해서 답하지 않는 것은 같다.
   document_summary도 같다. Pattern B는 정기공시 단건 요약만 실행하고, 거래소공시 요약과
-  기간을 밝히지 않은 요약은 handler 입구에서 막힌다.
+  기간을 밝히지 않은 요약은 handler 입구에서 막힌다. 거래소공시 단건 요약(Q06)은
+  event_summary라는 별도 intent와 별도 handler를 갖는다. 대상 문서를 고르는 규칙이
+  회계연도가 아니라 이벤트 체인이어서, 같은 handler에 담으면 Pattern B의 입구 가드를
+  넓혀야 하기 때문이다.
 
 Pattern 추가 방법:
 - agent/handlers/에 모듈을 만들고 아래 HANDLERS에 한 줄 등록한다.
@@ -60,6 +63,7 @@ from disclosure_agent.agent.handlers.cross_entity_compare import (
 )
 from disclosure_agent.agent.handlers.document_summary import handle_document_summary
 from disclosure_agent.agent.handlers.event_history import handle_event_history
+from disclosure_agent.agent.handlers.event_summary import handle_event_summary
 from disclosure_agent.agent.handlers.holding_fact import handle_holding_fact
 from disclosure_agent.agent.handlers.single_fact import handle_single_fact
 from disclosure_agent.agent.handlers.temporal_compare import handle_temporal_compare
@@ -72,6 +76,7 @@ from disclosure_agent.agent.query_analyzer import (
     INTENT_CONTRACT_FACT,
     INTENT_CROSS_ENTITY_COMPARE,
     INTENT_DOCUMENT_SUMMARY,
+    INTENT_EVENT_SUMMARY,
     INTENT_HOLDING_FACT,
     INTENT_TEMPORAL_COMPARE,
     KNOWN_INTENTS,
@@ -106,6 +111,10 @@ HANDLERS: dict[str, Handler] = {
     Intent.SINGLE_FACT: handle_single_fact,
     Intent.EVENT_HISTORY: handle_event_history,
     INTENT_DOCUMENT_SUMMARY: handle_document_summary,
+    # event_summary도 Contract v0.1의 Intent에 아직 없어 query_analyzer의 문자열 상수를 쓴다.
+    # 거래소공시 단건 요약(Q06)이며, 정기공시 요약(document_summary)과 handler를 나눈 이유는
+    # query_analyzer의 INTENT_EVENT_SUMMARY 주석에 있다.
+    INTENT_EVENT_SUMMARY: handle_event_summary,
     INTENT_TEMPORAL_COMPARE: handle_temporal_compare,
     INTENT_CROSS_ENTITY_COMPARE: handle_cross_entity_compare,
     # contract_fact도 Contract v0.1의 Intent에 아직 없어 query_analyzer의 문자열 상수를 쓴다.

@@ -97,7 +97,10 @@ from disclosure_agent.common.schemas import (
 )
 from disclosure_agent.event.adapter import EventAdapterResult, adapt_extracted_event
 from disclosure_agent.event.contract_adapter import ContractGap, to_event_history
-from disclosure_agent.event.correction_fields import resolve_correction_field
+from disclosure_agent.event.correction_fields import (
+    classify_latest_state_blocking_correction,
+    resolve_correction_field,
+)
 from disclosure_agent.event.exceptions import UnsupportedCompositeCorrectionError
 from disclosure_agent.event.extractor import extract_event
 from disclosure_agent.event.latest_state import (
@@ -679,10 +682,30 @@ def find_unrepresentable_correction_change(
         해석되지 않는 라벨은 통과시키지 않는다. 무엇이 바뀌었는지 모르는 상태에서 "요약과
         무관하다"고 말할 근거가 없다.
 
+    공유 이벤트 계층이 이미 판정한 라벨은 여기서 막지 않는다:
+        event.correction_fields의 LATEST_STATE_BLOCKING_CORRECTIONS는 "원문이 여러 항목을 한
+        행에 묶어 두어 현재 필드 모델로 옮길 수 없다"를 유형별로 분류해 둔 정본이고,
+        resolve_latest_event_state가 그 라벨을 만나면 UnsupportedCompositeCorrectionError를
+        올린다. 그 판정을 이 handler가 앞질러 가로채면 두 가지를 잃는다.
+
+            1. 분류(category=source_composite)가 결과에서 사라진다. "원문이 묶어 놓았다"와
+               "이름을 못 붙였다"는 후속 조치가 다르다. 앞은 원문 구조를 표현할 모델이
+               필요하고, 뒤는 대응표를 넓히면 풀린다.
+            2. 공유 계층이 정책을 넓혀도 Q06만 옛 사유로 답한다. 정본이 두 곳이 된다.
+
+        그래서 분류된 라벨은 건너뛰고 resolver가 올리는 예외에 맡긴다(_resolve_state가
+        REASON_UNSUPPORTED_COMPOSITE_CORRECTION으로 옮긴다). 어느 쪽이든 최신 상태를 만들지
+        않는 것은 같고, 달라지는 것은 어느 사유로 멈추는가뿐이다.
+
+        여기에 그 라벨 목록을 다시 적지 않는다. 분류 함수를 부른다. 목록을 옮겨 적으면
+        공유 계층이 항목을 추가할 때 이쪽만 뒤처진다.
+
     이미 이름이 붙은 변경(change.field)은 보지 않는다. 그쪽은 resolve_latest_event_state가
     해당 정정 문서의 값으로 상태를 실제로 갱신한다.
 
-    첫 항목을 결정론적으로 돌려준다. 체인 순서가 같으면 같은 항목이 나온다.
+    첫 항목을 결정론적으로 돌려준다. 체인 순서가 같으면 같은 항목이 나온다. 한 체인에
+    공유 계층이 분류한 변경과 이 함수만 아는 변경이 함께 있으면 뒤엣것을 돌려주며, 그때도
+    실행은 멈춘다.
     """
     required = set(required_fields)
 
@@ -694,6 +717,15 @@ def find_unrepresentable_correction_change(
 
         for change in entry.changes:
             if change.field is not None:
+                continue
+
+            if (
+                classify_latest_state_blocking_correction(
+                    change.raw_field,
+                    event_type=event_type.value,
+                )
+                is not None
+            ):
                 continue
 
             canonical = resolve_correction_field(

@@ -18,6 +18,7 @@ import pytest
 
 from disclosure_agent.agent.handlers.event_summary import (
     REASON_UNREPRESENTABLE_CORRECTION_CHANGE,
+    REASON_UNSUPPORTED_COMPOSITE_CORRECTION,
     REASON_UNSUPPORTED_EVENT_SUMMARY_TYPE,
     REQUIRED_SUMMARY_FIELDS_BY_EVENT_TYPE,
     build_event_summary_result,
@@ -34,6 +35,9 @@ from disclosure_agent.common.enums import (
     ChainPolicy,
     EventType,
     ExecutionStatus,
+)
+from disclosure_agent.event.correction_fields import (
+    classify_latest_state_blocking_correction,
 )
 from disclosure_agent.event.extractor import FACILITY_INVESTMENT_FIELDS
 
@@ -850,3 +854,51 @@ def test_grounded_payload_leaves_the_summary_to_the_deterministic_path(
 
     with pytest.raises(PayloadNotGroundableError, match="ResolvedEventState"):
         build_grounded_payload(execution, question="테스트 질문")
+
+
+# --------------------------------------------------------------------------
+# 조합형 정정은 공유 이벤트 계층의 판정을 그대로 쓴다(PR #98)
+# --------------------------------------------------------------------------
+
+# 공유 계층이 신규시설투자에 대해 분류해 둔 원문 라벨. 목록의 정본은
+# event.correction_fields.LATEST_STATE_BLOCKING_CORRECTIONS이며, 아래 테스트가 그 사실을
+# 함께 확인한다. 여기 적힌 것은 문서에 실제로 실리는 표기다.
+FACILITY_COMPOSITE_LABELS = (
+    "투자내역 / 투자금액(원) / 자기자본대비(%)",
+    "투자금액(원) - 자기자본대비(%)",
+)
+
+
+@pytest.mark.parametrize("raw_field", FACILITY_COMPOSITE_LABELS)
+def test_composite_correction_is_judged_by_the_shared_event_layer(
+    tmp_path: Path,
+    raw_field: str,
+) -> None:
+    """조합형 정정의 사유는 공유 계층이 정한다.
+
+    Q06의 지역 가드가 이 라벨을 앞질러 잡으면 분류(category)가 결과에서 사라지고, "원문이
+    여러 항목을 한 행에 묶었다"와 "이름을 못 붙였다"가 한 사유로 뭉개진다. 두 상황은 후속
+    조치가 다르다.
+
+    앞의 assert가 이 라벨의 정본이 공유 계층이라는 사실을 함께 고정한다. 목록을 handler로
+    옮겨 적으면 공유 계층이 항목을 늘릴 때 이쪽만 뒤처진다.
+    """
+    assert (
+        classify_latest_state_blocking_correction(
+            raw_field,
+            event_type=EventType.FACILITY_INVESTMENT.value,
+        )
+        is not None
+    )
+
+    execution = handle_event_summary(
+        plan(),
+        corpus_root=corpus_with_unnamed_correction(tmp_path, raw_field),
+    )
+
+    assert execution.execution_status is ExecutionStatus.BLOCKED
+    assert execution.execution_issue is not None
+    assert execution.execution_issue.reason == REASON_UNSUPPORTED_COMPOSITE_CORRECTION
+    assert execution.execution_issue.reason != REASON_UNREPRESENTABLE_CORRECTION_CHANGE
+    assert "source_composite" in execution.execution_issue.detail
+    assert not execution.resolved_event_states

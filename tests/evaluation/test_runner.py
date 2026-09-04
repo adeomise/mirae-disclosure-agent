@@ -284,7 +284,12 @@ def test_active_q04_gold_pins_facility_scope_without_corpus_values() -> None:
         "document_summaries": 1,
     }
     assert [item.model_dump(exclude_none=True, mode="json") for item in q04.document_summaries] == [
-        {"section_scope": "facility_investment", "fiscal_year": 2025}
+        {
+            "company": "삼성바이오로직스",
+            "report_name": "사업보고서",
+            "section_scope": "facility_investment",
+            "fiscal_year": 2025,
+        }
     ]
     assert q04.min_evidence_count == 1
     assert q04.counts.evidence is None
@@ -972,6 +977,31 @@ def test_document_summary_gold_rejects_stale_filing_with_identical_structure() -
             filing_fiscal_year=2024,
         ),
     )
+
+    assert failures == [
+        "document_summaries: expected fields did not match distinct predicted summaries"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("company", "다른기업"),
+        ("report_name", "분기보고서"),
+    ],
+)
+def test_q04_gold_rejects_wrong_document_identity(field: str, wrong_value: str) -> None:
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q04"]
+    actual = summary_prediction()
+    actual.document_summaries = actual.document_summaries[:1]
+    actual.evidence = actual.evidence[:1]
+    summary = actual.document_summaries[0]
+    summary.company = "삼성바이오로직스"
+    summary.report_name = "사업보고서"
+    summary.section_scope = runner.SectionScope.FACILITY_INVESTMENT
+    setattr(summary, field, wrong_value)
+
+    failures = compare_prediction(gold, actual)
 
     assert failures == [
         "document_summaries: expected fields did not match distinct predicted summaries"

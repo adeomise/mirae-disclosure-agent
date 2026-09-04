@@ -27,6 +27,7 @@ from disclosure_agent.agent.answer_builder import (
     FACT_NORMALIZED_UNIT_LABELS,
     LIMITATION_MESSAGE_BY_REASON,
     METRIC_LABELS,
+    OPERATION_AGGREGATE,
     OPERATION_DELTA,
     OPERATION_DELTA_PCT,
     OPERATION_DIFF_PP,
@@ -47,6 +48,9 @@ from disclosure_agent.agent.answer_builder import (
     UnsupportedResultShapeError,
     _topic_particle,
     build_answer_response,
+)
+from disclosure_agent.agent.calculator import (
+    OPERATION_AGGREGATE as CALCULATOR_OPERATION_AGGREGATE,
 )
 from disclosure_agent.agent.calculator import (
     OPERATION_DELTA as CALCULATOR_OPERATION_DELTA,
@@ -761,6 +765,8 @@ CANONICAL_NORMALIZED_UNIT = "KRW"
 
 LEFT_MARGIN_ID = "calculation_operating_margin_2025_LEFT"
 RIGHT_MARGIN_ID = "calculation_operating_margin_2025_RIGHT"
+LEFT_AGGREGATE_ID = "calculation_investment_amount_LEFT"
+RIGHT_AGGREGATE_ID = "calculation_investment_amount_RIGHT"
 
 
 def make_comparison_fact(
@@ -926,6 +932,80 @@ def q11_result(
     )
 
 
+def q12_result(
+    *,
+    relation: ComparisonRelation = ComparisonRelation.LEFT_GREATER,
+    left_total: str = "3000",
+    right_total: str = "500",
+) -> AgentExecutionResult:
+    """Q12 shape: investment_amount Fact 2+1, aggregate 2, comparison 1."""
+    left_first = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_LEFT_INVESTMENT_A",
+        company=LEFT_COMPANY,
+        metric=MetricConcept.INVESTMENT_AMOUNT,
+        raw_value="1000",
+        raw_unit="원",
+        normalized_value="1000",
+        fiscal_year=None,
+        accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+    )
+    left_second = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_LEFT_INVESTMENT_B",
+        company=LEFT_COMPANY,
+        metric=MetricConcept.INVESTMENT_AMOUNT,
+        raw_value="2000",
+        raw_unit="원",
+        normalized_value="2000",
+        fiscal_year=None,
+        accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+    )
+    right = make_comparison_fact(
+        fact_id="fact_SYNTHETIC_RIGHT_INVESTMENT_A",
+        company=RIGHT_COMPANY,
+        metric=MetricConcept.INVESTMENT_AMOUNT,
+        raw_value="500",
+        raw_unit="원",
+        normalized_value="500",
+        fiscal_year=None,
+        accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+    )
+    left_aggregate = CalculationResult(
+        calculation_id=LEFT_AGGREGATE_ID,
+        operation=OPERATION_AGGREGATE,
+        inputs=[
+            fact_reference(left_first.fact_id),
+            fact_reference(left_second.fact_id),
+        ],
+        value=left_total,
+        unit=CANONICAL_NORMALIZED_UNIT,
+        evidence_ids=["evidence_SYNTHETIC_01"],
+    )
+    right_aggregate = CalculationResult(
+        calculation_id=RIGHT_AGGREGATE_ID,
+        operation=OPERATION_AGGREGATE,
+        inputs=[fact_reference(right.fact_id)],
+        value=right_total,
+        unit=CANONICAL_NORMALIZED_UNIT,
+        evidence_ids=["evidence_SYNTHETIC_01"],
+    )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=[left_first, left_second, right],
+        evidence=[make_evidence()],
+        calculations=[left_aggregate, right_aggregate],
+        comparisons=[
+            ComparisonResult(
+                comparison_id="comparison_investment_amount_LEFT_vs_RIGHT",
+                left=calculation_reference(LEFT_AGGREGATE_ID),
+                right=calculation_reference(RIGHT_AGGREGATE_ID),
+                relation=relation,
+            )
+        ],
+    )
+
+
 def test_q10_shape_renders_both_values_and_the_relation() -> None:
     """Fact 2 · Calculation 0 · Comparison 1이 하나의 답변으로 나간다."""
     result = q10_result()
@@ -959,6 +1039,197 @@ def test_q11_shape_renders_the_derived_values_and_the_relation() -> None:
     assert response.reason is None
     assert len(response.facts) == 4
     assert response.facts == result.facts
+
+
+def test_q12_shape_renders_aggregate_values_and_preserves_the_result() -> None:
+    """Builder는 합계와 우열을 다시 만들지 않고 Q12 결과를 읽기만 한다."""
+    result = q12_result()
+    before = result.model_copy(deep=True)
+
+    response = build_answer_response(result)
+
+    assert OPERATION_AGGREGATE == CALCULATOR_OPERATION_AGGREGATE
+    assert response.answer == (
+        f"{LEFT_COMPANY}의 시설투자 합계는 3000원이고, "
+        f"{RIGHT_COMPANY}의 시설투자 합계는 500원입니다. "
+        f"{LEFT_COMPANY} 쪽이 더 큽니다."
+    )
+    assert response.status is AnswerabilityStatus.ANSWERABLE
+    assert response.reason is None
+    assert response.facts == result.facts
+    assert result == before
+
+
+def test_q12_aggregate_values_are_not_recomputed_from_input_facts() -> None:
+    result = q12_result(
+        relation=ComparisonRelation.RIGHT_GREATER,
+        left_total="17",
+        right_total="29",
+    )
+
+    answer = build_answer_response(result).answer
+
+    assert "17원" in answer
+    assert "29원" in answer
+    assert "3000원" not in answer
+    assert "500원" not in answer
+    assert answer.endswith(f"{RIGHT_COMPANY} 쪽이 더 큽니다.")
+
+
+@pytest.mark.parametrize(
+    ("relation", "expected_clause"),
+    [
+        (ComparisonRelation.LEFT_GREATER, f"{LEFT_COMPANY} 쪽이 더 큽니다."),
+        (ComparisonRelation.RIGHT_GREATER, f"{RIGHT_COMPANY} 쪽이 더 큽니다."),
+        (ComparisonRelation.EQUAL, "두 값은 같습니다."),
+    ],
+)
+def test_q12_relation_is_read_without_comparing_aggregate_values(
+    relation: ComparisonRelation,
+    expected_clause: str,
+) -> None:
+    result = q12_result(
+        relation=relation,
+        left_total="3000",
+        right_total="500",
+    )
+
+    answer = build_answer_response(result).answer
+
+    assert "3000원" in answer
+    assert "500원" in answer
+    assert answer.endswith(expected_clause)
+
+
+def test_q12_reference_chain_is_independent_of_fact_and_input_order() -> None:
+    baseline = q12_result()
+    expected_answer = build_answer_response(baseline).answer
+    result = q12_result()
+    result.facts.reverse()
+    result.calculations[0].inputs.reverse()
+    before = result.model_copy(deep=True)
+
+    response = build_answer_response(result)
+
+    comparison = result.comparisons[0]
+    calculations = {
+        item.calculation_id: item for item in result.calculations
+    }
+
+    assert response.answer == expected_answer
+    assert comparison.left == calculation_reference(LEFT_AGGREGATE_ID)
+    assert comparison.right == calculation_reference(RIGHT_AGGREGATE_ID)
+    assert {
+        item.input_id for item in calculations[LEFT_AGGREGATE_ID].inputs
+    } == {
+        "fact_SYNTHETIC_LEFT_INVESTMENT_A",
+        "fact_SYNTHETIC_LEFT_INVESTMENT_B",
+    }
+    assert [
+        item.input_id for item in calculations[RIGHT_AGGREGATE_ID].inputs
+    ] == ["fact_SYNTHETIC_RIGHT_INVESTMENT_A"]
+    assert all(
+        item.input_type is ResultInputType.FACT
+        for calculation in result.calculations
+        for item in calculation.inputs
+    )
+    assert result == before
+
+
+def _malform_q12_result(
+    result: AgentExecutionResult,
+    case: str,
+) -> None:
+    if case == "one-aggregate":
+        result.calculations.pop()
+    elif case == "no-comparison":
+        result.comparisons.clear()
+    elif case == "two-comparisons":
+        result.comparisons.append(result.comparisons[0].model_copy(deep=True))
+    elif case == "comparison-targets-fact":
+        result.comparisons[0].left = fact_reference(result.facts[0].fact_id)
+    elif case == "dangling-calculation":
+        result.comparisons[0].right = calculation_reference(
+            "calculation_SYNTHETIC_MISSING"
+        )
+    elif case == "nested-calculation-input":
+        result.calculations[0].inputs = [
+            calculation_reference(RIGHT_AGGREGATE_ID)
+        ]
+    elif case == "missing-input-fact":
+        result.facts = [
+            fact
+            for fact in result.facts
+            if fact.fact_id != "fact_SYNTHETIC_LEFT_INVESTMENT_A"
+        ]
+    elif case == "mixed-input-companies":
+        result.facts[1].company = RIGHT_COMPANY
+    elif case == "same-aggregate-company":
+        result.facts[2].company = LEFT_COMPANY
+    elif case == "unsupported-input-metric":
+        result.facts[0].metric = MetricConcept.REVENUE
+    elif case == "mixed-operation":
+        result.calculations[0].operation = OPERATION_RATIO
+    elif case == "missing-value":
+        result.calculations[0].value = None
+    elif case == "non-numeric-value":
+        result.calculations[0].value = "SYNTHETIC-NOT-A-NUMBER"
+    elif case == "missing-unit":
+        result.calculations[0].unit = None
+    elif case == "unsupported-unit":
+        result.calculations[0].unit = "SYNTHETIC-UNIT"
+    elif case == "mismatched-units":
+        result.calculations[1].unit = BASE_CURRENCY_UNIT
+    elif case == "same-comparison-target":
+        result.comparisons[0].right = result.comparisons[0].left
+    elif case == "unreferenced-fact":
+        result.facts.append(
+            make_comparison_fact(
+                fact_id="fact_SYNTHETIC_UNUSED_INVESTMENT",
+                company=LEFT_COMPANY,
+                metric=MetricConcept.INVESTMENT_AMOUNT,
+                fiscal_year=None,
+                accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+            )
+        )
+    elif case == "duplicate-input-fact":
+        result.calculations[0].inputs.append(
+            result.calculations[0].inputs[0]
+        )
+    else:  # pragma: no cover - the parametrization is the exhaustive caller
+        raise AssertionError(f"unknown synthetic malformed case: {case}")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "one-aggregate",
+        "no-comparison",
+        "two-comparisons",
+        "comparison-targets-fact",
+        "dangling-calculation",
+        "nested-calculation-input",
+        "missing-input-fact",
+        "mixed-input-companies",
+        "same-aggregate-company",
+        "unsupported-input-metric",
+        "mixed-operation",
+        "missing-value",
+        "non-numeric-value",
+        "missing-unit",
+        "unsupported-unit",
+        "mismatched-units",
+        "same-comparison-target",
+        "unreferenced-fact",
+        "duplicate-input-fact",
+    ],
+)
+def test_malformed_q12_aggregate_shapes_fail_closed(case: str) -> None:
+    result = q12_result()
+    _malform_q12_result(result, case)
+
+    with pytest.raises((UnsupportedResultShapeError, MissingAnswerSupportError)):
+        build_answer_response(result)
 
 
 def test_building_the_same_comparison_twice_yields_the_same_answer() -> None:

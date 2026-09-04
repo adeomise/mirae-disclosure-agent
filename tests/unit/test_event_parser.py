@@ -152,6 +152,49 @@ def test_facility_investment_correction_fields_are_canonicalized(tmp_path: Path)
     assert changes[1]["raw_unit"] == "원"
 
 
+def test_facility_composite_correction_preserves_raw_change_and_provenance(
+    tmp_path: Path,
+) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <title>신규시설투자등</title>
+        <span>정정신고(보고)</span><span>신규 시설투자 등</span>
+        <table id="XFormD8_Form0_RepeatTable0">
+          <tr><td>정정항목</td><td>정정전</td><td>정정후</td></tr>
+          <tr>
+            <td>투자내역 / 투자금액(원) / 자기자본대비(%)</td>
+            <td>OLD_AMOUNT_AND_RATIO</td>
+            <td>NEW_AMOUNT_AND_RATIO</td>
+          </tr>
+        </table>
+        """,
+    )
+
+    parsed_change = document["correction"]["changes"][0]
+
+    assert parsed_change["before"] == "OLD_AMOUNT_AND_RATIO"
+    assert parsed_change["after"] == "NEW_AMOUNT_AND_RATIO"
+    assert parsed_change["table_id"] == "XFormD8_Form0_RepeatTable0"
+    assert parsed_change["row_index"] == 1
+    assert parsed_change["field_cell_index"] == 0
+    assert parsed_change["before_cell_index"] == 1
+    assert parsed_change["after_cell_index"] == 2
+
+    extracted_change = extract_event(document)["correction"]["changes"][0]
+
+    assert extracted_change["canonical_field"] is None
+    assert extracted_change["before"] == "OLD_AMOUNT_AND_RATIO"
+    assert extracted_change["after"] == "NEW_AMOUNT_AND_RATIO"
+    assert extracted_change["provenance"] == {
+        "table_id": "XFormD8_Form0_RepeatTable0",
+        "row_index": 1,
+        "field_cell_index": 0,
+        "before_cell_index": 1,
+        "after_cell_index": 2,
+    }
+
+
 def test_supply_contract_single_field_corpus_aliases_are_canonicalized(
     tmp_path: Path,
 ) -> None:

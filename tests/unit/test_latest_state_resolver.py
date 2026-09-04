@@ -311,6 +311,24 @@ def test_source_composite_cannot_confirm_stale_contract_amount_as_latest() -> No
         assert state.fields["contract_amount"].value != old_value
 
 
+def test_facility_composite_cannot_confirm_stale_investment_amount_as_latest() -> None:
+    root_event, history, chain, documents = _inputs_with_unmapped_change(
+        "투자내역 / 투자금액(원) / 자기자본대비(%)",
+        event_type=EventType.FACILITY_INVESTMENT,
+    )
+
+    with pytest.raises(UnsupportedCompositeCorrectionError) as exc_info:
+        resolve_latest_event_state(
+            root_event=root_event,
+            history=history,
+            chain=chain,
+            documents=documents,
+        )
+
+    assert exc_info.value.source_doc_id == "exchange_SECOND"
+    assert exc_info.value.category == "source_composite"
+
+
 @pytest.mark.parametrize(
     ("raw_field", "event_type"),
     [

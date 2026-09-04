@@ -23,7 +23,7 @@ from disclosure_agent.common.enums import (
     ResultInputType,
     SectionScope,
 )
-from disclosure_agent.common.schemas import AgentExecutionResult, DocumentSummary, Fact
+from disclosure_agent.common.schemas import AgentExecutionResult, Fact
 
 EVALUATION_DIR = Path(__file__).parent
 DEFAULT_QUESTIONS_PATH = EVALUATION_DIR / "questions.jsonl"
@@ -107,6 +107,7 @@ class ExpectedDocumentSummary(BaseModel):
     company: str | None = None
     report_name: str | None = None
     section_scope: SectionScope | None = None
+    fiscal_year: int | None = None
 
 
 class GoldAnswer(BaseModel):
@@ -158,6 +159,7 @@ class PredictionCase(AgentExecutionResult):
     """A case ID paired with one canonical AgentExecutionResult prediction."""
 
     case_id: str = Field(min_length=1)
+    source_fiscal_years: dict[str, int] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -317,6 +319,8 @@ def execute_agent_cases(
     answer_question_fn: AgentExecutor = answer_question,
 ) -> tuple[PredictionCase, ...]:
     """Execute scored cases through the public Agent entry point."""
+    resolved_manifest = manifest_path or corpus_root / "manifest.jsonl"
+    source_fiscal_years = _source_fiscal_years(resolved_manifest)
     predictions: list[PredictionCase] = []
     for question in _active_regression_questions(dataset):
         try:
@@ -325,10 +329,18 @@ def execute_agent_cases(
                 corpus_root=corpus_root,
                 manifest_path=manifest_path,
             )
+            used_doc_ids = {
+                item.doc_id for item in (*result.document_summaries, *result.evidence)
+            }
             predictions.append(
                 PredictionCase.model_validate(
                     {
                         "case_id": question.case_id,
+                        "source_fiscal_years": {
+                            doc_id: source_fiscal_years[doc_id]
+                            for doc_id in used_doc_ids
+                            if doc_id in source_fiscal_years
+                        },
                         **result.model_dump(mode="python"),
                     }
                 )
@@ -339,6 +351,25 @@ def execute_agent_cases(
                 f"{type(error).__name__}: {error}"
             ) from error
     return tuple(predictions)
+
+
+def _source_fiscal_years(manifest_path: Path) -> dict[str, int]:
+    """Map public document IDs to fiscal years for source-filing evaluation."""
+    if not manifest_path.is_file():
+        return {}
+    years: dict[str, int] = {}
+    for record in _read_jsonl(manifest_path):
+        fiscal_year = record.get("base_year")
+        if not isinstance(fiscal_year, int):
+            continue
+        doc_id = record.get("doc_id")
+        if not isinstance(doc_id, str) or not doc_id:
+            receipt_no = record.get("rcept_no")
+            if not isinstance(receipt_no, str) or not receipt_no:
+                continue
+            doc_id = f"periodic_{receipt_no}"
+        years[doc_id] = fiscal_year
+    return years
 
 
 def _fact_matches(expected: ExpectedFact, actual: Fact) -> bool:
@@ -368,15 +399,20 @@ def _facts_match_distinctly(
 
 
 def _document_summaries_match_distinctly(
-    expected: list[ExpectedDocumentSummary], actual: list[DocumentSummary]
+    expected: list[ExpectedDocumentSummary], prediction: PredictionCase
 ) -> bool:
     """Return whether every scope expectation matches a distinct summary."""
+    actual = prediction.document_summaries
     candidates = [
         [
             index
             for index, summary in enumerate(actual)
             if all(
-                getattr(summary, field) == value
+                (
+                    prediction.source_fiscal_years.get(summary.doc_id) == value
+                    if field == "fiscal_year"
+                    else getattr(summary, field) == value
+                )
                 for field, value in item.model_dump(exclude_none=True).items()
             )
         ]
@@ -590,7 +626,7 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
         failures.append("facts: expected fields did not match distinct predicted Facts")
 
     if gold.document_summaries is not None and not _document_summaries_match_distinctly(
-        gold.document_summaries, prediction.document_summaries
+        gold.document_summaries, prediction
     ):
         failures.append(
             "document_summaries: expected fields did not match distinct predicted summaries"

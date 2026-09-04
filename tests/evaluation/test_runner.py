@@ -259,6 +259,7 @@ def test_active_q05_gold_pins_two_scopes_without_freezing_evidence_count() -> No
         "business_overview",
         "products",
     ]
+    assert [item.fiscal_year for item in q05.document_summaries] == [2025, 2025]
     assert q05.min_evidence_count == 1
     assert q05.counts.evidence is None
     assert q05.integrity.document_summary_evidence_references is True
@@ -869,8 +870,8 @@ def q05_gold() -> GoldAnswer:
                 "document_summaries": 2,
             },
             "document_summaries": [
-                {"section_scope": "business_overview"},
-                {"section_scope": "products"},
+                {"section_scope": "business_overview", "fiscal_year": 2025},
+                {"section_scope": "products", "fiscal_year": 2025},
             ],
             "min_evidence_count": 1,
             "integrity": {
@@ -884,13 +885,16 @@ def q05_gold() -> GoldAnswer:
 
 def summary_prediction(
     *,
-    product_doc_id: str = "annual-filing",
+    filing_doc_id: str = "annual-filing-2025",
+    filing_fiscal_year: int = 2025,
+    product_doc_id: str | None = None,
     product_evidence_id: str = "evidence-products",
     extra_evidence_doc_id: str | None = None,
 ) -> PredictionCase:
+    product_doc_id = product_doc_id or filing_doc_id
     evidence = [
-        {"evidence_id": "evidence-overview", "doc_id": "annual-filing", "location_type": "text"},
-        {"evidence_id": "evidence-products", "doc_id": "annual-filing", "location_type": "table"},
+        {"evidence_id": "evidence-overview", "doc_id": filing_doc_id, "location_type": "text"},
+        {"evidence_id": "evidence-products", "doc_id": product_doc_id, "location_type": "table"},
     ]
     if extra_evidence_doc_id is not None:
         evidence.append(
@@ -902,7 +906,7 @@ def summary_prediction(
         )
     summaries = []
     for name, scope, doc_id, evidence_id in (
-        ("overview", "business_overview", "annual-filing", "evidence-overview"),
+        ("overview", "business_overview", filing_doc_id, "evidence-overview"),
         ("products", "products", product_doc_id, product_evidence_id),
     ):
         summaries.append(
@@ -922,11 +926,30 @@ def summary_prediction(
                 ],
             }
         )
-    return prediction("case", facts=[], evidence=evidence, document_summaries=summaries)
+    actual = prediction("case", facts=[], evidence=evidence, document_summaries=summaries)
+    actual.source_fiscal_years = {
+        filing_doc_id: filing_fiscal_year,
+        product_doc_id: filing_fiscal_year,
+    }
+    return actual
 
 
 def test_document_summary_gold_matches_two_scopes_and_resolved_evidence() -> None:
     assert compare_prediction(q05_gold(), summary_prediction()) == []
+
+
+def test_document_summary_gold_rejects_stale_filing_with_identical_structure() -> None:
+    failures = compare_prediction(
+        q05_gold(),
+        summary_prediction(
+            filing_doc_id="annual-filing-2024",
+            filing_fiscal_year=2024,
+        ),
+    )
+
+    assert failures == [
+        "document_summaries: expected fields did not match distinct predicted summaries"
+    ]
 
 
 def test_document_summary_scope_expectations_are_distinct() -> None:

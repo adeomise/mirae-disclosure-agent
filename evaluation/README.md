@@ -32,14 +32,17 @@ separately and excluded from the score denominator. Existing contract cases omit
 are validation-only and are not regression-scored.
 
 Active and contract `ANSWERABLE` cases still require a supported semantic gold
-expectation (`fact`, `facts`, or `event_history`) and Evidence. A future regression
-case may instead use structural gold: at least one specified collection count or a
-positive `min_evidence_count`. Completely empty future gold is rejected.
+expectation (`fact`, `facts`, `document_summaries`, or `event_history`) and Evidence.
+A future regression case may instead use structural gold: at least one specified
+collection count or a positive `min_evidence_count`. Completely empty future gold is
+rejected.
 
-The comparator supports optional exact collection counts, multiple partial Fact
-expectations, canonical execution/answerability fields, and non-empty Fact/Calculation
-to Evidence reference integrity. Expected Fact fields that are omitted are not
-compared. Calculation gold can fix operation/unit order and independently recompute
+The comparator supports optional exact collection counts, multiple partial Fact and
+DocumentSummary expectations, canonical execution/answerability fields, and non-empty
+Fact/Calculation/DocumentSummary to Evidence reference integrity. DocumentSummary
+integrity can also require one selected filing and require all Evidence to belong to it.
+Expected fields that are omitted are not compared. Calculation gold can fix
+operation/unit order and independently recompute
 `delta`/`delta_pct` values from their ordered Fact inputs. Event, EventLink, and
 EventHistory content rubrics remain future extensions; their collection counts can
 already be checked.
@@ -72,10 +75,10 @@ Live mode executes the active regression cases through the public Agent entry po
 and evaluates the returned `AgentExecutionResult` objects with the same deterministic
 comparator:
 
-The current active regression set contains exactly six representative questions:
-`Q01`, `Q02`, `Q03`, `Q07`, `Q13`, and `Q18`. Therefore, a reported live-Agent result of `6/6`
-applies only to those six active cases; it is not a result for all 18 representative
-questions.
+The current active regression set contains exactly seven representative questions:
+`Q01`, `Q02`, `Q03`, `Q05`, `Q07`, `Q13`, and `Q18`. Therefore, a reported live-Agent
+result of `7/7` applies only to those seven active cases; it is not a result for all 18
+representative questions.
 
 ```text
 uv run python -m evaluation.runner --run-agent --corpus-root path/to/corpus

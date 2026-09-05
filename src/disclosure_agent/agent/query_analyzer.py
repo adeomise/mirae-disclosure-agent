@@ -1449,16 +1449,33 @@ def _resolve_companies(question: str, resolver: CompanyResolver) -> CompanyResol
     회사명을 추측하지 않는다. 실제 규칙은 agent.company_resolution이 가지고 있고, 여기서는
     그 결과를 질의 해석 계층의 거절 어휘로 옮기기만 한다.
 
-    막는 자리가 둘이며 순서가 규약이다.
+    막는 자리가 셋이며 순서가 규약이다.
 
         모호한 표현이 하나라도 있으면    먼저 막는다. '삼성이랑 현대차 비교해줘'에서 현대차만
                                         남겨 실행하면, 질문이 지목한 기업 하나가 사라진 채로
                                         답이 조립되고 사라졌다는 사실이 결과에 남지 않는다.
                                         일부만 실행하지 않는다.
 
+        확정되지 않은 표현이 남으면      해석기가 기업 언급으로 읽었지만 옮기지 않은 표현이다.
+                                        '레인이랑 현대차 2025년 매출 비교해줘'의 '레인'이 그
+                                        자리이며, 후보가 하나뿐이어도 그 근거로는 확정하지
+                                        않는다는 것이 해석기의 규약이다. 여기서 통과시키면
+                                        현대자동차 단독 계획이 만들어져, 확정하지 않기로 한
+                                        표현을 '없는 것'으로 처리한 셈이 된다.
+
         하나도 못 찾았으면              기존과 같은 unknown_company다. 모호성 판정이 먼저이므로
                                         '삼성'처럼 후보가 여럿인 표현이 '모르는 기업'으로
                                         잘못 보고되지 않는다.
+
+    판정 근거는 전부 CompanyResolution의 구조화된 결과다. 질문 문자열을 여기서 다시 들여다보지
+    않는다. 그렇게 하면 기업 인식 규칙이 해석기와 이 함수 두 곳에 생기고, 한쪽만 고쳐질 수 있다.
+
+    확정되지 않은 표현의 사유를 unknown_company로 두는 이유:
+        '레인'은 후보가 여럿이어서 못 고른 것이 아니다. 이 질문에서 어느 기업인지 정해지지
+        않았다는 뜻이며, 그것은 ambiguous_company_match가 아니라 unknown_company 쪽이다.
+        AMBIGUOUS_COMPANY_REASON으로 보고하면 후보 하나짜리 표현이 '후보가 여럿'으로 보고되고,
+        사유를 읽는 쪽이 그 하나를 답으로 읽는 길이 열린다. 대신 detail에 어느 표현이
+        걸렸는지를 적어, 기업을 하나도 못 찾은 경우와 결과에서 구분되게 둔다.
 
     돌아오는 순서는 질문에 나타난 순서다.
     """
@@ -1473,6 +1490,14 @@ def _resolve_companies(question: str, resolver: CompanyResolver) -> CompanyResol
                 f"'{mention.raw}'이(가) 가리키는 기업을 하나로 확정할 수 없습니다. "
                 f"후보: {', '.join(mention.candidates)}."
             ),
+        )
+
+    if resolution.unresolved:
+        mention = resolution.unresolved[0]
+
+        raise UnsupportedQuestionError(
+            reason="unknown_company",
+            detail=f"'{mention.raw}'이(가) 가리키는 기업을 확정할 수 없습니다.",
         )
 
     if not resolution.companies:

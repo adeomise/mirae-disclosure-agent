@@ -183,6 +183,34 @@ def test_unknown_company_still_reports_unknown_company() -> None:
     assert error.reason == "unknown_company"
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 'KT'는 케이티의 상장명이지만 'SKT'는 다른 회사다.
+        "SKT 2025년 연결 기준 매출액이 얼마야?",
+        "KTX 2025년 연결 기준 매출액이 얼마야?",
+        # '&'·'+'는 이름을 잇는 기호다. 'KT&G'는 케이티가 아니며 이 UNIVERSE에 없다.
+        "KT&G 2025년 연결 기준 매출액이 얼마야?",
+        "KT+G 2025년 연결 기준 매출액이 얼마야?",
+        # '기아'는 canonical 기업명이지만 야구단은 그 회사가 아니다.
+        "기아타이거즈 2025년 연결 기준 매출액이 얼마야?",
+    ],
+)
+def test_embedded_company_spelling_is_blocked(question: str) -> None:
+    """
+    더 긴 낱말 안에 들어 있는 등록 표기로 계획을 만들지 않는다.
+
+    만들면 질문에 없던 회사의 Fact가 근거까지 갖춘 채 답이 된다. 개수도 형식도 정상이라
+    결과만 봐서는 드러나지 않으며, 그래서 계획 이전에 막는다.
+    """
+    assert _blocked(question).reason == "unknown_company"
+
+
+def test_valid_spelling_next_to_an_embedded_one_still_builds_a_plan() -> None:
+    """경계 검사가 뒤에 있는 올바른 표기까지 막지는 않아야 한다."""
+    assert _plan("SKT 말고 KT 2025년 연결 기준 매출액이 얼마야?").companies == ("케이티",)
+
+
 def test_ambiguous_alias_registry_blocks_the_question(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -227,6 +255,36 @@ def test_short_unique_partial_is_not_silently_resolved() -> None:
     error = _blocked("레인 2025년 연결 기준 매출액이 얼마야?")
 
     assert error.reason == "unknown_company"
+
+
+def test_short_unique_partial_blocks_a_mixed_company_question() -> None:
+    """
+    확정하지 않은 표현이 다른 기업과 섞이면 질문 전체를 막는다.
+
+    이 자리가 이번 회귀의 본체다. '레인'을 버리고 현대자동차 하나로 계획을 만들면, 두 기업을
+    물은 질문이 단일 기업 질문이 되고 사라진 기업이 결과 어디에도 남지 않는다. '짧은 부분명은
+    자동으로 옮기지 않는다'는 규약이 '없던 일로 한다'로 바뀐 것이며, 그 차이는 답의 모양만
+    봐서는 드러나지 않는다.
+    """
+    error = _blocked("레인이랑 현대차 2025년 매출 비교해줘")
+
+    assert error.reason == "unknown_company"
+
+    # 어느 표현이 걸렸는지가 남아야 한다. 기업을 하나도 못 찾은 경우와 구분되는 자리다.
+    assert "레인" in error.detail
+
+
+def test_long_enough_partial_next_to_another_company_still_compares() -> None:
+    """
+    해석 하한을 넘는 부분명은 다중 기업 비교에서 그대로 살아 있어야 한다.
+
+    막는 쪽으로 틀리는 것도 틀리는 것이다. 하한에 걸린 표현만 막혀야 하고, 확정할 수 있는
+    부분명까지 함께 막히면 답할 수 있던 비교 질문이 사라진다.
+    """
+    plan = _plan("레인보우랑 현대차 2025년 매출 비교해줘")
+
+    assert plan.companies == ("레인보우로보틱스", "현대자동차")
+    assert plan.intent == INTENT_CROSS_ENTITY_COMPARE
 
 
 # ---------------------------------------------------------------------------

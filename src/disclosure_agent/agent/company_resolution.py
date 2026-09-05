@@ -21,6 +21,10 @@
     1~4는 '표기가 정확히 일치'하는 갈래이고 tier로 구분한다. 같은 문자열이 두 tier에
     걸리면 위 순서가 이긴다. 같은 tier 안에서 두 기업에 걸리면 고르지 않고 AMBIGUOUS_MATCH다.
 
+    1~4는 낱말 경계 위에 놓였을 때만 인정한다. 그냥 부분문자열로 찾으면 'SKT' 안의 'KT',
+    '기아타이거즈' 안의 '기아'가 그대로 걸리고, 질문에 없던 회사의 Fact가 조용히 답이 된다.
+    경계 규칙은 has_lexical_boundaries 하나가 가지고 있고 네 갈래가 같은 것을 쓴다.
+
 부분명 해석의 규약:
     후보를 좁힐 때 '가장 유명한 회사', '가장 짧은 이름', '검색 상위' 같은 기준을 쓰지 않는다.
     쓰는 순간 그 기준이 조용히 답을 고른 것이 되고, 고른 사실이 결과에 남지 않는다.
@@ -42,6 +46,11 @@
                     이름의 앞부분과 겹치는 경우가 있고, 그 근거로 기업을 확정하면 질문에 없던
                     회사가 답에 들어온다. 이 하한은 후보 집계에는 적용하지 않는다. 적용하면
                     '삼성'처럼 짧은 표현의 모호성이 사라져 한 회사로 확정된다.
+
+                    옮기지 않되 mention은 남긴다(RESOLUTION_BELOW_PARTIAL_FLOOR). 지우면
+                    '레인이랑 현대차 비교해줘'에서 '레인'이 결과 어디에도 없이 사라지고,
+                    부르는 쪽은 현대자동차 하나만 물은 질문으로 읽는다. 하한의 뜻은 '자동으로
+                    옮기지 않는다'이지 '없던 일로 한다'가 아니다.
 
 alias 정책:
     편집거리·LLM 추론으로 비슷해 보이는 회사를 고르지 않는다. 등록한 표기만 옮긴다.
@@ -71,7 +80,7 @@ from __future__ import annotations
 import bisect
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from disclosure_agent.retrieval.metadata_filter import (
@@ -81,11 +90,13 @@ from disclosure_agent.retrieval.metadata_filter import (
 )
 
 __all__ = [
+    "BOUNDARY_TRAILING_FORMS",
     "COMPANY_ALIASES",
     "PARTIAL_MIN_CANDIDATE_LENGTH",
     "PARTIAL_MIN_RESOLVE_LENGTH",
     "RESOLUTION_ALIAS",
     "RESOLUTION_AMBIGUOUS_MATCH",
+    "RESOLUTION_BELOW_PARTIAL_FLOOR",
     "RESOLUTION_CANONICAL",
     "RESOLUTION_LISTED_NAME",
     "RESOLUTION_UNIQUE_PARTIAL",
@@ -93,6 +104,7 @@ __all__ = [
     "CompanyMention",
     "CompanyResolution",
     "CompanyResolver",
+    "has_lexical_boundaries",
     "normalize_company_name_with_offsets",
 ]
 
@@ -105,6 +117,14 @@ RESOLUTION_UNIQUE_PARTIAL = "unique_partial"
 # 옮기지 못한 이유. 후보가 둘 이상일 때만 쓴다. 후보가 0개인 것은 '이 표현은 기업 언급이
 # 아니다'이며 mention 자체를 만들지 않는다.
 RESOLUTION_AMBIGUOUS_MATCH = "ambiguous_match"
+
+# 옮기지 않기로 한 이유. 후보는 하나뿐이지만 표현이 PARTIAL_MIN_RESOLVE_LENGTH보다 짧은 자리다.
+#
+# AMBIGUOUS_MATCH와 따로 두는 것이 규약이다. 둘은 실제로 일어난 일이 다르다. 하나는 '어느
+# 회사인지 후보가 여럿이다'이고, 이쪽은 '후보는 하나지만 그 근거가 회사를 확정하기에 얇다'이다.
+# 한 이름으로 묶으면 후보 하나짜리 표현이 '모호하다'로 보고되고, 사유를 읽는 쪽이 후보 목록에서
+# 그 하나를 답으로 읽게 된다.
+RESOLUTION_BELOW_PARTIAL_FLOOR = "below_partial_floor"
 
 # tier가 작을수록 먼저다. 같은 문자열이 두 갈래에 걸릴 때의 순서이며, 위 docstring의
 # 해석 우선순위 1~4에 대응한다.
@@ -185,7 +205,52 @@ MENTION_PARTICLES: tuple[str, ...] = (
     "나",
 )
 
-# 낱말 양끝에서 떼는 문장부호. 회사명에 쓰이는 '&'·'+'는 넣지 않는다.
+# 표기 일치 뒤에 붙어도 낱말 경계로 보는 어형.
+#
+# MENTION_PARTICLES에 조사가 둘 겹친 어형을 더한 것이다. 목록을 두 벌로 두는 이유는 두 곳이
+# 하는 일이 다르기 때문이다. MENTION_PARTICLES는 부분명 후보를 만들 때 '떼는' 목록이고(한 번만
+# 뗀다), 이쪽은 이미 찾은 표기 뒤에 무엇이 붙어 있어도 되는지를 보는 '허용' 목록이다.
+#
+# 여기 없는 음절이 이어지면 다른 낱말로 본다. '기아타이거즈'의 '타이거즈'가 그 자리이며,
+# 그래서 이 표는 늘리는 것이 아니라 확인된 어형만 담는다. query_analyzer의
+# METRIC_TOKEN_SUFFIXES가 지표 어휘에서 쓰는 규약과 같다.
+#
+# 불변식: MENTION_PARTICLES ⊆ BOUNDARY_TRAILING_FORMS.
+#
+#     표기 일치를 보는 자리가 둘이고, 이 관계가 둘을 어긋나지 않게 붙든다.
+#
+#         _scan_exact_surfaces   질문 문자열에서 찾고 has_lexical_boundaries로 경계를 본다.
+#         _resolve_token         낱말에서 조사를 하나 떼고(MENTION_PARTICLES) 남은 표기를
+#                                self._surfaces에서 그대로 조회한다. 경계 검사를 부르지 않는다.
+#
+#     뒤쪽이 안전한 것은 낱말 단위로만 보기 때문인데, 그것만으로는 부족하다. 뗀 조사가 이
+#     허용 목록에도 있어야, 앞쪽 훑기가 경계로 막은 자리를 뒤쪽 훑기가 다시 열지 않는다.
+#     아래 합집합 구성이 그 관계를 보장한다. 목록을 직접 나열하는 형태로 바꾸면 보장이 사라지고,
+#     그때 생기는 구멍은 조사 하나를 뗀 표기에서만 열려 눈에 잘 띄지 않는다.
+#     관계 자체는 tests/unit/test_company_resolution.py가 고정한다.
+BOUNDARY_TRAILING_FORMS: frozenset[str] = frozenset(
+    MENTION_PARTICLES
+    + (
+        "에는",
+        "에서는",
+        "로는",
+        "으로는",
+        "과는",
+        "와는",
+    )
+)
+
+# 회사명 안쪽에 오는 기호. 낱말 경계 판정에서 이름 글자와 똑같이 다룬다.
+#
+# 'KT&G'·'S&T중공업'처럼 이 기호는 이름을 잇는 자리에 쓰이고 이름을 끊지 않는다. 경계로 보면
+# 코퍼스에 KT&G가 없을 때 'KT&G 매출'에서 앞의 'KT'만 걸려, 질문에 없던 케이티의 Fact가 답이
+# 된다.
+#
+# 대가로 'A&B'를 기업 구분자로 쓴 질문은 어느 쪽도 확정되지 않고 막힌다. 한국어 질문에서 두
+# 기업을 잇는 표기는 '와'·'과'·'랑'이며, 막는 쪽으로 틀리는 것이 다른 회사를 답하는 것보다 낫다.
+NAME_INTERNAL_SYMBOLS = "&+"
+
+# 낱말 양끝에서 떼는 문장부호. NAME_INTERNAL_SYMBOLS는 회사명 글자이므로 넣지 않는다.
 _TOKEN_TRIM_CHARS = "?!.,·ㆍ、'\"“”‘’()[]{}<>《》「」:;~"
 
 # 낱말 경계. 공백 종류를 가리지 않는다.
@@ -246,12 +311,18 @@ def find_unclaimed_span(
     haystack: str,
     needle: str,
     claimed: Sequence[tuple[int, int]],
+    *,
+    accept: Callable[[int, int], bool] | None = None,
 ) -> tuple[int, int] | None:
     """
     이미 다른 회사명이 차지한 구간과 겹치지 않는 첫 출현 위치를 찾는다. 없으면 None.
 
     이 검사가 다중 기업 판정의 false positive를 막는 자리다. 단순 포함 검사만 하면
     'LG생활건강'을 물은 질문에서 'LG'가 또 매치되어 한 기업이 두 기업으로 세어진다.
+
+    accept를 주면 그 검사를 통과한 출현만 고른다. 통과하지 못한 출현에서 멈추지 않고 다음
+    출현을 계속 본다. 멈추면 'SKT 말고 KT 매출'처럼 같은 글자가 앞에 한 번 잘못 나온 질문에서
+    뒤의 올바른 자리를 못 찾는다.
     """
     if not needle:
         return None
@@ -261,7 +332,7 @@ def find_unclaimed_span(
     while start != -1:
         end = start + len(needle)
 
-        if not _overlaps(start, end, claimed):
+        if not _overlaps(start, end, claimed) and (accept is None or accept(start, end)):
             return start, end
 
         start = haystack.find(needle, start + 1)
@@ -273,6 +344,117 @@ def _overlaps(start: int, end: int, claimed: Sequence[tuple[int, int]]) -> bool:
     return any(
         claim_start < end and start < claim_end for claim_start, claim_end in claimed
     )
+
+
+def has_lexical_boundaries(
+    composed: str,
+    offsets: tuple[int, ...],
+    span: tuple[int, int],
+) -> bool:
+    """
+    정규화 구간 span이 원문에서 낱말 경계 위에 놓였는가.
+
+    왜 필요한가:
+        표기 일치는 정규화한 질문 문자열 위에서 부분문자열로 찾는다. 그것만으로는 'SKT' 안의
+        'KT', '기아타이거즈' 안의 '기아'가 그대로 걸린다. 걸린 순간 질문에 없던 회사의 Fact가
+        근거까지 갖춘 채 답이 되고, 개수나 형식으로는 드러나지 않는다.
+
+    왜 정규식 \\b를 쓰지 않는가:
+        \\b는 로마자 낱말 경계다. 한국어에는 그 자리가 없고, 기업명 뒤에는 조사가 띄어쓰기 없이
+        붙는다('KT와', '기아는'). \\b를 요구하면 그 표기가 전부 막힌다. 그래서 경계 역할을 할
+        글자를 직접 정한다. query_analyzer가 상대 기간 표현에서 쓰는 방법과 같다.
+
+    경계로 보는 것:
+        - 문자열의 처음과 끝
+        - 정규화가 지운 글자. 공백·'(주)'·'·'가 여기이며, 그래서 '(주)한미반도체'와
+          '한미 반도체'가 그대로 남는다.
+        - 이름 글자가 아닌 글자(따옴표, 괄호, 물음표)
+        - 뒤쪽에 한해, 바로 붙어 있는 이름 글자들이 BOUNDARY_TRAILING_FORMS의 어형 하나와
+          정확히 같을 때. 'KT와'·'기아는'이 여기서 살아남고 '기아타이거즈'가 막힌다.
+
+    tier마다 두지 않는다. canonical/listed_name/alias는 같은 훑기에서 같은 규칙으로 걸리므로,
+    경계 규칙이 갈래마다 갈라지면 어느 갈래가 무엇을 통과시키는지 알 수 없게 된다.
+    """
+    start, end = span
+
+    if start >= end or end > len(offsets):
+        return False
+
+    return _starts_on_boundary(composed, offsets, start) and _ends_on_boundary(
+        composed, offsets, end
+    )
+
+
+def _starts_on_boundary(composed: str, offsets: tuple[int, ...], start: int) -> bool:
+    if start == 0:
+        # 문자열의 처음이거나, 앞에 있던 글자를 정규화가 전부 지웠다.
+        # '(주)한미반도체'의 '(주)'가 뒤쪽 경우다.
+        return True
+
+    head = offsets[start]
+
+    previous = offsets[start - 1]
+
+    if previous < head - 1:
+        # 사이에 정규화가 지운 글자가 있다. 공백·구분 기호·법인격 표기가 여기다.
+        return True
+
+    if previous == head:
+        # 원문 한 글자가 정규화에서 둘로 늘어난 자리의 중간이다. 낱말 경계가 아니다.
+        return False
+
+    return not _is_name_character(composed[head - 1])
+
+
+def _ends_on_boundary(composed: str, offsets: tuple[int, ...], end: int) -> bool:
+    tail = offsets[end - 1] + 1
+
+    if tail >= len(composed):
+        return True
+
+    if end >= len(offsets):
+        # 뒤에 남은 글자는 정규화가 전부 지웠다. '기아 주식회사'의 '주식회사'가 이 자리다.
+        return True
+
+    following = offsets[end]
+
+    if following > tail:
+        return True
+
+    if following < tail:
+        # 원문 한 글자가 정규화에서 둘로 늘어난 자리의 중간이다.
+        return False
+
+    if not _is_name_character(composed[tail]):
+        return True
+
+    return _adjacent_name_run(composed, tail) in BOUNDARY_TRAILING_FORMS
+
+
+def _adjacent_name_run(composed: str, start: int) -> str:
+    """원문에서 그 자리부터 끊기지 않고 이어지는 이름 글자들."""
+    stop = start
+
+    while stop < len(composed) and _is_name_character(composed[stop]):
+        stop += 1
+
+    return composed[start:stop]
+
+
+def _is_name_character(character: str) -> bool:
+    """
+    회사명이 이어질 수 있는 글자인가. 한글·로마자·숫자와 NAME_INTERNAL_SYMBOLS가 여기 든다.
+
+    공백과 나머지 문장부호는 여기 들지 않는다. 그것들이 곧 경계다.
+
+    '&'·'+'를 이름 글자로 두는 이유:
+        경계로 두면 'KT&G'에서 'KT'가 낱말 끝에 닿은 것으로 읽힌다. 등록된 이름 안에 있으면
+        표기가 통째로 걸리니 괜찮다는 판단은 그 회사가 코퍼스에 있을 때만 성립하고, 없는 회사를
+        물었을 때야말로 경계 검사가 필요한 자리다. 그 조건에 기대면 코퍼스에 KT&G가 없는 동안
+        KT&G 질문이 케이티의 Fact로 답해지며, 근거도 형식도 정상이라 결과만 봐서는 드러나지
+        않는다.
+    """
+    return character.isalnum() or character in NAME_INTERNAL_SYMBOLS
 
 
 @dataclass(frozen=True)
@@ -293,8 +475,14 @@ class CompanyMention:
     """
     질문 안에서 기업을 가리킨 표현 하나와 그 해석 결과.
 
-    canonical이 None이면 옮기지 못한 것이다. 그때 method는 RESOLUTION_AMBIGUOUS_MATCH이고
+    canonical이 None이면 옮기지 않은 것이다. 그때 method가 옮기지 않은 이유를 담고
     candidates에 후보가 전부 들어 있다. 후보 중 하나를 골라 담지 않는다.
+
+        RESOLUTION_AMBIGUOUS_MATCH        후보가 둘 이상이다.
+        RESOLUTION_BELOW_PARTIAL_FLOOR    후보는 하나지만 표현이 해석 하한보다 짧다.
+
+    후보가 하나뿐이어도 canonical이 채워지지 않을 수 있다는 뜻이다. 후보 수로 해석 여부를
+    되짚지 말고 canonical(또는 resolved)을 보라.
     """
 
     raw: str
@@ -314,9 +502,18 @@ class CompanyResolution:
     """
     질문 하나에 대한 기업명 해석 결과 전부.
 
-    mentions는 질문에 나온 순서다. 옮긴 것과 못 옮긴 것을 함께 담는다. 못 옮긴 것을 빼고
-    돌려주면 부르는 쪽이 '모호한 표현이 있었다'는 사실을 알 수 없고, 그러면 모호한 기업 하나를
-    조용히 버린 채 나머지로 답하게 된다.
+    mentions는 질문에 나온 순서다. 옮긴 것과 옮기지 않은 것을 함께 담는다. 옮기지 않은 것을
+    빼고 돌려주면 부르는 쪽이 '확정하지 못한 표현이 있었다'는 사실을 알 수 없고, 그러면 그
+    기업 하나를 조용히 버린 채 나머지로 답하게 된다.
+
+    읽는 자리가 셋이다.
+
+        companies    옮겨진 canonical 기업
+        unresolved   옮기지 않은 표현 전부
+        ambiguous    그중 후보가 둘 이상이라 옮기지 못한 표현. unresolved의 부분집합이다.
+
+    부르는 쪽이 fail-close를 정할 때 보는 것은 unresolved다. ambiguous만 보면 해석 하한에
+    걸린 표현이 빠지고, '레인이랑 현대차 비교해줘'가 현대자동차 단독 질문으로 줄어든다.
     """
 
     mentions: tuple[CompanyMention, ...] = ()
@@ -335,6 +532,22 @@ class CompanyResolution:
     @property
     def ambiguous(self) -> tuple[CompanyMention, ...]:
         """후보가 둘 이상이라 옮기지 못한 표현."""
+        return tuple(
+            mention
+            for mention in self.mentions
+            if mention.method == RESOLUTION_AMBIGUOUS_MATCH
+        )
+
+    @property
+    def unresolved(self) -> tuple[CompanyMention, ...]:
+        """
+        기업 언급으로 읽었지만 canonical로 옮기지 않은 표현 전부.
+
+        ambiguous가 그 일부이고, 나머지는 해석 하한에 걸려 옮기지 않은 표현이다. 둘을 한
+        자리에서 볼 수 있어야 부르는 쪽이 '확정되지 않은 기업 언급이 남아 있다'는 하나의
+        사실로 판단한다. 사유별로 따로 물으면 새 사유가 늘 때마다 부르는 쪽이 함께 늘어야
+        하고, 빠뜨린 사유는 조용히 통과한다.
+        """
         return tuple(mention for mention in self.mentions if mention.canonical is None)
 
     @property
@@ -548,7 +761,8 @@ class CompanyResolver:
         두 벌로 훑는다.
 
             1. 표기 일치  정규화한 질문 문자열에서 등록된 표기를 긴 것부터 찾는다.
-                          띄어쓰기나 '(주)'가 달라도 걸린다.
+                          띄어쓰기나 '(주)'가 달라도 걸린다. 낱말 경계 위에 놓인 자리만
+                          인정한다(has_lexical_boundaries).
             2. 부분명     1이 집지 않은 자리만 낱말 단위로 본다. 조사를 떼고 후보를 센다.
 
         2가 1보다 뒤인 것이 규약이다. 앞에 두면 '삼성전자'를 물은 질문에서 '삼성'이 먼저
@@ -580,8 +794,11 @@ class CompanyResolver:
         claimed: list[tuple[int, int]],
         mentions: list[CompanyMention],
     ) -> None:
+        def on_boundary(start: int, end: int) -> bool:
+            return has_lexical_boundaries(composed, offsets, (start, end))
+
         for surface in self._ordered_surfaces:
-            span = find_unclaimed_span(normalized, surface, claimed)
+            span = find_unclaimed_span(normalized, surface, claimed, accept=on_boundary)
 
             if span is None:
                 continue
@@ -672,7 +889,10 @@ class CompanyResolver:
 
             candidates = self._partial_candidates(mention_text)
 
-            if len(candidates) > 1:
+            if not candidates:
+                return None
+
+            if len(candidates) > 1 or len(mention_text) >= PARTIAL_MIN_RESOLVE_LENGTH:
                 return self._build_mention(
                     composed=composed,
                     offsets=offsets,
@@ -682,19 +902,22 @@ class CompanyResolver:
                     candidates=candidates,
                 )
 
-            if len(candidates) == 1 and len(mention_text) >= PARTIAL_MIN_RESOLVE_LENGTH:
-                return self._build_mention(
-                    composed=composed,
-                    offsets=offsets,
-                    span=span,
-                    normalized=mention_text,
-                    method=RESOLUTION_UNIQUE_PARTIAL,
-                    candidates=candidates,
-                )
-
-            # 후보가 하나인데 표현이 짧으면 여기서 멈춘다. 더 짧은 형태를 다시 보아도 근거는
-            # 얇아지기만 한다.
-            return None
+            # 후보가 하나인데 표현이 짧은 자리다. 옮기지는 않되 기업 언급이었다는 사실은 남긴다.
+            #
+            # 여기서 None을 돌려주면 '레인이랑 현대차 비교해줘'의 '레인'이 결과 어디에도 없이
+            # 사라지고, 부르는 쪽은 현대자동차 하나만 물은 질문으로 읽어 단일 기업 계획을 만든다.
+            # 하한의 뜻은 '자동으로 옮기지 않는다'이지 '없던 일로 한다'가 아니다.
+            #
+            # 더 짧은 형태를 다시 보지 않고 여기서 멈추는 것은 그대로다. 근거는 얇아지기만 한다.
+            return self._build_mention(
+                composed=composed,
+                offsets=offsets,
+                span=span,
+                normalized=mention_text,
+                method=RESOLUTION_BELOW_PARTIAL_FLOOR,
+                candidates=candidates,
+                resolvable=False,
+            )
 
         return None
 
@@ -735,14 +958,26 @@ class CompanyResolver:
         normalized: str,
         method: str,
         candidates: Sequence[str],
+        resolvable: bool = True,
     ) -> CompanyMention:
-        resolved = candidates[0] if len(candidates) == 1 else None
+        """
+        표현 하나와 그 판정을 mention으로 굳힌다.
+
+        resolvable=False는 '후보는 찾았지만 옮기지 않기로 한 자리'다. 후보가 하나여도
+        canonical을 비우고, 부른 쪽이 준 method를 옮기지 않은 이유로 그대로 남긴다.
+        """
+        resolved = candidates[0] if resolvable and len(candidates) == 1 else None
+
+        if resolved is not None or not resolvable:
+            recorded = method
+        else:
+            recorded = RESOLUTION_AMBIGUOUS_MATCH
 
         return CompanyMention(
             raw=_raw_slice(composed, offsets, span),
             normalized=normalized,
             canonical=resolved,
-            method=method if resolved is not None else RESOLUTION_AMBIGUOUS_MATCH,
+            method=recorded,
             # 후보는 이름 순으로 고정한다. 등록 순서나 표기 길이 순으로 두면 같은 모호성이
             # manifest 정렬에 따라 다른 차례로 보고되고, 그 차례가 '첫 후보'처럼 읽힌다.
             candidates=tuple(sorted(candidates)),

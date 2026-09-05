@@ -16,9 +16,12 @@ from __future__ import annotations
 import pytest
 
 from disclosure_agent.agent.company_resolution import (
+    BOUNDARY_TRAILING_FORMS,
+    MENTION_PARTICLES,
     PARTIAL_MIN_RESOLVE_LENGTH,
     RESOLUTION_ALIAS,
     RESOLUTION_AMBIGUOUS_MATCH,
+    RESOLUTION_BELOW_PARTIAL_FLOOR,
     RESOLUTION_CANONICAL,
     RESOLUTION_LISTED_NAME,
     RESOLUTION_UNIQUE_PARTIAL,
@@ -220,6 +223,197 @@ def test_resolution_records_provenance(resolver: CompanyResolver) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 낱말 경계
+#
+# 표기 일치는 정규화한 질문 문자열 위에서 부분문자열로 찾는다. 경계 검사가 없으면 'SKT' 안의
+# 'KT'가 그대로 걸려, 질문에 없던 회사의 Fact가 근거까지 갖춘 채 답이 된다.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("question", "expected", "raw"),
+    [
+        # 표기 뒤에 아무것도 붙지 않은 자리
+        ("KT 2025년 매출 알려줘", "케이티", "KT"),
+        # 조사가 띄어쓰기 없이 붙은 자리. 한국어에는 로마자 낱말 경계(\b)가 없다.
+        ("KT와 2025년 매출 알려줘", "케이티", "KT"),
+        ("KT는 2025년 매출 알려줘", "케이티", "KT"),
+        ("기아는 2025년 매출 알려줘", "기아", "기아"),
+        ("기아의 2025년 매출 알려줘", "기아", "기아"),
+        # 문장부호가 붙은 자리
+        ("'기아' 2025년 매출 알려줘", "기아", "기아"),
+    ],
+)
+def test_word_boundary_keeps_valid_spellings(
+    resolver: CompanyResolver,
+    question: str,
+    expected: str,
+    raw: str,
+) -> None:
+    mention = _single(resolver, question)
+
+    assert mention.canonical == expected
+    assert mention.raw == raw
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 등록된 표기가 더 긴 낱말 '안'에 들어 있는 자리. 'KT'는 케이티의 상장명이다.
+        "SKT 2025년 매출 알려줘",
+        "KTX 2025년 매출 알려줘",
+        # 숫자가 이어붙은 자리. 숫자도 이름 글자다.
+        "KT9 2025년 매출 알려줘",
+        "9KT 2025년 매출 알려줘",
+        # canonical 기업명이 더 긴 낱말의 앞부분인 자리. 야구단은 기아가 아니다.
+        "기아타이거즈 2025년 매출 알려줘",
+        "기아타이거즈는 2025년 매출 알려줘",
+    ],
+)
+def test_embedded_spelling_is_not_a_company_mention(
+    resolver: CompanyResolver,
+    question: str,
+) -> None:
+    """
+    낱말 안에 우연히 들어 있는 등록 표기로는 기업을 인식하지 않는다.
+
+    인식하면 다른 회사의 Fact가 조용히 답으로 나간다. 근거도 형식도 정상이라 결과만 봐서는
+    드러나지 않는 종류의 오류이며, 그래서 여기서 막는다.
+    """
+    resolution = resolver.resolve_question(question)
+
+    assert resolution.mentions == ()
+    assert resolution.companies == ()
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 'KT&G'는 케이티와 다른 회사다. 이 UNIVERSE에는 없다.
+        "KT&G 2025년 매출 알려줘",
+        "KT&G는 2025년 매출 알려줘",
+        "KT+G 2025년 매출 알려줘",
+        # 기호 앞쪽에 붙은 자리도 같다.
+        "G&KT 2025년 매출 알려줘",
+    ],
+)
+def test_name_internal_symbol_does_not_open_a_boundary(
+    resolver: CompanyResolver,
+    question: str,
+) -> None:
+    """
+    '&'·'+'는 이름을 잇는 기호이지 낱말을 끊는 기호가 아니다.
+
+    끊는 것으로 보면 'KT&G'에서 앞의 'KT'만 걸려 케이티의 Fact가 답이 된다. 등록된 이름 안에
+    있으면 표기가 통째로 걸리니 괜찮다는 판단은 그 회사가 코퍼스에 있을 때만 성립하고, 없는
+    회사를 물었을 때야말로 경계 검사가 필요한 자리다. 그 조건에 기대지 않는다.
+    """
+    resolution = resolver.resolve_question(question)
+
+    assert resolution.mentions == ()
+    assert resolution.companies == ()
+
+
+def test_registered_name_with_an_internal_symbol_still_wins() -> None:
+    """
+    기호를 품은 이름이 코퍼스에 있으면 그 이름이 통째로 걸려야 한다.
+
+    경계 규칙을 조인 뒤에도 긴 표기 우선이 그대로인지 본다. 여기가 깨지면 KT&G를 담은
+    코퍼스에서 KT&G 질문이 아무 기업도 못 찾는 쪽으로 뒤집힌다.
+    """
+    resolver = CompanyResolver.from_universe(
+        UNIVERSE + ({"corp_name": "케이티앤지", "listed_name": "KT&G"},)
+    )
+
+    assert resolver.resolve_question("KT&G 2025년 매출 알려줘").companies == ("케이티앤지",)
+
+    # 같은 코퍼스에서 'KT'는 여전히 케이티다.
+    assert resolver.resolve_question("KT 2025년 매출 알려줘").companies == ("케이티",)
+
+
+def test_symbol_between_two_companies_fails_closed(resolver: CompanyResolver) -> None:
+    """
+    '&'를 기업 구분자로 쓴 표기는 어느 쪽도 확정하지 않는다.
+
+    이것은 '&'를 이름 글자로 둔 대가이며, 고른 값이다. 한국어 질문에서 두 기업을 잇는 표기는
+    '와'·'과'·'랑'이고 그 경로는 그대로 살아 있다. 구분자로도 이름 글자로도 읽힐 수 있는 기호
+    앞에서는 막는 쪽이 다른 회사를 답하는 것보다 낫다.
+    """
+    resolution = resolver.resolve_question("삼성전자&기아 2025년 매출 비교해줘")
+
+    assert resolution.companies == ()
+
+    # 같은 뜻을 조사로 적으면 그대로 두 기업이다.
+    assert resolver.resolve_question("삼성전자랑 기아 2025년 매출 비교해줘").companies == (
+        "삼성전자",
+        "기아",
+    )
+
+
+def test_mention_particles_are_all_accepted_as_boundary_trailing_forms() -> None:
+    """
+    MENTION_PARTICLES ⊆ BOUNDARY_TRAILING_FORMS를 고정한다.
+
+    이 관계가 표기 일치를 보는 두 자리를 어긋나지 않게 붙든다. _resolve_token은 낱말에서 조사를
+    하나 뗀 표기를 self._surfaces에서 그대로 조회하며 경계 검사를 부르지 않는다. 뗀 조사가 이
+    허용 목록에 없으면, _scan_exact_surfaces가 경계로 막은 자리를 부분명 훑기가 다시 연다.
+
+    지금은 합집합으로 만들어 관계가 저절로 성립한다. 목록을 직접 나열하는 형태로 바뀌면 이
+    테스트가 그 사실을 알린다. 그때 생기는 구멍은 조사 하나를 뗀 표기에서만 열려 눈에 잘 띄지
+    않는다.
+    """
+    assert set(MENTION_PARTICLES) <= set(BOUNDARY_TRAILING_FORMS)
+
+
+def test_boundary_rejection_does_not_hide_a_later_valid_match(
+    resolver: CompanyResolver,
+) -> None:
+    """
+    경계에 걸린 자리에서 멈추지 않고 다음 출현을 계속 본다.
+
+    첫 출현에서 포기하면 같은 글자가 앞에 한 번 잘못 나온 질문에서 뒤의 올바른 자리를 놓치고,
+    답할 수 있던 질문이 막힌다.
+    """
+    mention = _single(resolver, "SKT 말고 KT 2025년 매출 알려줘")
+
+    assert mention.canonical == "케이티"
+    assert mention.method == RESOLUTION_LISTED_NAME
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "(주)한미반도체 2025년 매출은?",
+        "한미반도체 주식회사 2025년 매출은?",
+        "주식회사한미반도체 2025년 매출은?",
+        "한미 반도체 2025년 매출은?",
+    ],
+)
+def test_word_boundary_does_not_break_name_normalization(
+    resolver: CompanyResolver,
+    question: str,
+) -> None:
+    """
+    경계 검사가 기존 표기 정규화를 깨지 않아야 한다.
+
+    법인격 표기와 띄어쓰기는 정규화가 지운 글자다. 지운 글자를 경계로 보지 않으면 '(주)'가
+    붙었다는 이유로, 또는 회사명 중간을 띄어 썼다는 이유로 지금까지 답하던 질문이 막힌다.
+    """
+    mention = _single(resolver, question)
+
+    assert mention.canonical == "한미반도체"
+
+
+def test_word_boundary_keeps_multi_company_questions(
+    resolver: CompanyResolver,
+) -> None:
+    """앞 기업의 조사가 뒤 기업의 경계를 흐리지 않아야 한다."""
+    resolution = resolver.resolve_question("레인보우로보틱스가 삼성전자와 맺은 계약")
+
+    assert resolution.companies == ("레인보우로보틱스", "삼성전자")
+
+
+# ---------------------------------------------------------------------------
 # fail-close
 # ---------------------------------------------------------------------------
 
@@ -292,9 +486,62 @@ def test_short_unique_partial_is_not_resolved(resolver: CompanyResolver) -> None
     """
     assert len("레인") < PARTIAL_MIN_RESOLVE_LENGTH
 
+    mention = _single(resolver, "레인 2025년 매출 알려줘")
+
+    assert mention.canonical is None
+    assert mention.method == RESOLUTION_BELOW_PARTIAL_FLOOR
+
+
+def test_short_unique_partial_stays_visible_as_an_unresolved_mention(
+    resolver: CompanyResolver,
+) -> None:
+    """
+    옮기지 않은 표현도 mention으로 남아야 한다.
+
+    사라지면 부르는 쪽은 그 표현이 애초에 없었던 것과 구분하지 못한다. '레인 2025년 매출'
+    하나만 보면 둘 다 답할 수 없는 질문이라 차이가 드러나지 않지만, 다른 기업과 섞이면
+    갈린다(test_below_floor_mention_blocks_a_mixed_company_question).
+    """
     resolution = resolver.resolve_question("레인 2025년 매출 알려줘")
 
-    assert resolution.mentions == ()
+    assert resolution.companies == ()
+
+    assert [mention.raw for mention in resolution.unresolved] == ["레인"]
+
+    # 후보가 여럿이라 못 고른 것이 아니다. 두 사유를 한 이름으로 묶지 않는다.
+    assert resolution.ambiguous == ()
+
+
+def test_below_floor_mention_blocks_a_mixed_company_question(
+    resolver: CompanyResolver,
+) -> None:
+    """
+    확정하지 않은 짧은 표현이 다른 기업과 섞이면 그 사실이 결과에 남아야 한다.
+
+    '레인'을 버리면 이 질문은 현대자동차 단독 질문이 되고, 부르는 쪽이 단일 기업 계획을 만든다.
+    확정하지 않기로 한 표현을 '없는 것'으로 처리한 셈이며, 사라졌다는 사실이 결과 어디에도
+    남지 않는다.
+    """
+    resolution = resolver.resolve_question("레인이랑 현대차 2025년 매출 비교해줘")
+
+    assert resolution.companies == ("현대자동차",)
+
+    assert [mention.raw for mention in resolution.unresolved] == ["레인"]
+
+    # 레인보우로보틱스를 고르지 않는다. 후보로만 남는다.
+    assert resolution.unresolved[0].candidates == ("레인보우로보틱스",)
+    assert resolution.unresolved[0].canonical is None
+
+
+def test_long_enough_partial_next_to_another_company_still_resolves(
+    resolver: CompanyResolver,
+) -> None:
+    """해석 하한을 넘는 부분명은 다중 기업 질문에서 그대로 확정된다."""
+    resolution = resolver.resolve_question("레인보우랑 현대차 2025년 매출 비교해줘")
+
+    assert resolution.companies == ("레인보우로보틱스", "현대자동차")
+
+    assert resolution.unresolved == ()
 
 
 def test_common_word_inside_company_names_is_not_a_mention(

@@ -33,8 +33,8 @@ from disclosure_agent.agent.normalization import (
     UnmappedPolicyCategoryError,
     answerability_reason_for_policy_category,
 )
-from disclosure_agent.agent.query_analyzer import RELATIVE_PERIOD_TOKENS, YEAR_PATTERN
-from disclosure_agent.agent.safety import _YEAR_PATTERN as GATE_YEAR_PATTERN
+from disclosure_agent.agent.query_analyzer import RELATIVE_PERIOD_TOKENS
+from disclosure_agent.agent.query_vocabulary import find_years
 from disclosure_agent.agent.safety import (
     CATEGORY_EXTERNAL_INFORMATION,
     CATEGORY_FORWARD_LOOKING,
@@ -50,6 +50,7 @@ from disclosure_agent.agent.safety import (
     PolicyDecision,
     _is_source_backed_future_request,
     _request_units,
+    _requested_periods,
     screen_question,
 )
 from disclosure_agent.common.enums import (
@@ -462,27 +463,97 @@ def test_default_coverage_matches_the_declared_corpus_range() -> None:
     assert (DEFAULT_CORPUS_COVERAGE.last_year, DEFAULT_CORPUS_COVERAGE.last_month) == (2026, 3)
 
 
-def test_gate_year_pattern_agrees_with_the_query_analyzer() -> None:
-    """
-    Gate와 query_analyzer가 연도를 같은 규칙으로 읽는지 본다.
-
-    Gate는 질의 해석보다 앞 계층이라 analyzer를 import하지 않고 같은 패턴을 따로 둔다.
-    두 규칙이 갈라지면 "Gate는 연도로 안 봤는데 analyzer는 봤다"는 상태가 생기고, 그
-    질문은 기간 판정을 건너뛴 채 조회로 넘어간다.
-
-    '년'이 붙지 않은 네 자리 숫자를 연도로 보지 않는다는 규칙이 특히 중요하다.
-    """
-    probes = [
+@pytest.mark.parametrize(
+    "probe",
+    [
+        # '년'이 붙은 표기.
         "삼성전자 2026년 상반기 실적",
         "2024년 매출과 2025년 매출",
-        "계약금액 2500억",
-        "접수번호 20240815000123",
         "2027년",
         "1999년과 2030년",
-    ]
+        # 보고서 종류가 붙은 맨 연도. 어휘 모듈이 읽는 자리이며 Gate도 같이 읽어야 한다.
+        "한미반도체 2027 사업보고서 연결 매출액이 얼마야?",
+        "한미반도체 2025 사업보고서 연결 매출액이 얼마야?",
+        "2024 사업보고서랑 2025 사업보고서 비교해줘",
+        "2025 반기보고서 매출",
+        # 두 규칙에 함께 걸리는 표기. 한 기간이다.
+        "테스트바이오 2025년 사업보고서 정리해줘",
+        # 연도가 아닌 네 자리 숫자.
+        "계약금액 2500억",
+        "접수번호 20240815000123",
+        "테스트반도체 매출이 2025억원 맞아?",
+        "테스트반도체 계약번호 2025-0001 알려줘",
+        "직원 2025명",
+        "테스트반도체 2025 매출 알려줘",
+        # 연도와 금액이 함께 있는 질문.
+        "2024년 매출이 2025억원 맞아?",
+    ],
+)
+def test_gate_reads_the_same_years_as_the_query_vocabulary(probe: str) -> None:
+    """
+    Gate와 질의 해석 계층이 같은 것을 연도로 읽는지 본다.
 
-    for probe in probes:
-        assert GATE_YEAR_PATTERN.findall(probe) == YEAR_PATTERN.findall(probe), probe
+    두 규칙이 갈라지면 "Gate는 연도로 안 봤는데 analyzer는 봤다"는 상태가 생기고, 그
+    질문은 기간 판정을 건너뛴 채 조회로 넘어간다. 실제로 그랬다. Gate가 '년'이 붙은 표기만
+    읽던 동안 "2027 사업보고서 매출"이 F1을 지나쳤다.
+
+    정규식 두 개를 문자열로 대조하지 않는다. 그 대조는 이 결함을 놓쳤다. 두 자리가 같은
+    정규식 하나만 보고 있었고, 어휘 모듈이 그 정규식 밖에서 읽는 표기가 있다는 사실은
+    대조 대상이 아니었기 때문이다. 그래서 규칙의 모양이 아니라 읽어 낸 연도를 고정한다.
+
+    Gate 쪽은 같은 연도를 여러 번 지목할 수 있다(연도마다 하위 기간을 따로 붙이므로).
+    비교 전에 값으로 중복을 없애며, 차례는 그대로 둔다.
+    """
+    gate_years = tuple(dict.fromkeys(year for year, _, _ in _requested_periods(probe)))
+
+    assert gate_years == find_years(probe), probe
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_expression"),
+    [
+        # '년'을 쓴 표기와 생략한 표기가 같은 결과여야 한다.
+        ("한미반도체 2027년 사업보고서 연결 매출액이 얼마야?", "2027년"),
+        ("한미반도체 2027 사업보고서 연결 매출액이 얼마야?", "2027년"),
+        # 하위 기간도 같이 읽는다. 상한이 2026년 3월이라 반기보고서는 밖이다.
+        ("2026년 반기보고서 매출 알려줘", "2026년 반기"),
+        ("2026 반기보고서 매출 알려줘", "2026년 반기"),
+    ],
+)
+def test_report_context_bare_year_is_screened_like_the_year_suffixed_form(
+    question: str,
+    expected_expression: str,
+) -> None:
+    """보고서 종류가 붙은 맨 연도가 '년'을 쓴 표기와 같은 F1 판정을 받는다."""
+    decision = screen_question(question)
+
+    assert not decision.allowed
+    assert decision.category == CATEGORY_OUT_OF_CORPUS_PERIOD
+    assert decision.matched_expressions == (expected_expression,)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 수집 상한 안의 맨 연도. 연도를 읽게 되었다고 해서 막히지 않는다.
+        "한미반도체 2025 사업보고서 연결 매출액이 얼마야?",
+        "테스트바이오 2025 사업보고서 설비 투자 정리해줘",
+        "2024 사업보고서랑 2025 사업보고서 비교해줘",
+        # 연도가 아닌 네 자리 숫자. 기간을 말하지 않은 질문에 기간이 생기면 안 된다.
+        "테스트반도체 매출이 2027억원 맞아?",
+        "테스트반도체 계약번호 2027-0001 알려줘",
+        "직원 2027명",
+        "테스트반도체 2027 매출 알려줘",
+    ],
+)
+def test_bare_numbers_do_not_gain_a_period_at_the_gate(question: str) -> None:
+    """
+    맨 숫자를 연도로 읽지 않는 규칙이 Gate에서도 그대로다.
+
+    읽으면 금액·식별자·수량이 기간이 되고, 상한 밖 숫자를 쓴 질문이 F1으로 막힌다. 그
+    거부 사유는 실제로 일어난 일과 다르다.
+    """
+    assert screen_question(question).allowed
 
 
 def test_sub_year_period_is_attached_to_its_own_year() -> None:

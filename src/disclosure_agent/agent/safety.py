@@ -56,6 +56,22 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+# 무엇을 절대연도로 볼지는 agent.query_vocabulary가 정한다.
+#
+# 이 모듈이 같은 규칙을 따로 두지 않는 이유:
+#     Gate가 '년'이 붙은 표기만 읽고 어휘 모듈이 "2027 사업보고서"까지 읽던 동안, 같은
+#     질문이 표기에 따라 갈렸다. "2027년 사업보고서 매출"은 F1으로 막히고 "2027 사업보고서
+#     매출"은 조회로 넘어갔다. 두 규칙을 나란히 두고 테스트로 대조하는 방식은 그 갈라짐을
+#     막지 못했다. 대조가 '년' 표기만 보고 있었기 때문이다.
+#
+# 계층 규약을 어기지 않는 이유(pattern_f_safety.md §3.4):
+#     §3.4가 요구하는 것은 두 가지다. 판정 시점에 코퍼스(manifest·문서)를 열지 않을 것,
+#     그리고 정책 판정과 질의 해석을 한 파일에 섞지 않을 것. query_vocabulary는 문자열만
+#     읽는 어휘 모듈이라 코퍼스를 열지 않고, 무엇을 요구하고 무엇을 막을지도 정하지 않는다.
+#     그 판단은 query_analyzer가 하며 이 모듈은 그쪽을 import하지 않는다. 어휘를 공유해도
+#     "판정은 질문 문자열만 본다"는 그대로다.
+from disclosure_agent.agent.query_vocabulary import find_year_spans
+
 __all__ = [
     "CATEGORY_EXTERNAL_INFORMATION",
     "CATEGORY_FORWARD_LOOKING",
@@ -556,13 +572,6 @@ class CorpusCoverage:
 # 넘기고 싶어지면 호출부에서 주입하면 되고, 아래 판정 규칙은 한 줄도 바뀌지 않는다.
 DEFAULT_CORPUS_COVERAGE = CorpusCoverage(last_year=2026, last_month=3)
 
-# 절대연도. '년'이 붙지 않은 네 자리 숫자는 연도로 보지 않는다.
-#
-# query_analyzer.YEAR_PATTERN과 같은 규칙이다. import하지 않고 같은 값을 둔 이유는 Gate가
-# 질의 해석보다 앞 계층이기 때문이다. 대신 두 패턴이 갈라지지 않는지는 테스트가 고정한다
-# (test_pattern_f_safety_gate.py의 year pattern 동기화 검사).
-_YEAR_PATTERN = re.compile(r"(?<!\d)(?:19|20)\d{2}(?=\s*년)")
-
 # 연도 안의 하위 기간 표현. 요구 기간의 '끝'이 어디인지를 정한다.
 #
 # 끝을 보는 이유: 코퍼스 상한이 연 경계가 아니어서, 시작만 보면 2026년 상반기(Q16)가
@@ -593,7 +602,14 @@ def _sub_year_end_month(match: re.Match[str]) -> int:
 
 def _requested_periods(question: str) -> tuple[tuple[int, int | None, str], ...]:
     """
-    질문이 지목한 기간을 (연도, 마지막 달, 원문 표현)으로 읽는다.
+    질문이 지목한 기간을 (연도, 마지막 달, 근거 표현)으로 읽는다.
+
+    무엇을 연도로 볼지는 query_vocabulary.find_year_spans가 정한다. '년'이 붙은 표기와
+    보고서 종류가 붙은 표기("2027 사업보고서")를 함께 읽으며, 그 범위는 질의 해석 계층이
+    읽는 범위와 같다. 여기서 다시 세지 않는 이유는 위 import의 설명과 같다.
+
+    근거 표현은 원문을 그대로 자르지 않고 "{연도}년" 꼴로 적는다. 질문이 '년'을 생략했어도
+    가리킨 기간은 그 회계연도이고, 진단 원문이 읽는 사람에게 알려야 하는 것도 그것이다.
 
     마지막 달이 None이면 하위 기간 표현 없이 연도만 쓴 경우다. 추측해서 12월로 채우지
     않는다. 연 단위 언급과 연말까지를 요구하는 언급은 다른 진술이고, 그 차이가 아래
@@ -608,16 +624,14 @@ def _requested_periods(question: str) -> tuple[tuple[int, int | None, str], ...]
         안이고, 크면 어떤 달이 붙어도 밖이다. 하위 기간 표현이 결과를 바꾸는 것은 연도가
         상한 연도와 같을 때뿐이다.
     """
-    matches = list(_YEAR_PATTERN.finditer(question))
+    spans = find_year_spans(question)
 
     periods: list[tuple[int, int | None, str]] = []
 
-    for index, match in enumerate(matches):
-        window_end = matches[index + 1].start() if index + 1 < len(matches) else len(question)
+    for index, (_, year_end, year) in enumerate(spans):
+        window_end = spans[index + 1][0] if index + 1 < len(spans) else len(question)
 
-        sub_year = _SUB_YEAR_PERIOD.search(question, match.end(), window_end)
-
-        year = int(match.group(0))
+        sub_year = _SUB_YEAR_PERIOD.search(question, year_end, window_end)
 
         if sub_year is None:
             periods.append((year, None, f"{year}년"))
@@ -839,7 +853,7 @@ def _first_future_relative_in_request(request: str) -> tuple[str, str] | None:
     if deictic is not None:
         return deictic
 
-    if _YEAR_PATTERN.search(request):
+    if find_year_spans(request):
         # 같은 요청 안에 절대연도가 있으면 anchored relative일 수 있다. 단정하지 않는다.
         return None
 

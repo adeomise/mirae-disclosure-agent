@@ -19,6 +19,7 @@ from disclosure_agent.api.service import (
     FAILED_PUBLIC_MESSAGE,
     AgentAskService,
     MissingExecutionIssueError,
+    Verbalize,
 )
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
@@ -67,7 +68,27 @@ def clear_dependency_overrides():
     app.dependency_overrides.clear()
 
 
-def runtime_service(result: AgentExecutionResult) -> AgentAskService:
+def _deterministic_verbalize(payload: object) -> str | None:
+    """
+    이 파일의 기본 verbalize_fn. 항상 None을 돌려줘 build_answer_response의 문장을 그대로 둔다.
+
+    default_verbalize(설정을 읽고 실제 HyperCLOVA 클라이언트를 만드는 자리)를 대신한다.
+    이 파일은 HTTP 경계의 구조적 계약만 고정하며, HCX가 문장을 바꾸는지는
+    test_api_hcx_verbalization.py가 전담한다.
+
+    default_verbalize에 맡겨 두면 로컬 .env나 프로세스 환경에 HyperCLOVA 자격 증명이
+    채워져 있을 때(HYPERCLOVA_ENABLED=true 등) 이 파일의 assertion이 실제 모델 응답과
+    부딪힌다. 이 함수로 verbalize_fn을 고정해 두면 바깥 환경이 무엇이든 default_verbalize/
+    _cached_chat_client/실제 HCX 전송 계층을 아예 지나가지 않는다.
+    """
+    return None
+
+
+def runtime_service(
+    result: AgentExecutionResult,
+    *,
+    verbalize_fn: Verbalize = _deterministic_verbalize,
+) -> AgentAskService:
     def fake_answer_question(question: str, **_: object) -> AgentExecutionResult:
         assert question
         return result
@@ -75,6 +96,7 @@ def runtime_service(result: AgentExecutionResult) -> AgentAskService:
     return AgentAskService(
         corpus_root=Path("unused-synthetic-corpus"),
         answer_question_fn=fake_answer_question,
+        verbalize_fn=verbalize_fn,
     )
 
 
@@ -565,6 +587,79 @@ def test_q11_response_does_not_recalculate_the_margins_from_the_facts() -> None:
     assert "7.00%" in answer
     assert "12.50" not in answer
     assert answer.endswith("합성중공업(주) 쪽이 더 큽니다.")
+
+
+def test_runtime_service_stays_isolated_from_hyperclova_even_when_the_environment_enables_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    회귀 방지: 바깥 프로세스 환경(.env 포함)이 HyperCLOVA를 켜 두고 자격 증명까지 채워도,
+    runtime_service()로 만든 서비스는 실제 HCX 전송 계층에 닿지 않는다.
+
+    HYPERCLOVA_ENABLED=true와 그럴듯한 자격 증명을 주입한 뒤 get_hyperclova_settings /
+    _cached_chat_client의 lru_cache를 비운다. 비우지 않으면 이전 테스트가 이미 채운 캐시가
+    이번 환경 변경을 가리고, 이 테스트가 아무것도 증명하지 못한다.
+
+    HttpHyperClovaClient.complete 자체를 감시한다. 이 메서드가 실제 HCX 전송이 시작되는
+    경계다(agent.hyperclova의 ChatCompletionClient 계약). runtime_service()가
+    verbalize_fn을 제대로 갈아 끼우고 있다면(_deterministic_verbalize) default_verbalize를
+    지나가지 않으므로 이 메서드는 한 번도 불리지 않는다.
+
+    FastAPI TestClient도 내부적으로 httpx를 쓰므로 httpx.Client.post 자체를 감시하면
+    테스트 요청까지 걸린다. HttpHyperClovaClient.complete만 감시해 그 문제를 피한다.
+
+    service.py가 verbalize_fn의 예외를 삼키므로(정상 요청을 실패로 만들지 않기 위해) 응답
+    자체는 실제 호출 여부와 무관하게 200으로 나갈 수 있다. 그래서 호출 여부는 응답 상태가
+    아니라 이 sentinel의 호출 기록으로 직접 확인한다.
+
+    테스트가 끝나면 캐시를 다시 비워, 여기서 주입한 가짜 자격 증명이 다른 테스트로 새지
+    않게 한다.
+    """
+    from disclosure_agent.agent.hyperclova import HttpHyperClovaClient
+    from disclosure_agent.api import service as service_module
+    from disclosure_agent.common.config import get_hyperclova_settings
+
+    monkeypatch.setenv("HYPERCLOVA_ENABLED", "true")
+    monkeypatch.setenv("HYPERCLOVA_API_KEY", "synthetic-key")
+    monkeypatch.setenv("HYPERCLOVA_API_URL", "https://example.invalid/v3/chat-completions")
+    monkeypatch.setenv("HYPERCLOVA_MODEL", "HCX-005")
+
+    get_hyperclova_settings.cache_clear()
+    service_module._cached_chat_client.cache_clear()
+
+    network_calls: list[object] = []
+
+    def fail_if_called(self: HttpHyperClovaClient, *, system_prompt: str, user_message: str) -> str:
+        network_calls.append((system_prompt, user_message))
+        raise AssertionError(
+            "real HyperCLOVA transport must not be reached from tests/integration/test_api_ask.py"
+        )
+
+    monkeypatch.setattr(HttpHyperClovaClient, "complete", fail_if_called)
+
+    try:
+        result = derived_metric_comparison_result()
+        result.calculations[0].value = "1.00"
+        result.calculations[1].value = "7.00"
+        result.comparisons[0].relation = ComparisonRelation.RIGHT_GREATER
+
+        app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+        response = client.post(
+            "/api/ask",
+            json={"question": "synthetic isolation guard"},
+        )
+
+        assert response.status_code == 200
+
+        answer = response.json()["answer"]
+        assert "1.00%" in answer
+        assert "7.00%" in answer
+        assert "12.50" not in answer
+        assert network_calls == []
+    finally:
+        get_hyperclova_settings.cache_clear()
+        service_module._cached_chat_client.cache_clear()
 
 
 def test_not_comparable_result_still_returns_200_with_the_unavailable_sentence() -> None:

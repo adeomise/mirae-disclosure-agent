@@ -82,6 +82,9 @@ MALFORMED_INCOMPLETE_KOREAN_TEXT_PATTERN = re.compile(
     rf"<(?=[가-힣]{{1,9}}[ \t]*"
     rf"</(?:{_DART_STRUCTURAL_CLOSING_NAMES}|SECTION-\d+)[ \t]*>)"
 )
+# A lone literal less-than immediately before a SPAN closing tag was observed
+# in the annual corpus. Do not extend this to arbitrary incomplete markup.
+MALFORMED_BARE_LT_TEXT_PATTERN = re.compile(r"<(?=</SPAN[ \t]*>)")
 XML_ATTRIBUTE_NAME_PATTERN = re.compile(r"[A-Za-z_:][A-Za-z0-9_.:-]*")
 MALFORMED_DUPLICATED_QUOTE_VALUE_START_PATTERN = re.compile(
     r"[^\s\"'=<>/]"
@@ -91,11 +94,13 @@ MALFORMED_DUPLICATED_QUOTE_VALUE_START_PATTERN = re.compile(
 def _repair_malformed_attribute_syntax(fragment: str) -> str:
     """Audit-confirmed attribute syntax errors in structural start tags only.
 
-    Two repairs are intentionally narrow:
+    Repairs are intentionally narrow:
 
     - ``NAME=""value"`` loses the duplicated opening quote only when the
       second quote is followed by a non-delimiter value character.  Therefore
       the valid empty value ``NAME=""`` is unchanged.
+    - ``NAME="value""`` loses one duplicated closing double quote only for
+      nonempty values followed by XML whitespace or a tag terminator.
     - ``NAME="value"NEXT="other"`` gains one space only when the closing
       quote is immediately followed by a complete XML attribute name and
       ``=``.
@@ -172,10 +177,23 @@ def _repair_malformed_attribute_syntax(fragment: str) -> str:
                 edits.append((position, position + 1, ""))
                 position += 1
 
+            value_start = position
             closing_quote = fragment.find(quote, position)
             if closing_quote == -1:
                 break
             position = closing_quote + 1
+            if (
+                quote == '"'
+                and closing_quote > value_start
+                and fragment.startswith('"', position)
+                and position + 1 < len(fragment)
+                and (
+                    fragment[position + 1] in " \t\r\n>"
+                    or fragment.startswith("/>", position + 1)
+                )
+            ):
+                edits.append((position, position + 1, ""))
+                position += 1
 
             if position >= len(fragment):
                 break
@@ -220,13 +238,13 @@ def _repair_malformed_attribute_syntax(fragment: str) -> str:
     return "".join(parts)
 
 
-def _repair_malformed_percent_comparisons_in_text(fragment: str) -> str:
+def _repair_malformed_literal_lt_in_text(fragment: str) -> str:
     """Element text의 audit-confirmed malformed literal ``<``만 escape한다.
 
     호출자는 CDATA/comment/processing instruction을 제외한 fragment를 전달한다.
     start/end tag와 quoted attribute 안의 동일 문자열은 strict parser가 계속
     검증하도록 그대로 둔다. percent 비교식과 structural closing tag 직전의
-    미완성 한글 token은 서로 독립된 좁은 문법으로 판정한다.
+    미완성 한글 token, SPAN 닫힘 직전의 단독 `<`를 좁은 문법으로 판정한다.
     """
     parts: list[str] = []
     unchanged_start = 0
@@ -250,7 +268,12 @@ def _repair_malformed_percent_comparisons_in_text(fragment: str) -> str:
                     position,
                 )
             )
-            if comparison is not None or incomplete_korean_text is not None:
+            bare_lt = MALFORMED_BARE_LT_TEXT_PATTERN.match(fragment, position)
+            if (
+                comparison is not None
+                or incomplete_korean_text is not None
+                or bare_lt is not None
+            ):
                 parts.append(fragment[unchanged_start:position])
                 parts.append("&lt;")
                 position += 1
@@ -281,9 +304,9 @@ def sanitize_dart_xml_text(xml_text: str) -> str:
     """Audit-confirmed DART XML syntax errors only, preserving strict parsing.
 
     정상 entity는 그대로 두며, 구조 tag allowlist 밖의 ``<...>``는 text로
-    escape한다. audit으로 확정한 percent 비교식과 미완성 한글 text의 raw
-    ``<``만 text node에서 escape한다. 구조 start tag 안에서는 빈 attribute와
-    구분 가능한 중복 opening quote 및 attribute 사이의 누락된 공백만 복구한다.
+    escape한다. audit으로 확정한 percent 비교식, 미완성 한글 text 및 SPAN 닫힘
+    직전의 단독 ``<``만 text node에서 escape한다. 구조 start tag 안에서는 빈 attribute와
+    구분 가능한 중복 opening/closing quote 및 attribute 사이의 누락된 공백만 복구한다.
     XML 선언, comment, CDATA, processing instruction은 변경하지 않는다.
     """
 
@@ -300,12 +323,12 @@ def sanitize_dart_xml_text(xml_text: str) -> str:
             return f"&lt;{inner}&gt;"
 
         repaired_attributes = _repair_malformed_attribute_syntax(fragment)
-        escaped_comparisons = _repair_malformed_percent_comparisons_in_text(
+        escaped_literal_lt = _repair_malformed_literal_lt_in_text(
             repaired_attributes,
         )
         escaped_tags = TAG_LIKE_PATTERN.sub(
             escape_pseudo_tag,
-            escaped_comparisons,
+            escaped_literal_lt,
         )
         return VALID_XML_ENTITY_PATTERN.sub("&amp;", escaped_tags)
 

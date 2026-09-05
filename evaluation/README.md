@@ -44,9 +44,53 @@ integrity can also require one selected filing and require all Evidence to belon
 Expected fields that are omitted are not compared. Calculation gold can fix
 operation/unit/value/input/Evidence structure and
 independently recompute `delta`/`delta_pct` or `aggregate` values from their Fact inputs.
-Comparison gold can fix its typed left/right inputs and relation. Event, EventLink, and
-EventHistory content rubrics remain future extensions; their collection counts can
-already be checked.
+Comparison gold can fix its typed left/right inputs and relation. The generic
+EventHistory evaluator supports exact `document_count` and `change_count`,
+`link_resolution`, and `chain_complete`. Its provenance integrity checks Evidence
+coverage for `history.document_ids`, requires each FieldChange's referenced Evidence
+to belong to that history's chain, and requires each EventLink's source and resolved
+documents to belong to the same history chain. Unrelated Evidence that is not referenced
+by an EventHistory or FieldChange is not restricted. Value-level EventHistory and other
+content rubrics remain future extensions.
+
+## Semantic count contract
+
+Some questions ask "how many times" ("몇 번") about something a result represents with
+more than one structured collection. `counts` alone pins raw collection sizes but does
+not say which of those sizes is the actual answer to the user's question — it is a
+structural check, not a claim about meaning. `semantic_count` is that claim:
+
+```json
+"semantic_count": {"source": "event_links", "value": 3}
+```
+
+`source` names the structured collection on the predicted result whose length is the
+semantic count answer; `value` is the expected length. The comparator computes
+`len(getattr(prediction, source))` and compares it to `value`, independently of any
+`counts` entry for the same collection. `source` is restricted to structured collections
+this contract currently commits to as a valid count answer — today only `event_links` —
+not every collection on the result; it is not resolved per `case_id`.
+
+### Q15: what "몇 번" counts
+
+Q15 ("레인보우로보틱스 사옥·제조시설 신축 투자, 그동안 계획이 몇 번 바뀌었어?") is the
+representative case for this contract. Its EventHistory chain has:
+
+- `document_count = 4`: the root filing plus 3 correction filings (chain length).
+- `event_links = 3`: one correction link per correction filing — this is the semantic
+  answer count. Q15's gold sets `semantic_count.source = "event_links"` and
+  `semantic_count.value = 3`.
+- `len(history.changes) = 4`: individual FieldChange entries (e.g. one correction
+  changes both the investment amount and the completion date, producing two
+  FieldChanges from one correction event). FieldChange cardinality is **not** the
+  user-facing "몇 번" count — it is a finer-grained record of what changed within each
+  correction, not of how many corrections occurred.
+
+`counts.event_links` and `event_history.document_count` in Q15's gold continue to pin
+the underlying collection sizes as before; `semantic_count` additionally marks
+`event_links` as the collection whose cardinality answers the question, so this
+distinction cannot silently drift if `counts` or `event_history` gold changes for
+unrelated reasons.
 
 ## Corpus-dependent gold values
 
@@ -76,10 +120,10 @@ Live mode executes the active regression cases through the public Agent entry po
 and evaluates the returned `AgentExecutionResult` objects with the same deterministic
 comparator:
 
-The current active regression set contains exactly eleven representative questions:
-`Q01`, `Q02`, `Q03`, `Q04`, `Q05`, `Q07`, `Q08`, `Q12`, `Q13`, `Q17`, and `Q18`. Therefore, a reported
-live-Agent result of `11/11` applies only to those eleven active cases; it is not a result
-for all 18 representative questions.
+The current active regression set contains exactly twelve representative questions:
+`Q01`, `Q02`, `Q03`, `Q04`, `Q05`, `Q07`, `Q08`, `Q12`, `Q13`, `Q15`, `Q17`, and `Q18`.
+Therefore, a reported live-Agent result of `12/12` applies only to those twelve active
+cases; it is not a result for all 18 representative questions.
 
 ```text
 uv run python -m evaluation.runner --run-agent --corpus-root path/to/corpus

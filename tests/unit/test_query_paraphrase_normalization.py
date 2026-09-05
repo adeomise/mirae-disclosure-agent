@@ -27,11 +27,14 @@ from disclosure_agent.agent.query_analyzer import (
     OPERATION_COMPARE,
     SUPPORTED_CONTRACT_FIELDS,
     UnsupportedQuestionError,
+    _business_profile_residual,
     build_query_plan,
 )
 from disclosure_agent.agent.query_vocabulary import (
     OPERATION_AGGREGATE,
     find_contract_fields,
+    find_product_phrase_span,
+    find_year_spans,
     find_years,
     matches_product_phrase,
     normalize_aggregate_request,
@@ -278,6 +281,34 @@ def test_amount_shaped_number_still_fails_closed_at_the_plan() -> None:
     assert error.value.reason == "missing_year"
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "2025 사업보고서",
+        "2025년 사업보고서",
+        "2024년 매출과 2026년 상반기",
+        "테스트반도체 매출이 2025억원 맞아?",
+        "계약번호 20250916 계약금액",
+        "테스트반도체 2025 매출 알려줘",
+    ],
+)
+def test_year_spans_agree_with_the_years_they_are_reduced_to(question: str) -> None:
+    """
+    자리를 함께 돌려주는 헬퍼와 값만 돌려주는 헬퍼가 같은 것을 연도로 읽는다.
+
+    find_year_spans는 안전 판정(agent.safety)이 하위 기간을 붙이려고 쓰고, find_years는
+    질의 해석이 기간을 세려고 쓴다. 둘이 갈라지면 같은 질문이 두 계층에서 다른 기간을
+    갖게 되며, 그 차이는 결과의 형식으로 드러나지 않는다.
+    """
+    spans = find_year_spans(question)
+
+    assert tuple(dict.fromkeys(year for _, _, year in spans)) == find_years(question)
+
+    # 돌려준 자리는 네 자리 숫자만 가리킨다. 보고서 종류는 자리에 들어가지 않는다.
+    for start, end, year in spans:
+        assert question[start:end] == str(year)
+
+
 # --------------------------------------------------------------------------
 # 3. T1-005 제품 표현
 # --------------------------------------------------------------------------
@@ -304,6 +335,14 @@ def test_amount_shaped_number_still_fails_closed_at_the_plan() -> None:
         "주된 제품",
         "무슨 제품이 주요야",
         "어떤 제품을 생산해",
+        # 제품이 질문의 머리임을 밝히는 꼬리가 붙은 표기.
+        "대표 제품이 뭐야?",
+        "주요한 제품이 뭐야?",
+        "주력으로 파는 제품은?",
+        "주력 제품은 무엇인가요?",
+        "핵심 제품이 뭔지 알려줘",
+        "주력 제품 알려줘",
+        "대표 제품 소개해줘",
     ],
 )
 def test_product_phrasings_are_recognized(expression: str) -> None:
@@ -329,6 +368,41 @@ def test_unrelated_wording_is_not_read_as_a_product_request(expression: str) -> 
 
 
 @pytest.mark.parametrize(
+    "expression",
+    [
+        # 제품 표현이 다른 속성을 묻는 자리의 수식어로 쓰였다. 질문의 머리는 그 속성이다.
+        "대표 제품 출시일 알려줘",
+        "핵심 제품 생산량 알려줘",
+        "대표 제품 가격 알려줘",
+        "주요 제품 점유율 알려줘",
+        "주력 제품 원가 알려줘",
+        "대표 제품 매출액은 얼마야?",
+        "주요 제품별 매출 비중",
+        # 공백을 걷어내면 조사와 명사의 첫 글자가 같은 모양이 되는 자리.
+        # '제품이름'의 '이'와 '제품가격'의 '가'는 조사가 아니다.
+        "대표 제품 이름 알려줘",
+        "핵심 제품 가격표 보여줘",
+        # '설명'·'소개'는 명사로도 온다. 어간만 보면 요청 동사로 읽힌다.
+        "대표 제품 설명서 가격 알려줘",
+        "주력 제품 소개서 어디 있어",
+        # 제품이 다른 것을 묻는 문장의 목적어다.
+        "어떤 사업부가 주력 제품을 담당해",
+    ],
+)
+def test_product_phrase_modifying_another_attribute_is_not_a_product_request(
+    expression: str,
+) -> None:
+    """
+    제품이라는 말이 나오는 것과 제품을 묻는 것은 다르다.
+
+    가르지 않으면 다른 것을 물은 질문이 기업 소개 요약으로 들어가고, 요약은 사업 개요와
+    주요 제품을 실어 돌려준다. 형식이 맞는 답이 나가므로 사용자가 물은 속성이 빠졌다는
+    사실은 결과 어디에도 남지 않는다.
+    """
+    assert not matches_product_phrase(expression)
+
+
+@pytest.mark.parametrize(
     "question",
     [
         "테스트반도체는 무슨 사업을 하고 어떤 제품이 주력이야?",
@@ -336,6 +410,9 @@ def test_unrelated_wording_is_not_read_as_a_product_request(expression: str) -> 
         "테스트반도체는 어떤 사업을 하고 주요한 제품이 뭐야?",
         "테스트반도체는 무슨 사업을 하고 무슨 제품을 만들어?",
         "테스트반도체는 어떤 사업을 하고 대표 제품이 뭐야?",
+        "테스트반도체는 어떤 사업을 하고 주요한 제품이 뭐야?",
+        "테스트반도체는 무슨 사업을 하고 핵심 제품이 뭔지 알려줘",
+        "테스트반도체는 어떤 사업을 하고 주력 제품 알려줘",
     ],
 )
 def test_product_paraphrases_open_the_business_profile_path(question: str) -> None:
@@ -398,6 +475,141 @@ def test_business_unit_questions_are_still_not_business_profile() -> None:
         plan_for("테스트반도체는 어떤 사업부가 대표 제품을 담당해?")
 
     assert error.value.reason == "missing_year"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 사업 서술과 제품 표현이 둘 다 있지만, 제품은 다른 속성을 묻는 자리의 수식어다.
+        "테스트반도체는 무슨 사업을 하고 대표 제품 출시일도 알려줘?",
+        "테스트반도체는 어떤 사업을 하고 핵심 제품 생산량 알려줘",
+        "테스트반도체는 무슨 사업을 하고 대표 제품 가격 알려줘",
+        "테스트반도체는 어떤 사업을 하고 주력 제품 원가 알려줘",
+        "테스트반도체는 무슨 사업을 하고 대표 제품 이름 알려줘",
+    ],
+)
+def test_product_attribute_requests_are_not_narrowed_into_the_summary_path(
+    question: str,
+) -> None:
+    """
+    제품을 수식어로 쓴 속성 요청은 기업 소개 요약으로 축소되지 않는다.
+
+    축소되면 요약이 사업 개요와 주요 제품을 실어 돌아오고, 사용자가 물은 '출시일'·'생산량'은
+    답에서 사라진다. 답할 수 없다는 사실조차 남지 않는 조용한 축소다.
+
+    막는 자리를 요약 경로 앞에 두므로, 이 질문들은 이 경로가 생기기 전과 같은 경로로 흘러가
+    그쪽 규칙으로 막힌다. 지원하지 않는 속성을 위한 새 의도를 여기서 만들지 않는다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        plan_for(question)
+
+    assert error.value.reason == "missing_year"
+
+
+def test_product_attribute_request_stays_blocked_even_with_a_year() -> None:
+    """
+    기간을 밝혀도 요약 경로가 열리지 않는다.
+
+    위 회귀가 보는 missing_year는 기간이 없어서 걸린 사유다. 그것만 고정해 두면 기간을
+    적은 같은 질문이 조용히 요약으로 들어가도 알아채지 못한다. 기간을 채운 질문은 요청한
+    속성('출시일')을 지원하지 않는다는 사유로 막혀야 하며, 그 사유가 실제로 일어난 일이다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        plan_for("테스트반도체는 2025년에 무슨 사업을 하고 대표 제품 출시일 알려줘")
+
+    assert error.value.reason == "unsupported_metric"
+
+
+def test_product_identity_request_with_a_year_still_opens_the_summary_path() -> None:
+    """가른 경계가 기간을 밝힌 제품 자체 질문까지 막지는 않는다."""
+    plan = plan_for("테스트반도체는 2025년에 무슨 사업을 하고 대표 제품이 뭐야?")
+
+    assert plan.intent == INTENT_DOCUMENT_SUMMARY
+    assert plan.section_scopes == (SectionScope.BUSINESS_OVERVIEW, SectionScope.PRODUCTS)
+    assert plan.years == (2025,)
+
+
+# --------------------------------------------------------------------------
+# 3-1. 제품 요청 뒤에 남은 요청
+# --------------------------------------------------------------------------
+#
+# 제품 표현이 질문의 머리인지만 보면 "대표 제품이 뭐고 출시일도 알려줘"가 통과한다. 앞 반은
+# 이 경로가 답하는 질문이 맞고, 뒤에 붙은 요청은 답하지 않는데 결과는 정상적인 요약이다.
+# 그래서 머리인지가 아니라 전부인지를 본다.
+
+
+@pytest.mark.parametrize(
+    ("question", "surviving"),
+    [
+        # 어순 1: 수식어가 앞. 꼬리는 만족하지만 뒤에 다른 요청이 이어진다.
+        ("테스트반도체는 무슨 사업을 하고 대표 제품이 뭐고 출시일도 알려줘", "출시일"),
+        ("테스트반도체는 어떤 사업을 하고 대표 제품 알려주고 생산량도 알려줘", "생산량"),
+        ("테스트반도체는 무슨 사업을 하고 대표 제품이 뭔지랑 가격도 알려줘", "가격"),
+        ("테스트반도체는 어떤 사업을 하고 핵심 제품은 무엇이고 원가는 어때?", "원가"),
+        # 어순 3: 수식어가 뒤.
+        ("테스트반도체는 무슨 사업을 하고 어떤 제품이 주력인지와 출시일 알려줘", "출시일"),
+        # 어순 4: 만드는 것.
+        (
+            "테스트반도체는 어떤 사업을 하고 무슨 제품을 만들어서 파는지랑 가격도 알려줘",
+            "가격",
+        ),
+        (
+            "테스트반도체는 어떤 사업을 하고 무슨 제품을 생산하는지와 생산량도 알려줘",
+            "생산량",
+        ),
+    ],
+)
+def test_conjoined_attribute_request_is_not_narrowed_into_the_summary_path(
+    question: str,
+    surviving: str,
+) -> None:
+    """
+    제품 요청 뒤에 다른 요청이 이어지면 요약 경로를 열지 않는다.
+
+    네 어순을 모두 본다. 꼬리 검사는 '제품' 바로 뒤만 보므로 어순 1·2에서도 이 모양이
+    통과했다. 어순 3·4는 꼬리를 요구하지 않아 더 넓게 통과했다. 남은 요청을 세는 자리는
+    어순과 무관하므로 넷을 같은 규칙으로 막는다.
+
+    남은 낱말을 함께 고정한다. 무엇이 남아서 막혔는지가 회귀에 적혀 있지 않으면, 나중에
+    이 검사가 다른 이유로 통과할 때(예: 제품 표현을 아예 못 읽어서) 그것을 알아채지 못한다.
+    """
+    assert surviving in _business_profile_residual(question, COMPANIES)
+
+    with pytest.raises(UnsupportedQuestionError) as error:
+        plan_for(question)
+
+    assert error.value.reason == "missing_year"
+
+
+def test_business_profile_residual_is_empty_for_a_pure_profile_question() -> None:
+    """
+    답하는 질문에서는 남는 말이 없다.
+
+    기업명·기간·조사·어미·요청 표현은 이 경로가 답하지 않고도 남을 수 있는 말이므로 남은
+    요청으로 세지 않는다. 그것들이 남는 것으로 세어지면 정상 Q05가 전부 막힌다.
+    """
+    for question in (
+        "테스트반도체는 무슨 사업을 하고 대표 제품이 뭐야?",
+        "테스트반도체는 2024년에 어떤 사업을 하고 주요한 제품이 뭐야?",
+        "테스트반도체는 작년에 무슨 사업을 하고 주력 제품 알려줘",
+        "테스트반도체는 어떤 사업을 하고 무슨 제품을 만들어?",
+    ):
+        assert _business_profile_residual(question, COMPANIES) == "", question
+
+
+def test_product_phrase_span_covers_only_the_product_request() -> None:
+    """
+    구간이 제품 요청만 가져간다.
+
+    구간이 넓으면 뒤에 이어진 요청까지 함께 걷혀 남은 것이 없다고 세어지고, 좁으면 정상
+    질문에서 제품 표현 조각이 남은 요청으로 세어진다.
+    """
+    compacted = "".join("테스트반도체는 무슨 사업을 하고 대표 제품이 뭐고 출시일도 알려줘".split())
+
+    span = find_product_phrase_span(compacted)
+
+    assert span is not None
+    assert compacted[span[0] : span[1]] == "대표제품이뭐"
 
 
 # --------------------------------------------------------------------------

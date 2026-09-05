@@ -79,6 +79,8 @@ from disclosure_agent.agent.query_vocabulary import (
     PRODUCT_TOKENS,
     YEAR_PATTERN,
     find_contract_fields,
+    find_product_phrase_span,
+    find_year_spans,
     find_years,
     matches_product_phrase,
     normalize_aggregate_request,
@@ -234,9 +236,14 @@ AMBIGUOUS_COMPANY_REASON = "ambiguous_company_match"
 #     있어야 어느 쪽을 넓혔는지가 코드에 남는다.
 #
 # 이름을 이 모듈에서도 읽을 수 있게 두는 이유:
-#     Pattern F Gate가 query_analyzer.YEAR_PATTERN을 import해 자기 패턴과 갈라지지
-#     않았는지 확인한다(tests/unit/test_pattern_f_safety_gate.py). Gate는 질의 해석보다
-#     앞 계층이라 같은 값을 따로 두고 있으며, 그 대조가 계속 성립해야 한다.
+#     주제어에서 기간 표기를 걷어내는 자리(_event_summary_subject_tokens)가 '년'이 붙은
+#     표기만 보면 되고, 그 자리는 연도를 세지 않는다.
+#
+# 기간을 세는 자리는 이 패턴을 직접 쓰지 않는다:
+#     연도를 세는 것은 find_years이고, 자리까지 필요한 곳은 find_year_spans다. Pattern F
+#     Gate(agent.safety)도 그 헬퍼를 쓴다. Gate가 자기 정규식을 따로 두던 동안 "2027년
+#     사업보고서"와 "2027 사업보고서"가 갈렸고, 두 정규식을 대조하는 테스트는 대조 자체가
+#     '년' 표기만 보고 있어 그것을 잡지 못했다.
 
 # 기준 연도(anchor)에서 한 해 앞을 가리키는 상대 기간 표현.
 #
@@ -658,6 +665,127 @@ SECTION_SCOPE_TOKENS: tuple[tuple[SectionScope, tuple[str, ...]], ...] = (
 # 그것을 여기에 낱말로 늘어놓으면 어순 하나를 넓힐 때마다 이 자리가 함께 늘어난다.
 # PRODUCT_TOKENS는 그 개념의 정본 표기이며 판정은 matches_product_phrase가 한다.
 BUSINESS_DESCRIPTION_TOKENS = ("무슨사업을", "어떤사업을", "어떤사업인지")
+
+# 기업 소개 요약이 답하지 않고도 남아 있을 수 있는 말.
+#
+# 왜 필요한가:
+#     제품 표현이 질문의 머리라는 것과 제품 표현이 질문의 **전부**라는 것은 다른 진술이다.
+#     앞엣것만 보면 "대표 제품이 뭐고 출시일도 알려줘"가 통과한다. '대표 제품이 뭐'까지는
+#     이 경로가 답하는 질문이 맞고, 그 뒤에 붙은 '출시일도 알려줘'는 답하지 않는다. 그런데
+#     결과는 사업 개요와 주요 제품을 실은 정상적인 요약이라, 물어본 출시일이 빠졌다는 것이
+#     응답 어디에도 남지 않는다. 형식이 맞는 답이 나가므로 사용자도 알아채지 못한다.
+#
+# 어떻게 가르는가:
+#     이 경로가 의미를 가져간 구간(제품 표현·사업 서술 표기)과 질문이 답과 무관하게 담을
+#     수 있는 것(기업명·기간)을 걷어낸다. 그러고도 남는 것이 있으면 답하지 않을 요청이
+#     남은 것이므로 경로를 열지 않는다.
+#
+# 왜 속성 낱말 목록이 아닌가:
+#     막을 것을 적으면 목록에 없는 속성이 오는 날 같은 축소가 다시 일어나고, 그때 일어나는
+#     일은 '조용히 요약했다'라서 구멍이 드러나지도 않는다. 그래서 남아도 되는 것을 적는다.
+#     아래는 전부 기능 형태소(조사·어미·접속사·요청 표현)와 구두점이며, 내용을 가리키는
+#     낱말은 하나도 없다. 그 낱말이 남으면 무엇을 가리키든 요청이 남은 것으로 본다.
+#
+# 닫힌 부류만 담는다:
+#     조사와 어미는 한국어에서 더 늘지 않는 부류다. 반대로 '출시일'·'생산량'·'가격'이 속한
+#     부류는 끝이 없다. 늘지 않는 쪽을 적어야 목록이 완결된다.
+#
+# 맨 '가'와 맨 '주'를 넣지 않는 이유:
+#     둘을 넣으면 '주가'가 조사 둘로 읽혀 통째로 사라진다. 남아야 할 요청이 사라지는 쪽이
+#     여기서는 더 나쁘다. 넣지 않으면 이 표기를 담은 질문은 요약 경로가 열리지 않고 기존
+#     경로로 흘러간다. 그쪽이 안전한 방향이다.
+BUSINESS_PROFILE_SCAFFOLDING: tuple[str, ...] = (
+    # 요청 표현.
+    "알려주세요",
+    "알려줘",
+    "알려",
+    "설명해주세요",
+    "설명해줘",
+    "소개해주세요",
+    "소개해줘",
+    "말해주세요",
+    "말해줘",
+    "정리해주세요",
+    "정리해줘",
+    "보여줘",
+    "주세요",
+    "줄래",
+    "줘",
+    "해줘",
+    # 종결·의문 어미.
+    "인가요",
+    "일까요",
+    # '뭔가요'의 꼬리. 맨 '가'를 넣지 않고 이 표기만 받는다. 맨 '가'를 넣으면 '주가'가
+    # 조사 둘로 읽혀 통째로 사라지지만, 두 글자로 묶으면 그 일이 생기지 않는다.
+    "가요",
+    "이에요",
+    "예요",
+    "이야",
+    "인지",
+    "뭔지",
+    "나요",
+    "는지",
+    "은지",
+    "어요",
+    "아요",
+    "해요",
+    "요",
+    "야",
+    "지",
+    "어",
+    "아",
+    "해",
+    "니",
+    "냐",
+    "죠",
+    # 접속.
+    "그리고",
+    "또한",
+    "하는지",
+    "하고",
+    "하며",
+    "이며",
+    "이고",
+    "이랑",
+    "랑",
+    "와",
+    "과",
+    "및",
+    "또",
+    "고",
+    # 조사.
+    "은",
+    "는",
+    "이",
+    "을",
+    "를",
+    "도",
+    "의",
+    "에서",
+    "에",
+    "으로",
+    "로",
+    "만",
+    "까지",
+    "부터",
+    # 기간 단위와 상대 기간. 절대연도 숫자는 find_year_spans가 따로 걷어낸다.
+    "년",
+    *PREVIOUS_YEAR_EXPRESSIONS,
+    # 법인격 표기. 기업명을 걷어낸 자리에 남는다("한미반도체(주)는").
+    "주식회사",
+    "(주)",
+    "㈜",
+)
+
+# 긴 표기부터 시도한다. 짧은 쪽이 먼저 걸리면 긴 표기의 앞부분만 지워진다("하고"보다 "고"가
+# 먼저 걸리면 '하'가 남는다).
+_BUSINESS_PROFILE_SCAFFOLDING_PATTERN = re.compile(
+    "|".join(
+        re.escape(token)
+        for token in sorted(set(BUSINESS_PROFILE_SCAFFOLDING), key=len, reverse=True)
+    )
+    + r"|[\s?!.,·ㆍ、'\"“”‘’()\[\]{}<>《》「」]"
+)
 
 # 이 질문 모양이 요약하는 범위. 순서는 사업보고서 서식의 Section 순서이며, 결과의
 # DocumentSummary도 이 순서로 실린다.
@@ -1850,7 +1978,53 @@ def _looks_like_facility_investment_aggregate(question: str) -> bool:
     )
 
 
-def _looks_like_business_profile(question: str) -> bool:
+def _business_profile_residual(question: str, companies: tuple[str, ...]) -> str:
+    """기업 소개 요약이 의미를 가져가고 남은 말을 돌려준다. 빈 문자열이면 남은 요청이 없다.
+
+    걷어내는 것은 넷이다.
+
+        제품 표현      이 경로가 답하는 요청 그 자체(find_product_phrase_span)
+        사업 서술 표기 같은 요청의 나머지 반(BUSINESS_DESCRIPTION_TOKENS)
+        기업명         무엇을 묻는지가 아니라 누구에게 묻는지다
+        기간           같은 이유다. 어느 문서를 볼지를 정할 뿐 요청을 늘리지 않는다
+
+    그러고 남은 것에서 기능 형태소와 구두점을 지운다(BUSINESS_PROFILE_SCAFFOLDING). 그래도
+    남는 글자가 있으면 이 경로가 답하지 않을 요청이 함께 온 것이다.
+
+    자리 계산에 대해:
+        공백을 걷어낸 문자열 하나를 두고 전부 처리한다. find_product_phrase_span이 돌려주는
+        자리도 같은 기준이다. 원문과 걷어낸 문자열을 섞어 쓰면 자리가 어긋난다.
+
+    기업명을 정규화한 표기로도 지우는 이유:
+        질문이 "한미반도체(주)"라고 쓰고 목록의 이름은 "한미반도체"일 수 있다. 두 표기를
+        모두 지우고, 그래도 남는 법인격 표기는 위 목록이 받는다.
+    """
+    compacted = "".join(question.split())
+
+    span = find_product_phrase_span(question)
+
+    if span is not None:
+        compacted = compacted[: span[0]] + compacted[span[1] :]
+
+    for token in BUSINESS_DESCRIPTION_TOKENS:
+        compacted = compacted.replace(token, "")
+
+    for company in companies:
+        compacted = compacted.replace(company, "")
+
+        normalized = normalize_company_name(company)
+
+        if normalized:
+            compacted = compacted.replace(normalized, "")
+
+    # 절대연도의 숫자. 뒤에서부터 지워야 앞 구간의 자리가 어긋나지 않는다.
+    for start, end, _ in reversed(find_year_spans(compacted)):
+        compacted = compacted[:start] + compacted[end:]
+
+    return _BUSINESS_PROFILE_SCAFFOLDING_PATTERN.sub("", compacted)
+
+
+def _looks_like_business_profile(question: str, companies: tuple[str, ...] = ()) -> bool:
     """
     기업이 무슨 사업을 하고 주력 제품이 무엇인지 함께 묻는 질문인가(Q05).
 
@@ -1861,6 +2035,18 @@ def _looks_like_business_profile(question: str) -> bool:
     요약 요청이 아니며, 요약으로 받으면 물은 값이 조용히 빠진 답이 나간다
     (BUSINESS_PROFILE_EXCLUDED_TOKENS의 설명). 그런 질문은 이 경로가 생기기 전과 같은
     경로로 흘러간다.
+
+    두 묶음이 있어도 **남은 요청이 있으면 거짓이다.** 값 조회 표기 검사는 이 경로가 아는
+    지표 어휘만 보므로, 그 어휘에 없는 속성이 함께 오면 걸리지 않는다("대표 제품이 뭐고
+    출시일도 알려줘"). 어휘를 늘리는 것으로는 끝나지 않으므로, 무엇이 남았는지를 본다
+    (_business_profile_residual).
+
+    기업명을 받는 이유:
+        남은 말을 세려면 기업명이 남은 요청이 아니라는 것을 알아야 한다. 이 모듈은 기업명을
+        추측하지 않으므로 호출부가 확정한 목록을 그대로 받는다. 기본값이 빈 튜플인 것은
+        기업명을 찾지 못한 질문도 판정 자체는 할 수 있어야 하기 때문이며, 그 경우 기업명이
+        남은 요청으로 세어져 경로가 열리지 않는다. 기업을 확정하지 못한 질문은 어차피 뒤에서
+        막힌다.
 
     판정 순서에 대해:
         이력 판정보다 뒤, 일반 요약 판정보다 앞이다. 일반 요약 판정은 요약 요청 표현과
@@ -1873,9 +2059,13 @@ def _looks_like_business_profile(question: str) -> bool:
     if any(token in compacted for token in BUSINESS_PROFILE_EXCLUDED_TOKENS):
         return False
 
-    return any(
-        token in compacted for token in BUSINESS_DESCRIPTION_TOKENS
-    ) and matches_product_phrase(question)
+    if not any(token in compacted for token in BUSINESS_DESCRIPTION_TOKENS):
+        return False
+
+    if not matches_product_phrase(question):
+        return False
+
+    return _business_profile_residual(question, companies) == ""
 
 
 def _build_business_profile_plan(
@@ -3158,7 +3348,7 @@ def build_query_plan(
     # 기업 소개 요약(Q05)은 일반 요약 판정보다 앞이다. 일반 요약 판정은 이 질문을
     # 알아보지 못하므로 순서가 결과를 바꾸지는 않지만, 앞에 두어야 두 판정이 서로 다른
     # 질문 모양을 본다는 것이 자리에서 드러난다.
-    if _looks_like_business_profile(question):
+    if _looks_like_business_profile(question, companies):
         return _build_business_profile_plan(question, companies, fiscal_year_anchors)
 
     if _looks_like_document_summary(question):

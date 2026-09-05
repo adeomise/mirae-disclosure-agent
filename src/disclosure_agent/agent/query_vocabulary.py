@@ -38,6 +38,8 @@ __all__ = [
     "YEAR_PATTERN",
     "compact",
     "find_contract_fields",
+    "find_product_phrase_span",
+    "find_year_spans",
     "find_years",
     "matches_product_phrase",
     "normalize_aggregate_request",
@@ -97,29 +99,48 @@ REPORT_CONTEXT_YEAR_PATTERN = re.compile(
 )
 
 
+def find_year_spans(question: str) -> tuple[tuple[int, int, int], ...]:
+    """질문에 쓰인 절대연도를 (시작, 끝, 연도)로 전부 찾는다. 나타난 차례다.
+
+    자리를 함께 돌려주는 이유:
+        연도만 필요한 곳도 있지만, 연도 하나에 하위 기간 표현을 붙이려면 그 연도가 질문의
+        어디에 있는지가 있어야 한다("2024년 매출과 2026년 상반기"에서 '상반기'는 뒤 연도의
+        것이다). 값만 돌려주면 자리가 필요한 쪽은 연도를 처음부터 다시 세게 되고, 그러면
+        이 모듈이 정한 것과 다른 규칙이 하나 더 생긴다. Pattern F Gate(agent.safety)가
+        실제로 그 상태였고, '년'이 붙은 표기만 읽어서 같은 질문이 표기에 따라 갈렸다.
+
+    돌려주는 자리는 네 자리 숫자만 가리킨다. 보고서 종류가 붙은 표기에서도 '사업보고서'는
+    자리에 넣지 않는다. 숫자 바로 뒤부터를 하위 기간 표현이 올 수 있는 구간으로 볼 수
+    있어야, "2026 반기보고서"의 '반기'가 "2026년 반기보고서"와 같게 읽힌다.
+
+    같은 숫자를 두 규칙이 함께 읽으면 한 번만 담는다("2025년 사업보고서"가 그렇다). 두
+    패턴 모두 네 자리 숫자에서 시작하므로 시작 자리가 같으면 같은 숫자다.
+    """
+    spans: dict[int, tuple[int, int, int]] = {}
+
+    for match in YEAR_PATTERN.finditer(question):
+        spans.setdefault(match.start(), (match.start(), match.end(), int(match.group(0))))
+
+    for match in REPORT_CONTEXT_YEAR_PATTERN.finditer(question):
+        spans.setdefault(match.start(1), (match.start(1), match.end(1), int(match.group(1))))
+
+    return tuple(spans[start] for start in sorted(spans))
+
+
 def find_years(question: str) -> tuple[int, ...]:
     """질문에 쓰인 절대연도를 전부 찾는다. 없으면 빈 튜플이며 추측하지 않는다.
 
-    두 규칙이 같은 연도를 읽으면 한 번만 담는다("2025년 사업보고서"는 두 패턴에 모두 걸린다).
+    무엇을 연도로 볼지는 find_year_spans가 정한다. 여기서는 값만 남긴다.
+
     돌아오는 차례는 질문에 나타난 차례이며, 값으로 중복을 제거한다. 같은 연도가 여러 번
     나오는 것은 두 기간이 아니다("2024년 매출과 2024년 영업이익").
 
     첫 매치 하나만 돌려주지 않는 이유는 호출부(query_analyzer)의 설명과 같다. 두 기간을
     묻는 질문에서 하나만 고르면 나머지 기간이 사라진 채로 답이 조립된다.
     """
-    positioned: list[tuple[int, int]] = []
-
-    for match in YEAR_PATTERN.finditer(question):
-        positioned.append((match.start(), int(match.group(0))))
-
-    for match in REPORT_CONTEXT_YEAR_PATTERN.finditer(question):
-        positioned.append((match.start(1), int(match.group(1))))
-
-    positioned.sort(key=lambda item: item[0])
-
     seen: dict[int, None] = {}
 
-    for _, year in positioned:
+    for _, _, year in find_year_spans(question):
         seen.setdefault(year, None)
 
     return tuple(seen)
@@ -240,9 +261,56 @@ PRODUCT_TOKENS = ("주력제품", "주요제품")
 # 표기를 두어도 값 조회 질문이 요약으로 끌려가지 않는다.
 _PRODUCT_QUALIFIERS = r"주력|주요|주된|대표|핵심"
 
+# 제품 뒤에 붙는 조사. 있어도 되고 없어도 된다.
+_PRODUCT_HEAD_PARTICLE = r"(?:은|는|이|가|을|를)?"
+
+# "제품이 질문의 머리인가"를 가르는 꼬리.
+#
+# 왜 필요한가:
+#     "대표 제품"이라는 말은 그 자체를 묻는 자리에도 오고, 다른 것을 묻는 자리의 수식어로도
+#     온다. 앞엣것은 이 경로가 답하는 질문이고("대표 제품이 뭐야?"), 뒤엣것은 아니다
+#     ("대표 제품 출시일 알려줘"). 낱말만 보면 둘이 같아 보인다.
+#
+#     가르지 않으면 뒤엣것이 기업 소개 요약으로 들어간다. 요약은 사업 개요와 주요 제품을
+#     싣고 돌아오므로 형식이 맞는 답이 나가지만, 사용자가 물은 '출시일'은 결과 어디에도
+#     남지 않는다. 답할 수 없다는 사실조차 사라지는 축소다.
+#
+# 왜 속성 낱말 목록(출시일·생산량·가격…)으로 막지 않는가:
+#     그 목록은 끝이 없고, 목록에 없는 속성이 오는 날 같은 축소가 다시 일어난다. 그때
+#     일어나는 일은 '막지 못했다'가 아니라 '조용히 요약했다'이므로 목록의 구멍이 드러나지도
+#     않는다. 그래서 무엇을 막을지가 아니라 무엇을 열지를 적는다. 아래 셋 중 하나가 아니면
+#     열지 않으며, 모르는 표현은 이 경로가 생기기 전과 같은 경로로 흘러간다.
+#
+#   1. 요청이 거기서 끝난다      "대표 제품", "주력으로 파는 제품은?"
+#   2. 무엇인지를 되묻는다        "대표 제품이 뭐야?", "주력 제품은 무엇인가요?"
+#   3. 요청 동사가 바로 붙는다    "주력 제품 알려줘", "대표 제품 소개해줘"
+#
+#     셋 다 제품과 요청 사이에 다른 명사가 없다는 한 가지를 다르게 적은 것이다. 명사가
+#     끼어들면("제품 출시일") 질문의 머리는 그 명사이지 제품이 아니다.
+#
+# 조사만으로 가르지 않는 이유:
+#     공백을 걷어낸 질문에서는 조사와 명사의 첫 글자가 같은 모양이 된다. "제품이름"의 '이'는
+#     조사가 아니고 "제품가격"의 '가'도 그렇다. 조사 뒤에 되묻는 말이나 요청 동사가 와야
+#     한다고 적으면 그 둘이 갈린다.
+#
+# 요청 동사를 어간이 아니라 활용형으로 적는 이유:
+#     '설명'·'소개'는 명사로도 쓰인다("제품 설명서 가격"). 어간으로 적으면 그 명사가 요청
+#     동사로 읽혀 다시 축소가 생긴다. '알려'는 그 문제가 없어 그대로 둔다.
+_PRODUCT_IDENTITY_TAIL = (
+    rf"(?:{_PRODUCT_HEAD_PARTICLE}(?:$|[?!.])"
+    rf"|{_PRODUCT_HEAD_PARTICLE}(?:뭐|뭔|무엇|어떤것|어떤거|어느것|어느거)"
+    rf"|{_PRODUCT_HEAD_PARTICLE}(?:알려|소개해|설명해|말해))"
+)
+
+# 3·4번 어순에는 이 꼬리를 붙이지 않는다.
+#
+# 두 어순은 의문사가 제품 앞에 있어("어떤 제품이 주력이야", "무슨 제품을 만들어") 제품이
+# 질문의 머리라는 것이 어순 자체에 이미 들어 있다. 꼬리를 덧붙이면 같은 조건을 두 번
+# 요구하게 되고, 실제로 오는 표현을 이유 없이 막는다.
 PRODUCT_PHRASE_PATTERNS: tuple[str, ...] = (
-    rf"(?:{_PRODUCT_QUALIFIERS})(?:적인|한)?제품",
-    rf"(?:{_PRODUCT_QUALIFIERS})(?:으로|로)?(?:파는|판매하는|만드는|생산하는)제품",
+    rf"(?:{_PRODUCT_QUALIFIERS})(?:적인|한)?제품{_PRODUCT_IDENTITY_TAIL}",
+    rf"(?:{_PRODUCT_QUALIFIERS})(?:으로|로)?(?:파는|판매하는|만드는|생산하는)제품"
+    rf"{_PRODUCT_IDENTITY_TAIL}",
     rf"(?:어떤|무슨|어느)제품(?:이|을|를|은|는)?(?:{_PRODUCT_QUALIFIERS})",
     r"(?:어떤|무슨|어느)제품(?:이|을|를|은|는)?(?:만들|생산|판매|파는|팔)",
 )
@@ -250,9 +318,38 @@ PRODUCT_PHRASE_PATTERNS: tuple[str, ...] = (
 _PRODUCT_PHRASE_PATTERN = re.compile("|".join(PRODUCT_PHRASE_PATTERNS))
 
 
+def find_product_phrase_span(question: str) -> tuple[int, int] | None:
+    """제품을 묻는 표현이 차지한 구간을 돌려준다. 없으면 None.
+
+    자리는 compact(question) 기준이다. 원문 기준이 아니라는 것이 요점이다. 이 어휘가 읽는
+    대상이 공백을 걷어낸 질문이므로, 원문 자리로 옮기면 걷어낸 공백만큼 어긋난다. 호출부도
+    같은 방식으로 걷어낸 문자열을 두고 이 자리를 쓴다.
+
+    자리를 돌려주는 이유:
+        판정만 돌려주면 "이 표현이 질문의 어디까지를 가져갔는가"가 호출부에 남지 않는다.
+        Q05 경로는 그것을 알아야 한다. 제품 표현이 질문의 머리라는 것과 제품 표현이 질문의
+        **전부**라는 것은 다른 진술이고, 뒤엣것이 성립하지 않으면 남은 요청이 조용히
+        사라진다("대표 제품이 뭐고 출시일도 알려줘"). 남은 것이 있는지는 이 구간을 걷어낸
+        뒤에야 볼 수 있다.
+
+        판정은 이 모듈이 하고, 남은 것을 무엇으로 볼지는 query_analyzer가 정한다. 그 분업은
+        이 모듈의 나머지와 같다.
+    """
+    match = _PRODUCT_PHRASE_PATTERN.search(compact(question))
+
+    return None if match is None else match.span()
+
+
 def matches_product_phrase(question: str) -> bool:
-    """질문이 주요 제품을 묻고 있는가."""
-    return _PRODUCT_PHRASE_PATTERN.search(compact(question)) is not None
+    """질문이 주요 제품 자체를 묻고 있는가.
+
+    제품이라는 말이 나오는지가 아니라 제품이 질문의 머리인지를 본다. 다른 것을 묻는 질문의
+    수식어로 쓰인 제품 표현은 거짓이다(_PRODUCT_IDENTITY_TAIL의 설명).
+
+    제품 표현이 질문의 전부인지는 보지 않는다. 그 판정에는 이 모듈이 갖지 않은 어휘(사업
+    서술 표기·기업명)가 필요하며, query_analyzer가 find_product_phrase_span으로 한다.
+    """
+    return find_product_phrase_span(question) is not None
 
 
 # --------------------------------------------------------------------------

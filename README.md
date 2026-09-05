@@ -75,6 +75,12 @@ macOS/Linux에서는 대응하는 `.sh` 스크립트를 사용할 수 있습니�
 Linux VM + Docker에서 서버를 띄우는 최소 절차(build/run, corpus volume mount, 환경 변수,
 `/health`·`/api/ask` 확인)는 `docs/deployment.md`를 따릅니다.
 
+**최종 제출용 organizer endpoint**: `http://49.50.143.186/answer`
+(`GET /answer?question_id=...&question=...`, 미래에셋 AI Festival 주최측 평가 규격
+5-field 응답). 내부 production API(`/api/ask`, `/health`)는 그대로 유지되며, `/answer`는
+같은 `AgentAskService`/`get_ask_service` 경로를 재사용하는 별도 adapter입니다
+(`src/disclosure_agent/api/organizer.py`).
+
 ## Branch 사용법
 
 `develop`에서 작업 목적에 맞는 Branch를 만들고 Pull Request로 다시 `develop`에 병합합니다.

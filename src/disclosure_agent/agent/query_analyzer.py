@@ -789,6 +789,50 @@ _BUSINESS_PROFILE_SCAFFOLDING_PATTERN = re.compile(
     + r"|[\s?!.,·ㆍ、'\"“”‘’()\[\]{}<>《》「」]"
 )
 
+# 기업 표기 바로 뒤에 붙는 조사.
+#
+# BUSINESS_PROFILE_SCAFFOLDING이 아니라 여기에 두는 이유:
+#     그 목록은 맨 '가'를 일부러 담지 않는다('주가'가 조사 둘로 읽혀 통째로 사라지기
+#     때문이며, 그 자리의 설명을 보라). 그 결정을 지키면서 "한미반도체가 어떤 사업을
+#     하고..."의 '가'는 걷어내야 한다. 둘을 함께 만족시키는 것이 자리 조건이다. 여기서
+#     걷어내는 '가'는 기업 표기 바로 뒤에 붙은 것뿐이므로 '주가'의 '가'는 걸리지 않는다.
+#
+# 나머지 조사는 위 목록도 받는다. 그래도 함께 적는 이유는, 기업 표기 뒤에 무엇이 올 수
+# 있는지를 한자리에서 읽을 수 있어야 하기 때문이다. 조사는 닫힌 부류이므로 늘지 않는다.
+_SUBJECT_PARTICLE_SUFFIX = r"(?:은|는|이|가|을|를|의|도)?"
+
+# 기업 소개 요약이 답하지 않고도 남아 있을 수 있는 '문서 지목' 표기.
+#
+# BUSINESS_PROFILE_SCAFFOLDING과 목록을 나누는 이유:
+#     그 목록의 규약은 "내용을 가리키는 낱말은 하나도 없다"이다. 아래는 전부 내용 낱말이며,
+#     한 목록에 섞으면 그 규약이 깨지고 다음 사람이 임의의 명사를 더할 근거가 생긴다.
+#
+# 왜 남아도 되는가:
+#     이 표기들은 '무엇을 묻는가'가 아니라 '어느 문서를 보고 답하라'를 말한다. 요청을
+#     늘리지 않으므로 기업명·기간과 같은 부류다. Q05 경로는 이미 사업보고서 1건을 대상으로
+#     하고, 연도를 밝히지 않으면 코퍼스의 최신 사업보고서로 옮긴다
+#     (_build_business_profile_plan). "최신 사업보고서 기준으로 요약해줘"는 그 경로가 이미
+#     하는 일을 말로 적은 것뿐이다. 걷어내지 않으면 남은 요청으로 세어져, 답할 수 있던
+#     질문이 막힌다.
+#
+# 표기를 새로 적지 않고 잇는 이유:
+#     보고서 종류와 요약 요청 표현은 이 모듈이 Pattern B 판정에 이미 쓰는 어휘다. 여기에
+#     같은 낱말을 다시 적으면 그 어휘가 늘 때 한쪽만 늘어난다.
+#
+# 닫힌 목록이며 부분문자열 탐색을 새로 열지 않는다. 아래 표기 그대로만 걷어낸다.
+BUSINESS_PROFILE_DOCUMENT_FRAMING: tuple[str, ...] = (
+    # 대상 문서를 이름으로 지목한 표기.
+    *PERIODIC_REPORT_TOKENS,
+    # 요약을 요청한 표현. 어미('해줘')는 위 SCAFFOLDING이 받는다.
+    *SUMMARY_REQUEST_TOKENS,
+    # 판본을 지목한 표기. 연도를 밝히지 않은 Q05가 이미 쓰는 기준과 같은 말이다.
+    "최신",
+    # "<문서> 기준으로"의 나머지 반. '으로'는 위 SCAFFOLDING이 받지만, 긴 표기를 먼저
+    # 지워야 하는 것은 여기서도 같으므로 함께 적는다.
+    "기준으로",
+    "기준",
+)
+
 # 이 질문 모양이 요약하는 범위. 순서는 사업보고서 서식의 Section 순서이며, 결과의
 # DocumentSummary도 이 순서로 실린다.
 BUSINESS_PROFILE_SECTION_SCOPES: tuple[SectionScope, ...] = (
@@ -1987,15 +2031,22 @@ def _business_profile_residual(
 ) -> str:
     """기업 소개 요약이 의미를 가져가고 남은 말을 돌려준다. 빈 문자열이면 남은 요청이 없다.
 
-    걷어내는 것은 넷이다.
+    걷어내는 것은 다섯이다.
 
         제품 표현      이 경로가 답하는 요청 그 자체(find_product_phrase_span)
         사업 서술 표기 같은 요청의 나머지 반(BUSINESS_DESCRIPTION_TOKENS)
         기업명         무엇을 묻는지가 아니라 누구에게 묻는지다
         기간           같은 이유다. 어느 문서를 볼지를 정할 뿐 요청을 늘리지 않는다
+        문서 지목 표기 같은 이유다(BUSINESS_PROFILE_DOCUMENT_FRAMING)
 
     그러고 남은 것에서 기능 형태소와 구두점을 지운다(BUSINESS_PROFILE_SCAFFOLDING). 그래도
     남는 글자가 있으면 이 경로가 답하지 않을 요청이 함께 온 것이다.
+
+    문서 지목 표기를 기간보다 뒤에 걷어내는 이유:
+        연도를 읽는 규칙 하나가 보고서 종류에 기대고 있다("2025 사업보고서"의 '2025'는
+        REPORT_CONTEXT_YEAR_PATTERN이 뒤의 '사업보고서'를 보고 연도로 읽는다). 보고서
+        표기를 먼저 지우면 그 규칙이 걸리지 않아 '년'을 붙이지 않은 연도가 남고, 남은
+        요청으로 세어진다.
 
     자리 계산에 대해:
         공백을 걷어낸 문자열 하나를 두고 전부 처리한다. find_product_phrase_span이 돌려주는
@@ -2038,12 +2089,22 @@ def _business_profile_residual(
         if name
     }
 
+    # 기업 표기와, 거기 바로 붙은 조사까지 함께 걷어낸다. 조사를 자리 조건 없이 걷어내지
+    # 않는 이유는 _SUBJECT_PARTICLE_SUFFIX의 설명에 있다.
     for name in sorted(subject_wording, key=len, reverse=True):
-        compacted = compacted.replace(name, "")
+        compacted = re.sub(
+            re.escape(name) + _SUBJECT_PARTICLE_SUFFIX,
+            "",
+            compacted,
+        )
 
     # 절대연도의 숫자. 뒤에서부터 지워야 앞 구간의 자리가 어긋나지 않는다.
     for start, end, _ in reversed(find_year_spans(compacted)):
         compacted = compacted[:start] + compacted[end:]
+
+    # 대상 문서를 지목한 표기. 긴 표기부터 지우는 이유는 기업명과 같다.
+    for token in sorted(BUSINESS_PROFILE_DOCUMENT_FRAMING, key=len, reverse=True):
+        compacted = compacted.replace(token, "")
 
     return _BUSINESS_PROFILE_SCAFFOLDING_PATTERN.sub("", compacted)
 

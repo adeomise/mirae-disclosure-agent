@@ -1,8 +1,10 @@
 from pathlib import Path
 
 import pytest
+from lxml import etree
 
 from disclosure_agent.periodic.parser import (
+    _repair_malformed_percent_comparisons_in_text,
     parse_periodic_xml,
     sanitize_dart_xml_text,
 )
@@ -162,6 +164,20 @@ def _comparison_document(comparison: str) -> str:
     </DOCUMENT>"""
 
 
+def _attribute_comparison_document(
+    *,
+    attribute_value: str,
+    cell_text: str,
+) -> str:
+    return f"""<DOCUMENT>
+      <DOCUMENT-NAME>합성 정기보고서</DOCUMENT-NAME>
+      <COMPANY-NAME>테스트기업</COMPANY-NAME>
+      <BODY><SECTION-1><TABLE><TR>
+        <TD ATEST="{attribute_value}">{cell_text}</TD>
+      </TR></TABLE></SECTION-1></BODY>
+    </DOCUMENT>"""
+
+
 def _parse_comparison_document(
     tmp_path: Path,
     *,
@@ -232,6 +248,71 @@ def test_valid_percent_comparison_is_sanitizer_noop() -> None:
     valid_xml = _comparison_document("&lt; 10%")
 
     assert sanitize_dart_xml_text(valid_xml) == valid_xml
+
+
+def test_malformed_percent_comparison_in_attribute_remains_fail_closed(
+    tmp_path: Path,
+) -> None:
+    malformed = _attribute_comparison_document(
+        attribute_value="< 10%",
+        cell_text="값",
+    )
+
+    assert _repair_malformed_percent_comparisons_in_text(malformed) == malformed
+    assert 'ATEST="&lt; 10%">' not in sanitize_dart_xml_text(malformed)
+
+    source = tmp_path / "MALFORMED_ATTRIBUTE.xml"
+    source.write_text(malformed, encoding="utf-8")
+    with pytest.raises(ValueError, match="XML 파싱에 실패했습니다"):
+        parse_periodic_xml(source)
+
+
+def test_valid_escaped_percent_comparison_in_attribute_is_noop() -> None:
+    valid = _attribute_comparison_document(
+        attribute_value="&lt; 10%",
+        cell_text="값",
+    )
+
+    assert sanitize_dart_xml_text(valid) == valid
+    root = etree.fromstring(valid.encode("utf-8"))
+    assert root.find(".//TD").get("ATEST") == "< 10%"
+
+
+def test_quoted_gt_does_not_end_attribute_context_early(tmp_path: Path) -> None:
+    boundary_probe = _attribute_comparison_document(
+        attribute_value="synthetic > < 10%",
+        cell_text="value < 10%",
+    )
+    repaired_probe = _repair_malformed_percent_comparisons_in_text(boundary_probe)
+    assert 'ATEST="synthetic > < 10%"' in repaired_probe
+    assert ">value &lt; 10%" in repaired_probe
+
+    malformed_text = _attribute_comparison_document(
+        attribute_value="synthetic > text",
+        cell_text="value < 10%",
+    )
+    sanitized = sanitize_dart_xml_text(malformed_text)
+
+    assert 'ATEST="synthetic > text"' in sanitized
+    assert "value &lt; 10%" in sanitized
+
+    source = tmp_path / "QUOTED_GT.xml"
+    source.write_text(malformed_text, encoding="utf-8")
+    parsed = parse_periodic_xml(source)
+    assert parsed["tables"][0]["rows"][0][0]["text"] == "value < 10%"
+
+
+def test_percent_comparison_in_protected_regions_is_noop() -> None:
+    protected = """<?xml version="1.0" encoding="UTF-8"?>
+    <DOCUMENT><?audit threshold="< 10%"?>
+      <DOCUMENT-NAME>합성 정기보고서</DOCUMENT-NAME>
+      <COMPANY-NAME>테스트기업</COMPANY-NAME>
+      <BODY><!-- threshold < 10% -->
+        <SECTION-1><P><![CDATA[threshold < 10%]]></P></SECTION-1>
+      </BODY>
+    </DOCUMENT>"""
+
+    assert sanitize_dart_xml_text(protected) == protected
 
 
 def test_repeated_malformed_percent_comparisons_preserve_order(

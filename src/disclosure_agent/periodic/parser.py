@@ -77,6 +77,56 @@ DART_STRUCTURAL_TAGS = {
 }
 
 
+def _repair_malformed_percent_comparisons_in_text(fragment: str) -> str:
+    """Element text의 malformed percent 비교 연산자만 escape한다.
+
+    호출자는 CDATA/comment/processing instruction을 제외한 fragment를 전달한다.
+    start/end tag와 quoted attribute 안의 동일 문자열은 strict parser가 계속
+    검증하도록 그대로 둔다.
+    """
+    parts: list[str] = []
+    unchanged_start = 0
+    position = 0
+    in_markup = False
+    quote: str | None = None
+
+    while position < len(fragment):
+        if not in_markup:
+            next_markup = fragment.find("<", position)
+            if next_markup == -1:
+                break
+            position = next_markup
+            comparison = MALFORMED_PERCENT_COMPARISON_PATTERN.match(
+                fragment,
+                position,
+            )
+            if comparison is not None:
+                parts.append(fragment[unchanged_start:position])
+                parts.append("&lt;")
+                position = comparison.end()
+                unchanged_start = position
+                continue
+
+            in_markup = True
+            position += 1
+            continue
+
+        character = fragment[position]
+        if quote is not None:
+            if character == quote:
+                quote = None
+        elif character in {'"', "'"}:
+            quote = character
+        elif character == ">":
+            in_markup = False
+        position += 1
+
+    if not parts:
+        return fragment
+    parts.append(fragment[unchanged_start:])
+    return "".join(parts)
+
+
 def sanitize_dart_xml_text(xml_text: str) -> str:
     """DART 본문의 entity/pseudo-tag/percent 비교식 오류만 보수적으로 교정한다.
 
@@ -97,8 +147,7 @@ def sanitize_dart_xml_text(xml_text: str) -> str:
 
             return f"&lt;{inner}&gt;"
 
-        escaped_comparisons = MALFORMED_PERCENT_COMPARISON_PATTERN.sub(
-            "&lt;",
+        escaped_comparisons = _repair_malformed_percent_comparisons_in_text(
             fragment,
         )
         escaped_tags = TAG_LIKE_PATTERN.sub(

@@ -545,6 +545,7 @@ def test_not_comparable_is_completed_unanswerable_canonical_reason() -> None:
         "calculations": [],
         "comparisons": [],
         "narrative_comparisons": [],
+        "answer_bearing_fact_ids": [],
         "warnings": [],
         "conversion_gaps": [],
     }

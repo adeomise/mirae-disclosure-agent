@@ -502,14 +502,18 @@ def _require_every_value_is_stated(text: str, payload: GroundedPayload) -> None:
         않았다. 보조로 내려간 Fact의 값도 여전히 화이트리스트에 있으므로 문장에 적어도 되고,
         자릿수를 바꿔 적으면 그때는 ungrounded_number로 걸린다.
 
-    TODO:
-        사용자가 원천 값 자체를 함께 요청한 경우(예: "원래 값도 알려주고 증감도 알려줘")에는 그
-        Fact가 계산의 입력이더라도 답에 실려야 한다. 지금은 그 요청을 구별할 구조적 신호가
-        payload에도 AgentExecutionResult에도 없다. query_analyzer.QueryPlan의 metric/derived_metric
-        만으로는 갈리지 않으며(그 두 질문은 같은 계획을 만든다), 계획 자체가 grounding 경계를
-        넘어오지 않는다. 신호가 생기기 전까지 그 모양은 이 함수가 구별하지 못한다.
+    사용자가 원천 값 자체를 함께 요청한 경우는 보조로 내리지 않는다:
+        "원래 값도 알려주고 증감도 알려줘"의 두 Fact는 계산의 입력이면서 동시에 답의 일부다.
+        그 요청은 질의 해석이 읽어(query_analyzer.QueryPlan.requested_source_values) 실행 계층이
+        Fact 식별자로 옮기고(agent.normalization), payload가 그대로 나른다. 여기서는 그 목록을
+        보조 집합에서 빼기만 한다.
+
+        질문 문자열을 읽지 않는다. 같은 판정을 이 자리에서 다시 내리면 질의 해석과 검증이 서로
+        다르게 답하는 순간이 생기고, 그때 어느 쪽이 사용자의 요청인지 알 수 없다.
     """
-    supporting = _facts_consumed_by_calculations(payload)
+    supporting = _facts_consumed_by_calculations(payload) - set(
+        payload.answer_bearing_fact_ids
+    )
 
     for fact in payload.facts:
         if fact.fact_id in supporting:

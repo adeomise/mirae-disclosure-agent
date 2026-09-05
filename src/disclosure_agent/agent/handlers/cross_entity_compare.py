@@ -368,7 +368,7 @@ def _unsupported_plan(plan: QueryPlan) -> BlockedInfo | None:
         # 문서를 두 번 연 뒤이므로, 코퍼스를 열기 전인 여기서 막는다.
         #
         # 정상 경로에서는 만들어지지 않는 계획이다. query_analyzer가 같은 기업의 중복 매치를
-        # 하나로 세기 때문이며(_extract_companies), 그래도 막는 이유는 이 handler가 계획을
+        # 하나로 세기 때문이며(_resolve_companies), 그래도 막는 이유는 이 handler가 계획을
         # 직접 받는 호출부에도 열려 있기 때문이다.
         return BlockedInfo(
             stage=STAGE_PATTERN_ENTRY,

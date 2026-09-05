@@ -223,6 +223,12 @@ class GroundedPayload:
     event_histories: tuple[GroundedEventHistory, ...]
     evidence: tuple[GroundedEvidence, ...]
     limitation: str | None
+    # 질문이 값 자체를 요청한 Fact. 계산의 입력이더라도 답에서 빠질 수 없다.
+    #
+    # 전송하지 않는다(as_dict 참조). 이 값은 돌아온 문장을 검증할 때 쓰는 기준이지 모델이 읽을
+    # 재료가 아니다. 지시문은 이미 facts와 calculations의 값을 모두 담으라고 말하고 있으므로,
+    # 지시를 따른 응답은 이 목록과 무관하게 통과한다.
+    answer_bearing_fact_ids: tuple[str, ...] = ()
 
     def to_json(self) -> str:
         """모델에게 실제로 보내는 문자열."""
@@ -377,6 +383,7 @@ def build_grounded_payload(
             for item in result.evidence
         ),
         limitation=_limitation(result, status),
+        answer_bearing_fact_ids=_answer_bearing_fact_ids(result, facts),
     )
 
 
@@ -794,6 +801,39 @@ def _ground_calculation(
         input_ids=tuple(item.input_id for item in calculation.inputs),
         evidence_ids=tuple(calculation.evidence_ids),
     )
+
+
+def _answer_bearing_fact_ids(
+    result: AgentExecutionResult,
+    facts: tuple[GroundedFact, ...],
+) -> tuple[str, ...]:
+    """
+    답에 실려야 하는 Fact 식별자. 실행 결과가 적어 둔 것을 그대로 옮긴다.
+
+    판정하지 않는다. 무엇이 요청됐는가는 질의 해석이 정하고 실행 계층이 Fact 식별자로 옮겼다
+    (agent.normalization._answer_bearing_fact_ids). 여기서 다시 고르면 같은 판정이 두 곳에
+    생긴다.
+
+    payload에 없는 Fact를 가리키면 멈춘다. 그런 목록은 "이 값은 답에 있어야 한다"고 말하면서
+    그 값을 함께 보내지 않는 상태이고, 받은 쪽은 무엇을 적어야 하는지 알 수 없다. 검증 단계는
+    그 id를 영영 만족시키지 못하므로 모든 응답이 거절되며, 그 원인은 응답 어디에도 남지 않는다.
+    """
+    declared = tuple(result.answer_bearing_fact_ids)
+
+    if not declared:
+        return ()
+
+    known = {fact.fact_id for fact in facts}
+
+    unknown = sorted(set(declared) - known)
+
+    if unknown:
+        raise PayloadNotGroundableError(
+            f"답에 실려야 한다고 지정된 Fact가 payload에 없습니다: {unknown}. "
+            "보내지 않는 값을 답에서 요구하지 않습니다."
+        )
+
+    return declared
 
 
 def _require_known_comparison_operands(

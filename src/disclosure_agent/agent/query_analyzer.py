@@ -108,6 +108,8 @@ __all__ = [
     "SUPPORTED_CONTRACT_FIELDS",
     "QueryPlan",
     "RelativePeriod",
+    "RequestedSourceValue",
+    "SOURCE_VALUE_REQUEST_TOKENS",
     "UnsupportedQuestionError",
     "build_query_plan",
     "normalize_company_name",
@@ -860,6 +862,73 @@ class RelativePeriod:
         return (self.anchor_year + self.offset, self.anchor_year)
 
 
+# 원천 값 자체를 함께 요청했다고 읽는 표현.
+#
+# 파생값을 묻는 질문과 원천 값을 함께 묻는 질문은 지금까지 같은 계획으로 접혀 있었다.
+# "증감만 알려줘"와 "원래 값도 알려주고 증감도 알려줘"는 metric도 years도 intent도 같아서,
+# 계획만 보고는 둘을 가를 수 없었다. 그 구분이 없으면 표현 계층은 원천 Fact가 근거로만 실린
+# 것인지 답으로 요청된 것인지 알 수 없다.
+#
+# 어휘를 좁게 둔다. "값"이나 "얼마"처럼 흔한 말을 넣으면 증감만 물은 질문이 원천 값 요청으로
+# 읽히고, 그때 표현 계층은 사용자가 묻지 않은 수치를 반드시 적으라고 요구하게 된다. 읽지 못한
+# 요청은 빈 튜플로 두며, 그 경우의 동작은 지금까지와 같다.
+SOURCE_VALUE_REQUEST_TOKENS: tuple[str, ...] = (
+    "원래 값",
+    "원래값",
+    "원값",
+    "실제 값",
+    "실제값",
+)
+
+
+@dataclass(frozen=True)
+class RequestedSourceValue:
+    """질문이 값 자체를 함께 요청한 원천 지표 한 건.
+
+    Fact 식별자를 담지 않는다. 이 계획을 만드는 시점에는 코퍼스를 열지 않았고 Fact가 아직
+    없다. 담을 수 있는 것은 '무엇의 어느 해 값을 요청했는가'라는 의미뿐이며, 그것을 실제
+    Fact로 옮기는 일은 Fact를 만든 쪽이 한다(handlers/normalization).
+
+    회사를 담지 않는 이유는 이 계획이 이미 companies로 대상 기업을 정하고 있기 때문이다.
+    한 계획 안에서 원천 값 요청이 다른 기업을 가리킬 일은 없다.
+    """
+
+    metric: MetricConcept
+    fiscal_year: int
+
+
+def _extract_requested_source_values(
+    question: str,
+    *,
+    metric: MetricConcept | str | None,
+    years: tuple[int, ...],
+) -> tuple[RequestedSourceValue, ...]:
+    """
+    질문이 원천 값 자체를 함께 요청했는지 읽는다.
+
+    파생 개념만 물은 계획(metric이 None)에서는 빈 튜플이다. 그 질문이 요청한 것은 비율이고,
+    분자·분모는 사용자가 이름으로 부르지 않은 값이다. 그 자리에서 원천 값을 답에 요구하면
+    묻지 않은 수치를 반드시 적으라고 하는 셈이 된다.
+
+    표현을 찾으면 이 계획이 다루는 모든 연도에 대해 담는다. 연도별로 갈라 읽지 않는 이유는
+    "2024년 매출액 원래 값만"처럼 한쪽 해만 지목하는 표현을 아직 어휘로 갖고 있지 않기
+    때문이다. 그 구분이 필요해지면 여기서 연도를 좁히면 되고, 담는 자리는 이미 건별이다.
+
+    읽는 일을 이 함수 하나가 한다. 실행 계층과 검증 계층은 질문 문자열을 다시 읽지 않는다.
+    """
+    if metric is None:
+        return ()
+
+    if not any(token in question for token in SOURCE_VALUE_REQUEST_TOKENS):
+        return ()
+
+    concept = MetricConcept(metric)
+
+    return tuple(
+        RequestedSourceValue(metric=concept, fiscal_year=year) for year in sorted(years)
+    )
+
+
 @dataclass(frozen=True)
 class QueryPlan:
     """
@@ -987,6 +1056,20 @@ class QueryPlan:
     # 실행 계획 상태이며, Pattern 결과로 나가지 않는다. 공유 Contract가 미해결 기간을
     # 표현해야 할 때가 오면 common.schemas.Period.kind가 그 자리를 이미 갖고 있다.
     relative_period: RelativePeriod | None = None
+    # 질문이 값 자체를 함께 요청한 원천 지표. 읽지 못했으면 빈 튜플이다.
+    #
+    # metric과 다른 자리인 이유:
+    #     metric은 "이 계획이 어느 지표를 다루는가"이고, 시계열 비교에서는 그 지표의 증감만
+    #     물은 질문에도 채워진다. 그 값만으로는 원천 Fact가 답으로 요청된 것인지 계산의 입력일
+    #     뿐인지 갈리지 않는다. 실제로 "증감만 알려줘"와 "원래 값도 알려줘"는 metric도 years도
+    #     같은 계획을 만든다.
+    #
+    # 건별로 담는 이유:
+    #     요청이 두 해 중 한쪽만 가리킬 수 있다. 계획이 boolean 하나만 담으면 그때 나머지 해의
+    #     값까지 답에 요구하게 되고, 사용자가 묻지 않은 수치가 필수가 된다.
+    #
+    # 기본값이 빈 튜플이므로 이 필드를 채우지 않는 기존 계획은 지금까지와 똑같이 동작한다.
+    requested_source_values: tuple[RequestedSourceValue, ...] = ()
     # 원문 검색 후 수행할 결정적 처리. 현재 실행 경로에서는 Q12의
     # aggregate + compare만 명시하며, 다른 Pattern의 기존 계획은 빈 튜플을 유지한다.
     operations: tuple[str, ...] = field(default_factory=tuple)
@@ -2692,6 +2775,9 @@ def _build_temporal_compare_plan(
         section_scope=section_scope,
         accounting_scope_explicit=scope_explicit,
         relative_period=relative_period,
+        requested_source_values=_extract_requested_source_values(
+            question, metric=metric, years=years
+        ),
         warnings=(f"{detail} 시계열 비교로 해석했습니다.",),
     )
 
@@ -2756,6 +2842,9 @@ def _build_relative_period_plan(
         derived_metric=derived_metric,
         accounting_scope_explicit=scope_explicit,
         relative_period=relative_period,
+        requested_source_values=_extract_requested_source_values(
+            question, metric=metric, years=years
+        ),
         warnings=(
             f"질문의 상대 기간 표현('{expression}')에 기준 연도 FY{anchor_year}를 적용해 "
             f"FY{older} -> FY{newer} 시계열 비교로 해석했습니다. "

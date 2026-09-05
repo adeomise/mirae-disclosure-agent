@@ -114,6 +114,7 @@ if TYPE_CHECKING:  # pragma: no cover - 순환 import를 만들지 않기 위한
     from disclosure_agent.agent.handlers.event_summary import EventSummaryResult
     from disclosure_agent.agent.handlers.single_fact import SingleFactResult
     from disclosure_agent.agent.handlers.temporal_compare import TemporalCompareResult
+    from disclosure_agent.agent.query_analyzer import RequestedSourceValue
 
 # 이 정규화가 맞추는 Contract 버전. conversion_gaps의 기본값과 같아야 한다.
 TARGET_CONTRACT_VERSION = "0.1"
@@ -747,8 +748,49 @@ def normalize_temporal_compare_result(result: TemporalCompareResult) -> AgentExe
         facts=list(result.facts),
         evidence=list(result.evidence),
         calculations=list(result.calculations),
+        answer_bearing_fact_ids=_answer_bearing_fact_ids(
+            result.plan.requested_source_values, result.facts
+        ),
         warnings=warnings,
     )
+
+
+def _answer_bearing_fact_ids(
+    requested: Sequence[RequestedSourceValue],
+    facts: Sequence[Fact],
+) -> list[str]:
+    """
+    질의 해석이 남긴 원천 값 요청을 실제 Fact 식별자로 옮긴다.
+
+    이 자리에서 하는 이유는 여기가 요청과 Fact를 동시에 아는 첫 지점이기 때문이다. 계획을
+    만드는 시점에는 코퍼스를 열지 않아 Fact가 없고, 표현 계층에는 계획이 넘어가지 않는다.
+
+    질문 문자열을 읽지 않는다. 무엇을 요청했는가는 query_analyzer가 이미 판정했고
+    (_extract_requested_source_values), 여기서 다시 읽으면 같은 판정이 두 곳에 생긴다.
+
+    짝을 찾지 못한 요청은 담지 않는다. 담을 id가 없기 때문이다. 정상 경로에서는 생기지
+    않는다. 확보 계층이 요청한 조합을 전부 확보하거나 하나도 담지 않으므로
+    (period_retrieval.collect_period_facts), 성공 경로의 Fact 목록에는 계획이 요구한 조합이
+    모두 있다. 그래도 확인 없이 넣지 않는 이유는, 없는 id를 실으면 payload 조립이 fail closed로
+    멈춰 답할 수 있었던 질문이 사라지기 때문이다.
+    """
+    if not requested:
+        return []
+
+    by_metric_and_year = {(fact.metric, fact.fiscal_year): fact.fact_id for fact in facts}
+
+    matched = [
+        by_metric_and_year[(item.metric, item.fiscal_year)]
+        for item in requested
+        if (item.metric, item.fiscal_year) in by_metric_and_year
+    ]
+
+    # 같은 Fact를 두 번 가리키는 요청이 있어도 목록에는 한 번만 담는다. 순서는 요청 순서다.
+    seen: set[str] = set()
+
+    return [
+        fact_id for fact_id in matched if not (fact_id in seen or seen.add(fact_id))
+    ]
 
 
 # --------------------------------------------------------------------------

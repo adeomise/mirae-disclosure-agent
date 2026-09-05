@@ -182,3 +182,32 @@ operations        = [none]
   **Parser·구조 분석 결과와 교차 확인이 필요**하며 확정은 팀원 1의 분석 결과를 따릅니다.
 - `operations`의 값 목록이 `docs/data_contracts.md` Draft의 계산 결과 표현과 같은 어휘를 쓸지는
   미정입니다([open_decisions.md](open_decisions.md) DC5 참조).
+- `companies`를 `{surface, resolved_name, role}` 객체 배열로 넓힐지는 미정입니다. 현재 구현의
+  `QueryPlan.companies`는 canonical `corp_name` 문자열만 담습니다. 사용자 표현과 해석 경로는
+  `agent.company_resolution.CompanyResolution`이 들고 있으며,
+  `agent.query_analyzer.resolve_companies()`로 계획을 만들지 않고도 볼 수 있습니다.
+
+## C1 Company Resolution 현재 규칙
+
+기업 표현을 canonical `corp_name` 하나로 옮기는 규칙입니다. 구현은
+`src/disclosure_agent/agent/company_resolution.py`에 있고, 인식 후보는 manifest에서
+(`retrieval.metadata_filter.list_company_universe`) 읽어 주입합니다.
+
+해석 순서는 다음과 같으며, 위에서부터 먼저 봅니다.
+
+| # | 방법(`method`) | 무엇과 맞추는가 | 예 |
+|---|---|---|---|
+| 1 | `canonical` | `corp_name`. 표기 정규화(`(주)`·공백·대소문자)를 거친 뒤 비교 | `(주)한미반도체` → `한미반도체` |
+| 2 | `listed_name` | manifest의 상장명 | `현대차` → `현대자동차`, `KT` → `케이티` |
+| 3 | `alias` | `COMPANY_ALIASES`에 명시적으로 등록한 표기 | `삼바` → `삼성바이오로직스` |
+| 4 | `unique_partial` | 등록 표기의 앞부분이며 후보가 **정확히 하나**일 때 | `레인보우` → `레인보우로보틱스` |
+
+확정하지 못하면 고르지 않습니다.
+
+- 후보가 2개 이상 — `query_plan/ambiguous_company_match`로 BLOCKED. `삼성`을 삼성전자로
+  좁히지 않습니다.
+- 후보가 0개 — 기존과 같이 `query_plan/unknown_company`.
+- 비교 질문에 모호한 표현이 하나라도 있으면 나머지 기업만으로 실행하지 않고 질문 전체를 막습니다.
+
+이번 범위에서 하지 않는 것: LLM 기반 회사명 추론, 편집거리·유사도에 따른 자동 선택, 외부 검색을
+이용한 보정, 문맥으로 `삼성`을 `삼성전자`로 추정하기.

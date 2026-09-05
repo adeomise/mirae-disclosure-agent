@@ -383,6 +383,23 @@ class AgentExecutionResult(BaseModel):
     # 이쪽은 두 서술의 변화 항목이라, 한 목록에 담으면 받는 쪽이 어느 것이 수치 판정인지
     # 항목마다 확인해야 한다.
     narrative_comparisons: list[NarrativeComparisonResult] = Field(default_factory=list)
+    # 질문이 값 자체를 요청한 원천 Fact의 식별자.
+    #
+    # 왜 결과에 담는가:
+    #     같은 Fact가 계산의 입력이면서 동시에 답의 일부일 수 있다. "증감만 알려줘"와
+    #     "원래 값도 알려주고 증감도 알려줘"는 확보하는 Fact도 만드는 Calculation도 같아서,
+    #     결과 모양만 보고는 두 질문을 가를 수 없다. 그 구분은 질의 해석이 이미 갖고 있고
+    #     (query_analyzer.QueryPlan.requested_source_values), 이 자리는 그것을 표현 계층까지
+    #     나르는 통로다.
+    #
+    # 식별자만 담는 이유:
+    #     무엇을 요청했는가는 질의 해석의 어휘이고, 그 어휘를 공통 Contract로 옮기면 표현
+    #     계층이 질문 해석 규칙을 알아야 한다. Fact를 만든 쪽이 의미를 식별자로 옮기고 나면
+    #     받는 쪽은 "이 id는 답에 실려야 한다"만 알면 된다.
+    #
+    # 기본값이 비어 있으므로 이 필드를 채우지 않는 기존 producer는 지금까지와 똑같이 동작한다.
+    # 빈 목록은 "요청을 읽지 못했다"이며 "요청이 없었다"를 단정하지 않는다.
+    answer_bearing_fact_ids: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     conversion_gaps: list[ConversionGap] = Field(default_factory=list)
 

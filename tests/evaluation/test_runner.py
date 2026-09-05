@@ -136,6 +136,7 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q06",
         "q07",
         "q08",
+        "q09",
         "q10",
         "q11",
         "q12",
@@ -146,7 +147,7 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q17",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 1
+    assert sum(question.lifecycle == "future" for question in representative) == 0
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -1105,17 +1106,29 @@ def test_representative_calculation_counts_match_final_targets() -> None:
     assert gold_by_id["q10"].integrity.calculation_evidence_references is None
 
 
-def test_narrative_future_gold_does_not_require_zero_facts() -> None:
-    """q09 remains an unresolved future placeholder; q06 no longer belongs here.
-
-    Q06 is active now, with an actual corpus-verified structure-first gold (like
-    Q10/Q12/Q15) that explicitly pins facts=0 alongside every other collection.
+def test_no_narrative_future_gold_remains() -> None:
     """
-    gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
+    q09 was the last unresolved future placeholder; it is active now, like q06 before
+    it. Every representative question is active, so no case relies any longer on the
+    relaxed future-ANSWERABLE validation rule (that relaxed path is still covered
+    directly by the synthetic-case tests below, e.g.
+    test_future_answerable_with_counts_only_passes).
 
-    for case_id in ("q09",):
-        counts = gold_by_id[case_id].counts
-        assert counts is None or counts.facts is None
+    Active gold pins facts explicitly instead of leaving it unset the way the old
+    future placeholder could. q09's Evidence is not zero (it retains the one fiscal
+    year it resolved), so it is asserted on its own rather than folded into the
+    facts=0/evidence=0 group below.
+    """
+    loaded = load_dataset()
+    representative = [
+        question
+        for question in loaded.questions
+        if question.representative_question_id is not None
+    ]
+    gold_by_id = {gold.case_id: gold for gold in loaded.gold_answers}
+
+    assert sum(question.lifecycle == "future" for question in representative) == 0
+    assert gold_by_id["q09"].counts.facts == 0
 
     for case_id in ("q16", "q17", "q18"):
         counts = gold_by_id[case_id].counts
@@ -1396,6 +1409,310 @@ def test_q14_rejects_a_root_chosen_by_inverse_chain_inference() -> None:
     assert failures
     assert any(item.startswith("answerability_status:") for item in failures)
     assert any(item.startswith("counts.event_histories:") for item in failures)
+
+
+# --------------------------------------------------------------------------
+# Q09 — narrative temporal compare, fail-closed on an ambiguous filing (D5)
+# --------------------------------------------------------------------------
+
+Q09_FY2023_RESOLVED_DOC = "periodic_20240307000835"
+Q09_FY2025_ORIGINAL_DOC = "periodic_20260312001119"
+Q09_FY2025_CORRECTION_DOC = "periodic_20260515001658"
+Q09_SECTION_PATH = ["II. 사업의 내용", "1. 사업의 개요"]
+
+
+def test_active_q09_gold_pins_ambiguous_filing_and_one_side_evidence_identity() -> None:
+    """
+    Q09 질문은 두 회계연도를 묻지만, 실제 코퍼스의 FY2025 사업보고서는 원본과 정정본이 함께
+    있고 정기공시 판본 선택 정책(D5, open_decisions.md)이 아직 없다. handler는 그 해를
+    하나로 확정하지 않고 filing_discovery 단계에서 ambiguous_filing으로 멈춘다.
+
+    FY2023은 판본이 하나라 정상 확보되고, 그 Evidence만 결과에 남는다. gold는 그 Evidence
+    3건이 실제로 FY2023 확정 문서(periodic_20240307000835)에서 나왔는지까지 doc_id로 pin한다
+    — count만 pin하면 같은 개수의 FY2025 후보 Evidence가 섞여도 통과하기 때문이다
+    (아래 mutation 테스트가 그 실패 모드를 직접 재현한다).
+
+    항목별 짝짓기 규칙 부재로 멈추는 NOT_COMPARABLE(양쪽 Section을 모두 확보한 뒤의 판정)과
+    다르다. Q09는 이번 코퍼스 스냅샷에서 그 단계에 도달하지 않는다.
+    """
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    gold = {item.case_id: item for item in loaded.gold_answers}["q09"]
+
+    assert questions["q09"].lifecycle == "active"
+    assert questions["q09"].question == (
+        "삼성바이오로직스 사업 구조가 2023년이랑 2025년이랑 어떻게 달라졌어?"
+    )
+    assert gold.execution_status is ExecutionStatus.COMPLETED
+    assert gold.status is AnswerabilityStatus.UNRESOLVED
+    assert gold.reason is AnswerabilityReason.AMBIGUOUS_MATCH
+    assert gold.answerability_detail_reason == "ambiguous_filing"
+    assert gold.answerability_detail_stage == "filing_discovery"
+    assert gold.counts.model_dump(exclude_none=True) == {
+        "facts": 0,
+        "evidence": 3,
+        "events": 0,
+        "event_links": 0,
+        "event_histories": 0,
+        "resolved_event_states": 0,
+        "calculations": 0,
+        "comparisons": 0,
+        "narrative_comparisons": 0,
+        "document_summaries": 0,
+        "warnings": 1,
+        "conversion_gaps": 0,
+    }
+    assert gold.min_evidence_count == 3
+    assert gold.evidence == [
+        runner.ExpectedEvidence(doc_id=Q09_FY2023_RESOLVED_DOC, section_path=Q09_SECTION_PATH)
+    ] * 3
+
+
+def _q09_evidence_row(doc_id: str, index: int) -> dict[str, object]:
+    return {
+        "evidence_id": f"evidence_{doc_id}_row_{index}",
+        "doc_id": doc_id,
+        "location_type": "text",
+        "section_path": Q09_SECTION_PATH,
+    }
+
+
+def q09_prediction(**overrides: object) -> PredictionCase:
+    """
+    Actual-shaped Q09 prediction: FY2023 resolved, FY2025 ambiguous (original +
+    correction), only FY2023's three Evidence rows retained.
+    """
+    values: dict[str, object] = {
+        "case_id": "q09",
+        "execution_status": "COMPLETED",
+        "answerability_status": "UNRESOLVED",
+        "answerability_reason": "ambiguous_match",
+        "answerability_detail": {
+            "stage": "filing_discovery",
+            "reason": "ambiguous_filing",
+            "detail": (
+                "2025 회계연도의 조건에 맞는 공시(정정본 포함)가 2건입니다: "
+                f"{Q09_FY2025_ORIGINAL_DOC}, {Q09_FY2025_CORRECTION_DOC}. "
+                "판본 선택 정책이 정해지지 않아 비교 대상 문서를 하나 골라 답하지 않습니다."
+            ),
+        },
+        "evidence": [_q09_evidence_row(Q09_FY2023_RESOLVED_DOC, i) for i in range(3)],
+        "warnings": [
+            "질문이 2개 기간(2023, 2025)을 함께 묻고 있어 시계열 비교로 해석했습니다."
+        ],
+    }
+    values.update(overrides)
+    return PredictionCase.model_validate(values)
+
+
+def test_q09_actual_shaped_prediction_passes_the_comparator() -> None:
+    """The exact shape production returns today against the actual corpus must pass."""
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q09"]
+
+    assert compare_prediction(gold, q09_prediction()) == []
+
+
+def test_q09_rejects_answerable_status() -> None:
+    """A prediction that claims to have picked a FY2025 version must fail."""
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q09"]
+    actual = q09_prediction(
+        answerability_status="ANSWERABLE",
+        answerability_reason=None,
+        answerability_detail=None,
+    ).model_dump(mode="python")
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("answerability_status:") for item in failures)
+
+
+@pytest.mark.parametrize("wrong_reason", ["not_found", "not_comparable"])
+def test_q09_rejects_wrong_canonical_reason(wrong_reason: str) -> None:
+    """
+    not_found would claim no FY2025 filing exists at all (there are two); not_comparable
+    would claim both years' Sections were secured and found unpairable — a judgment this
+    corpus snapshot never reaches because FY2025 never resolves to one filing.
+    """
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q09"]
+    actual = q09_prediction(answerability_reason=wrong_reason).model_dump(mode="python")
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("answerability_reason:") for item in failures)
+
+
+def test_q09_rejects_incomparable_narrative_sections_as_the_blocking_reason() -> None:
+    """
+    incomparable_narrative_sections is a real, adjacent Q09 outcome (both Sections
+    secured, no pairing rule) but not this one — this corpus snapshot stops earlier,
+    on the FY2025 filing choice itself. The canonical (status, reason) pair alone
+    cannot tell the two apart; answerability_detail.reason must.
+    """
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q09"]
+    actual = q09_prediction().model_dump(mode="python")
+    actual["answerability_detail"]["reason"] = "incomparable_narrative_sections"
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("answerability_detail.reason:") for item in failures)
+
+
+def test_q09_rejects_a_regressed_stage_with_the_same_reason_and_shape() -> None:
+    """
+    The false positive this contract closes: canonical reason stays ambiguous_match,
+    answerability_detail.reason stays ambiguous_filing, every collection count and the
+    retained FY2023 Evidence stay exactly as production returns them today — only
+    answerability_detail.stage regresses to a different stage. Reason alone cannot see
+    this: filing_discovery and a hypothetical later stage can both carry a reason
+    string named "ambiguous_filing" while meaning a different diagnosis. Stage identity
+    must be pinned independently.
+    """
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q09"]
+    actual = q09_prediction().model_dump(mode="python")
+    actual["answerability_detail"]["stage"] = "comparability"
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("answerability_detail.stage:") for item in failures)
+
+
+def test_q09_rejects_a_missing_answerability_detail_when_gold_pins_stage() -> None:
+    """A prediction with no answerability_detail at all cannot satisfy a pinned stage."""
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q09"]
+    actual = q09_prediction(answerability_detail=None).model_dump(mode="python")
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("answerability_detail.stage:") for item in failures)
+
+
+@pytest.mark.parametrize("evidence_count", [0, 1, 2, 5])
+def test_q09_rejects_wrong_evidence_count(evidence_count: int) -> None:
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q09"]
+    actual = q09_prediction(
+        evidence=[
+            _q09_evidence_row(Q09_FY2023_RESOLVED_DOC, i) for i in range(evidence_count)
+        ]
+    ).model_dump(mode="python")
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("counts.evidence:") for item in failures)
+
+
+@pytest.mark.parametrize(
+    "wrong_doc_id",
+    [Q09_FY2025_ORIGINAL_DOC, Q09_FY2025_CORRECTION_DOC, "periodic_99999999999999"],
+)
+def test_q09_rejects_evidence_from_an_unresolved_or_unrelated_document(
+    wrong_doc_id: str,
+) -> None:
+    """
+    The count-only false positive this contract closes: three Evidence rows total, same
+    as the gold's min_evidence_count and counts.evidence, but one of them actually came
+    from a FY2025 candidate the handler never resolved (or an unrelated document
+    entirely). A count-only gold cannot see this; doc_id identity must catch it.
+    """
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q09"]
+    actual = q09_prediction(
+        evidence=[
+            _q09_evidence_row(Q09_FY2023_RESOLVED_DOC, 0),
+            _q09_evidence_row(Q09_FY2023_RESOLVED_DOC, 1),
+            _q09_evidence_row(wrong_doc_id, 2),
+        ]
+    ).model_dump(mode="python")
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("evidence:") for item in failures)
+
+
+def test_q09_rejects_evidence_entirely_from_the_wrong_document() -> None:
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q09"]
+    actual = q09_prediction(
+        evidence=[
+            _q09_evidence_row("periodic_99999999999999", i) for i in range(3)
+        ]
+    ).model_dump(mode="python")
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("evidence:") for item in failures)
+
+
+def test_q09_rejects_a_fabricated_narrative_comparison() -> None:
+    """
+    No NarrativeComparisonResult exists in this corpus snapshot's actual path (both
+    Sections are never secured together). A handler that invented one — even an empty
+    claims=[] one — would look like the pairing rule this contract explicitly does not
+    have.
+    """
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q09"]
+    actual = q09_prediction().model_dump(mode="python")
+    actual["narrative_comparisons"] = [
+        {
+            "comparison_id": "narrative_synthetic_1",
+            "company": "삼성바이오로직스",
+            "section_scope": "business_overview",
+            "left_fiscal_year": 2023,
+            "right_fiscal_year": 2025,
+            "left_section_path": Q09_SECTION_PATH,
+            "right_section_path": Q09_SECTION_PATH,
+            "claims": [],
+        }
+    ]
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("counts.narrative_comparisons:") for item in failures)
+
+
+@pytest.mark.parametrize("carrier", ["document_summaries", "calculations", "comparisons"])
+def test_q09_rejects_any_carrier_actual_production_never_populates(carrier: str) -> None:
+    """
+    The narrative path never builds a DocumentSummary (it is discarded so Pattern B's
+    single-document summary path does not receive two), a Calculation, or a Comparison
+    — Q09 never crosses the calculation guard. Any of those appearing means a different
+    code path answered, not this one.
+    """
+    minimal_by_carrier: dict[str, dict[str, object]] = {
+        "document_summaries": {
+            "summary_id": "summary_synthetic_1",
+            "doc_id": Q09_FY2023_RESOLVED_DOC,
+            "company": "삼성바이오로직스",
+            "report_name": "사업보고서",
+            "section_scope": "business_overview",
+            "section_path": Q09_SECTION_PATH,
+            "items": [
+                {
+                    "item_id": "item_synthetic_1",
+                    "item_type": "paragraph",
+                    "label": "합성 항목",
+                    "evidence_ids": ["evidence_synthetic_1"],
+                }
+            ],
+        },
+        "calculations": {
+            "calculation_id": "calculation_synthetic_1",
+            "operation": "delta",
+            "inputs": [{"input_type": "fact", "input_id": "fact_synthetic_1"}],
+            "value": 1,
+            "unit": "원",
+        },
+        "comparisons": {
+            "comparison_id": "comparison_synthetic_1",
+            "left": {"input_type": "fact", "input_id": "fact_synthetic_1"},
+            "right": {"input_type": "fact", "input_id": "fact_synthetic_2"},
+            "relation": "left_greater",
+        },
+    }
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q09"]
+    actual = q09_prediction().model_dump(mode="python")
+    actual[carrier] = [minimal_by_carrier[carrier]]
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith(f"counts.{carrier}:") for item in failures)
 
 
 def test_runner_rejects_answerable_case_without_evidence(tmp_path: Path) -> None:

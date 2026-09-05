@@ -434,13 +434,56 @@ def _require_grounded_numbers(text: str, payload: GroundedPayload) -> None:
 
 def _require_every_value_is_stated(text: str, payload: GroundedPayload) -> None:
     """
-    확보한 값이 문장에서 빠지지 않았는지 본다.
+    답에 실려야 하는 값이 문장에서 빠지지 않았는지 본다.
 
     빠뜨리는 쪽은 틀린 숫자를 쓰는 것보다 잡기 어렵다. 형식은 완전한 답변이고, 무엇이
     사라졌는지는 문장 어디에도 남지 않는다. 여러 값을 물은 질문에 한 값만 답하는 실패
     모드이며, answer_builder._single_fact_sentence가 다중 Fact를 거부하는 이유와 같다.
+
+    '전부'가 아니라 '답에 실리는 값'을 보는 이유:
+        payload에 실린 Fact가 모두 답의 일부인 것은 아니다. 파생값을 만든 원천 Fact는 그
+        파생값이 무엇에서 나왔는지를 붙들어 두려고 함께 실린다. 계산의 입력을 id로만 가리키는
+        구조가 성립하려면 그 Fact가 payload 안에 있어야 하고(grounded_payload._ground_calculation),
+        근거 문서로 되짚는 경로도 그 Fact를 지난다.
+
+        그것을 문장에까지 요구하면 결정론 경로가 자기 검증기에 걸린다. 실제로 걸렸다.
+        build_answer_response가 만든 Q08(기간별 영업이익률 변화)과 Q11(기업 간 영업이익률 비교)의
+        문장은 원천 Fact의 값을 적지 않으며, 그 문장을 이 함수에 넣으면 value_dropped가 된다.
+        두 문항은 비율을 물었고 답은 비율이다. 분자와 분모를 함께 적어야 답이 되는 것이 아니다.
+
+        그래서 완결성의 기준을 payload의 적재 여부가 아니라 참조 위상에서 읽는다. 어떤 계산의
+        입력으로 쓰인 Fact는 그 계산이 대신 답하고 있으므로 보조 값으로 본다. 그 계산 자체는
+        아래에서 빠짐없이 요구하므로, 보조로 내려간 Fact가 대변되지 않은 채 사라지는 일은 없다.
+
+    계산 결과는 깊이와 무관하게 전부 요구한다:
+        다른 계산의 입력으로 쓰인 계산도 마찬가지다(Q08의 기간별 비율 2건). 계산 결과는 원문에
+        적힌 값이 아니라 이 시스템이 만들어 실은 진술이며, 빠지면 그것을 대신할 것이 없다.
+        원천 Fact가 파생값에 대변되는 것과 다른 자리다.
+
+    우열 판정의 피연산자는 보조로 내리지 않는다:
+        GroundedComparison.left_id/right_id는 아래 집합에 넣지 않는다. 넣으면 Q10처럼 Fact 2건을
+        견준 결과에서 두 값이 모두 보조가 되어, 값을 하나도 적지 않고 "A 쪽이 더 큽니다"만 쓴
+        문장이 통과한다. 판정은 값을 대신 말해 주지 않는다.
+
+    이 완화가 근거 밖의 수치를 열지는 않는다:
+        여기서 정하는 것은 '무엇이 반드시 있어야 하는가'(하한)뿐이다. '무엇이 있어도 되는가'
+        (상한)는 _require_grounded_numbers가 _allowed_numbers로 따로 정하며 그 목록은 바뀌지
+        않았다. 보조로 내려간 Fact의 값도 여전히 화이트리스트에 있으므로 문장에 적어도 되고,
+        자릿수를 바꿔 적으면 그때는 ungrounded_number로 걸린다.
+
+    TODO:
+        사용자가 원천 값 자체를 함께 요청한 경우(예: "원래 값도 알려주고 증감도 알려줘")에는 그
+        Fact가 계산의 입력이더라도 답에 실려야 한다. 지금은 그 요청을 구별할 구조적 신호가
+        payload에도 AgentExecutionResult에도 없다. query_analyzer.QueryPlan의 metric/derived_metric
+        만으로는 갈리지 않으며(그 두 질문은 같은 계획을 만든다), 계획 자체가 grounding 경계를
+        넘어오지 않는다. 신호가 생기기 전까지 그 모양은 이 함수가 구별하지 못한다.
     """
+    supporting = _facts_consumed_by_calculations(payload)
+
     for fact in payload.facts:
+        if fact.fact_id in supporting:
+            continue
+
         renderings = [fact.display_value]
 
         if fact.normalized_display:
@@ -463,6 +506,27 @@ def _require_every_value_is_stated(text: str, payload: GroundedPayload) -> None:
             raise AnswerRejectedError(
                 "value_dropped", f"이력 {history.event_id!r}의 공시 건수가 문장에 없습니다"
             )
+
+
+def _facts_consumed_by_calculations(payload: GroundedPayload) -> frozenset[str]:
+    """
+    어떤 계산의 입력으로 쓰인 Fact의 id.
+
+    input_ids에는 Fact와 Calculation의 id가 함께 올 수 있다(Q08의 변화량은 비율 2건을
+    가리킨다). 그래서 payload의 Fact id 집합과 교집합을 취한다. 종류를 문자열 모양으로
+    짐작하지 않으며, 계산 id가 이 집합에 섞여 계산을 보조로 내리는 일도 없다.
+
+    계산이 하나도 없으면 빈 집합이다. 그때는 어떤 Fact도 보조가 되지 않으므로 단일 Fact
+    답변(Q01)과 Fact 비교(Q10)의 완결성 기준은 이 변경 전과 같다.
+    """
+    known = {fact.fact_id for fact in payload.facts}
+
+    return frozenset(
+        input_id
+        for calculation in payload.calculations
+        for input_id in calculation.input_ids
+        if input_id in known
+    )
 
 
 def _require_known_entities(text: str, payload: GroundedPayload) -> None:

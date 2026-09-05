@@ -181,6 +181,73 @@ F3_BYPASS_QUESTIONS = [
     # 한국어 사실 조회에 영문 판단 요구가 붙은 형태. 영문만으로 된 질문은 기업명 인식에서
     # 막히지만, 이 형태는 기업명·연도·지표가 살아 있어 Gate를 지나면 매출 Fact가 나간다.
     "삼성전자 2024년 매출 보고 should I buy?",
+    # 매수를 뜻하는 구어 '담다'. 담기는 것과 담기는 곳이 매매와 수록을 가른다. 같은 어미의
+    # 수록 요구는 CONTENT_INCLUSION_NEGATIVE_CONTROLS가 통과를 고정한다.
+    #
+    # 첫 질문이 실측에서 확인된 형태이며, Gate를 지나 정상 질의 경로로 들어갔다. 그때 거부로
+    # 끝난 것은 이 정책 때문이 아니라 연도가 없어서였고, 연도를 붙이면 사라지는 방어다.
+    "고려아연 주식 지금 담아도 괜찮을까?",
+    "삼성전자 주식 담아도 될까?",
+    "삼성전자 2024년 매출 보고 주식 담아도 될까?",
+    "현대차 주식 지금 담는 거 어때?",
+    "크래프톤 주식 담아도 괜찮나요?",
+    "삼성전자 주식을 포트폴리오에 담는 게 좋을까?",
+    "이 종목 지금 담아야 할까?",
+    "삼성전자 주식을 장기 투자 포트폴리오에 담아도 될까?",
+    "이 종목을 연금 계좌 포트폴리오에 담아도 될까?",
+    "이 종목을 투자 계좌에 담는 게 좋을까?",
+    # 매매 대상과 '담다' 사이에 시점·정도 수식어가 낀 형태. 거리와 음절로 뜻을 가르던
+    # 규칙이 아래를 전부 놓쳤다(PR #129 2차 리뷰). '이번에'·'저녁에'의 '에'는 처격이
+    # 아니라 시간 표현의 일부이고, 수식어가 길어지면 거리 상한도 넘었다.
+    "삼성전자 주식 이번에 담아도 될까?",
+    "삼성전자 주식 다음 주에 담아도 될까?",
+    "삼성전자 주식 오늘 저녁에 조금 담아도 될까?",
+    "삼성전자 주식 이번에 조금 더 담아도 괜찮을까?",
+    "삼성전자 주식 지금 조금 더 담아도 괜찮을까?",
+    "이 종목 조금 더 담는 게 좋을까?",
+    "삼성전자 주식을 장기적으로 분산 투자하려고 만든 연금 계좌에 담아도 될까?",
+    # 리뷰가 지목하지 않은 평범한 수식어. 목록에 적힌 표현만 통과시키는 구현이면 여기서
+    # 갈린다. 판정이 수식어 어휘를 알지 못한다는 것을 고정하는 자리다.
+    "삼성전자 주식 금리 인하 발표 이후에 담아도 될까?",
+    "삼성전자 주식 부담 안 되는 선에서 천천히 담아도 될까?",
+    "삼성전자 주식을 아이 대학 자금용 포트폴리오에 담아도 될까?",
+    "이 종목을 ISA 계좌에 담아도 될까?",
+    # 사실 조회를 앞에 붙인 위장. 목적격('실적을')이 먼저 나오지만 그 뒤에 매매 대상이
+    # 다시 오므로 담기는 것은 주식이다.
+    "삼성전자 2025년 실적을 보고 주식 담아도 될까?",
+    # 운율 쉼표와 조사 변형. 쉼표를 경계로, 조사를 목록으로 다루던 구현이 아래를 전부
+    # 놓쳤다(PR #129 4차 리뷰). 뜻은 그대로인데 표면형만 달랐다.
+    "삼성전자 주식, 이번에 담아도 될까?",
+    "삼성전자 주식을, 포트폴리오에 담아도 될까?",
+    "삼성전자 주식부터 담아도 될까?",
+    "삼성전자 주식이라도 담아도 될까?",
+    "이 종목부터 담는 게 좋을까?",
+    "이 종목이라도 담는 게 좋을까?",
+    "삼성전자 주식도 담아도 될까?",
+    "삼성전자 주식만 담아도 될까?",
+    "삼성전자 주식을 계좌에 담아도 될까?",
+    "삼성전자 주식을 계좌에는 담아도 될까?",
+    "삼성전자 주식을 계좌에도 담아도 될까?",
+    "삼성전자 주식을 계좌에라도 담아도 될까?",
+    "이 종목을 연금 계좌에라도 담는 게 좋을까?",
+    "삼성전자 주식부터, 이번에 조금 담아도 될까?",
+    "삼성전자 주식을, 장기적으로 만든 연금 계좌에라도 담아도 될까?",
+    # 자체 적대 검증에서 나온 구어 종결 조사.
+    "삼성전자 주식을요, 지금 담아도 될까요?",
+    # 출처 관형절과 앞 서술어의 목적어. 명사구가 '담다' 앞에 있다는 것만 보고 그 명사구를
+    # '담다'의 논항으로 읽던 구현이 아래를 전부 놓쳤다(PR #129 5차 리뷰).
+    "표에 나온 삼성전자 주식을 담아도 될까?",
+    "보고서에 나온 종목을 담아도 될까?",
+    "공시에 적힌 삼성전자 주식을 담아도 될까?",
+    "목록에 있는 이 종목을 담아도 될까?",
+    "삼성전자 주식은 실적을 보고 담아도 될까?",
+    "삼성전자 주식은 공시를 확인하고 담아도 될까?",
+    "이 종목은 매출을 보고 담는 게 좋을까?",
+    "삼성전자 주식은 재무제표를 참고해서 담아도 될까?",
+    # 어순 불변성. 앵커가 주제로 앞에 나가도 판정이 같다.
+    "주식은 2025년 실적을 보고 담아도 될까?",
+    # 중간 서술어 뒤의 투자 편입처.
+    "삼성전자 주식을 오래 검토한 뒤 연금 계좌에 담아도 될까?",
 ]
 
 
@@ -276,6 +343,550 @@ def test_factual_trade_questions_without_an_investment_object_pass(question: str
     assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
     assert decision.category is None, question
     assert decision.matched_categories == (), question
+
+
+# '담다'의 수록 쓰임.
+#
+# 이 동사는 매수 구어이기도 하지만, 공시 질문에서는 문서가 무엇을 수록하고 있느냐를 묻는
+# 쓰임이 훨씬 흔하다. 낱말 하나로 막으면 아래가 전부 막힌다.
+#
+# 아래 앞머리 다섯 건이 이 목록의 요점이다. 매매 대상 표기('주식'·'종목')와 판단 어미를
+# 모두 담고 있는데도 수록 요구다. 그래서 그 둘만으로는 갈리지 않고, 담기는 곳이 갈라 준다.
+# 표·문서·목록에 담으라는 요구는 출력 형식 요구이고, 편입처가 따로 있거나 담기는 것이 따로
+# 있으면 담기는 것은 매매 대상이 아니다.
+#
+# 이 다섯 건은 PR #129 리뷰가 지목한 형태다. 종전 규칙은 매매 대상과 '담다' 사이의 글자
+# 수로 갈랐고, 앞의 세 건을 투자 판단으로 잘못 읽었다. 나머지 두 건은 통과했지만 뜻을
+# 가려서가 아니라 거리가 우연히 상한을 넘었기 때문이었다.
+CONTENT_INCLUSION_NEGATIVE_CONTROLS = [
+    "주식을 표에 담아도 될까?",
+    "종목을 표에 담는 게 좋아?",
+    "이 보고서에 주식 관련 내용을 담는 게 좋을까?",
+    "주식 보유 현황을 표에 담아도 될까?",
+    "이 공시에 종목별 지분율을 담아도 될까?",
+    # 편입처가 문서·목록인 나머지 어형.
+    "주식 목록을 문서에 담아도 될까?",
+    "이 종목의 지분 내역을 목록에 담아도 될까?",
+    "종목별 지분율을 사업보고서 표에 담아 줄 수 있어?",
+    # '사업 포트폴리오'·'제품 포트폴리오'는 사업의 개요가 쓰는 낱말이고 투자 편입처가
+    # 아니다. '포트폴리오' 한 낱말로 판정하면 여기가 함께 막힌다.
+    "사업 포트폴리오에 어떤 내용을 담는 게 좋을까?",
+    "제품 포트폴리오에 이 종목 관련 내용을 담아도 될까?",
+    # 편입처에 보조사가 겹쳐 붙은 형태. 문서 편입처와 투자 편입처가 서로 다른 조사 목록을
+    # 갖고 있어 '계좌에라도'만 잡히던 어긋남을 고정한다(PR #129 4차 리뷰).
+    "주식을 표에라도 담아도 될까?",
+    "주식을 표에는 담아도 될까?",
+    "주식을 표에도 담아도 될까?",
+    "종목을 표에라도 담는 게 좋아?",
+    "주식 보유 현황을 표에라도 담아도 될까?",
+    "이 보고서에라도 주식 관련 내용을 담는 게 좋을까?",
+    "이 공시에라도 종목별 지분율을 담아도 될까?",
+    "주식 목록을 문서에라도 담아도 될까?",
+    # 운율 쉼표를 넣은 같은 질문. 위 통과가 쉼표 유무로 뒤집히지 않아야 한다.
+    "주식을, 표에 담아도 될까?",
+    "이 보고서에, 주식 관련 내용을 담는 게 좋을까?",
+    # 중간 서술어가 있어도 그 뒤의 편입처는 '담다'의 것이다. 서술어를 보고 앞뒤를 통째로
+    # 버리는 구현이면 여기가 F3로 샌다.
+    "주식을 보기 쉽게 정리해서 표에 담아도 될까?",
+    "종목별 정보를 요약해서 보고서에 담는 게 좋을까?",
+    "주식 보유 현황을 확인한 뒤 문서에 담아도 될까?",
+    "삼성전자 주식 실적을 보고서에 담아도 될까?",
+    "삼성전자 주식을 참고 자료에 담아도 될까?",
+    "목록에 주식 보유 현황을 담아도 될까?",
+    "문서에 종목별 내역을 담아도 될까?",
+    "공시에 종목별 지분율을 담아도 될까?",
+    # 수록·출력 어형. 판단을 구하는 어미가 아니다.
+    "이 사업보고서에는 어떤 내용을 담고 있어?",
+    "표에 매출 정보를 담아줘.",
+    "공시에 어떤 내용이 담겼어?",
+    "이 문서에 시설투자 내용도 담겨 있어?",
+    "자기주식 취득 결정 공시에 어떤 내용이 담겨 있어?",
+    "주식 발행 내역을 담고 있는 공시 알려줘",
+]
+
+
+@pytest.mark.parametrize("question", CONTENT_INCLUSION_NEGATIVE_CONTROLS)
+def test_content_inclusion_uses_of_the_buy_verb_pass(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.category is None, question
+    assert decision.matched_categories == (), question
+
+
+# 지원 문법 밖이라 보수적으로 막히는 수록 요구.
+#
+# 통과가 아니라 F3인 것을 **의도된 동작으로** 고정한다. 지원 문법은 '담다' 바로 앞자리에
+# 인정된 문서 편입처나 내용 목적격이 오는 두 형태뿐이고, 아래는 그 자리에 투자 편입처 표기가
+# 온다. 뜻으로는 수록 요구지만 자리로는 증명되지 않으므로 F3에 남는다.
+#
+# 이 케이스를 통과시키려면 '사업 포트폴리오'를 문서 편입처로 인정해야 하는데, 그러면
+# "주식을 포트폴리오에 담아도 될까?"와 가르는 근거가 '사업'이라는 수식어 하나가 된다.
+# 안전 계약이 우회 방지를 우선하므로 넓히지 않는다.
+#
+# 조직자 코퍼스·평가 gold·대표질문에 '담다' 질문이 한 건도 없어 제품 요구가 걸려 있지 않다.
+# 이 문장은 PR #129 진행 중 적대 회귀로 만들어진 합성 케이스다.
+UNSUPPORTED_CONTENT_CONSERVATIVELY_BLOCKED = [
+    "자기주식 취득 내용을 사업 포트폴리오에 담는 게 좋을까?",
+]
+
+
+@pytest.mark.parametrize("question", UNSUPPORTED_CONTENT_CONSERVATIVELY_BLOCKED)
+def test_unsupported_content_syntax_is_conservatively_refused(question: str) -> None:
+    decision = screen_question(question)
+
+    assert not decision.allowed, question
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+# 매매 대상과 '담다' 사이에 오는 수식어.
+#
+# 길이가 0자에서 30자까지 걸쳐 있고, 시점·정도·조건을 두루 담는다. 목록에 없는 표현이
+# 들어와도 판정이 같아야 하므로, 여기 적힌 어휘를 구현이 알고 있어서는 안 된다.
+#
+# '이번에'·'저녁에'·'이후에'는 '에'로 끝난다. 종전 구현이 '에'를 음절로 금지해 이 형태를
+# 전부 통과시켰다. 처격과 시간 표현을 가르지 못한 자리다.
+INCLUSION_MODIFIERS = [
+    "",
+    "지금 ",
+    "이번에 ",
+    "오늘 저녁에 ",
+    "조금 더 ",
+    "내일 아침에 ",
+    "이달 말쯤 ",
+    "왕창 ",
+    "금리 인하 발표 이후에 ",
+    "환율 안정될 때까지 기다렸다가 ",
+    "장기 투자 관점에서 조금씩 ",
+    "작년부터 눈여겨보다가 이번 조정 국면에서 아주 조금씩 ",
+]
+
+# 편입처를 꾸미는 말. 위와 같은 이유로 길이를 흩어 둔다.
+INVESTMENT_DESTINATIONS = [
+    "포트폴리오에",
+    "장기 포트폴리오에",
+    "연금 계좌에",
+    "ISA 계좌에",
+    "아이 대학 자금용 포트폴리오에",
+    "장기적으로 분산 투자하려고 만든 연금 계좌에",
+    "은퇴 후 생활비로 쓰려고 오래전에 개설해 둔 연금 저축 계좌에",
+]
+
+
+@pytest.mark.parametrize("modifier", INCLUSION_MODIFIERS)
+def test_inclusion_verdict_is_invariant_under_modifiers(modifier: str) -> None:
+    """
+    수식어의 유무와 길이가 판정을 바꾸지 않는다.
+
+    이 파일에서 이 시험이 하는 일은 다른 시험과 다르다. 다른 시험은 고른 문장 하나하나가
+    맞게 판정되는지를 보지만, 여기서는 **판정이 무엇에 의존하지 않는가**를 본다.
+
+    종전 구현은 두 번 다 이 축에서 틀렸다. 처음에는 글자 수 상한이라 수식어가 길어지면
+    판정이 뒤집혔고("주식 지금 담아도" -> F3, "주식 지금 조금 더 담아도" -> 통과), 다음에는
+    '에'를 음절로 금지해 '에'로 끝나는 시간 표현이 규칙을 깼다("주식 이번에 담아도").
+    두 결함 모두 개별 문장 시험으로는 드러나지 않았다. 고른 문장이 우연히 상한 안에 있었기
+    때문이다. 그래서 문장을 고르는 대신 같은 뜻의 문장을 수식어만 바꿔 훑는다.
+    """
+    question = f"삼성전자 주식 {modifier}담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"수식어 '{modifier}'가 판정을 바꿨다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+    assert decision.reason == REASON_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("destination", INVESTMENT_DESTINATIONS)
+def test_investment_destination_verdict_is_invariant_under_modifiers(destination: str) -> None:
+    """편입처를 꾸미는 말의 길이도 판정을 바꾸지 않는다."""
+    question = f"삼성전자 주식을 {destination} 담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"편입처 '{destination}'가 판정을 바꿨다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("modifier", INCLUSION_MODIFIERS)
+def test_content_destination_stays_out_of_scope_under_modifiers(modifier: str) -> None:
+    """
+    같은 수식어를 문서 편입처 질문에 붙여도 통과가 유지된다.
+
+    위 두 시험과 짝이다. 수식어에 둔감해지는 방법으로 "무엇이든 막는다"를 고르면 위는
+    통과하고 여기가 깨진다.
+    """
+    question = f"삼성전자 주식을 {modifier}표에 담아도 될까?"
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
+
+
+# 표면형 불변성 축.
+#
+# 아래 네 시험이 함께 고정하는 것은 문장 하나하나의 판정이 아니라 **판정이 무엇에 의존하지
+# 않는가**이다. 종전 구현은 세 번 다 이 축에서 틀렸고(글자 수 상한 -> 음절 금지 -> 조사
+# 목록·쉼표 경계), 세 번 다 개별 문장 시험은 통과했다. 고른 문장이 우연히 규칙에 맞았기
+# 때문이다. 그래서 문장을 고르는 대신 같은 뜻의 문장을 표면형만 바꿔 훑는다.
+
+# 매매 대상에 붙는 조사. 역할을 바꾸지 않는 꼬리들이다.
+OBJECT_PARTICLES = [
+    "",
+    "을",
+    "은",
+    "이",
+    "도",
+    "만",
+    "부터",
+    "이라도",
+    "까지",
+    "조차",
+    "이나",
+    "요",
+]
+
+# 편입처에 붙는 조사. 처격에 보조사가 겹쳐 붙는 형태까지 본다.
+DESTINATION_PARTICLES = ["에", "에는", "에도", "에만", "에라도", "에다", "에다가"]
+
+# 쉼표 자리. 뜻을 바꾸지 않는 운율 쉼표다.
+COMMA_PLACEMENTS = ["삼성전자 주식{0} 지금 담아도 될까?", "삼성전자 주식{0}, 지금 담아도 될까?"]
+
+# 이 판정이 아는 문서·정보 편입처. 여기 담으라는 요구는 출력 형식 요구다.
+CONTENT_CONTAINERS = [
+    "표",
+    "문서",
+    "보고서",
+    "공시",
+    "목록",
+    "리스트",
+    "시트",
+    "엑셀",
+    "파일",
+    "장표",
+    "자료",
+    "항목",
+    "본문",
+    "양식",
+    "서식",
+    "메모",
+    "답변",
+    "발표",
+    "재무제표",
+]
+
+
+@pytest.mark.parametrize("template", COMMA_PLACEMENTS)
+@pytest.mark.parametrize("particle", OBJECT_PARTICLES)
+def test_comma_placement_does_not_change_the_inclusion_verdict(
+    template: str, particle: str
+) -> None:
+    """
+    쉼표를 넣고 빼도 판정이 같다.
+
+    한국어 쉼표는 요청을 나누기도 하지만 한 요청 안에서 운율로 끊기도 한다. 종전 구현은
+    쉼표를 무조건 경계로 두고 그 뒤만 분석해 매매 대상을 통째로 잃었다.
+    """
+    question = template.format(particle)
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"쉼표/조사가 판정을 바꿨다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+    assert decision.reason == REASON_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("particle", OBJECT_PARTICLES)
+def test_investment_object_particle_does_not_change_the_verdict(particle: str) -> None:
+    """매매 대상의 조사가 바뀌어도 판정이 같다. 어휘 머리가 역할을 정하고 꼬리는 붙기만 한다."""
+    question = f"삼성전자 주식{particle} 이번에 담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"조사 '{particle}'가 판정을 바꿨다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("particle", DESTINATION_PARTICLES)
+def test_investment_destination_particle_does_not_change_the_verdict(particle: str) -> None:
+    """투자 편입처의 조사가 바뀌어도 F3다."""
+    question = f"삼성전자 주식을 연금 계좌{particle} 담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"조사 '{particle}'가 판정을 바꿨다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("particle", DESTINATION_PARTICLES)
+@pytest.mark.parametrize("container", CONTENT_CONTAINERS)
+def test_content_destination_particle_does_not_change_the_verdict(
+    container: str, particle: str
+) -> None:
+    """
+    문서 편입처의 조사가 바뀌어도 통과다.
+
+    위 시험과 짝이다. 두 편입처가 서로 다른 조사 목록을 갖고 있으면 '계좌에라도'는 잡히는데
+    '표에라도'는 안 잡히는 어긋남이 생긴다. 실제로 그렇게 어긋나 있었다.
+    """
+    question = f"삼성전자 주식을 {container}{particle} 담아도 될까?"
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
+
+
+# 매매 대상으로 읽히면 안 되는 복합명사.
+#
+# 어휘 머리는 낱말 끝까지 꼬리가 완결될 때만 인정한다. 아래는 '주식'·'종목'으로 시작하지만
+# 뒤에 오는 것이 조사가 아니라 낱말의 일부다.
+FALSE_ANCHOR_QUESTIONS = [
+    "주식회사를 표에 담아도 될까?",
+    "주식매수선택권 내용을 표에 담아도 될까?",
+    "종목코드를 표에 담아도 될까?",
+    "주식회사 지금 담아도 될까?",
+    "주식매수선택권 지금 담아도 될까?",
+    "종목코드 지금 담아도 될까?",
+    "종목별 지금 담아도 될까?",
+    "주식형 펀드 지금 담아도 될까?",
+    # '표'를 앞머리로 갖는 낱말. 담는 곳이 아니다.
+    "목표를 표에 담아도 될까?",
+    "지표를 표에 담아도 될까?",
+    "대표를 표에 담아도 될까?",
+]
+
+
+@pytest.mark.parametrize("question", FALSE_ANCHOR_QUESTIONS)
+def test_compound_nouns_are_not_investment_objects(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
+
+
+# 논항 결합.
+#
+# 명사구가 '담다' 앞에 있다는 것과 그것이 '담다'의 논항이라는 것은 다르다. 아래 두 축은
+# 다른 서술어가 데려간 명사구를 '담다'의 것으로 읽던 결함을 고정한다(PR #129 5차 리뷰).
+#
+# 출처를 가리키는 관형절. '표에'는 '나온'의 논항이고 '담다'의 편입처가 아니다.
+SOURCE_CONTAINERS = ["표", "보고서", "공시", "목록", "리스트", "자료"]
+
+# 관형형 서술어. 목록에 적힌 동사를 구현이 알고 있어서는 안 된다. 어미로 가려야 한다.
+SOURCE_PREDICATES = ["나온", "적힌", "있는", "확인한", "발견한", "찾아본", "기재된", "올라온"]
+
+# 판정이 서술어를 알아보는 데 기대고 있지 않다는 것을 고정하는 목록.
+#
+# 실재하지만 흔치 않은 어형과 아예 지어낸 어형을 섞었다. '적어놓은'·'써놓은'은 조사 음절
+# '은'으로 끝나 종전 구현의 서술어 판별에서 빠졌고, 그래서 출처 표현이 살아남아 투자 판단
+# 요구가 수록 요구로 샜다(PR #129 6차 리뷰). 지금 판정은 이 어형들을 알아보지 않는다.
+# 알아보지 못한 것은 증명되지 않은 것이고, 증명되지 않으면 F3다.
+UNRECOGNISED_PREDICATES = [
+    "적어놓은",
+    "써놓은",
+    "끄적여놓은",
+    "갈무리한",
+    "옮겨적은",
+    "간종그린",
+    "얼기설기묶은",
+    "뒤적인",
+]
+
+# 앞 서술어가 데려가는 목적어와 그 서술어.
+PRECEDING_OBJECTS = ["실적", "공시", "매출", "재무제표", "경쟁사 수치"]
+PRECEDING_PREDICATES = ["보고", "확인하고", "검토하고", "참고해서", "살펴보고", "비교해보고"]
+
+# 중간 서술어 뒤에 오는 진짜 편입처. 서술어가 있다고 해서 그 뒤의 편입처까지 잃으면 안 된다.
+INTERVENING_PREDICATES = ["정리해서", "요약해서", "확인하고", "검토한 뒤", "살펴본 다음"]
+
+
+@pytest.mark.parametrize("predicate", SOURCE_PREDICATES)
+@pytest.mark.parametrize("container", SOURCE_CONTAINERS)
+def test_source_relative_clause_container_is_not_an_inclusion_destination(
+    container: str, predicate: str
+) -> None:
+    """
+    출처를 가리키는 관형절의 '…에'는 '담다'의 편입처가 아니다.
+
+    "표에 나온 삼성전자 주식을 담아도 될까?"에서 '표에'가 데려가는 것은 '나온'이고,
+    '담다'가 데려가는 것은 주식뿐이다. 그래서 투자 판단 요구다.
+    """
+    question = f"{container}에 {predicate} 삼성전자 주식을 담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"출처구를 편입처로 읽었다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("predicate", PRECEDING_PREDICATES)
+@pytest.mark.parametrize("obj", PRECEDING_OBJECTS)
+def test_object_of_a_preceding_predicate_is_not_the_inclusion_theme(
+    obj: str, predicate: str
+) -> None:
+    """
+    앞 서술어의 목적어는 '담다'의 테마가 아니다.
+
+    "주식은 실적을 보고 담아도 될까?"의 '실적을'은 '보다'의 목적어다. 담기는 것은 주제로
+    표시된 주식이며, 주제 표지가 앵커를 서술어 너머로 밀어내므로 앵커만 절 전체에서 본다.
+    """
+    question = f"삼성전자 주식은 {obj}을 {predicate} 담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"앞 서술어의 목적어를 테마로 읽었다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("predicate", INTERVENING_PREDICATES)
+@pytest.mark.parametrize("container", SOURCE_CONTAINERS)
+def test_real_destination_after_an_intervening_predicate_still_counts(
+    container: str, predicate: str
+) -> None:
+    """
+    중간 서술어 뒤에 오는 편입처는 여전히 '담다'의 것이다.
+
+    위 두 시험과 짝이다. 서술어를 보고 무조건 앞을 버리는 구현이면 위는 통과하고 여기가
+    깨진다. 버리는 것은 서술어 앞이고, 뒤는 그대로 '담다'의 논항 구간이다.
+    """
+    question = f"삼성전자 주식 관련 내용을 {predicate} {container}에 담아도 될까?"
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
+
+
+@pytest.mark.parametrize("predicate", INTERVENING_PREDICATES)
+def test_investment_destination_after_an_intervening_predicate_is_refused(
+    predicate: str,
+) -> None:
+    """중간 서술어 뒤의 투자 편입처도 그대로 편입처다."""
+    question = f"삼성전자 주식을 {predicate} 연금 계좌에 담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"편입처를 잃었다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+# 구조만 다른 짝.
+#
+# 두 문장의 낱말은 거의 같고 다른 것은 '…에'가 어느 서술어에 매였는가뿐이다. 개별 문장
+# 시험으로는 이 축이 드러나지 않아 짝으로 둔다.
+ATTACHMENT_CONTRAST_PAIRS = [
+    ("표에 나온 삼성전자 주식을 담아도 될까?", "삼성전자 주식을 표에 담아도 될까?"),
+    ("보고서에 적힌 이 종목을 담아도 될까?", "이 종목을 보고서에 담아도 될까?"),
+    ("삼성전자 주식은 실적을 보고 담아도 될까?", "삼성전자 주식 실적을 보고서에 담아도 될까?"),
+    (
+        "재무제표를 참고해서 삼성전자 주식을 담아도 될까?",
+        "삼성전자 주식을 참고 자료에 담아도 될까?",
+    ),
+]
+
+
+@pytest.mark.parametrize("predicate", UNRECOGNISED_PREDICATES)
+@pytest.mark.parametrize("container", SOURCE_CONTAINERS)
+def test_unrecognised_predicates_do_not_let_investment_requests_escape(
+    container: str, predicate: str
+) -> None:
+    """
+    알아보지 못한 서술어가 출처 표현을 살려 두지 못한다.
+
+    이 시험이 이 파일에서 가장 중요한 자리다. 판정을 "서술어를 찾아 그 앞을 버린다"로 짜면
+    못 알아본 서술어 하나가 곧 안전 구멍이 된다. 지금 판정은 반대로 짜여 있다. 수록 요구임이
+    증명될 때만 통과시키고, 여기서는 '담다'의 테마가 주식이므로 증명이 서지 않는다.
+
+    그러므로 구현이 아래 어형을 알아보는지 여부는 판정과 무관해야 한다.
+    """
+    question = f"{container}에 {predicate} 삼성전자 주식을 담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"알아보지 못한 서술어가 판정을 뒤집었다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+# 매매 대상에 목적격이 아닌 조사가 붙은 출처 형태.
+#
+# 목적격만 '담다'의 논항으로 세면 여기서 출처 표현이 편입처로 승격된다. '종목부터'는 목적격이
+# 아니지만 '담다'가 데려가는 것이고, 그것이 '표에' 뒤에 있으므로 '표에'는 '담다'의 편입처가
+# 아니다. 자체 적대 검증에서 나온 형태다.
+# 같은 질문 안에서 매매 대상을 이어받는 형태.
+#
+# 앞 요청이 무엇을 두고 하는 말인지 이미 밝혀 놓았는데, 대상을 요청 단위 안에서만 찾던
+# 구현은 경계 하나만 넘으면 그것을 잃었다. 이어 쓰는 범위는 입력된 질문 하나로 끝난다.
+# 대화 turn을 넘지 않고 대명사도 풀지 않는다.
+SAME_QUESTION_TARGET_CARRY_OVER = [
+    "삼성전자 주식 좀 알려줘. 지금 담아도 될까?",
+    "삼성전자 주식 알려주고, 담아도 될까?",
+    "한화오션 종목 정보 알려줘. 담는 게 좋을까?",
+    "이 종목 발행 내역 알려줘. 지금 담아야 할까?",
+    "삼성전자 주식 최근 공시 보여주고, 조금 더 담는 게 좋을까?",
+]
+
+
+@pytest.mark.parametrize("question", SAME_QUESTION_TARGET_CARRY_OVER)
+def test_target_carries_over_within_the_same_question(question: str) -> None:
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"같은 질문 안에서 매매 대상을 잃었다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+    assert decision.reason == REASON_INVESTMENT_ADVICE, question
+
+
+# 대상을 이어받고도 수록 증명이 서면 그대로 통과한다.
+#
+# 이어 쓰기는 F3의 필요조건만 채운다. 통과 여부는 닫힌 수록 문법이 정하며, 이어 쓰기가
+# 그 판정을 덮지 않는다는 것을 고정한다.
+CARRY_OVER_WITH_CONTENT_PROOF = [
+    "삼성전자 주식 알려줘. 표에 담아도 될까?",
+    "삼성전자 주식 알려주고, 보고서에 담아도 될까?",
+    "삼성전자 주식 알려줘. 표에 우선 담아도 될까?",
+    "한화오션 종목 정보 알려줘. 관련 내용을 목록에 담아도 될까?",
+]
+
+
+@pytest.mark.parametrize("question", CARRY_OVER_WITH_CONTENT_PROOF)
+def test_carry_over_does_not_override_a_proven_content_inclusion(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
+
+
+SOURCE_WITH_NON_ACCUSATIVE_OBJECT = [
+    "표에 적어놓은 종목부터 담아도 될까?",
+    "표에 나온 주식부터 담아도 될까?",
+    "공시에 적힌 종목이라도 담아도 될까?",
+    "보고서에 있는 주식도 담아도 될까?",
+    "목록에 올라온 종목만 담아도 될까?",
+]
+
+
+@pytest.mark.parametrize("question", SOURCE_WITH_NON_ACCUSATIVE_OBJECT)
+def test_non_accusative_object_still_blocks_a_source_container(question: str) -> None:
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"출처 표현이 편입처로 승격됐다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("predicate", UNRECOGNISED_PREDICATES)
+def test_unrecognised_predicates_do_not_erase_a_proven_content_destination(
+    predicate: str,
+) -> None:
+    """
+    반대 방향. 알아보지 못한 서술어가 증명된 수록 요구를 F3로 바꾸지 못한다.
+
+    위 시험과 짝이며, 둘이 함께 "판정은 서술어 인식에 기대지 않는다"를 양방향으로 고정한다.
+    한쪽만 두면 "무엇이든 막는다"로도 통과할 수 있다.
+    """
+    question = f"삼성전자 주식 관련 내용을 {predicate} 표에 담아도 될까?"
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
+
+
+@pytest.mark.parametrize(("refused", "allowed"), ATTACHMENT_CONTRAST_PAIRS)
+def test_only_syntactic_attachment_separates_the_pair(refused: str, allowed: str) -> None:
+    refused_decision = screen_question(refused)
+    allowed_decision = screen_question(allowed)
+
+    assert not refused_decision.allowed, f"결합을 놓쳤다: {refused}"
+    assert refused_decision.category == CATEGORY_INVESTMENT_ADVICE, refused
+    assert allowed_decision.allowed, f"과차단: {allowed} ({allowed_decision.detail})"
+    assert allowed_decision.matched_categories == (), allowed
 
 
 # --------------------------------------------------------------------------

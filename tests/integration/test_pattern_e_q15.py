@@ -57,10 +57,12 @@ from disclosure_agent.agent.answer_builder import (
     REASON_AMBIGUOUS_ROOT,
     REASON_UNVERIFIED_COUNTERPARTY,
     STAGE_FILING_DISCOVERY,
+    build_answer_response,
 )
 from disclosure_agent.agent.handlers.event_history import (
     EVENT_TYPE_BY_DOCUMENT_SUBTYPE,
     build_event_history_result,
+    handle_event_history,
     resolve_event_type,
     root_filing_window,
 )
@@ -106,6 +108,22 @@ Q12 = (
 Q14 = "LG에너지솔루션이 포드랑 맺었던 배터리 공급계약, 지금 어떻게 됐어?"
 
 REAL_COMPANIES = ("레인보우로보틱스", "LG이노텍", "LG에너지솔루션", "HD현대일렉트릭")
+
+# BB17. 실측 코퍼스에서 정정공시가 원공시 제출일로 자기 접수일을 적은 질문이다.
+#
+# 이 정정(exchange_20240813800252)은 실재하고 파싱도 된다. 투자금액 803억 -> 1,008억,
+# 투자기간 종료일 2025-09-30 -> 2025-10-31을 바꾼다. 그런데 연결이 자기 자신을 가리켜
+# 대상을 특정하지 못하고, 예전 구현은 그 정정을 조용히 빼고 완결 체인이라고 답했다.
+BB17_QUESTION = "엘에스일렉트릭이 2024년에 낸 신규 시설투자 공시, 그 뒤에 수정된 부분이 있어?"
+
+BB17_COMPANIES = ("엘에스일렉트릭",)
+
+BB17_CORRECTION_RECEIPT_NO = "20240813800252"
+
+BB17_CORRECTION_DOC_ID = f"exchange_{BB17_CORRECTION_RECEIPT_NO}"
+
+# 이력이 완결됐을 때만 쓸 수 있는 문장. 이 질문에는 나오면 안 된다.
+NO_LATER_CHANGE_SENTENCE = "이후 변경된 내용은 확인되지 않았습니다"
 
 # 실측 코퍼스에서 공급계약 원공시가 한 건뿐인 기업을 쓰는 대조쌍.
 #
@@ -1319,3 +1337,284 @@ def test_named_counterparty_with_several_roots_still_stops_at_ambiguous_root() -
     assert len(internal.root_candidate_doc_ids) > 1
     assert internal.blocked is not None
     assert internal.blocked.reason == REASON_AMBIGUOUS_ROOT
+
+
+# --------------------------------------------------------------------------
+# BB17 — 자기참조 정정이 완결 체인으로 둔갑하지 않는다
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.corpus
+def test_bb17_self_referential_correction_is_not_reported_as_a_complete_chain() -> None:
+    """
+    연결하지 못한 정정이 있는 이력을 "변경 없음"으로 답하지 않는다.
+
+    이 PR은 연결을 되찾지 않는다. 정정은 여전히 원공시에 붙지 않는다. 고정하는 것은 그
+    정정이 사라지지 않는다는 것과, 사라지지 않았으므로 완결이라고 말하지 않는다는 것이다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    plan = build_query_plan(BB17_QUESTION, known_companies=BB17_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+
+    result = answer_question(BB17_QUESTION, corpus_root=corpus_root)
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.INCOMPLETE_CHAIN
+
+    assert len(result.event_histories) == 1
+
+    history = result.event_histories[0]
+
+    assert history.chain_complete is False
+
+    # 미해결 정정이 구조에 남아 있다. 접수번호를 잃어버리면 무엇이 미해결인지 알 수 없다.
+    unresolved_receipt_nos = [
+        receipt_no
+        for gap in result.conversion_gaps
+        for receipt_no in gap.dropped.get("unresolved_correction_receipt_nos", [])
+    ]
+
+    assert unresolved_receipt_nos == [BB17_CORRECTION_RECEIPT_NO]
+
+    # 어느 정정을 Contract 상태로 옮기지 못했는지도 그 정정을 지목해 남는다.
+    assert BB17_CORRECTION_DOC_ID in {gap.subject for gap in result.conversion_gaps}
+
+    # 없는 연결을 지어내지 않는다. 정정은 원공시에 붙지 않은 상태 그대로다.
+    assert history.document_ids == ["exchange_20240521800037"]
+
+    answer = build_answer_response(result).answer
+
+    assert NO_LATER_CHANGE_SENTENCE not in answer
+
+
+@pytest.mark.corpus
+def test_q15_answer_is_unchanged_by_the_bb17_fix() -> None:
+    """
+    fail-closed 규칙이 정상 체인을 건드리지 않는다.
+
+    Q15는 원공시 1건 + 정정 3건이 전부 연결되는 이력이다. 이 체인에는 연결 정보가 무의미한
+    정정이 없으므로 새 규칙이 발동할 자리가 없고, 답 문장도 그대로여야 한다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    result = answer_question(Q15, corpus_root=corpus_root)
+
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert result.event_histories[0].chain_complete is True
+
+    answer = build_answer_response(result).answer
+
+    assert "이력을 확인했습니다" in answer
+
+
+# --------------------------------------------------------------------------
+# 질의가 고른 루트가 '가능한 대상' 여럿 중 하나인 경우
+#
+# 리뷰어 사례를 production 조건 그대로 재현한다. 질문의 기간이 원공시를 B 하나로 좁히지만,
+# 체인 후보에는 A·B·C가 모두 들어 있다.
+# --------------------------------------------------------------------------
+
+# A 원공시 2023-03-01, B 원공시 2025-08-30, C 정정 2025-09-15(자기참조).
+#
+# 질문이 2025년을 지목하므로 원공시 후보는 B 하나다. C는 A와 B 둘 다 시간상 가능하며,
+# 어느 쪽인지 원문이 밝히지 않는다.
+PLAUSIBLE_EARLIER_ROOT = "SYNTHETIC0201"
+
+PLAUSIBLE_SELECTED_ROOT = "SYNTHETIC0202"
+
+PLAUSIBLE_CORRECTION = "SYNTHETIC0203"
+
+PLAUSIBLE_RECORDS: list[dict[str, Any]] = [
+    _record(
+        PLAUSIBLE_EARLIER_ROOT,
+        "20230301",
+        subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+        is_correction=False,
+    ),
+    _record(
+        PLAUSIBLE_SELECTED_ROOT,
+        "20250830",
+        subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+        is_correction=False,
+    ),
+    _record(
+        PLAUSIBLE_CORRECTION,
+        "20250915",
+        subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+        is_correction=True,
+    ),
+]
+
+PLAUSIBLE_QUESTION = (
+    f"{COMPANY}가 2025년에 낸 신규 시설투자 공시, 그 뒤에 수정된 부분이 있어?"
+)
+
+
+def _plausible_document(record: dict[str, Any]) -> dict[str, Any]:
+    """정정본은 원공시 제출일로 자기 접수일을 적는다. 대상을 가리키지 못하는 값이다."""
+    if not record["is_correction"]:
+        return {
+            "metadata": {"doc_id": record["doc_id"], "document_type": "exchange"},
+            "title": record["report_nm"],
+            "rows": [],
+            "correction": None,
+        }
+
+    return {
+        "metadata": {"doc_id": record["doc_id"], "document_type": "exchange"},
+        "title": record["report_nm"],
+        "rows": [],
+        "correction": {
+            "correction_date": "2025-09-15",
+            "original_filing_date": "2025-09-15",
+            "reason": "투자금액 변경",
+            "changes": [
+                {
+                    "raw_field": "2. 투자내역-투자금액",
+                    "field": "2. 투자내역-투자금액",
+                    "before": "1,000,000,000",
+                    "after": "1,500,000,000",
+                }
+            ],
+        },
+    }
+
+
+@pytest.fixture
+def plausible_manifest_path(tmp_path: Path) -> Path:
+    path = tmp_path / "plausible-manifest.jsonl"
+
+    with path.open("w", encoding="utf-8") as file:
+        for record in PLAUSIBLE_RECORDS:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    return path
+
+
+@pytest.fixture
+def plausible_corpus_root(tmp_path: Path) -> Path:
+    root = tmp_path / "plausible-corpus"
+
+    for record in PLAUSIBLE_RECORDS:
+        directory = root / unicodedata.normalize("NFD", record["file_path"])
+
+        directory.mkdir(parents=True, exist_ok=True)
+
+        (directory / f"{record['rcept_no']}.xml").write_text("<html/>", encoding="utf-8")
+
+    return root
+
+
+@pytest.fixture
+def plausible_documents(monkeypatch: pytest.MonkeyPatch) -> None:
+    by_receipt_no = {
+        record["rcept_no"]: _plausible_document(record) for record in PLAUSIBLE_RECORDS
+    }
+
+    def _parse(path: Path | str) -> dict[str, Any]:
+        return by_receipt_no[Path(path).stem]
+
+    monkeypatch.setattr(
+        "disclosure_agent.agent.handlers.event_history.parse_exchange_document", _parse
+    )
+
+
+def test_selected_root_among_several_plausible_roots_is_not_certified_complete(
+    plausible_manifest_path: Path,
+    plausible_corpus_root: Path,
+    plausible_documents: None,
+) -> None:
+    """
+    질의가 고른 루트가 '가능한 대상' 여럿 중 하나여도 완결이라 말하지 않는다.
+
+    질문의 기간이 원공시를 B 하나로 좁힌다. 그러나 C가 정정한 대상은 A일 수도 B일 수도
+    있고 원문은 밝히지 않는다. 그러면 "B 뒤에 변경이 없다"는 증명되지 않은 진술이 된다.
+
+    귀속은 정하지 않는다. EventLink는 만들어지지 않는다. 막는 것은 완결 선언뿐이다.
+    """
+    plan = build_query_plan(PLAUSIBLE_QUESTION, known_companies=KNOWN_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+    assert plan.years == (2025,)
+
+    internal = build_event_history_result(
+        plan,
+        corpus_root=plausible_corpus_root,
+        manifest_path=plausible_manifest_path,
+    )
+
+    # 질의가 고른 원공시는 B 하나다. A는 기간 밖이라 루트 후보가 아니다.
+    assert internal.blocked is None
+    assert internal.root_candidate_doc_ids == (f"exchange_{PLAUSIBLE_SELECTED_ROOT}",)
+
+    assert internal.history is not None
+    assert internal.history.chain_complete is False
+    assert internal.status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+
+    # 소유를 만들지 않았다. 체인에 들어간 문서는 루트뿐이고 EventLink도 없다.
+    assert internal.history.document_ids == [f"exchange_{PLAUSIBLE_SELECTED_ROOT}"]
+    assert internal.links == ()
+
+    result = handle_event_history(
+        plan,
+        corpus_root=plausible_corpus_root,
+        manifest_path=plausible_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.INCOMPLETE_CHAIN
+    assert result.event_links == []
+
+    # 미해결 정정의 접수번호가 남는다.
+    assert [
+        receipt_no
+        for gap in result.conversion_gaps
+        for receipt_no in gap.dropped.get("unresolved_correction_receipt_nos", [])
+    ] == [PLAUSIBLE_CORRECTION]
+
+    answer = build_answer_response(result).answer
+
+    assert NO_LATER_CHANGE_SENTENCE not in answer
+
+
+def test_earlier_root_of_the_same_group_is_also_not_certified_complete(
+    plausible_manifest_path: Path,
+    plausible_corpus_root: Path,
+    plausible_documents: None,
+) -> None:
+    """
+    같은 정정이 A의 완결도 막는다. 그것은 '양쪽 모두의 정정'이라는 뜻이 아니다.
+
+    A와 B 어느 쪽도 "뒤에 변경이 없다"를 증명하지 못한다는 뜻이며, 어느 쪽에도 EventLink는
+    생기지 않는다. 하나를 골라 붙이는 것이 귀속이고, 이 PR은 귀속을 하지 않는다.
+    """
+    plan = build_query_plan(
+        f"{COMPANY}가 2023년에 낸 신규 시설투자 공시, 그 뒤에 수정된 부분이 있어?",
+        known_companies=KNOWN_COMPANIES,
+    )
+
+    assert plan.years == (2023,)
+
+    internal = build_event_history_result(
+        plan,
+        corpus_root=plausible_corpus_root,
+        manifest_path=plausible_manifest_path,
+    )
+
+    assert internal.root_candidate_doc_ids == (f"exchange_{PLAUSIBLE_EARLIER_ROOT}",)
+    assert internal.history is not None
+    assert internal.history.chain_complete is False
+    assert internal.history.document_ids == [f"exchange_{PLAUSIBLE_EARLIER_ROOT}"]
+    assert internal.links == ()

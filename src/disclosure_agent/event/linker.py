@@ -32,6 +32,10 @@
 TODO:
 - 후속·해지 공시 방향의 연결(본문 '관련공시' 필드)
 - 세부유형이 바뀌는 정정의 처리
+- 자기참조 원공시 제출일을 적은 정정의 대상 복구. 지금은 그런 정정을 가능한 모든 루트의
+  미해결 항목으로 남겨 chain_complete=False로 만들 뿐(_might_belong_to_chain), 대상을
+  되찾지는 않는다. 실측 코퍼스에 자기참조 정정이 있다(엘에스일렉트릭 20240813800252 등).
+  대상을 되찾으면 가능한 루트 중 하나만 미완결로 남고 나머지는 완결로 돌아온다.
 """
 
 from __future__ import annotations
@@ -125,7 +129,21 @@ class ChainEntry:
 
 @dataclass(frozen=True)
 class FilingChain:
-    """원공시 1건과 그에 연결된 정정공시들."""
+    """
+    원공시 1건과 그에 연결된 정정공시들.
+
+    두 자리의 뜻이 다르다.
+
+        entries           귀속을 확정한 문서. 루트와, 원문이 밝힌 연결을 따라 붙은 정정들.
+                          여기 있는 정정만 EventLink가 된다.
+
+        unresolved_links  이 루트의 정정일 수 있으나 대상을 확정하지 못한 정정. 소유를
+                          주장하지 않으며 EventLink를 만들지 않는다. 하는 일은 이 이력을
+                          완결이라 부르지 못하게 막는 것뿐이다.
+
+    같은 정정이 여러 루트의 unresolved_links에 동시에 들어갈 수 있다. 그것은 그 정정이 여러
+    이력에 속한다는 뜻이 아니라, 그중 어느 이력도 완결이라 말할 수 없다는 뜻이다.
+    """
 
     root_receipt_no: str
     entries: tuple[ChainEntry, ...] = field(default_factory=tuple)
@@ -136,8 +154,12 @@ class FilingChain:
         """
         체인을 완결된 것으로 볼 수 있는가.
 
-        루트가 후보 안에 있고, 이 체인에 속할 수 있었으나 연결하지 못한 정정이 없어야 한다.
+        루트가 후보 안에 있고, 이 루트의 정정일 수 있었으나 연결하지 못한 정정이 없어야 한다.
         완결되지 않았다면 결과에 부분 이력임을 밝혀야 한다.
+
+        unresolved_links에 들어 있다는 것이 '이 루트의 정정이다'라는 뜻은 아니다. '이 루트의
+        정정일 수 있는데 확정하지 못했다'는 뜻이며, 완결이 아니라고 말하는 데는 그것으로
+        충분하다. 귀속을 확정한 정정만 entries에 들어가고 EventLink가 된다.
         """
         return bool(self.entries) and not self.unresolved_links
 
@@ -298,12 +320,8 @@ def build_filing_chain(
     정정이 직전 정정을 가리키는 다단 체인을 따라가기 위해, 더 붙는 문서가 없을 때까지
     반복해서 확장한다.
 
-    연결하지 못한 정정 중 이 체인에 속할 수 있었던 것(후보에 체인 구성원이 들어 있는 경우)은
-    unresolved_links에 남긴다. 조용히 빼면 이력이 완결된 것처럼 보인다.
-
-    반대로 incomplete_chain과 missing_link_field는 어느 체인 것인지 알 수 없어 여기에
-    귀속시키지 않는다. 대상이 후보 집합 밖이거나 원문이 대상을 밝히지 않은 경우다.
-    그런 정정이 있다는 사실은 호출자가 후보 전체에 link_correction을 돌려 따로 드러내야 한다.
+    연결하지 못한 정정 중 이 체인에 속할 수 있었던 것은 unresolved_links에 남긴다. 조용히
+    빼면 이력이 완결된 것처럼 보인다. 무엇을 남기는지는 _might_belong_to_chain이 정한다.
 
     입력 순서에 의존하지 않는다. 결과는 공시일과 접수번호 순으로 정렬한다.
     """
@@ -351,7 +369,12 @@ def build_filing_chain(
     unresolved = tuple(
         links[correction.receipt_no]
         for correction in sorted(pending, key=_sort_key)
-        if _might_belong_to_chain(links[correction.receipt_no], chain_members)
+        if _might_belong_to_chain(
+            links[correction.receipt_no],
+            chain_members,
+            correction=correction,
+            root=root,
+        )
     )
 
     entries = tuple(
@@ -376,16 +399,128 @@ def build_filing_chain(
     )
 
 
+def _is_temporally_plausible(root: FilingLike, correction: FilingLike) -> bool:
+    """
+    이 원공시가 이 정정의 대상이었을 수 있는가. 시간만 본다.
+
+    정정보다 나중에 제출된 원공시는 정정 시점에 존재하지 않았으므로 그 정정의 대상일 수 없다.
+    그것이 시간으로 말할 수 있는 전부이며, 여기서 대상을 고르지 않는다.
+
+    다른 원공시가 몇 건이든 보지 않는 이유:
+        '이 정정이 어느 원공시의 것인가'(귀속)와 '이 원공시의 이력을 완결이라 할 수 있는가'
+        (완결성)는 다른 질문이다. 후보가 여럿이라 귀속을 정하지 못하는 것과, 이 루트가 대상일
+        수 있다는 것은 동시에 참이다. 완결성 판정에 필요한 것은 이 루트가 가능한 대상인지
+        하나뿐이고, 경쟁 후보 수는 귀속에만 관계한다. 이 모듈은 귀속을 하지 않는다.
+
+    같은 날 제출을 가능으로 보는 이유:
+        receipt_date는 날짜이지 시각이 아니다. 그리고 find_original_candidates가 원공시를
+        찾는 조건 자체가 '같은 날짜'다. 즉 같은 날 낸 정정은 예외가 아니라 정상 연결 경로이며,
+        실측 코퍼스에서 정상 연결된 정정 253건 중 6건이 원공시와 같은 날 제출됐다.
+        같은 날을 빼면 실재하는 원공시가 후보에서 빠져 가짜 판정이 나온다.
+
+    날짜를 모르면 가능으로 본다. 모르는 시간은 불가능의 증거가 아니다.
+    """
+    root_date = normalize_filing_date(root.receipt_date)
+
+    correction_date = normalize_filing_date(correction.receipt_date)
+
+    if root_date is None or correction_date is None:
+        return True
+
+    return root_date <= correction_date
+
+
+def _link_field_is_uninformative(
+    result: LinkResult,
+    correction: FilingLike,
+) -> bool:
+    """
+    이 정정의 연결 정보가 대상을 가릴 근거를 전혀 주지 못했는가.
+
+    두 경우다.
+
+        missing_link_field   원문이 원공시 제출일을 밝히지 않았거나 파서가 읽지 못했다.
+        자기참조 날짜         읽어낸 원공시 제출일이 이 정정 자신의 접수일과 같다. 정정은
+                             자기 자신을 정정할 수 없으므로 그 값은 대상을 가리키지 못한다.
+                             실측 코퍼스에 실재한다(예: 엘에스일렉트릭 20240813800252가
+                             original_filing_date로 자기 접수일 2024-08-13을 적었다).
+
+    날짜가 자기참조가 아닌 incomplete_chain은 여기 들어오지 않는다. 그때 날짜는 대상이 언제
+    제출됐는지를 실제로 말해 주고, 그 날짜에 해당하는 후보가 없다는 것은 대상이 후보 집합
+    밖이라는 근거가 된다. 근거가 있는 배제와 근거가 없는 배제를 같은 값으로 묶지 않는다.
+    """
+    if result.status == LINK_STATUS_MISSING_LINK_FIELD:
+        return True
+
+    if result.status != LINK_STATUS_INCOMPLETE_CHAIN:
+        return False
+
+    correction_date = normalize_filing_date(correction.receipt_date)
+
+    if correction_date is None:
+        return False
+
+    return normalize_filing_date(result.original_filing_date) == correction_date
+
+
 def _might_belong_to_chain(
     result: LinkResult,
     chain_members: Mapping[str, FilingLike],
+    *,
+    correction: FilingLike,
+    root: FilingLike,
 ) -> bool:
     """
-    연결에 실패한 정정이 이 체인에 속할 수 있었는지 본다.
+    연결에 실패한 정정이 이 루트의 이력을 완결이라 부르지 못하게 하는가.
 
-    후보 중 하나라도 체인 구성원이면 이 체인의 미해결 항목으로 본다. 후보가 아예 없는
-    경우(incomplete_chain)는 대상이 후보 집합 밖이므로 이 체인과 무관하다고 판단한다.
+    묻는 것이 '이 정정은 이 루트의 것인가'가 아니다. 그 둘은 다른 질문이고, 섞으면 답이
+    틀린다.
+
+        귀속(RESOLVED MEMBERSHIP)   "이 정정은 이 루트의 것이다."
+                                    증명해야 한다. EventLink를 만들 수 있다.
+                                    이 모듈이 하는 증명은 link_correction 하나뿐이다.
+
+        가능성(PLAUSIBLE MEMBERSHIP) "이 정정은 이 루트의 것일 수 있다."
+                                    완결이 아니라고 말하는 데는 이것으로 충분하다.
+                                    EventLink를 만들지 않는다.
+
+    "이 루트의 뒤에 정정이 없다"는 완결 진술이고, 그것은 가능한 대상이 하나도 남지 않았을 때만
+    참이다. 귀속을 정하지 못했다는 것은 그 진술의 근거가 되지 못한다. 모른다는 것과 없다는
+    것은 다르다.
+
+    두 갈래로 남긴다.
+
+    1. 후보 중 하나가 체인 구성원인 경우(주로 ambiguous_link). 대상 후보 안에 이 체인의
+       문서가 들어 있다.
+
+    2. 연결 정보 자체가 무의미하고(_link_field_is_uninformative), 이 루트가 시간상 가능한
+       대상인 경우(_is_temporally_plausible).
+
+    2번을 남기는 이유:
+        후보가 비어 있다는 것을 '이 체인과 무관하다'는 증거로 쓰던 자리다. 그것은 대상 날짜를
+        읽어냈을 때만 성립하는 추론이다. 날짜를 못 읽었거나 읽은 값이 자기 자신을 가리키면
+        어느 체인 것인지 가릴 근거가 하나도 없고, 근거 없이 무관하다고 정하면 그 정정은
+        결과에서 사라진다. 그러면 실제로는 뒤에 변경이 있었는데 chain_complete=True가 되어
+        "이후 변경된 내용은 확인되지 않았습니다"가 나간다. 형식이 온전한 채로 틀린 답이다.
+
+    가능한 대상이 여럿이어도 막는 이유:
+        이 루트 말고 다른 원공시도 가능한 대상이라는 사실은, 이 루트가 가능한 대상이라는
+        사실을 지우지 않는다. 경쟁 후보가 있으니 귀속은 못 정한다 — 그래서 EventLink를 만들지
+        않는다. 그러나 '이 루트 뒤에 정정이 없다'를 증명하지 못하는 것은 그대로다. 경쟁 후보
+        수를 완결성 판정에 쓰면, 후보가 많을수록 더 자신 있게 완결이라고 말하는 셈이 된다.
+
+        가능한 루트가 여럿일 때 그 정정은 각 루트의 unresolved_links에 함께 남는다. 그것은
+        '양쪽 모두의 정정'이라는 뜻이 아니라 '어느 쪽도 완결이라 말할 수 없다'는 뜻이다.
+        어느 쪽에도 EventLink는 생기지 않는다.
+
+    이 루트가 정정보다 나중에 나온 경우:
+        시간상 가능한 대상이 아니므로 이 체인은 영향을 받지 않는다. 루트가 나오기 전에
+        제출된 문서는 그 루트를 정정한 것일 수 없다.
     """
-    return any(
-        candidate.receipt_no in chain_members for candidate in result.candidates
-    )
+    if any(candidate.receipt_no in chain_members for candidate in result.candidates):
+        return True
+
+    if not _link_field_is_uninformative(result, correction):
+        return False
+
+    return _is_temporally_plausible(root, correction)

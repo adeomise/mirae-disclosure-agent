@@ -457,6 +457,555 @@ def test_ambiguous_correction_is_reported_not_dropped(
     assert chain.is_complete is False
 
 
+# --------------------------------------------------------------------------
+# 4-1. 연결 정보가 무의미한 정정 (fail-closed)
+#
+# 후보가 비어 있다는 것을 '이 체인과 무관하다'는 증거로 쓰면 안 되는 경우들이다.
+# 대상을 되찾는 것은 이 규칙의 일이 아니다. 여기서 고정하는 것은 사라지지 않는다는 것뿐이다.
+# --------------------------------------------------------------------------
+
+
+def test_self_referential_correction_keeps_the_chain_incomplete(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """
+    원공시 제출일로 자기 접수일을 적은 정정은 조용히 사라지면 안 된다.
+
+    실측(엘에스일렉트릭 20240813800252)에 있는 모양이다. 읽어낸 날짜가 자기 자신을 가리키므로
+    대상을 특정할 수 없고, 그 상태로 빼면 뒤에 실제 변경이 있었는데 chain_complete=True가 되어
+    "이후 변경된 내용은 확인되지 않았습니다"가 나간다.
+    """
+    original = make_event_filing("A0001", "20240521", document_subtype=OTHER_SUBTYPE)
+
+    correction = make_event_filing(
+        "A0002",
+        "20240813",
+        document_subtype=OTHER_SUBTYPE,
+        is_correction=True,
+    )
+
+    documents = {
+        "A0001": make_exchange_document(),
+        # 원공시 제출일이 정정 자신의 접수일과 같다.
+        "A0002": make_exchange_document(
+            original_filing_date="2024-08-13",
+            correction_date="2024-08-13",
+            changes=[("투자금액(원)", "80,300,000,000", "100,800,000,000")],
+        ),
+    }
+
+    chain = build_filing_chain(
+        root_receipt_no="A0001",
+        filings=[original, correction],
+        documents=documents,
+        event_type="facility_investment",
+    )
+
+    # 원공시에 붙이지는 못한다. 이 PR은 연결을 되찾지 않는다.
+    assert [entry.filing.receipt_no for entry in chain.entries] == ["A0001"]
+
+    # 그러나 사라지지 않는다.
+    assert [link.correction_receipt_no for link in chain.unresolved_links] == ["A0002"]
+    assert chain.unresolved_links[0].status == LINK_STATUS_INCOMPLETE_CHAIN
+    assert chain.is_complete is False
+
+    # 없는 연결을 지어내지 않는다.
+    assert chain.unresolved_links[0].original is None
+    assert chain.unresolved_links[0].candidates == ()
+
+
+def test_missing_link_field_correction_keeps_the_chain_incomplete(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """원공시 제출일을 아예 읽지 못한 정정도 같은 이유로 남는다."""
+    original = make_event_filing("A0001", "20250830")
+
+    correction = make_event_filing("A0002", "20251008", is_correction=True)
+
+    documents = {
+        "A0001": make_exchange_document(),
+        "A0002": make_exchange_document(
+            original_filing_date=None,
+            correction_date="2025-10-08",
+        ),
+    }
+
+    chain = build_filing_chain(
+        root_receipt_no="A0001",
+        filings=[original, correction],
+        documents=documents,
+        event_type="supply_contract",
+    )
+
+    assert [entry.filing.receipt_no for entry in chain.entries] == ["A0001"]
+    assert [link.correction_receipt_no for link in chain.unresolved_links] == ["A0002"]
+    assert chain.unresolved_links[0].status == LINK_STATUS_MISSING_LINK_FIELD
+    assert chain.is_complete is False
+
+
+def test_root_filed_after_the_correction_is_not_a_competing_root(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """
+    정정보다 나중에 나온 원공시를 경쟁 후보로 세지 않는다.
+
+        B0001 원공시    2025-04-01
+        B0002 정정      2025-05-01   자기참조. 연결 실패
+        A0001 원공시    2025-08-30
+
+    B0002가 제출된 날 A0001은 존재하지 않았다. 그러므로 B0002가 정정했을 수 있는 원공시는
+    B0001 하나뿐이고, B0001 체인에서 사라지면 안 된다. 후보 집합 전체의 원공시를 세면
+    '원공시가 2건이라 모른다'가 되어 그 정정이 어느 체인에도 남지 않고, B0001이 완결로
+    답해진다. BB17과 같은 오류다.
+
+    반대로 A0001은 B0002보다 뒤에 나왔으므로 B0002에게 정정당할 수 없다. A0001 체인은
+    그대로 완결이어야 한다.
+    """
+    filings, documents = _q13_shaped_chain(make_event_filing, make_exchange_document)
+
+    earlier_root = make_event_filing("B0001", "20250401")
+
+    earlier_correction = make_event_filing("B0002", "20250501", is_correction=True)
+
+    documents["B0001"] = make_exchange_document()
+    documents["B0002"] = make_exchange_document(
+        original_filing_date="2025-05-01",
+        correction_date="2025-05-01",
+    )
+
+    everything = [*filings, earlier_root, earlier_correction]
+
+    # 정정 시점에 존재하던 원공시가 B0001 하나뿐이다. 그 체인은 미완결이어야 한다.
+    earlier_chain = build_filing_chain(
+        root_receipt_no="B0001",
+        filings=everything,
+        documents=documents,
+        event_type="supply_contract",
+    )
+
+    assert [link.correction_receipt_no for link in earlier_chain.unresolved_links] == [
+        "B0002"
+    ]
+    assert earlier_chain.is_complete is False
+
+    # 연결을 지어내지는 않는다. 정정은 여전히 B0001에 붙지 않았다.
+    assert [entry.filing.receipt_no for entry in earlier_chain.entries] == ["B0001"]
+    assert earlier_chain.unresolved_links[0].original is None
+
+    # 정정보다 뒤에 나온 원공시의 체인은 오염되지 않는다.
+    later_chain = build_filing_chain(
+        root_receipt_no="A0001",
+        filings=everything,
+        documents=documents,
+        event_type="supply_contract",
+    )
+
+    assert [entry.filing.receipt_no for entry in later_chain.entries] == [
+        "A0001",
+        "A0002",
+        "A0003",
+    ]
+    assert later_chain.unresolved_links == ()
+    assert later_chain.is_complete is True
+
+
+def test_several_plausible_roots_all_lose_completeness_without_gaining_a_link(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """
+    가능한 대상이 여럿이어도 각 루트는 완결이 아니다. 그러나 어느 쪽도 소유하지 않는다.
+
+        A0001 원공시    2025-03-01
+        B0001 원공시    2025-08-30
+        C0001 정정      2025-09-15   연결 정보 없음
+
+    귀속(RESOLVED MEMBERSHIP)은 정하지 못한다. 둘 다 시간상 가능하고 본문은 대상을 밝히지
+    않았다. 그래서 EventLink를 만들지 않는다.
+
+    가능성(PLAUSIBLE MEMBERSHIP)은 양쪽 모두에 있다. "이 루트 뒤에 정정이 없다"를 어느
+    쪽에 대해서도 증명하지 못하므로 양쪽 다 완결이 아니다.
+
+    둘은 다른 진술이다. 경쟁 후보가 있다는 이유로 완결이라고 말하면, 후보가 많을수록 더
+    자신 있게 완결이라고 하는 셈이 된다.
+    """
+    first_root = make_event_filing("A0001", "20250301")
+
+    second_root = make_event_filing("B0001", "20250830")
+
+    correction = make_event_filing("C0001", "20250915", is_correction=True)
+
+    documents = {
+        "A0001": make_exchange_document(),
+        "B0001": make_exchange_document(),
+        "C0001": make_exchange_document(
+            original_filing_date=None,
+            correction_date="2025-09-15",
+        ),
+    }
+
+    filings = [first_root, second_root, correction]
+
+    for root_receipt_no in ("A0001", "B0001"):
+        chain = build_filing_chain(
+            root_receipt_no=root_receipt_no,
+            filings=filings,
+            documents=documents,
+            event_type="supply_contract",
+        )
+
+        # 소유를 만들지 않는다. 체인에 들어간 문서는 루트뿐이다.
+        assert [entry.filing.receipt_no for entry in chain.entries] == [root_receipt_no]
+
+        # 그러나 완결이라고 하지 않는다.
+        assert [link.correction_receipt_no for link in chain.unresolved_links] == [
+            "C0001"
+        ]
+        assert chain.is_complete is False
+
+        # 연결을 지어내지 않았다는 것을 판정 자체로 확인한다.
+        assert chain.unresolved_links[0].original is None
+        assert chain.unresolved_links[0].candidates == ()
+
+    # 연결 판정은 그대로 미해결이다. 체인 구성이 판정을 바꾸지 않는다.
+    result = link_correction(
+        correction,
+        document=documents["C0001"],
+        candidates=filings,
+    )
+
+    assert result.status == LINK_STATUS_MISSING_LINK_FIELD
+    assert result.original is None
+
+
+def test_informative_link_to_one_root_leaves_the_other_root_complete(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """
+    원문이 대상을 밝히면 귀속이 정해지고, 다른 루트는 완결 그대로다.
+
+    같은 기업·같은 유형이고 정정이 뒤에 나왔다는 것만으로는 다른 루트를 건드리지 않는다.
+    가능성 규칙은 연결 정보가 무의미할 때만 발동한다.
+    """
+    first_root = make_event_filing("A0001", "20250301")
+
+    second_root = make_event_filing("B0001", "20250830")
+
+    correction = make_event_filing("C0001", "20250915", is_correction=True)
+
+    documents = {
+        "A0001": make_exchange_document(),
+        "B0001": make_exchange_document(),
+        "C0001": make_exchange_document(
+            original_filing_date="2025-03-01",
+            correction_date="2025-09-15",
+        ),
+    }
+
+    filings = [first_root, second_root, correction]
+
+    owned = build_filing_chain(
+        root_receipt_no="A0001",
+        filings=filings,
+        documents=documents,
+        event_type="supply_contract",
+    )
+
+    assert [entry.filing.receipt_no for entry in owned.entries] == ["A0001", "C0001"]
+    assert owned.is_complete is True
+
+    untouched = build_filing_chain(
+        root_receipt_no="B0001",
+        filings=filings,
+        documents=documents,
+        event_type="supply_contract",
+    )
+
+    assert [entry.filing.receipt_no for entry in untouched.entries] == ["B0001"]
+    assert untouched.unresolved_links == ()
+    assert untouched.is_complete is True
+
+
+def test_same_day_root_stays_plausible(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """
+    같은 날 제출된 원공시는 가능한 대상이다.
+
+    receipt_date는 날짜이지 시각이 아니고, find_original_candidates가 원공시를 찾는 조건
+    자체가 '같은 날짜'다. 실측 코퍼스에서 정상 연결된 정정 253건 중 6건이 원공시와 같은 날
+    제출됐다. 같은 날을 빼면 실재하는 원공시가 후보에서 빠져 가짜 완결이 나온다.
+    """
+    root = make_event_filing("A0001", "20250501")
+
+    correction = make_event_filing("A0002", "20250501", is_correction=True)
+
+    documents = {
+        "A0001": make_exchange_document(),
+        "A0002": make_exchange_document(
+            original_filing_date=None,
+            correction_date="2025-05-01",
+        ),
+    }
+
+    chain = build_filing_chain(
+        root_receipt_no="A0001",
+        filings=[root, correction],
+        documents=documents,
+        event_type="supply_contract",
+    )
+
+    assert [link.correction_receipt_no for link in chain.unresolved_links] == ["A0002"]
+    assert chain.is_complete is False
+
+
+def test_unknown_receipt_date_is_not_evidence_of_impossibility(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """날짜를 모르면 가능으로 본다. 모르는 시간은 불가능의 증거가 아니다."""
+    root = make_event_filing("A0001", None)
+
+    correction = make_event_filing("A0002", "20250501", is_correction=True)
+
+    documents = {
+        "A0001": make_exchange_document(),
+        "A0002": make_exchange_document(
+            original_filing_date=None,
+            correction_date="2025-05-01",
+        ),
+    }
+
+    chain = build_filing_chain(
+        root_receipt_no="A0001",
+        filings=[root, correction],
+        documents=documents,
+        event_type="supply_contract",
+    )
+
+    assert [link.correction_receipt_no for link in chain.unresolved_links] == ["A0002"]
+    assert chain.is_complete is False
+
+
+def test_many_roots_around_the_correction_split_by_time_only(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """
+    정정 앞뒤로 원공시가 여럿인 경우. 가르는 기준은 시간 하나다.
+
+    앞의 5건은 전부 가능한 대상이므로 전부 완결이 아니다. 뒤의 2건은 정정 시점에 존재하지
+    않았으므로 영향을 받지 않는다. 개수는 판정에 쓰이지 않는다.
+    """
+    before = [
+        make_event_filing(f"E000{index}", date)
+        for index, date in enumerate(
+            ("20250101", "20250201", "20250301", "20250401", "20250501"), start=1
+        )
+    ]
+
+    after = [
+        make_event_filing("L0001", "20251001"),
+        make_event_filing("L0002", "20251101"),
+    ]
+
+    correction = make_event_filing("C0001", "20250601", is_correction=True)
+
+    documents = {
+        filing.receipt_no: make_exchange_document() for filing in (*before, *after)
+    }
+    documents["C0001"] = make_exchange_document(
+        original_filing_date="2025-06-01",
+        correction_date="2025-06-01",
+    )
+
+    filings = [*before, *after, correction]
+
+    for root in before:
+        chain = build_filing_chain(
+            root_receipt_no=root.receipt_no,
+            filings=filings,
+            documents=documents,
+            event_type="supply_contract",
+        )
+
+        assert chain.is_complete is False
+        assert [entry.filing.receipt_no for entry in chain.entries] == [root.receipt_no]
+
+    for root in after:
+        chain = build_filing_chain(
+            root_receipt_no=root.receipt_no,
+            filings=filings,
+            documents=documents,
+            event_type="supply_contract",
+        )
+
+        assert chain.unresolved_links == ()
+        assert chain.is_complete is True
+
+
+def test_correction_before_every_root_touches_none_of_them(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """모든 원공시보다 먼저 나온 정정은 어느 이력의 완결도 막지 않는다."""
+    roots = [
+        make_event_filing("A0001", "20250601"),
+        make_event_filing("B0001", "20250701"),
+    ]
+
+    correction = make_event_filing("C0001", "20250101", is_correction=True)
+
+    documents = {filing.receipt_no: make_exchange_document() for filing in roots}
+    documents["C0001"] = make_exchange_document(
+        original_filing_date=None,
+        correction_date="2025-01-01",
+    )
+
+    for root in roots:
+        chain = build_filing_chain(
+            root_receipt_no=root.receipt_no,
+            filings=[*roots, correction],
+            documents=documents,
+            event_type="supply_contract",
+        )
+
+        assert chain.unresolved_links == ()
+        assert chain.is_complete is True
+
+
+def test_several_unresolved_corrections_are_all_kept(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """미해결 정정이 여럿이면 전부 남는다. 하나로 뭉치지 않는다."""
+    root = make_event_filing("A0001", "20250101")
+
+    first = make_event_filing("A0002", "20250301", is_correction=True)
+
+    second = make_event_filing("A0003", "20250501", is_correction=True)
+
+    documents = {
+        "A0001": make_exchange_document(),
+        # 자기참조.
+        "A0002": make_exchange_document(
+            original_filing_date="2025-03-01",
+            correction_date="2025-03-01",
+        ),
+        # 연결 정보 없음.
+        "A0003": make_exchange_document(
+            original_filing_date=None,
+            correction_date="2025-05-01",
+        ),
+    }
+
+    chain = build_filing_chain(
+        root_receipt_no="A0001",
+        filings=[root, first, second],
+        documents=documents,
+        event_type="supply_contract",
+    )
+
+    assert [link.correction_receipt_no for link in chain.unresolved_links] == [
+        "A0002",
+        "A0003",
+    ]
+    assert chain.is_complete is False
+    assert [entry.filing.receipt_no for entry in chain.entries] == ["A0001"]
+
+
+def test_resolved_correction_of_another_root_does_not_reach_this_chain(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """연결에 성공했으나 대상이 다른 루트인 정정은 이 체인의 미해결 항목이 아니다."""
+    filings, documents = _q13_shaped_chain(make_event_filing, make_exchange_document)
+
+    other_root = make_event_filing("B0001", "20250401")
+
+    other_correction = make_event_filing("B0002", "20250501", is_correction=True)
+
+    documents["B0001"] = make_exchange_document()
+    documents["B0002"] = make_exchange_document(
+        original_filing_date="2025-04-01",
+        correction_date="2025-05-01",
+    )
+
+    chain = build_filing_chain(
+        root_receipt_no="A0001",
+        filings=[*filings, other_root, other_correction],
+        documents=documents,
+        event_type="supply_contract",
+    )
+
+    assert chain.unresolved_links == ()
+    assert chain.is_complete is True
+
+
+def test_correction_filed_before_the_root_is_not_attributed_to_it(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """루트가 나오기 전에 제출된 문서는 그 루트를 정정한 것일 수 없다."""
+    original = make_event_filing("A0002", "20250830")
+
+    earlier = make_event_filing("A0001", "20250401", is_correction=True)
+
+    documents = {
+        "A0002": make_exchange_document(),
+        "A0001": make_exchange_document(
+            original_filing_date=None,
+            correction_date="2025-04-01",
+        ),
+    }
+
+    chain = build_filing_chain(
+        root_receipt_no="A0002",
+        filings=[original, earlier],
+        documents=documents,
+        event_type="supply_contract",
+    )
+
+    assert chain.unresolved_links == ()
+    assert chain.is_complete is True
+
+
+def test_out_of_corpus_correction_still_does_not_join_the_chain(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """
+    대상 날짜를 읽어냈는데 그 날의 후보가 없는 경우는 예전과 같이 무관으로 본다.
+
+    그 날짜는 대상이 언제 제출됐는지를 실제로 말해 주고, 후보에 그 날의 공시가 없다는 것은
+    대상이 후보 집합 밖이라는 근거가 된다. 근거가 있는 배제까지 fail-closed로 바꾸면
+    코퍼스 경계 밖을 가리키는 정정 하나가 모든 단일 루트 체인을 미완결로 만든다.
+    """
+    filings, documents = _q13_shaped_chain(make_event_filing, make_exchange_document)
+
+    stray = make_event_filing("A0009", "20251230", is_correction=True)
+
+    documents["A0009"] = make_exchange_document(
+        original_filing_date="2019-01-02",
+        correction_date="2025-12-30",
+    )
+
+    chain = build_filing_chain(
+        root_receipt_no="A0001",
+        filings=[*filings, stray],
+        documents=documents,
+        event_type="supply_contract",
+    )
+
+    assert chain.unresolved_links == ()
+    assert chain.is_complete is True
+
+
 def test_chain_with_unknown_root_is_empty(make_event_filing, make_exchange_document) -> None:
     filings, documents = _q13_shaped_chain(make_event_filing, make_exchange_document)
 

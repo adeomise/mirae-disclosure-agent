@@ -17,19 +17,26 @@
     "몇 번 바뀌었나"를 문장으로 옮기는 일은 answer-builder의 책임이다.
 
     ResolvedEventState도 만들지 않는다. 질문이 묻는 것은 최종 상태 하나가 아니라 변경
-    이력 전체이고, 그 정본은 EventHistory.changes다.
+    이력 전체이며, 그 세부 내용(어떤 필드가 무엇에서 무엇으로 바뀌었는가)의 정본은
+    EventHistory.changes다. 다만 사용자 질문의 "몇 번"에 대한 semantic count는
+    EventHistory.changes의 길이가 아니라 EventLink cardinality이고, Q15에서는 3이다
+    (아래 "몇 번"이 무엇을 세는가에 대하여 참고).
 
-"몇 번"이 무엇을 세는가에 대하여(미결):
-    Q15의 체인에는 정정 공시 3건과 이름 붙은 FieldChange 4건이 있다. 사용자에게 "몇 번
-    바뀌었다"고 말할 때 세어야 하는 것이 3인지 4인지는 이 PR에서 정하지 않는다.
+"몇 번"이 무엇을 세는가에 대하여:
+    사용자 질문의 "몇 번 바뀌었어?"는 correction/change event cardinality를 묻는다.
+    evaluation contract(evaluation/README.md의 semantic_count)는 이를 EventLink 수로
+    정의하며, Q15의 semantic answer count는 3이다(정정 공시 3건).
+
+    Q15의 체인에는 원공시 1건 + 정정 공시 3건(document_count=4)과, 이름 붙은 FieldChange
+    4건이 있다. FieldChange 4건은 정정마다 어떤 필드가 어떻게 바뀌었는지의 세부 기록이며,
+    사용자에게 답하는 "몇 번"이 아니다.
 
     두 값 모두 결과에 그대로 남아 있다. 정정 건수는 EventHistory.document_ids에서 원공시
     하나를 뺀 수이고(= EventLink 수), 필드 변경 건수는 EventHistory.changes의 길이다.
     producer가 둘 중 하나를 미리 접어 버리면 나중에 어느 쪽으로 답하기로 정하든 되돌릴 수
-    없으므로, 여기서는 둘 다 보존하는 것까지만 고정한다.
-
-    세는 규칙을 정하는 일은 answer-builder/HCX 쪽 결정이며 evaluation lifecycle을 future
-    에서 active로 옮기는 작업과 함께 다룬다. 그때까지 이 파일은 어느 쪽도 주장하지 않는다.
+    없으므로, 여기서는 둘 다 보존하는 것까지만 고정한다. "몇 번"으로 답할 값을 EventLink
+    수로 고르는 일은 evaluation의 semantic_count contract가 맡고, 그 값을 문장으로 옮기는
+    일은 answer-builder/HCX가 맡는다.
 
 실제 공시 값에 대하여:
     합성 fixture에는 실제 접수번호·수치를 쓰지 않는다. 실측 코퍼스를 읽는 테스트는

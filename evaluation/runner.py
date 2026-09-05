@@ -84,6 +84,24 @@ class CollectionCounts(BaseModel):
     document_summaries: int | None = Field(default=None, ge=0)
 
 
+class SemanticCountExpectation(BaseModel):
+    """Declares which structured collection cardinality answers the question's count.
+
+    A question that asks "how many times" can be answered by more than one
+    structured collection in a result (e.g. an EventHistory's document chain
+    length vs. its FieldChange count vs. its EventLink count). `counts` alone
+    cannot express which of those cardinalities is the actual semantic answer
+    to the user's question; it only pins raw collection sizes. This expectation
+    is the same collection-cardinality check, plus an explicit claim that
+    `source`'s length is the count the user's question means. `source` is
+    restricted to structured collections this contract currently commits to as
+    a valid answer source, not every collection on the result.
+    """
+
+    source: Literal["event_links"]
+    value: int = Field(ge=0)
+
+
 class IntegrityExpectation(BaseModel):
     """Expected reference-integrity outcomes."""
 
@@ -143,6 +161,7 @@ class GoldAnswer(BaseModel):
     counts: CollectionCounts | None = None
     answerability_detail_reason: str | None = None
     integrity: IntegrityExpectation | None = None
+    semantic_count: SemanticCountExpectation | None = None
 
     @model_validator(mode="after")
     def validate_answerability(self) -> GoldAnswer:
@@ -839,6 +858,16 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
 
     if gold.event_history is not None:
         failures.extend(_event_history_failures(gold.event_history, prediction))
+
+    if gold.semantic_count is not None:
+        source = gold.semantic_count.source
+        expected_value = gold.semantic_count.value
+        actual_value = len(getattr(prediction, source))
+        if actual_value != expected_value:
+            failures.append(
+                f"semantic_count: expected {expected_value} from {source}, "
+                f"got {actual_value}"
+            )
 
     if gold.integrity is not None:
         checks = {

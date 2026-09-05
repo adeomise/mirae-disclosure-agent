@@ -604,6 +604,13 @@ def test_active_q15_gold_pins_corpus_verified_history_structure() -> None:
     }
     assert q15.min_evidence_count == 4
     assert q15.integrity.event_history_evidence_references is True
+    # "몇 번 바뀌었어"의 semantic count는 EventLink 수(3)다. document_count=4는 원공시 +
+    # 정정 3건의 chain 길이이고, FieldChange 4건은 그 안의 세부 필드 변경 건수이므로 둘 다
+    # 사용자 질문의 "몇 번"으로 쓰지 않는다.
+    assert q15.semantic_count.model_dump(mode="json") == {
+        "source": "event_links",
+        "value": 3,
+    }
 
 
 def test_q14_gold_requires_ambiguity_instead_of_one_chosen_history() -> None:
@@ -1451,6 +1458,182 @@ def test_event_history_links_are_checked_against_their_own_history() -> None:
     )
 
     assert compare_prediction(gold, actual) == []
+
+
+def q15_like_prediction(*, event_link_count: int) -> PredictionCase:
+    """
+    Build a Q15-shaped facility-investment-history prediction: a fixed 4-document
+    chain (root + 3 corrections) with 4 FieldChanges, and a configurable EventLink
+    count.
+
+    The document/FieldChange shape never changes with `event_link_count`, so tests
+    using this fixture can vary EventLink cardinality alone and show that
+    `semantic_count` tracks `event_links`, not `document_count` or FieldChange count.
+    This is a generic fixture builder, not case_id-specific runner logic.
+    """
+    document_ids = [f"doc-{index}" for index in range(1, 5)]
+    evidence = [
+        {"evidence_id": f"evidence-{doc_id}", "doc_id": doc_id, "location_type": "event_field"}
+        for doc_id in document_ids
+    ]
+    changes = [
+        {
+            "field_name": "investment_amount",
+            "before": "100",
+            "after": "110",
+            "before_evidence_id": "evidence-doc-1",
+            "after_evidence_id": "evidence-doc-2",
+        },
+        {
+            "field_name": "investment_end_date",
+            "before": "2025-12-15",
+            "after": "2026-03-31",
+            "before_evidence_id": "evidence-doc-2",
+            "after_evidence_id": "evidence-doc-2",
+        },
+        {
+            "field_name": "investment_amount",
+            "before": "110",
+            "after": "120",
+            "before_evidence_id": "evidence-doc-2",
+            "after_evidence_id": "evidence-doc-3",
+        },
+        {
+            "field_name": "investment_amount",
+            "before": "120",
+            "after": "130",
+            "before_evidence_id": "evidence-doc-3",
+            "after_evidence_id": "evidence-doc-4",
+        },
+    ]
+    chain_links = [
+        {
+            "link_id": "link-1",
+            "source_doc_id": "doc-2",
+            "relation": "correction_of",
+            "raw_reference": {},
+            "resolved_doc_id": "doc-1",
+            "resolution_status": "resolved",
+        },
+        {
+            "link_id": "link-2",
+            "source_doc_id": "doc-3",
+            "relation": "correction_of",
+            "raw_reference": {},
+            "resolved_doc_id": "doc-2",
+            "resolution_status": "resolved",
+        },
+        {
+            "link_id": "link-3",
+            "source_doc_id": "doc-4",
+            "relation": "correction_of",
+            "raw_reference": {},
+            "resolved_doc_id": "doc-3",
+            "resolution_status": "resolved",
+        },
+    ]
+    if event_link_count <= len(chain_links):
+        links = chain_links[:event_link_count]
+    else:
+        links = [
+            *chain_links,
+            *(
+                {**chain_links[-1], "link_id": f"link-extra-{index}"}
+                for index in range(event_link_count - len(chain_links))
+            ),
+        ]
+
+    return prediction(
+        "q15_like",
+        facts=[],
+        event_links=links,
+        event_histories=[
+            {
+                "event_id": "event-1",
+                "document_ids": document_ids,
+                "changes": changes,
+                "chain_complete": True,
+            }
+        ],
+        evidence=evidence,
+    )
+
+
+def test_active_q15_gold_accepts_a_matching_prediction() -> None:
+    """
+    A prediction shaped like the real Q15 corpus result (4-document chain, 3
+    EventLinks, 4 FieldChanges) passes the real q15 gold record, including the new
+    semantic_count contract, with no Q15-specific runner branch.
+    """
+    q15_gold = {gold.case_id: gold for gold in load_dataset().gold_answers}["q15"]
+
+    assert compare_prediction(q15_gold, q15_like_prediction(event_link_count=3)) == []
+
+
+def test_semantic_count_event_links_pass_regardless_of_field_change_count() -> None:
+    """
+    The gold's change_count (4) and semantic_count.value (3) are different numbers
+    checked by different mechanisms; both hold at once for the same prediction. This
+    is the contract test that "몇 번 바뀌었어" is answered by EventLink cardinality,
+    not FieldChange cardinality, even though FieldChange count is also 4 here.
+    """
+    gold = answerable_gold(
+        "case",
+        facts=None,
+        event_history={
+            "link_resolution": "resolved",
+            "chain_complete": True,
+            "document_count": 4,
+            "change_count": 4,
+        },
+        semantic_count={"source": "event_links", "value": 3},
+    )
+
+    assert compare_prediction(gold, q15_like_prediction(event_link_count=3)) == []
+
+
+@pytest.mark.parametrize("event_link_count", [2, 4])
+def test_semantic_count_fails_when_event_link_cardinality_differs(
+    event_link_count: int,
+) -> None:
+    gold = answerable_gold(
+        "case",
+        facts=None,
+        semantic_count={"source": "event_links", "value": 3},
+    )
+
+    failures = compare_prediction(
+        gold, q15_like_prediction(event_link_count=event_link_count)
+    )
+
+    assert (
+        f"semantic_count: expected 3 from event_links, got {event_link_count}"
+        in failures
+    )
+
+
+def test_semantic_count_fails_even_when_document_count_still_matches() -> None:
+    """
+    document_count=4 is the chain length (root + corrections), not the semantic
+    answer count. A prediction can get document_count right while getting the
+    EventLink cardinality the question actually means wrong, and semantic_count must
+    catch that independently of document_count.
+    """
+    gold = answerable_gold(
+        "case",
+        facts=None,
+        event_history={
+            "link_resolution": "resolved",
+            "chain_complete": True,
+            "document_count": 4,
+        },
+        semantic_count={"source": "event_links", "value": 3},
+    )
+
+    failures = compare_prediction(gold, q15_like_prediction(event_link_count=2))
+
+    assert not any(failure.startswith("event_history.document_count") for failure in failures)
+    assert "semantic_count: expected 3 from event_links, got 2" in failures
 
 
 def test_resolved_event_states_exact_count_mismatch_fails() -> None:

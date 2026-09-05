@@ -53,6 +53,45 @@ documents to belong to the same history chain. Unrelated Evidence that is not re
 by an EventHistory or FieldChange is not restricted. Value-level EventHistory and other
 content rubrics remain future extensions.
 
+## Semantic count contract
+
+Some questions ask "how many times" ("몇 번") about something a result represents with
+more than one structured collection. `counts` alone pins raw collection sizes but does
+not say which of those sizes is the actual answer to the user's question — it is a
+structural check, not a claim about meaning. `semantic_count` is that claim:
+
+```json
+"semantic_count": {"source": "event_links", "value": 3}
+```
+
+`source` names the structured collection on the predicted result whose length is the
+semantic count answer; `value` is the expected length. The comparator computes
+`len(getattr(prediction, source))` and compares it to `value`, independently of any
+`counts` entry for the same collection. `source` is restricted to structured collections
+this contract currently commits to as a valid count answer — today only `event_links` —
+not every collection on the result; it is not resolved per `case_id`.
+
+### Q15: what "몇 번" counts
+
+Q15 ("레인보우로보틱스 사옥·제조시설 신축 투자, 그동안 계획이 몇 번 바뀌었어?") is the
+representative case for this contract. Its EventHistory chain has:
+
+- `document_count = 4`: the root filing plus 3 correction filings (chain length).
+- `event_links = 3`: one correction link per correction filing — this is the semantic
+  answer count. Q15's gold sets `semantic_count.source = "event_links"` and
+  `semantic_count.value = 3`.
+- `len(history.changes) = 4`: individual FieldChange entries (e.g. one correction
+  changes both the investment amount and the completion date, producing two
+  FieldChanges from one correction event). FieldChange cardinality is **not** the
+  user-facing "몇 번" count — it is a finer-grained record of what changed within each
+  correction, not of how many corrections occurred.
+
+`counts.event_links` and `event_history.document_count` in Q15's gold continue to pin
+the underlying collection sizes as before; `semantic_count` additionally marks
+`event_links` as the collection whose cardinality answers the question, so this
+distinction cannot silently drift if `counts` or `event_history` gold changes for
+unrelated reasons.
+
 ## Corpus-dependent gold values
 
 Some representative gold values depend on what the current corpus contains, not only on

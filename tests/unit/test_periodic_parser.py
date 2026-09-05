@@ -4,6 +4,7 @@ import pytest
 from lxml import etree
 
 from disclosure_agent.periodic.parser import (
+    _repair_malformed_attribute_syntax,
     _repair_malformed_percent_comparisons_in_text,
     parse_periodic_xml,
     sanitize_dart_xml_text,
@@ -449,6 +450,100 @@ def test_incomplete_korean_text_in_protected_regions_is_noop() -> None:
     </DOCUMENT>"""
 
     assert sanitize_dart_xml_text(protected) == protected
+
+
+def test_duplicated_attribute_opening_quote_is_repaired_for_strict_parse() -> None:
+    malformed = (
+        '<TH ENG=""Other receivables and others" WIDTH="111">미수금 등</TH>'
+    )
+
+    sanitized = sanitize_dart_xml_text(malformed)
+    element = etree.fromstring(
+        sanitized.encode("utf-8"),
+        etree.XMLParser(recover=False),
+    )
+
+    assert sanitized == (
+        '<TH ENG="Other receivables and others" WIDTH="111">미수금 등</TH>'
+    )
+    assert element.get("ENG") == "Other receivables and others"
+    assert element.get("WIDTH") == "111"
+    assert element.text == "미수금 등"
+
+
+def test_missing_whitespace_between_attributes_is_repaired_for_strict_parse() -> None:
+    malformed = '<TH WIDTH="111"HEIGHT="92">테스트</TH>'
+
+    sanitized = sanitize_dart_xml_text(malformed)
+    element = etree.fromstring(
+        sanitized.encode("utf-8"),
+        etree.XMLParser(recover=False),
+    )
+
+    assert sanitized == '<TH WIDTH="111" HEIGHT="92">테스트</TH>'
+    assert element.get("WIDTH") == "111"
+    assert element.get("HEIGHT") == "92"
+
+
+def test_valid_empty_attribute_is_preserved() -> None:
+    valid = '<TH ENG="" WIDTH="111" HEIGHT="92">테스트</TH>'
+
+    assert _repair_malformed_attribute_syntax(valid) == valid
+    assert sanitize_dart_xml_text(valid) == valid
+
+    element = etree.fromstring(valid.encode("utf-8"))
+    assert element.get("ENG") == ""
+    assert element.get("WIDTH") == "111"
+    assert element.get("HEIGHT") == "92"
+
+
+def test_valid_attributes_and_attribute_like_element_text_are_unchanged() -> None:
+    valid = (
+        '<TH ENG="" WIDTH="111" HEIGHT="92" NOTE=\'quoted "text"\'>'
+        'ENG=""Other WIDTH="111"HEIGHT="92"'
+        "</TH>"
+    )
+
+    assert sanitize_dart_xml_text(valid) == valid
+
+    element = etree.fromstring(valid.encode("utf-8"))
+    assert element.attrib == {
+        "ENG": "",
+        "WIDTH": "111",
+        "HEIGHT": "92",
+        "NOTE": 'quoted "text"',
+    }
+    assert element.text == 'ENG=""Other WIDTH="111"HEIGHT="92"'
+
+
+def test_attribute_repair_does_not_modify_protected_xml_regions() -> None:
+    protected = """<?xml version="1.0" encoding="UTF-8"?>
+    <DOCUMENT><?audit TH ENG=""Other WIDTH="111"HEIGHT="92"?>
+      <!-- <TH ENG=""Other WIDTH="111"HEIGHT="92"> -->
+      <BODY><SECTION-1><P><![CDATA[
+        <TH ENG=""Other WIDTH="111"HEIGHT="92">
+      ]]></P></SECTION-1></BODY>
+    </DOCUMENT>"""
+
+    assert sanitize_dart_xml_text(protected) == protected
+    etree.fromstring(protected.encode("utf-8"), etree.XMLParser(recover=False))
+
+
+def test_both_malformed_attribute_patterns_are_repaired_together() -> None:
+    malformed = '<TH ENG=""Other" WIDTH="111"HEIGHT="92">테스트</TH>'
+
+    sanitized = sanitize_dart_xml_text(malformed)
+    element = etree.fromstring(
+        sanitized.encode("utf-8"),
+        etree.XMLParser(recover=False),
+    )
+
+    assert sanitized == '<TH ENG="Other" WIDTH="111" HEIGHT="92">테스트</TH>'
+    assert element.attrib == {
+        "ENG": "Other",
+        "WIDTH": "111",
+        "HEIGHT": "92",
+    }
 
 
 @pytest.mark.parametrize(

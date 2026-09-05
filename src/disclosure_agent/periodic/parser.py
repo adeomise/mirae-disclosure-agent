@@ -82,6 +82,142 @@ MALFORMED_INCOMPLETE_KOREAN_TEXT_PATTERN = re.compile(
     rf"<(?=[가-힣]{{1,9}}[ \t]*"
     rf"</(?:{_DART_STRUCTURAL_CLOSING_NAMES}|SECTION-\d+)[ \t]*>)"
 )
+XML_ATTRIBUTE_NAME_PATTERN = re.compile(r"[A-Za-z_:][A-Za-z0-9_.:-]*")
+MALFORMED_DUPLICATED_QUOTE_VALUE_START_PATTERN = re.compile(
+    r"[^\s\"'=<>/]"
+)
+
+
+def _repair_malformed_attribute_syntax(fragment: str) -> str:
+    """Audit-confirmed attribute syntax errors in structural start tags only.
+
+    Two repairs are intentionally narrow:
+
+    - ``NAME=""value"`` loses the duplicated opening quote only when the
+      second quote is followed by a non-delimiter value character.  Therefore
+      the valid empty value ``NAME=""`` is unchanged.
+    - ``NAME="value"NEXT="other"`` gains one space only when the closing
+      quote is immediately followed by a complete XML attribute name and
+      ``=``.
+
+    The small lexer must understand the whole start tag before applying any
+    recorded edit.  Unknown or otherwise malformed attribute grammar remains
+    untouched so the strict XML parser can reject it.
+    """
+
+    parts: list[str] = []
+    unchanged_start = 0
+    search_position = 0
+
+    while True:
+        tag_start = fragment.find("<", search_position)
+        if tag_start == -1:
+            break
+
+        tag_name_match = XML_ATTRIBUTE_NAME_PATTERN.match(fragment, tag_start + 1)
+        if tag_name_match is None:
+            search_position = tag_start + 1
+            continue
+
+        tag_name = tag_name_match.group(0)
+        if (
+            tag_name not in DART_STRUCTURAL_TAGS
+            and SECTION_PATTERN.fullmatch(tag_name) is None
+        ):
+            search_position = tag_start + 1
+            continue
+
+        position = tag_name_match.end()
+        edits: list[tuple[int, int, str]] = []
+        tag_end: int | None = None
+
+        while position < len(fragment):
+            while position < len(fragment) and fragment[position].isspace():
+                position += 1
+
+            if fragment.startswith("/>", position):
+                tag_end = position + 2
+                break
+            if position < len(fragment) and fragment[position] == ">":
+                tag_end = position + 1
+                break
+
+            attribute_match = XML_ATTRIBUTE_NAME_PATTERN.match(fragment, position)
+            if attribute_match is None:
+                break
+            position = attribute_match.end()
+
+            while position < len(fragment) and fragment[position].isspace():
+                position += 1
+            if position >= len(fragment) or fragment[position] != "=":
+                break
+            position += 1
+
+            while position < len(fragment) and fragment[position].isspace():
+                position += 1
+            if position >= len(fragment) or fragment[position] not in {'"', "'"}:
+                break
+
+            quote = fragment[position]
+            position += 1
+            if (
+                position + 1 < len(fragment)
+                and fragment[position] == quote
+                and MALFORMED_DUPLICATED_QUOTE_VALUE_START_PATTERN.match(
+                    fragment,
+                    position + 1,
+                )
+                is not None
+            ):
+                edits.append((position, position + 1, ""))
+                position += 1
+
+            closing_quote = fragment.find(quote, position)
+            if closing_quote == -1:
+                break
+            position = closing_quote + 1
+
+            if position >= len(fragment):
+                break
+            if fragment[position].isspace() or fragment[position] in {"/", ">"}:
+                continue
+
+            next_attribute = XML_ATTRIBUTE_NAME_PATTERN.match(fragment, position)
+            if next_attribute is None:
+                break
+            equals_position = next_attribute.end()
+            while (
+                equals_position < len(fragment)
+                and fragment[equals_position].isspace()
+            ):
+                equals_position += 1
+            if (
+                equals_position >= len(fragment)
+                or fragment[equals_position] != "="
+            ):
+                break
+            edits.append((position, position, " "))
+
+        if tag_end is None:
+            search_position = tag_start + 1
+            continue
+
+        if edits:
+            parts.append(fragment[unchanged_start:tag_start])
+            edit_start = tag_start
+            for start, end, replacement in edits:
+                parts.append(fragment[edit_start:start])
+                parts.append(replacement)
+                edit_start = end
+            parts.append(fragment[edit_start:tag_end])
+            unchanged_start = tag_end
+
+        search_position = tag_end
+
+    if not parts:
+        return fragment
+    parts.append(fragment[unchanged_start:])
+    return "".join(parts)
 
 
 def _repair_malformed_percent_comparisons_in_text(fragment: str) -> str:
@@ -142,11 +278,12 @@ def _repair_malformed_percent_comparisons_in_text(fragment: str) -> str:
 
 
 def sanitize_dart_xml_text(xml_text: str) -> str:
-    """DART 본문의 entity/pseudo-tag/literal ``<`` 오류만 보수적으로 교정한다.
+    """Audit-confirmed DART XML syntax errors only, preserving strict parsing.
 
     정상 entity는 그대로 두며, 구조 tag allowlist 밖의 ``<...>``는 text로
     escape한다. audit으로 확정한 percent 비교식과 미완성 한글 text의 raw
-    ``<``만 text node에서 escape한다.
+    ``<``만 text node에서 escape한다. 구조 start tag 안에서는 빈 attribute와
+    구분 가능한 중복 opening quote 및 attribute 사이의 누락된 공백만 복구한다.
     XML 선언, comment, CDATA, processing instruction은 변경하지 않는다.
     """
 
@@ -162,8 +299,9 @@ def sanitize_dart_xml_text(xml_text: str) -> str:
 
             return f"&lt;{inner}&gt;"
 
+        repaired_attributes = _repair_malformed_attribute_syntax(fragment)
         escaped_comparisons = _repair_malformed_percent_comparisons_in_text(
-            fragment,
+            repaired_attributes,
         )
         escaped_tags = TAG_LIKE_PATTERN.sub(
             escape_pseudo_tag,

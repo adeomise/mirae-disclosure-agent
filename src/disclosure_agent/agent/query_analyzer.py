@@ -709,6 +709,13 @@ BUSINESS_PROFILE_SCAFFOLDING: tuple[str, ...] = (
     "말해줘",
     "정리해주세요",
     "정리해줘",
+    # 요청 동사의 어간. 어미('해줘'·'해주세요')는 아래가 따로 받으므로 "요약해줘"·"정리해서"
+    # 처럼 활용형을 다 적지 않아도 된다. SUMMARY_REQUEST_TOKENS와 같은 낱말이며, 그쪽은
+    # Pattern B 판정이 '요약을 요청했는가'를 보는 자리라 여기서 이름을 잇지 않는다. 이
+    # 자리는 '남아도 되는 말'이고 그쪽은 '있어야 하는 말'이어서, 한쪽이 늘어도 다른 쪽이
+    # 함께 늘어야 하는 관계가 아니다.
+    "요약",
+    "정리",
     "보여줘",
     "주세요",
     "줄래",
@@ -787,6 +794,100 @@ _BUSINESS_PROFILE_SCAFFOLDING_PATTERN = re.compile(
         for token in sorted(set(BUSINESS_PROFILE_SCAFFOLDING), key=len, reverse=True)
     )
     + r"|[\s?!.,·ㆍ、'\"“”‘’()\[\]{}<>《》「」]"
+)
+
+# 기업 표기 바로 뒤에 붙는 조사.
+#
+# BUSINESS_PROFILE_SCAFFOLDING이 아니라 여기에 두는 이유:
+#     그 목록은 맨 '가'를 일부러 담지 않는다('주가'가 조사 둘로 읽혀 통째로 사라지기
+#     때문이며, 그 자리의 설명을 보라). 그 결정을 지키면서 "한미반도체가 어떤 사업을
+#     하고..."의 '가'는 걷어내야 한다. 둘을 함께 만족시키는 것이 자리 조건이다. 여기서
+#     걷어내는 '가'는 기업 표기 바로 뒤에 붙은 것뿐이므로 '주가'의 '가'는 걸리지 않는다.
+#
+# 나머지 조사는 위 목록도 받는다. 그래도 함께 적는 이유는, 기업 표기 뒤에 무엇이 올 수
+# 있는지를 한자리에서 읽을 수 있어야 하기 때문이다. 조사는 닫힌 부류이므로 늘지 않는다.
+_SUBJECT_PARTICLE_SUFFIX = r"(?:은|는|이|가|을|를|의|도)?"
+
+# 대상 문서를 지목한 '구간'. 낱말이 아니라 구간인 것이 규약이다.
+#
+# 왜 낱말 하나씩 지우면 안 되는가:
+#     '최신'과 '기준'은 문서를 지목할 때도 쓰이고 요청 그 자체일 때도 쓰인다.
+#
+#         "최신 사업보고서 기준으로 무슨 사업을 하고 주력 제품이 뭐야?"
+#             -> '최신'은 어느 판본을 볼지를 말한다. 요청을 늘리지 않는다.
+#
+#         "2024년 사업보고서 기준으로 무슨 사업을 하고 최신 대표 제품이 뭐야?"
+#             -> '최신'은 묻는 대상을 좁힌다. 이 경로는 그 좁힘에 답하지 않는다.
+#
+#         "무슨 사업을 하고 대표 제품이 뭐고 기준은?"
+#             -> '기준'이 그 자체로 물음이다.
+#
+#     낱말만 보고 지우면 뒤 둘이 조용히 사라져, 좁혀 물은 질문이 좁히지 않은 요약으로
+#     답해지고 물은 것이 빠졌다는 사실은 결과 어디에도 남지 않는다. BUSINESS_PROFILE_
+#     EXCLUDED_TOKENS가 막으려던 것과 같은 축소이며, 막는 방향도 같아야 한다.
+#
+# 보고서 표기도 '있다는 이유로' 지우지 않는다:
+#     보고서 이름은 문서를 지목할 때도 나오고, 그 문서 자체를 달라는 요청일 때도 나온다.
+#
+#         "...주력 제품이 뭐야? 최신 사업보고서도 알려줘."
+#             -> 사업보고서를 달라는 것이 두 번째 요청이다. 이 경로는 그것에 답하지 않는다.
+#
+#     보고서 표기만 있으면 지우도록 두면 이 질문이 통째로 Q05가 된다. 사업 개요와 주요
+#     제품을 실은 요약이 나가고, 사용자가 따로 물은 보고서 요청은 결과 어디에도 남지
+#     않는다. 위 '최신'·'기준'에서 막으려던 것과 같은 축소이며, 낱말이 아니라 관계를
+#     봐야 한다는 결론도 같다.
+#
+# 그래서 문법을 요구한다:
+#     보고서 표기가 '무엇을 기준으로 삼는가'라는 자리에 놓였을 때만 지운다. 그 자리를
+#     만드는 것은 뒤따르는 '기준'이고, 이것이 필수다. 앞의 판본 선택자와 목적격 조사,
+#     뒤의 '으로'는 있어도 되고 없어도 된다.
+#
+#         (최신)? <보고서 표기> (를|을)? 기준 (으로)?
+#
+#         지운다:     최신사업보고서기준으로 / 최신사업보고서를기준으로
+#                     사업보고서기준으로 / 사업보고서를기준으로 / 사업보고서기준
+#                     2025년사업보고서기준으로  ('2025'는 앞서 연도로 걷힌다)
+#
+#         지우지 않는다: 사업보고서도알려줘 / 사업보고서도보여줘 / 최신사업보고서도알려줘
+#                        맨 '최신' / 맨 '기준' / 맨 '사업보고서'
+#
+#     세 조각 중 둘을 선택으로 두면 관계가 아니라 낱말을 보는 것이 된다. 실제로 '기준'을
+#     선택으로 두었던 판이 위 "사업보고서도 알려줘"를 조용히 삼켰다.
+#
+# 표기를 새로 적지 않고 잇는 이유:
+#     보고서 종류는 이 모듈이 Pattern B 판정에 이미 쓰는 어휘다(PERIODIC_REPORT_TOKENS).
+#     여기에 같은 낱말을 다시 적으면 그 어휘가 늘 때 한쪽만 늘어난다.
+_PERIODIC_REPORT_ALTERNATION = "|".join(
+    re.escape(token)
+    for token in sorted(set(PERIODIC_REPORT_TOKENS), key=len, reverse=True)
+)
+
+# 최신 판본을 지목하는 표기. 이 낱말 하나로는 문서 지목이 되지 않는다(위 설명).
+LATEST_REPORT_SELECTOR = "최신"
+
+# 보고서 표기와 '기준'을 잇는 목적격 조사. 없어도 된다.
+_REPORT_OBJECT_PARTICLE = r"(?:를|을)?"
+
+_BUSINESS_PROFILE_DOCUMENT_FRAMING_PATTERN = re.compile(
+    rf"(?:{re.escape(LATEST_REPORT_SELECTOR)})?"
+    rf"(?:{_PERIODIC_REPORT_ALTERNATION})"
+    rf"{_REPORT_OBJECT_PARTICLE}"
+    rf"기준(?:으로)?"
+)
+
+# 질문이 '최신 사업보고서'라고 판본을 지목했는가.
+#
+# 걷어내는 패턴과 나눠 두는 이유:
+#     걷어내는 쪽은 '기준'까지 갖춘 구간을 찾고, 이쪽은 판본 선택자가 쓰였는지만 본다.
+#     둘은 다른 물음이며, 절대연도와 함께 왔을 때 막아야 하는 쪽은 이것이다
+#     (_build_business_profile_plan의 선택자 충돌 판정).
+#
+#     이쪽이 '기준'을 요구하지 않아도 되는 이유:
+#         이 판정은 Q05 경로가 열린 뒤에만 쓰인다. '기준'을 갖추지 못한 보고서 표기는
+#         걷히지 않아 잔여물로 남고, 그 질문은 애초에 이 경로가 열리지 않는다. 그러므로
+#         여기까지 온 '최신 <보고서>'는 이미 문서 지목으로 걷힌 것뿐이다.
+_LATEST_REPORT_SELECTOR_PATTERN = re.compile(
+    rf"{re.escape(LATEST_REPORT_SELECTOR)}(?:{_PERIODIC_REPORT_ALTERNATION})"
 )
 
 # 이 질문 모양이 요약하는 범위. 순서는 사업보고서 서식의 Section 순서이며, 결과의
@@ -1980,6 +2081,18 @@ def _looks_like_facility_investment_aggregate(question: str) -> bool:
     )
 
 
+def _selects_latest_report(question: str) -> bool:
+    """질문이 '최신 사업보고서'라고 판본을 지목했는가.
+
+    '최신' 하나로는 참이 아니다. 그 낱말은 묻는 대상을 좁히는 자리에도 온다("최신 대표
+    제품이 뭐야?"). 보고서 표기 바로 앞에 있을 때만 판본 선택으로 읽는다.
+
+    걷어내는 자리(_business_profile_residual)와 같은 어휘를 쓰되 패턴을 나눈 이유는
+    _LATEST_REPORT_SELECTOR_PATTERN의 설명에 있다.
+    """
+    return _LATEST_REPORT_SELECTOR_PATTERN.search("".join(question.split())) is not None
+
+
 def _business_profile_residual(
     question: str,
     companies: tuple[str, ...],
@@ -1987,15 +2100,23 @@ def _business_profile_residual(
 ) -> str:
     """기업 소개 요약이 의미를 가져가고 남은 말을 돌려준다. 빈 문자열이면 남은 요청이 없다.
 
-    걷어내는 것은 넷이다.
+    걷어내는 것은 다섯이다.
 
         제품 표현      이 경로가 답하는 요청 그 자체(find_product_phrase_span)
         사업 서술 표기 같은 요청의 나머지 반(BUSINESS_DESCRIPTION_TOKENS)
         기업명         무엇을 묻는지가 아니라 누구에게 묻는지다
         기간           같은 이유다. 어느 문서를 볼지를 정할 뿐 요청을 늘리지 않는다
+        문서 지목 구간 같은 이유다. 낱말이 아니라 구간이다
+                       (_BUSINESS_PROFILE_DOCUMENT_FRAMING_PATTERN)
 
     그러고 남은 것에서 기능 형태소와 구두점을 지운다(BUSINESS_PROFILE_SCAFFOLDING). 그래도
     남는 글자가 있으면 이 경로가 답하지 않을 요청이 함께 온 것이다.
+
+    문서 지목 표기를 기간보다 뒤에 걷어내는 이유:
+        연도를 읽는 규칙 하나가 보고서 종류에 기대고 있다("2025 사업보고서"의 '2025'는
+        REPORT_CONTEXT_YEAR_PATTERN이 뒤의 '사업보고서'를 보고 연도로 읽는다). 보고서
+        표기를 먼저 지우면 그 규칙이 걸리지 않아 '년'을 붙이지 않은 연도가 남고, 남은
+        요청으로 세어진다.
 
     자리 계산에 대해:
         공백을 걷어낸 문자열 하나를 두고 전부 처리한다. find_product_phrase_span이 돌려주는
@@ -2038,12 +2159,21 @@ def _business_profile_residual(
         if name
     }
 
+    # 기업 표기와, 거기 바로 붙은 조사까지 함께 걷어낸다. 조사를 자리 조건 없이 걷어내지
+    # 않는 이유는 _SUBJECT_PARTICLE_SUFFIX의 설명에 있다.
     for name in sorted(subject_wording, key=len, reverse=True):
-        compacted = compacted.replace(name, "")
+        compacted = re.sub(
+            re.escape(name) + _SUBJECT_PARTICLE_SUFFIX,
+            "",
+            compacted,
+        )
 
     # 절대연도의 숫자. 뒤에서부터 지워야 앞 구간의 자리가 어긋나지 않는다.
     for start, end, _ in reversed(find_year_spans(compacted)):
         compacted = compacted[:start] + compacted[end:]
+
+    # 대상 문서를 지목한 구간. 낱말 하나씩 지우지 않는 이유는 위 패턴의 설명에 있다.
+    compacted = _BUSINESS_PROFILE_DOCUMENT_FRAMING_PATTERN.sub("", compacted)
 
     return _BUSINESS_PROFILE_SCAFFOLDING_PATTERN.sub("", compacted)
 
@@ -2156,6 +2286,30 @@ def _build_business_profile_plan(
                 f"질문이 {len(years)}개 기간({listed})을 함께 가리키고 있습니다. "
                 "기업 소개 요약은 사업보고서 1건을 대상으로 합니다. 한 기간을 골라 답하지 "
                 "않습니다."
+            ),
+        )
+
+    # 판본 선택자가 둘이면 막는다.
+    #
+    # "2024년 최신 사업보고서 기준으로 ..."는 대상 문서를 두 가지로 지목한다. 절대연도는
+    # FY2024를, '최신'은 코퍼스의 가장 최근 사업보고서를 가리키며, 둘은 같은 문서가 아닐 수
+    # 있다. 어느 쪽으로 답해도 나머지 하나를 버린 것이 되고, 버렸다는 사실은 결과에 남지
+    # 않는다. 위 다중 연도 판정이 막는 것과 같은 종류의 축소다.
+    #
+    # 값을 비교해 '어긋날 때만' 막지 않는 이유:
+    #     그러려면 '최신'이 가리키는 해를 여기서 먼저 정해야 하고, 그것은 이미 한쪽 선택자를
+    #     이긴 것으로 처리한 뒤에 확인하는 셈이다. 그리고 같은 질문의 판정이 코퍼스가 한 해
+    #     늘 때 바뀐다. 같은 질문이 실행 시점에 따라 갈리지 않게 두는 것이 이 모듈의 기존
+    #     규약이며(_resolve_anchor_year, build_query_plan의 기준 연도 설명), 여기서도 그것을
+    #     따른다. 둘 중 하나를 지우면 답할 수 있다는 것은 detail이 말한다.
+    if years and _selects_latest_report(question):
+        raise UnsupportedQuestionError(
+            reason="unsupported_summary_period",
+            detail=(
+                f"질문이 대상 문서를 두 가지로 지목하고 있습니다: 절대연도({years[0]})와 "
+                f"'{LATEST_REPORT_SELECTOR}' 판본 선택. 둘이 같은 사업보고서를 가리킨다는 "
+                "보장이 없으므로 한쪽을 골라 답하지 않습니다. 연도를 밝히거나 "
+                f"'{LATEST_REPORT_SELECTOR}'만 남겨 주십시오."
             ),
         )
 

@@ -709,6 +709,13 @@ BUSINESS_PROFILE_SCAFFOLDING: tuple[str, ...] = (
     "말해줘",
     "정리해주세요",
     "정리해줘",
+    # 요청 동사의 어간. 어미('해줘'·'해주세요')는 아래가 따로 받으므로 "요약해줘"·"정리해서"
+    # 처럼 활용형을 다 적지 않아도 된다. SUMMARY_REQUEST_TOKENS와 같은 낱말이며, 그쪽은
+    # Pattern B 판정이 '요약을 요청했는가'를 보는 자리라 여기서 이름을 잇지 않는다. 이
+    # 자리는 '남아도 되는 말'이고 그쪽은 '있어야 하는 말'이어서, 한쪽이 늘어도 다른 쪽이
+    # 함께 늘어야 하는 관계가 아니다.
+    "요약",
+    "정리",
     "보여줘",
     "주세요",
     "줄래",
@@ -801,36 +808,58 @@ _BUSINESS_PROFILE_SCAFFOLDING_PATTERN = re.compile(
 # 있는지를 한자리에서 읽을 수 있어야 하기 때문이다. 조사는 닫힌 부류이므로 늘지 않는다.
 _SUBJECT_PARTICLE_SUFFIX = r"(?:은|는|이|가|을|를|의|도)?"
 
-# 기업 소개 요약이 답하지 않고도 남아 있을 수 있는 '문서 지목' 표기.
+# 대상 문서를 지목한 '구간'. 낱말이 아니라 구간인 것이 규약이다.
 #
-# BUSINESS_PROFILE_SCAFFOLDING과 목록을 나누는 이유:
-#     그 목록의 규약은 "내용을 가리키는 낱말은 하나도 없다"이다. 아래는 전부 내용 낱말이며,
-#     한 목록에 섞으면 그 규약이 깨지고 다음 사람이 임의의 명사를 더할 근거가 생긴다.
+# 왜 낱말 하나씩 지우면 안 되는가:
+#     '최신'과 '기준'은 문서를 지목할 때도 쓰이고 요청 그 자체일 때도 쓰인다.
 #
-# 왜 남아도 되는가:
-#     이 표기들은 '무엇을 묻는가'가 아니라 '어느 문서를 보고 답하라'를 말한다. 요청을
-#     늘리지 않으므로 기업명·기간과 같은 부류다. Q05 경로는 이미 사업보고서 1건을 대상으로
-#     하고, 연도를 밝히지 않으면 코퍼스의 최신 사업보고서로 옮긴다
-#     (_build_business_profile_plan). "최신 사업보고서 기준으로 요약해줘"는 그 경로가 이미
-#     하는 일을 말로 적은 것뿐이다. 걷어내지 않으면 남은 요청으로 세어져, 답할 수 있던
-#     질문이 막힌다.
+#         "최신 사업보고서 기준으로 무슨 사업을 하고 주력 제품이 뭐야?"
+#             -> '최신'은 어느 판본을 볼지를 말한다. 요청을 늘리지 않는다.
+#
+#         "2024년 사업보고서 기준으로 무슨 사업을 하고 최신 대표 제품이 뭐야?"
+#             -> '최신'은 묻는 대상을 좁힌다. 이 경로는 그 좁힘에 답하지 않는다.
+#
+#         "무슨 사업을 하고 대표 제품이 뭐고 기준은?"
+#             -> '기준'이 그 자체로 물음이다.
+#
+#     낱말만 보고 지우면 뒤 둘이 조용히 사라져, 좁혀 물은 질문이 좁히지 않은 요약으로
+#     답해지고 물은 것이 빠졌다는 사실은 결과 어디에도 남지 않는다. BUSINESS_PROFILE_
+#     EXCLUDED_TOKENS가 막으려던 것과 같은 축소이며, 막는 방향도 같아야 한다.
+#
+# 그래서 자리 조건을 건다:
+#     보고서 표기가 있어야 지운다. 앞의 판본 선택자와 뒤의 '기준(으로)'은 있어도 되고
+#     없어도 되지만, 보고서 표기 없이 둘만으로는 아무것도 지우지 않는다.
+#
+#         최신사업보고서기준으로 / 사업보고서기준 / 사업보고서 / 2025년사업보고서
+#
+#     이것은 부분문자열 탐색을 넓히는 것이 아니라 좁히는 것이다. 지우는 자리가 보고서
+#     표기에 붙은 구간 하나로 한정된다.
 #
 # 표기를 새로 적지 않고 잇는 이유:
-#     보고서 종류와 요약 요청 표현은 이 모듈이 Pattern B 판정에 이미 쓰는 어휘다. 여기에
-#     같은 낱말을 다시 적으면 그 어휘가 늘 때 한쪽만 늘어난다.
+#     보고서 종류는 이 모듈이 Pattern B 판정에 이미 쓰는 어휘다(PERIODIC_REPORT_TOKENS).
+#     여기에 같은 낱말을 다시 적으면 그 어휘가 늘 때 한쪽만 늘어난다.
+_PERIODIC_REPORT_ALTERNATION = "|".join(
+    re.escape(token)
+    for token in sorted(set(PERIODIC_REPORT_TOKENS), key=len, reverse=True)
+)
+
+# 최신 판본을 지목하는 표기. 이 낱말 하나로는 문서 지목이 되지 않는다(위 설명).
+LATEST_REPORT_SELECTOR = "최신"
+
+_BUSINESS_PROFILE_DOCUMENT_FRAMING_PATTERN = re.compile(
+    rf"(?:{re.escape(LATEST_REPORT_SELECTOR)})?"
+    rf"(?:{_PERIODIC_REPORT_ALTERNATION})"
+    rf"(?:기준(?:으로)?)?"
+)
+
+# 질문이 '최신 사업보고서'라고 판본을 지목했는가.
 #
-# 닫힌 목록이며 부분문자열 탐색을 새로 열지 않는다. 아래 표기 그대로만 걷어낸다.
-BUSINESS_PROFILE_DOCUMENT_FRAMING: tuple[str, ...] = (
-    # 대상 문서를 이름으로 지목한 표기.
-    *PERIODIC_REPORT_TOKENS,
-    # 요약을 요청한 표현. 어미('해줘')는 위 SCAFFOLDING이 받는다.
-    *SUMMARY_REQUEST_TOKENS,
-    # 판본을 지목한 표기. 연도를 밝히지 않은 Q05가 이미 쓰는 기준과 같은 말이다.
-    "최신",
-    # "<문서> 기준으로"의 나머지 반. '으로'는 위 SCAFFOLDING이 받지만, 긴 표기를 먼저
-    # 지워야 하는 것은 여기서도 같으므로 함께 적는다.
-    "기준으로",
-    "기준",
+# 걷어내는 패턴과 나눠 두는 이유:
+#     걷어내는 쪽은 보고서 표기만 있어도 걸린다. 판본 선택자가 실제로 쓰였는지는 그것과
+#     다른 물음이고, 절대연도와 함께 왔을 때 막아야 하는 쪽은 이것이다
+#     (_build_business_profile_plan의 선택자 충돌 판정).
+_LATEST_REPORT_SELECTOR_PATTERN = re.compile(
+    rf"{re.escape(LATEST_REPORT_SELECTOR)}(?:{_PERIODIC_REPORT_ALTERNATION})"
 )
 
 # 이 질문 모양이 요약하는 범위. 순서는 사업보고서 서식의 Section 순서이며, 결과의
@@ -2024,6 +2053,18 @@ def _looks_like_facility_investment_aggregate(question: str) -> bool:
     )
 
 
+def _selects_latest_report(question: str) -> bool:
+    """질문이 '최신 사업보고서'라고 판본을 지목했는가.
+
+    '최신' 하나로는 참이 아니다. 그 낱말은 묻는 대상을 좁히는 자리에도 온다("최신 대표
+    제품이 뭐야?"). 보고서 표기 바로 앞에 있을 때만 판본 선택으로 읽는다.
+
+    걷어내는 자리(_business_profile_residual)와 같은 어휘를 쓰되 패턴을 나눈 이유는
+    _LATEST_REPORT_SELECTOR_PATTERN의 설명에 있다.
+    """
+    return _LATEST_REPORT_SELECTOR_PATTERN.search("".join(question.split())) is not None
+
+
 def _business_profile_residual(
     question: str,
     companies: tuple[str, ...],
@@ -2037,7 +2078,8 @@ def _business_profile_residual(
         사업 서술 표기 같은 요청의 나머지 반(BUSINESS_DESCRIPTION_TOKENS)
         기업명         무엇을 묻는지가 아니라 누구에게 묻는지다
         기간           같은 이유다. 어느 문서를 볼지를 정할 뿐 요청을 늘리지 않는다
-        문서 지목 표기 같은 이유다(BUSINESS_PROFILE_DOCUMENT_FRAMING)
+        문서 지목 구간 같은 이유다. 낱말이 아니라 구간이다
+                       (_BUSINESS_PROFILE_DOCUMENT_FRAMING_PATTERN)
 
     그러고 남은 것에서 기능 형태소와 구두점을 지운다(BUSINESS_PROFILE_SCAFFOLDING). 그래도
     남는 글자가 있으면 이 경로가 답하지 않을 요청이 함께 온 것이다.
@@ -2102,9 +2144,8 @@ def _business_profile_residual(
     for start, end, _ in reversed(find_year_spans(compacted)):
         compacted = compacted[:start] + compacted[end:]
 
-    # 대상 문서를 지목한 표기. 긴 표기부터 지우는 이유는 기업명과 같다.
-    for token in sorted(BUSINESS_PROFILE_DOCUMENT_FRAMING, key=len, reverse=True):
-        compacted = compacted.replace(token, "")
+    # 대상 문서를 지목한 구간. 낱말 하나씩 지우지 않는 이유는 위 패턴의 설명에 있다.
+    compacted = _BUSINESS_PROFILE_DOCUMENT_FRAMING_PATTERN.sub("", compacted)
 
     return _BUSINESS_PROFILE_SCAFFOLDING_PATTERN.sub("", compacted)
 
@@ -2217,6 +2258,30 @@ def _build_business_profile_plan(
                 f"질문이 {len(years)}개 기간({listed})을 함께 가리키고 있습니다. "
                 "기업 소개 요약은 사업보고서 1건을 대상으로 합니다. 한 기간을 골라 답하지 "
                 "않습니다."
+            ),
+        )
+
+    # 판본 선택자가 둘이면 막는다.
+    #
+    # "2024년 최신 사업보고서 기준으로 ..."는 대상 문서를 두 가지로 지목한다. 절대연도는
+    # FY2024를, '최신'은 코퍼스의 가장 최근 사업보고서를 가리키며, 둘은 같은 문서가 아닐 수
+    # 있다. 어느 쪽으로 답해도 나머지 하나를 버린 것이 되고, 버렸다는 사실은 결과에 남지
+    # 않는다. 위 다중 연도 판정이 막는 것과 같은 종류의 축소다.
+    #
+    # 값을 비교해 '어긋날 때만' 막지 않는 이유:
+    #     그러려면 '최신'이 가리키는 해를 여기서 먼저 정해야 하고, 그것은 이미 한쪽 선택자를
+    #     이긴 것으로 처리한 뒤에 확인하는 셈이다. 그리고 같은 질문의 판정이 코퍼스가 한 해
+    #     늘 때 바뀐다. 같은 질문이 실행 시점에 따라 갈리지 않게 두는 것이 이 모듈의 기존
+    #     규약이며(_resolve_anchor_year, build_query_plan의 기준 연도 설명), 여기서도 그것을
+    #     따른다. 둘 중 하나를 지우면 답할 수 있다는 것은 detail이 말한다.
+    if years and _selects_latest_report(question):
+        raise UnsupportedQuestionError(
+            reason="unsupported_summary_period",
+            detail=(
+                f"질문이 대상 문서를 두 가지로 지목하고 있습니다: 절대연도({years[0]})와 "
+                f"'{LATEST_REPORT_SELECTOR}' 판본 선택. 둘이 같은 사업보고서를 가리킨다는 "
+                "보장이 없으므로 한쪽을 골라 답하지 않습니다. 연도를 밝히거나 "
+                f"'{LATEST_REPORT_SELECTOR}'만 남겨 주십시오."
             ),
         )
 

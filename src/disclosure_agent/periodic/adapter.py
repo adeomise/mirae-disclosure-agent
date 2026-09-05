@@ -54,13 +54,34 @@ def _contract_enum[EnumType: StrEnum](
         raise ValueError(f"지원하지 않는 {field_name} 값입니다: {value!r}") from exc
 
 
+def _contract_company(
+    parsed_document: dict[str, Any],
+    canonical_company: str | None,
+) -> str:
+    """Contract identity는 명시된 canonical company를 우선한다."""
+    raw_company = _required_metadata(parsed_document, "corp_name")
+
+    if canonical_company is None:
+        return raw_company
+    if not isinstance(canonical_company, str) or not canonical_company.strip():
+        raise ValueError("canonical_company는 비어 있지 않은 문자열이어야 합니다.")
+
+    return canonical_company.strip()
+
+
 def adapt_financial_fact(
     financial_fact: FinancialFact,
     parsed_document: dict[str, Any],
+    *,
+    canonical_company: str | None = None,
 ) -> tuple[Fact, Evidence]:
-    """확정된 targeted FinancialFact 하나를 Contract Fact/Evidence로 옮긴다."""
+    """확정된 targeted FinancialFact 하나를 Contract Fact/Evidence로 옮긴다.
+
+    Agent가 확정한 canonical company가 있으면 Contract identity로 사용한다. 생략한
+    low-level 호출은 기존처럼 parser metadata의 raw company를 사용한다.
+    """
     doc_id = _required_metadata(parsed_document, "doc_id")
-    company = _required_metadata(parsed_document, "corp_name")
+    company = _contract_company(parsed_document, canonical_company)
     metric = _contract_enum(financial_fact.metric, MetricConcept, "metric")
     accounting_scope = _contract_enum(
         financial_fact.accounting_scope,
@@ -106,6 +127,7 @@ def adapt_financial_fact(
 def adapt_section_summary(
     parsed_document: dict[str, Any],
     *,
+    canonical_company: str | None = None,
     section_scope: SectionScope,
     selection: SectionSelection,
     items: list[SectionContentItem],
@@ -122,7 +144,7 @@ def adapt_section_summary(
     식별자가 나와야 결과를 대조할 수 있다.
     """
     doc_id = _required_metadata(parsed_document, "doc_id")
-    company = _required_metadata(parsed_document, "corp_name")
+    company = _contract_company(parsed_document, canonical_company)
     report_name = _required_metadata(parsed_document, "report_name")
 
     if not items:

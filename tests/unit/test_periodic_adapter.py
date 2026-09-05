@@ -6,10 +6,13 @@ from disclosure_agent.common.enums import (
     EvidenceLocationType,
     FactAccountingScope,
     MetricConcept,
+    SectionScope,
+    SummaryItemType,
 )
 from disclosure_agent.common.schemas import Evidence, Fact
-from disclosure_agent.periodic.adapter import adapt_financial_fact
+from disclosure_agent.periodic.adapter import adapt_financial_fact, adapt_section_summary
 from disclosure_agent.periodic.extractor import FactLocation, FinancialFact
+from disclosure_agent.periodic.sections import SectionContentItem, SectionSelection
 
 
 @pytest.fixture
@@ -66,6 +69,70 @@ def test_adapt_financial_fact_maps_contract_fields(
     assert fact.raw_unit == "백만원"
     assert fact.normalized_value == "1234567000000"
     assert fact.normalized_unit == "원"
+
+
+@pytest.mark.parametrize(
+    ("raw_company", "canonical_company"),
+    [
+        ("테스트자동차(주)", "테스트자동차"),
+        ("테스트자동차", "테스트자동차"),
+    ],
+)
+def test_financial_fact_uses_explicit_canonical_company_without_mutating_metadata(
+    financial_fact: FinancialFact,
+    parsed_document: dict,
+    raw_company: str,
+    canonical_company: str,
+) -> None:
+    parsed_document["metadata"]["corp_name"] = raw_company
+
+    fact, _ = adapt_financial_fact(
+        financial_fact,
+        parsed_document,
+        canonical_company=canonical_company,
+    )
+
+    assert fact.company == canonical_company
+    assert parsed_document["metadata"]["corp_name"] == raw_company
+
+
+def test_section_summary_uses_explicit_canonical_company_without_mutating_metadata(
+    parsed_document: dict,
+) -> None:
+    raw_company = "테스트바이오(주)"
+    canonical_company = "테스트바이오"
+    parsed_document["metadata"]["corp_name"] = raw_company
+    selection = SectionSelection(
+        scope=SectionScope.BUSINESS_OVERVIEW,
+        section_id="section_0001",
+        section_path=("II. 사업의 내용", "1. 사업의 개요"),
+    )
+    item = SectionContentItem(
+        item_type=SummaryItemType.PARAGRAPH,
+        ordinal=0,
+        label="문단 1",
+        excerpt="합성 사업 개요",
+        section_id=selection.section_id,
+        section_path=selection.section_path,
+    )
+
+    legacy_summary, _ = adapt_section_summary(
+        parsed_document,
+        section_scope=selection.scope,
+        selection=selection,
+        items=[item],
+    )
+    summary, _ = adapt_section_summary(
+        parsed_document,
+        canonical_company=canonical_company,
+        section_scope=selection.scope,
+        selection=selection,
+        items=[item],
+    )
+
+    assert legacy_summary.company == raw_company
+    assert summary.company == canonical_company
+    assert parsed_document["metadata"]["corp_name"] == raw_company
 
 
 def test_evidence_preserves_supported_table_provenance(

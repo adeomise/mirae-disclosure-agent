@@ -339,7 +339,11 @@ def collect_period_facts(
 
     for found in collected:
         try:
-            fact, item = adapt_financial_fact(found.fact, found.document or {})
+            fact, item = adapt_financial_fact(
+                found.fact,
+                found.document or {},
+                canonical_company=company,
+            )
 
         except ValueError as error:
             # 값은 확정했지만 공통 타입으로 옮기지 못했다. 추측해 채우지 않고 전부 버린다.

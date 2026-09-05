@@ -110,13 +110,30 @@ def test_success_reuses_the_periodic_adapter(
     internal = build_result_from_document(synthetic_document, plan=plan, filing=filing)
 
     expected_fact, expected_evidence = adapt_financial_fact(
-        internal.fact, synthetic_document
+        internal.fact,
+        synthetic_document,
+        canonical_company=plan.company,
     )
 
     result = normalize_single_fact_result(internal)
 
     assert result.facts == [expected_fact]
     assert result.evidence == [expected_evidence]
+
+
+def test_single_fact_uses_plan_company_and_preserves_raw_parser_metadata(
+    synthetic_document: dict[str, Any],
+    resolved_filing,
+) -> None:
+    plan, _ = resolved_filing
+    raw_company = synthetic_document["metadata"]["corp_name"]
+
+    result = _normalized(synthetic_document, resolved_filing)
+
+    assert plan.company == "테스트반도체"
+    assert raw_company == "테스트반도체(주)"
+    assert result.facts[0].company == plan.company
+    assert synthetic_document["metadata"]["corp_name"] == raw_company
 
 
 def test_normalization_does_not_invent_evidence_provenance(

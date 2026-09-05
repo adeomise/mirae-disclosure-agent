@@ -143,6 +143,7 @@ def test_two_periods_one_metric_collects_one_fact_per_period(
     assert len(collection.facts) == 2
     assert {fact.fiscal_year for fact in collection.facts} == set(SYNTHETIC_YEARS)
     assert {fact.metric for fact in collection.facts} == {MetricConcept.REVENUE}
+    assert {fact.company for fact in collection.facts} == {SYNTHETIC_COMPANY}
 
 
 def test_collected_facts_keep_the_requested_order(

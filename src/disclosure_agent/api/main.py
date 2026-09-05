@@ -19,3 +19,16 @@ app.mount("/static", StaticFiles(directory=UI_DIR), name="static")
 def disclosure_ui() -> FileResponse:
     """Serve the lightweight disclosure question interface."""
     return FileResponse(UI_DIR / "index.html")
+
+
+@app.get("/health")
+def health_check() -> dict[str, str]:
+    """Liveness probe: the process can accept and complete a request.
+
+    Deliberately does not call the Agent, touch the corpus, or reach
+    HyperCLOVA X. Those are answerability concerns, not liveness. A
+    deployment healthcheck must return quickly and independently of
+    corpus/HyperCLOVA availability so it never reports the process itself
+    as down for reasons unrelated to process health.
+    """
+    return {"status": "ok"}

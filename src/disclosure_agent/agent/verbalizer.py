@@ -51,7 +51,14 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from disclosure_agent.agent.answer_builder import ACCOUNTING_SCOPE_LABELS
+from disclosure_agent.agent.answer_builder import (
+    ACCOUNTING_SCOPE_LABELS,
+    DERIVED_METRIC_LABELS,
+    EVENT_COUNT_DOCUMENT,
+    EVENT_COUNT_LABELS,
+    METRIC_LABELS,
+    TEMPORAL_OPERATION_LABELS,
+)
 from disclosure_agent.agent.grounded_payload import GroundedComparison, GroundedPayload
 from disclosure_agent.agent.hyperclova import ChatCompletionClient, HyperClovaError
 from disclosure_agent.common.enums import (
@@ -161,15 +168,15 @@ INVERTING_PARTICLE = "보다"
 # 절의 경계. 우열 표현이 어느 이름에 걸리는지 볼 범위를 한 문장으로 자른다.
 CLAUSE_BOUNDARIES = ".!?\n"
 
-# 구절의 경계. 기간별 값이 어느 연도에 걸렸는지 볼 범위를 자른다.
+# 구절의 경계. 값이 누구에게 걸렸는지 볼 범위를 자른다.
 #
-# 절보다 좁다. 기간별 값은 한 문장에 나란히 적히므로(Q08의 결정론 문장) 문장 단위로 자르면 두
-# 해가 한 범위에 들어오고, 그때는 어느 값이 어느 해의 것인지 갈리지 않는다. 쉼표를 경계에
-# 넣는 이유가 그것이다.
+# 절보다 좁다. 한 주인의 값과 다른 주인의 값은 한 문장에 나란히 적히므로(Q08·Q10·Q11의 결정론
+# 문장) 문장 단위로 자르면 두 주인이 한 범위에 들어오고, 그때는 어느 값이 누구의 것인지
+# 갈리지 않는다. 쉼표를 경계에 넣는 이유가 그것이다.
 #
 # 소수점이 함께 경계가 되는 것은 부작용이 아니다. 쉼표 없이 이어 붙인 문장에서도 앞 값의
-# 소수점이 경계가 되어 앞 구절의 연도가 다음 값의 범위로 넘어오지 않는다.
-PERIOD_BOUNDARIES = CLAUSE_BOUNDARIES + ","
+# 소수점이 경계가 되어 앞 구절의 주인이 다음 값의 범위로 넘어오지 않는다.
+BINDING_BOUNDARIES = CLAUSE_BOUNDARIES + ","
 
 # 변경이 없었다는 진술.
 #
@@ -338,7 +345,7 @@ def validate_answer(answer: ModelAnswer, payload: GroundedPayload) -> None:
     _require_no_english_vocabulary(answer.answer)
     _require_grounded_numbers(answer.answer, payload)
     _require_every_value_is_stated(answer.answer, payload)
-    _require_bound_period_values(answer.answer, payload)
+    _require_bound_values(answer.answer, payload)
     _require_known_entities(answer.answer, payload)
     _require_consistent_accounting_scope(answer.answer, payload)
     _require_limitation_when_partial(answer.answer, payload)
@@ -540,89 +547,412 @@ def _facts_consumed_by_calculations(payload: GroundedPayload) -> frozenset[str]:
     )
 
 
-def _require_bound_period_values(text: str, payload: GroundedPayload) -> None:
+@dataclass(frozen=True)
+class _ValuedItem:
+    """문장에 적힐 수 있는 값 1건과 그 값의 주인.
+
+    Fact와 Calculation을 한 모양으로 눕힌다. 두 종류를 따로 도는 규칙을 쓰면 한쪽에만 있는
+    구멍이 생긴다. 실제로 그랬다. 기간 짝 검사가 Calculation만 보던 동안 Q07의 원천 Fact 두
+    건은 연도를 맞바꿔 적어도 걸리지 않았다.
+
+    owners는 축마다 "이 값이 붙어도 되는 주인"의 집합이다. 한 축에 여러 주인이 올 수 있다.
+    매출액의 증감액은 증감액이면서 매출액에 관한 값이고(둘 다 맞는 이름이다), 어느 쪽으로
+    불러도 틀리지 않는다. 빈 집합은 그 축이 이 값에 해당하지 않는다는 뜻이며, 그때는 어느
+    주인에게도 묶이지 않는다.
     """
-    기간별 값이 자기 연도에 붙어 있는지 본다.
 
-    수치 검증은 값의 집합만 본다. 어느 값이 어느 해의 것인지는 보지 않으므로, 두 해의 값을
-    맞바꿔 적은 문장이 _require_grounded_numbers와 _require_every_value_is_stated를 모두
-    통과한다. payload가 2024년 10.0000%, 2025년 9.0000%를 실은 채로 "2024년 9.0000%,
-    2025년 10.0000%"라고 적은 문장이 그렇다. 값은 둘 다 근거 안에 있고 하나도 빠지지 않았다.
-    틀렸다는 사실은 값 하나하나가 아니라 값과 해의 짝에만 남는다.
+    item_id: str
+    renderings: tuple[str, ...]
+    owners: dict[str, frozenset[str]]
+    answer_bearing: bool
 
-    연도가 두 개 이상 갈릴 때만 본다:
-        기간별 값을 담은 Calculation이 한 해만 가리키면 맞바꿀 상대가 없다. 같은 해의 두 기업을
-        견준 결과(Q11)가 그 자리다. 그 문장에서 값을 가르는 축은 연도가 아니라 기업명이고, 그
-        축은 _require_preserved_relation이 이미 본다. 연도로 묶으라고 요구하면 두 값이 같은
-        해에 걸려 어느 쪽도 확인되지 않는다.
 
-        두 기간 사이의 값은 회계연도 자리가 비어 있어 여기에 들어오지 않는다
-        (grounded_payload._ground_temporal_calculation). Q07의 증감액·증감률과 Q08의 차이가
-        그것이다. 한 해의 값이 아닌 것을 한 해에 묶으면 그것이 그 해의 값으로 읽힌다.
+# 값의 주인을 가르는 축. (이름, 하한을 거는가)
+#
+# 축마다 "이 값은 누구의 것인가"를 답하는 payload 구조가 다르다. 무엇이 주인인지는
+# _valued_items가 정하고, 아래 규칙은 축을 알지 않는다.
+#
+# 지표 축에는 하한을 걸지 않는다:
+#     하한은 "이 값이 자기 주인 옆에 적혔는가"를 묻는다. 연도와 기업은 값마다 다시 불린다.
+#     결정론 문장이 "2024년 10.0000%, 2025년 9.0000%"와 "A사의 …는 20.0000%, B사의 …는
+#     10.0000%"로 적기 때문이다. 지표는 그렇지 않다. 이름을 한 번 적고 그 뒤 여러 값이 그것을
+#     함께 받는다("영업이익률은 2024년 10.0000%, 2025년 9.0000%"). 하한을 걸면 두 번째 값이
+#     자기 지표 이름 옆에 없다는 이유로 걸리고, 대조군인 결정론 문장 자신이 거절된다.
+BINDING_AXES: tuple[tuple[str, bool], ...] = (
+    ("period", True),
+    ("company", True),
+    ("metric", False),
+    ("count", True),
+)
 
-    연도를 "N년"으로 찾는다:
-        맨 숫자로 찾으면 금액 안의 자릿수와 부딪친다. 20240원 같은 값이 2024년을 부른 것으로
-        읽히고, 그때 이 검증은 확인한 적 없는 짝을 확인했다고 말한다. 결정론 문장이 쓰는 표기가
-        "N년"이며(answer_builder._period_phrase), 모델은 그 표기를 옮긴다.
+PERIOD_AXIS, COMPANY_AXIS, METRIC_AXIS = "period", "company", "metric"
 
-    값 앞만 본다:
-        구절의 시작부터 값까지가 그 값을 부른 자리다. 뒤까지 보면 다음 구절의 연도가 함께 잡혀
-        두 해가 모두 이름을 대게 되고, 그러면 어느 쪽에 걸린 값인지 알 수 없다. 우열 표현이 어느
-        이름에 걸리는지 보는 방식과 같다(_require_ranking_matches).
+# 이력이 센 것의 종류. 셈마다 무엇을 센 것인지가 주인이다.
+#
+# 이력에는 셈이 둘 있고 문장에서는 둘 다 "N건"으로 적힌다. 숫자만 보면 어느 셈인지 알 수 없어
+# 두 셈을 맞바꿔 적어도 쓰인 숫자는 그대로였다.
+COUNT_AXIS = "count"
 
-    한 번이라도 제대로 묶였으면 통과시킨다:
-        같은 문자열이 다른 값 안에 들어 있을 수 있다. 비율이 1.0000%이고 차이가 -1.0000%p이면
-        차이를 적은 자리에서도 비율의 문자열이 잡힌다. 그 자리는 연도를 부르지 않으므로 짝을
-        세우지도 무너뜨리지도 않는다.
 
-    값을 다시 계산하지 않는다. 여기서 보는 것은 payload가 이미 확정한 (연도, 표기) 짝이 문장에
+def _require_bound_values(text: str, payload: GroundedPayload) -> None:
+    """
+    값이 자기 주인에게 붙어 있는지 본다.
+
+    수치 검증은 값의 집합만 본다. 어느 값이 누구의 것인지는 보지 않으므로, 주인을 맞바꿔 적은
+    문장이 _require_grounded_numbers와 _require_every_value_is_stated를 모두 통과한다. 쓰인
+    수치는 모두 근거 안에 있고 빠진 값도 없다. 틀렸다는 사실은 값 하나하나가 아니라 값과 주인의
+    짝에만 남는다.
+
+    한 규칙이 세 축을 함께 본다:
+        연도를 맞바꾼 문장(Q08)과 기업을 맞바꾼 문장(Q10·Q11)과 지표를 맞바꾼 문장(Q07·Q08)은
+        같은 실패다. 값이 자기 것이 아닌 주인에게 붙었다. 축마다 규칙을 따로 두면 축이 늘 때마다
+        같은 논리를 다시 쓰게 되고, 그 사본들이 갈리는 날 한쪽에만 구멍이 남는다.
+
+    두 주인 이상이 갈릴 때만 본다:
+        어휘에 주인이 하나뿐이면 맞바꿀 상대가 없다. 같은 해의 두 기업(Q11)에서 연도 축이,
+        한 기업의 두 해(Q07·Q08)에서 기업 축이 그 자리다.
+
+    한 값이 여러 주인의 것일 수 있다:
+        Q08의 매출액 1,000원은 2024년과 2025년 모두의 값이고, Q11의 1,000원은 A사와 B사
+        모두의 값이다. 매출액의 증감액은 증감액이면서 매출액에 관한 값이다. 그래서 주인을 하나로
+        정해 두지 않는다.
+
+    모든 자리를 본다:
+        맞게 붙은 자리를 하나 찾고 멈추지 않는다. 멈추면 "2024년 10.0000%, 2025년 9.0000%.
+        그런데 2025년 값은 10.0000%입니다"처럼 맞는 짝을 먼저 적고 뒤에서 뒤집는 문장이
+        통과한다. 뒤집는 진술도 사용자가 읽는 문장의 일부다.
+
+    빠뜨림과 어긋남을 나눠 본다:
+        답에 실려야 하는 값은 어딘가에 제대로 붙어 있어야 한다(하한). 어느 값이든 자기 것이
+        아닌 주인에게 붙어서는 안 된다(상한). 상한은 보조 Fact에도 걸린다. 적지 않아도 되는
+        값이지만 적었다면 틀리게 적어서는 안 된다. 이 구분이 supporting-Fact 면제와 어긋나지
+        않는 이유다(_facts_consumed_by_calculations).
+
+    값을 다시 계산하지 않는다. 여기서 보는 것은 payload가 이미 확정한 (주인, 표기) 짝이 문장에
     그대로 남아 있는지뿐이다.
     """
-    bound = [item for item in payload.calculations if item.fiscal_year is not None]
+    items = _valued_items(payload)
 
-    tokens = {item.fiscal_year: _period_token(item.fiscal_year) for item in bound}
-
-    if len(tokens) < 2:
+    if not items:
         return
 
-    for calculation in bound:
-        own = tokens[calculation.fiscal_year]
+    # 짧은 표기가 긴 표기 안에 들어 있을 수 있다. 그 자리는 짧은 쪽이 나타난 자리가 아니다.
+    every_rendering = {rendering for item in items for rendering in item.renderings}
 
-        others = [token for year, token in tokens.items() if year != calculation.fiscal_year]
+    vocabularies = _owner_vocabularies(payload, items)
 
-        contradicted = False
+    for axis, floor in BINDING_AXES:
+        _require_axis_binding(
+            text,
+            items,
+            axis=axis,
+            floor=floor,
+            vocabulary=vocabularies[axis],
+            every_rendering=every_rendering,
+        )
 
-        for index in _find_all(text, calculation.display_value):
-            clause = _period_clause(text, index)
 
-            names_own = own in clause
+def _require_axis_binding(
+    text: str,
+    items: tuple[_ValuedItem, ...],
+    *,
+    axis: str,
+    floor: bool,
+    vocabulary: frozenset[str],
+    every_rendering: set[str],
+) -> None:
+    """축 하나에 대해 값과 주인의 짝을 본다."""
+    if len(vocabulary) < 2:
+        # 부를 수 있는 주인이 하나뿐인 축은 아무것도 가르지 못한다.
+        return
 
-            names_other = any(token in clause for token in others)
+    owned = [item for item in items if item.owners[axis]]
 
-            if names_own and not names_other:
-                break
+    # 표기마다 정당한 주인. 같은 표기를 여러 주인이 함께 쓸 수 있다(Q08의 1,000원은 두 해,
+    # Q11의 1,000원은 두 기업).
+    owners: dict[str, set[str]] = {}
 
-            if names_other and not names_own:
-                contradicted = True
+    for item in owned:
+        for rendering in item.renderings:
+            owners.setdefault(rendering, set()).update(item.owners[axis])
 
-        else:
-            if contradicted:
-                raise AnswerRejectedError(
-                    "period_contradiction",
-                    f"Calculation {calculation.calculation_id!r}의 값이 {own}이 아닌 다른 "
-                    "연도에 붙어 있습니다",
-                )
+    # 상한. 어느 표기도 자기 것이 아닌 주인에게 붙어서는 안 된다. 지나가는 김에 그 표기가 어느
+    # 주인에게 제대로 붙었는지 모아 둔다.
+    bound = {
+        rendering: _bound_owners(
+            text,
+            rendering,
+            axis=axis,
+            valid=valid,
+            vocabulary=vocabulary,
+            every_rendering=every_rendering,
+        )
+        for rendering, valid in owners.items()
+    }
 
+    if not floor:
+        return
+
+    # 하한. 답에 실리는 항목은 자기 주인에게 붙은 자리가 하나는 있어야 한다.
+    #
+    # 항목이 지고 표기가 지지 않는다. 한 항목을 부르는 이름이 여럿일 수 있고(표기·정규화 표기)
+    # 그중 하나로만 적어도 완결성 규칙은 만족된다. 표기마다 짝을 요구하면 적지 않은 쪽이 걸린다.
+    for item in owned:
+        if not item.answer_bearing:
+            continue
+
+        if any(item.owners[axis] & bound[rendering] for rendering in item.renderings):
+            continue
+
+        raise AnswerRejectedError(
+            f"unverifiable_{axis}",
+            f"{item.item_id!r}의 값이 {sorted(item.owners[axis])} 중 어디에 붙어 있는지 "
+            "문장에서 확인할 수 없습니다",
+        )
+
+
+def _bound_owners(
+    text: str,
+    rendering: str,
+    *,
+    axis: str,
+    valid: set[str],
+    vocabulary: frozenset[str],
+    every_rendering: set[str],
+) -> set[str]:
+    """
+    표기 하나가 불린 자리를 전부 보고, 제대로 붙은 주인을 모은다.
+
+    자기 것이 아닌 주인을 부른 자리를 만나면 그 자리에서 멈춘다. 맞는 주인을 함께 불렀더라도
+    멈춘다. 맞는 이름이 옆에 있다는 것이 틀린 이름을 지워 주지 않기 때문이다. "2024년과 2025년
+    중 2025년 값은 10.0000%입니다"가 그 자리다. 10.0000%가 2024년의 값일 때 이 문장은 틀렸고,
+    2024년을 함께 불렀다는 이유로 통과시키면 틀린 진술이 그대로 나간다.
+
+    이 판정은 "각각" 구문을 함께 거절한다. "2024년과 2025년에 각각 10.0000%와 9.0000%"는 두
+    해를 모두 부르므로 어느 값도 짝이 서지 않는다. 순서로 짝을 맞춰 읽는 것은 사용자가 하는
+    일이고, 그 순간 확정된 짝은 답변 어디에도 남지 않는다. 값이 둘 다 있다는 것만으로는
+    부족하다는 기존 계약과 같은 자리다.
+
+    맞게 붙은 자리를 이미 찾았더라도 뒤의 자리를 계속 본다. 앞의 올바른 짝이 뒤의 어긋남을
+    지워 주지 않는다.
+    """
+    found: set[str] = set()
+
+    for index in _unshadowed(text, rendering, every_rendering):
+        clause = _binding_clause(text, index)
+
+        named = {token for token in vocabulary if _unshadowed(clause, token, vocabulary)}
+
+        wrong = named - valid
+
+        if wrong:
             raise AnswerRejectedError(
-                "unverifiable_period",
-                f"Calculation {calculation.calculation_id!r}의 값이 {own}에 붙어 있는지 "
-                "문장에서 확인할 수 없습니다",
+                f"{axis}_contradiction",
+                f"{rendering!r}이(가) {sorted(valid)}가 아닌 {sorted(wrong)}에 붙어 있습니다",
             )
 
+        found |= named
 
-def _period_token(fiscal_year: int) -> str:
-    """연도가 문장에서 불리는 표기."""
-    return f"{fiscal_year}년"
+    return found
+
+
+def _valued_items(payload: GroundedPayload) -> tuple[_ValuedItem, ...]:
+    """
+    문장에 적힐 수 있는 값을 주인과 함께 모은다.
+
+    보조 Fact도 담는다. 답에 실릴 의무는 없지만(_require_every_value_is_stated) 적혔다면 그
+    값도 자기 주인에게 붙어 있어야 한다. answer_bearing이 그 두 자리를 가른다.
+
+    정규화 표기도 함께 담는다. 결정론 문장이 그 표기로 적는 자리가 있고(Q10의 "정규화 100.0원"),
+    완결성 규칙도 둘 중 하나를 인정한다. 한쪽만 보면 다른 쪽으로 적은 문장이 검사 밖에 남는다.
+    """
+    supporting = _facts_consumed_by_calculations(payload)
+
+    metric_owners = _metric_owners(payload)
+
+    document_label = EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT]
+
+    items = [
+        _ValuedItem(
+            item_id=fact.fact_id,
+            renderings=(
+                (fact.display_value, fact.normalized_display)
+                if fact.normalized_display
+                else (fact.display_value,)
+            ),
+            owners={
+                PERIOD_AXIS: _period_owner(fact.fiscal_year),
+                COMPANY_AXIS: frozenset({fact.company}),
+                METRIC_AXIS: metric_owners[fact.fact_id],
+                COUNT_AXIS: frozenset(),
+            },
+            answer_bearing=fact.fact_id not in supporting,
+        )
+        for fact in payload.facts
+    ]
+
+    items.extend(
+        _ValuedItem(
+            item_id=calculation.calculation_id,
+            renderings=(calculation.display_value,),
+            owners={
+                PERIOD_AXIS: _period_owner(calculation.fiscal_year),
+                COMPANY_AXIS: frozenset({calculation.company}),
+                METRIC_AXIS: metric_owners[calculation.calculation_id],
+                COUNT_AXIS: frozenset(),
+            },
+            answer_bearing=True,
+        )
+        for calculation in payload.calculations
+    )
+
+    # 이력의 셈. 주인은 무엇을 센 것인가이며, 회계연도·기업·지표 축은 해당하지 않는다.
+    #
+    # 공시 건수에만 하한을 건다. 완결성 규칙이 요구하는 셈이 그것이고
+    # (_require_every_value_is_stated) 변경 건수는 빠뜨려도 되기 때문이다. 결정론 문장도 공시
+    # 1건짜리 이력에서는 변경 건수를 적지 않는다. 무엇이 요구되는지를 여기서 새로 정하지 않고
+    # 완결성 규칙이 이미 정한 것을 따라간다.
+    items.extend(
+        _ValuedItem(
+            item_id=f"{history.event_id}/{count.kind_label}",
+            renderings=(count.display_value,),
+            owners={
+                PERIOD_AXIS: frozenset(),
+                COMPANY_AXIS: frozenset(),
+                METRIC_AXIS: frozenset(),
+                COUNT_AXIS: frozenset({count.kind_label}),
+            },
+            answer_bearing=count.kind_label == document_label,
+        )
+        for history in payload.event_histories
+        for count in history.counts
+    )
+
+    return tuple(items)
+
+
+def _period_owner(fiscal_year: int | None) -> frozenset[str]:
+    """
+    회계연도 주인. 문장에서 불리는 표기로 옮긴다.
+
+    맨 숫자로 찾지 않는다. 금액 안의 자릿수와 부딪친다. 20240원 같은 값이 2024년을 부른 것으로
+    읽히고, 그때 이 검증은 확인한 적 없는 짝을 확인했다고 말한다. 결정론 문장이 쓰는 표기가
+    "N년"이다(answer_builder._period_phrase).
+
+    회계연도가 없으면 빈 집합이다. 두 기간 사이의 값이 그 자리이며(Q07의 증감액·증감률, Q08의
+    차이) 어느 한 해의 값이 아니다. 그런 값에 한 해를 요구하면 그것이 그 해의 값으로 읽힌다.
+    """
+    return frozenset() if fiscal_year is None else frozenset({f"{fiscal_year}년"})
+
+
+def _metric_owners(payload: GroundedPayload) -> dict[str, frozenset[str]]:
+    """
+    각 값이 어느 지표의 것으로 불려도 되는지를 payload의 참조 구조에서 끌어낸다.
+
+    이름의 근접만 보면 틀린다:
+        실측에서 돌아온 "한미반도체의 매출액은 작년보다 17,767,427,980원 늘었고"에서 그 값은
+        증감액 Calculation이고 매출액은 문장의 주어다. 문장은 맞다. 구절에 적힌 지표 이름이
+        곧 그 값의 이름표라고 보면 이 답을 거절하게 된다.
+
+    그래서 값마다 정당한 이름의 집합을 만든다:
+        Fact는 자기 지표 하나다. 원문에 그 지표의 값으로 적혀 있고 다른 이름으로 부를 근거가
+        없다.
+
+        Calculation은 자기 이름에 더해, 입력이 한 지표로 모일 때 그 지표를 함께 받는다. 매출액
+        두 건의 증감액은 매출액에 관한 값이므로 "매출액은 … 늘었다"가 맞고, 영업이익률 두 건의
+        차이는 영업이익률에 관한 값이므로 "영업이익률은 … 달라졌다"가 맞다.
+
+        입력이 한 지표로 모이지 않으면 자기 이름만 받는다. 영업이익률은 영업이익과 매출액에서
+        나오지만 둘 중 어느 쪽의 값도 아니다. 분자나 분모의 이름을 물려주면 "매출액은
+        20.0000%"가 통과하고, 그 문장은 비율을 원천 금액의 값으로 말한다.
+
+    입력의 이름은 그 입력이 물려받은 집합이 아니라 그 입력 자신의 이름으로 읽는다. 물려받은
+    것까지 따라가면 영업이익률의 차이가 영업이익·매출액까지 물려받아 위의 구분이 무너진다.
+
+    참조만 읽는다. 연산 이름을 보지 않는 이유는 그 대응표가 이미 metric_label에 반영돼 있고
+    (grounded_payload._ground_temporal_calculation) 여기서 다시 읽으면 같은 판정이 두 곳에
+    생기기 때문이다.
+    """
+    label_of: dict[str, str] = {fact.fact_id: fact.metric_label for fact in payload.facts}
+
+    label_of.update(
+        {item.calculation_id: item.metric_label for item in payload.calculations}
+    )
+
+    owners: dict[str, frozenset[str]] = {
+        fact.fact_id: frozenset({fact.metric_label}) for fact in payload.facts
+    }
+
+    for calculation in payload.calculations:
+        inherited = {
+            label_of[input_id]
+            for input_id in calculation.input_ids
+            if input_id in label_of
+        }
+
+        owners[calculation.calculation_id] = frozenset(
+            {calculation.metric_label} | (inherited if len(inherited) == 1 else set())
+        )
+
+    return owners
+
+
+def _owner_vocabularies(
+    payload: GroundedPayload,
+    items: tuple[_ValuedItem, ...],
+) -> dict[str, frozenset[str]]:
+    """
+    축마다 문장에서 알아볼 수 있는 주인 표기의 목록.
+
+    연도와 기업은 payload가 실은 것만 안다. 두 축 모두 값이 열려 있어 미리 적어 둘 수 없다.
+    payload 밖의 회사명은 _require_known_entities가, 없는 연도는 _require_grounded_numbers가
+    각각 따로 막는다.
+
+    지표와 이력의 셈은 다르다. 표기의 목록이 닫혀 있고 그 정본이 answer_builder에 있다.
+    payload에 없는 지표 이름도 알아볼 수 있어야 한다. Q07 payload에는 영업이익이 없지만
+    "영업이익 558,917,191,547원"은 틀린 문장이고, payload에 실린 이름만 보면 그 이름을 모르는
+    단어로 지나친다.
+    """
+    return {
+        PERIOD_AXIS: frozenset(
+            token for item in items for token in item.owners[PERIOD_AXIS]
+        ),
+        COMPANY_AXIS: frozenset(
+            token for item in items for token in item.owners[COMPANY_AXIS]
+        ),
+        METRIC_AXIS: frozenset(
+            set(METRIC_LABELS.values())
+            | set(DERIVED_METRIC_LABELS.values())
+            | set(TEMPORAL_OPERATION_LABELS.values())
+            | {fact.metric_label for fact in payload.facts}
+            | {item.metric_label for item in payload.calculations}
+        ),
+        COUNT_AXIS: frozenset(EVENT_COUNT_LABELS.values()),
+    }
+
+
+def _unshadowed(text: str, needle: str, others: frozenset[str] | set[str]) -> list[int]:
+    """
+    needle이 나타난 자리 중 더 긴 표기에 덮이지 않은 것.
+
+    짧은 표기가 긴 표기 안에 들어 있을 수 있다. 비율이 1.0000%이고 차이가 -1.0000%p이면 차이를
+    적은 자리에서도 비율의 문자열이 잡히고, 그 자리를 비율이 나타난 자리로 세면 비율이 엉뚱한
+    주인에게 붙었다고 판정하게 된다. 지표 이름도 같다("영업이익"은 "영업이익률" 안에 있다).
+
+    덮인 자리를 무시하는 것이지 봐주는 것이 아니다. 그 자리는 애초에 이 표기가 나타난 자리가
+    아니다. 긴 표기 자신은 자기 자리에서 따로 판정된다.
+    """
+    covering = [item for item in others if len(item) > len(needle) and needle in item]
+
+    spans = [
+        (start, start + len(item)) for item in covering for start in _find_all(text, item)
+    ]
+
+    return [
+        index
+        for index in _find_all(text, needle)
+        if not any(start <= index and index + len(needle) <= end for start, end in spans)
+    ]
 
 
 def _require_known_entities(text: str, payload: GroundedPayload) -> None:
@@ -955,9 +1285,15 @@ def _clause_start(text: str, index: int) -> int:
     return max(boundaries) + 1
 
 
-def _period_clause(text: str, index: int) -> str:
-    """index 앞의 가장 가까운 구절 경계부터 index까지. 그 값을 부른 자리다."""
-    boundaries = [text.rfind(marker, 0, index) for marker in PERIOD_BOUNDARIES]
+def _binding_clause(text: str, index: int) -> str:
+    """
+    index 앞의 가장 가까운 구절 경계부터 index까지. 그 값을 부른 자리다.
+
+    값 앞만 본다. 뒤까지 보면 다음 구절의 주인이 함께 잡혀 두 주인이 모두 이름을 대게 되고,
+    그러면 어느 쪽에 걸린 값인지 알 수 없다. 우열 표현이 어느 이름에 걸리는지 보는 방식과
+    같다(_require_ranking_matches).
+    """
+    boundaries = [text.rfind(marker, 0, index) for marker in BINDING_BOUNDARIES]
 
     return text[max(boundaries) + 1 : index]
 

@@ -71,6 +71,9 @@ from enum import StrEnum
 
 from disclosure_agent.agent.answer_builder import (
     ACCOUNTING_SCOPE_LABELS,
+    EVENT_COUNT_CHANGE,
+    EVENT_COUNT_DOCUMENT,
+    EVENT_COUNT_LABELS,
     FULL_YEAR_FISCAL_PERIODS,
     LIMITATION_MESSAGE_BY_REASON,
     LIMITATION_WITHOUT_REASON_MESSAGE,
@@ -88,6 +91,7 @@ from disclosure_agent.agent.answer_builder import (
     _is_temporal_derived_delta_shape,
     _normalized_value_with_unit,
     _referenced_fact,
+    event_count_display,
 )
 from disclosure_agent.agent.derived_metrics import UNIT_PERCENT
 from disclosure_agent.common.enums import AnswerabilityStatus, ResultInputType
@@ -185,6 +189,21 @@ class GroundedComparison:
 
 
 @dataclass(frozen=True)
+class GroundedEventCount:
+    """이력이 센 것 1건. 무엇을 셌는지와 그 셈이 문장에 적히는 표기.
+
+    셈을 정수로만 실으면 두 셈이 같은 모양이 된다. 공시 2건과 변경 1건을 맞바꿔 적은 문장에서
+    쓰인 숫자는 여전히 2와 1이고, 어느 쪽이 무엇의 셈인지는 숫자에 남지 않는다.
+
+    표기의 정본은 answer_builder다(EVENT_COUNT_LABELS, event_count_display). 이 자리는 그것을
+    검증 계층까지 나르기만 한다.
+    """
+
+    kind_label: str
+    display_value: str
+
+
+@dataclass(frozen=True)
 class GroundedEventHistory:
     """이력 1건의 셈.
 
@@ -201,6 +220,11 @@ class GroundedEventHistory:
     document_count: int
     change_count: int
     chain_complete: bool
+    # 셈마다 무엇을 센 것인지. 전송하지 않는다(as_dict 참조).
+    #
+    # 모델에게는 지금까지와 같은 정수를 보낸다. 이 표기는 돌아온 문장에서 어느 셈이 어느
+    # 숫자에 걸렸는지 볼 때 쓰는 기준이며, 보내는 재료가 아니다.
+    counts: tuple[GroundedEventCount, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -359,6 +383,16 @@ def build_grounded_payload(
             document_count=len(history.document_ids),
             change_count=len(history.changes),
             chain_complete=history.chain_complete,
+            counts=(
+                GroundedEventCount(
+                    kind_label=EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT],
+                    display_value=event_count_display(len(history.document_ids)),
+                ),
+                GroundedEventCount(
+                    kind_label=EVENT_COUNT_LABELS[EVENT_COUNT_CHANGE],
+                    display_value=event_count_display(len(history.changes)),
+                ),
+            ),
         )
         for history in result.event_histories
     )

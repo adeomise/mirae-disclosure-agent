@@ -506,6 +506,33 @@ DERIVED_METRIC_LABELS: dict[DerivedMetric, str] = {
     DerivedMetric.OPERATING_MARGIN: "영업이익률",
 }
 
+# 이력이 세는 것의 이름과 그 셈의 단위.
+#
+# 이력에는 셈이 둘 있고(확인한 공시, 확인된 변경) 문장에서는 둘 다 "N건"으로 적힌다. 숫자만
+# 보면 어느 셈인지 알 수 없으므로 무엇을 센 것인지를 이름으로 남긴다.
+#
+# 대응표로 두는 이유는 이 이름이 두 곳에서 쓰이기 때문이다. 아래 _event_history_sentence가
+# 문장을 만들 때 쓰고, grounded_payload가 검증기에 넘길 표기를 만들 때 읽는다. 문장에 직접
+# 적어 두면 검증기가 같은 한국어를 따로 한 벌 더 갖게 되고, 한쪽만 바뀌는 날 검증기는 문장에
+# 없는 이름을 찾게 된다.
+EVENT_COUNT_DOCUMENT = "document"
+EVENT_COUNT_CHANGE = "change"
+
+EVENT_COUNT_LABELS: dict[str, str] = {
+    EVENT_COUNT_DOCUMENT: "공시",
+    EVENT_COUNT_CHANGE: "변경 항목",
+}
+
+EVENT_COUNT_UNIT = "건"
+
+
+def event_count_display(count: int) -> str:
+    """이력의 셈이 문장에 적히는 표기.
+
+    단위를 붙인 문자열이다. 맨 숫자로 두면 금액이나 연도의 자릿수와 구별되지 않는다.
+    """
+    return f"{count}{EVENT_COUNT_UNIT}"
+
 # 변화량의 결과 단위. 백분율 두 건의 차이는 %가 아니라 percentage point다.
 #
 # agent.calculator가 정본이며 아래 OPERATION_DELTA 주석이 적어 둔 순환 import 때문에 그쪽에서
@@ -2817,23 +2844,36 @@ def _event_history_sentence(histories: list[EventHistory]) -> str:
 
     if incomplete:
         # 체인을 다 보지 못했다. "변경이 없었다"는 확정 진술을 붙이지 않는다.
-        sentence = f"관련 공시 {document_count}건까지 확인했습니다."
+        sentence = (
+            f"관련 {EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT]} "
+            f"{event_count_display(document_count)}까지 확인했습니다."
+        )
 
     elif document_count == 1:
-        return "관련 공시 1건을 확인했으며, 이후 변경된 내용은 확인되지 않았습니다."
+        return (
+            f"관련 {EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT]} "
+            f"{event_count_display(document_count)}을 확인했으며, "
+            "이후 변경된 내용은 확인되지 않았습니다."
+        )
 
     else:
-        sentence = f"관련 공시 {document_count}건으로 이어지는 이력을 확인했습니다."
+        sentence = (
+            f"관련 {EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT]} "
+            f"{event_count_display(document_count)}으로 이어지는 이력을 확인했습니다."
+        )
 
     change_count = len(history.changes)
 
     if change_count:
-        return f"{sentence} 확인된 변경 항목은 {change_count}건입니다."
+        return (
+            f"{sentence} 확인된 {EVENT_COUNT_LABELS[EVENT_COUNT_CHANGE]}은 "
+            f"{event_count_display(change_count)}입니다."
+        )
 
     if incomplete:
         return sentence
 
-    return f"{sentence} 확인된 변경 항목은 없습니다."
+    return f"{sentence} 확인된 {EVENT_COUNT_LABELS[EVENT_COUNT_CHANGE]}은 없습니다."
 
 
 def _limitation(result: AgentExecutionResult, *, partial: bool) -> str:

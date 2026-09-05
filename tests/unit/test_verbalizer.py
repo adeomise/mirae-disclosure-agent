@@ -18,7 +18,14 @@ import logging
 
 import pytest
 
-from disclosure_agent.agent.answer_builder import build_answer_response
+from disclosure_agent.agent.answer_builder import (
+    OPERATION_DELTA,
+    OPERATION_DELTA_PCT,
+    OPERATION_DIFF_PP,
+    UNIT_PERCENTAGE_POINT,
+    build_answer_response,
+)
+from disclosure_agent.agent.derived_metrics import OPERATION_RATIO, UNIT_PERCENT
 from disclosure_agent.agent.grounded_payload import GroundedPayload, build_grounded_payload
 from disclosure_agent.agent.hyperclova import (
     HyperClovaResponseError,
@@ -28,6 +35,8 @@ from disclosure_agent.agent.verbalizer import (
     MAX_ANSWER_LENGTH,
     SYSTEM_PROMPT,
     AnswerRejectedError,
+    _facts_consumed_by_calculations,
+    _metric_owners,
     parse_model_answer,
     validate_answer,
     verbalize,
@@ -44,6 +53,7 @@ from disclosure_agent.common.enums import (
 )
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
+    CalculationResult,
     ComparisonResult,
     EventHistory,
     Evidence,
@@ -78,10 +88,10 @@ def evidence() -> Evidence:
     )
 
 
-def fact_payload(
+def fact_result(
     *,
     scope: FactAccountingScope = FactAccountingScope.CONSOLIDATED,
-) -> GroundedPayload:
+) -> AgentExecutionResult:
     fact = Fact(
         fact_id="fact_revenue",
         company="한미반도체",
@@ -103,10 +113,17 @@ def fact_payload(
         evidence=[evidence()],
     )
 
-    return build_grounded_payload(result, question=QUESTION)
+    return result
 
 
-def history_payload(*, partial: bool = False) -> GroundedPayload:
+def fact_payload(
+    *,
+    scope: FactAccountingScope = FactAccountingScope.CONSOLIDATED,
+) -> GroundedPayload:
+    return build_grounded_payload(fact_result(scope=scope), question=QUESTION)
+
+
+def history_result(*, partial: bool = False) -> AgentExecutionResult:
     history = EventHistory(
         event_id="evt_1",
         document_ids=["doc_a", "doc_b"],
@@ -124,7 +141,14 @@ def history_payload(*, partial: bool = False) -> GroundedPayload:
         evidence=[evidence()],
     )
 
-    return build_grounded_payload(result, question="그 공급계약 나중에 바뀐 내용 있어?")
+    return result
+
+
+HISTORY_QUESTION = "그 공급계약 나중에 바뀐 내용 있어?"
+
+
+def history_payload(*, partial: bool = False) -> GroundedPayload:
+    return build_grounded_payload(history_result(partial=partial), question=HISTORY_QUESTION)
 
 
 def model_reply(answer: str, **declared: list[str]) -> str:
@@ -275,6 +299,1528 @@ def test_declared_id_outside_the_payload_is_rejected() -> None:
     client = ScriptedClient(reply)
 
     assert verbalize(fact_payload(), client=client) is None
+
+
+# --------------------------------------------------------------------------
+# 수치 표기 보존 — 검증기가 보는 것은 문자열이다
+#
+# 검증기가 보는 것은 수의 크기가 아니라 문자열이다. _canonical_number가 지우는 것은 천단위
+# 쉼표뿐이고 자릿수는 그대로 두므로, 같은 수를 다르게 적은 문장은 payload 밖의 수치가 된다.
+#
+# 모델은 그 표기를 정규화한다. HCX-007이 실제로 그렇게 했다. payload가 증감액을
+# 17767427980.0000원으로 싣던 동안 세 번의 실측 호출이 모두 그것을 17,767,427,980원으로 다시
+# 적었고, 그 응답은 ungrounded_number로 거절됐다.
+#
+# 그 불일치는 표기 쪽에서 없앴다. 증감액은 이제 결정론 문장과 payload가 같은 규칙으로 적는다
+# (answer_builder._grouped_amount). 아래는 그 표기에 대한 검증기의 판정을 고정한다.
+# --------------------------------------------------------------------------
+
+
+def temporal_delta_result() -> AgentExecutionResult:
+    """Q07 모양. 원천 Fact 2건과 그 둘에서 나온 증감액·증감률.
+
+    값은 실제 코퍼스가 만든 것과 같은 표기를 쓴다. 원천 Fact는 공시 원문 표기라 쉼표가 있고,
+    증감액은 계산 계층이 만든 문자열이라 쉼표가 없고 소수 자릿수가 남는다. 한 payload 안에
+    두 표기가 함께 있다는 것이 이 고정의 핵심이다.
+    """
+
+    def revenue(fact_id: str, *, year: int, raw: str, normalized: int) -> Fact:
+        return Fact(
+            fact_id=fact_id,
+            company="한미반도체",
+            metric=MetricConcept.REVENUE,
+            fiscal_year=year,
+            fiscal_period="FY",
+            accounting_scope=FactAccountingScope.CONSOLIDATED,
+            raw_value=raw,
+            raw_unit="원",
+            normalized_value=normalized,
+            normalized_unit="KRW",
+            evidence_ids=[f"ev_{year}"],
+        )
+
+    def inputs() -> list[ResultInputReference]:
+        return [
+            ResultInputReference(input_type=ResultInputType.FACT, input_id="fact_rev_2024"),
+            ResultInputReference(input_type=ResultInputType.FACT, input_id="fact_rev_2025"),
+        ]
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=[
+            revenue("fact_rev_2024", year=2024, raw="558,917,191,547", normalized=558917191547),
+            revenue("fact_rev_2025", year=2025, raw="576,684,619,527", normalized=576684619527),
+        ],
+        calculations=[
+            CalculationResult(
+                calculation_id="calc_delta",
+                operation=OPERATION_DELTA,
+                inputs=inputs(),
+                value="17767427980.0000",
+                unit="KRW",
+                evidence_ids=["ev_2024", "ev_2025"],
+            ),
+            CalculationResult(
+                calculation_id="calc_delta_pct",
+                operation=OPERATION_DELTA_PCT,
+                inputs=inputs(),
+                value="3.1789",
+                unit=UNIT_PERCENT,
+                evidence_ids=["ev_2024", "ev_2025"],
+            ),
+        ],
+        evidence=[
+            Evidence(
+                evidence_id="ev_2024", doc_id="doc_2024", location_type=EvidenceLocationType.TABLE
+            ),
+            Evidence(
+                evidence_id="ev_2025", doc_id="doc_2025", location_type=EvidenceLocationType.TABLE
+            ),
+        ],
+    )
+
+
+def temporal_delta_payload() -> GroundedPayload:
+    return build_grounded_payload(
+        temporal_delta_result(), question="한미반도체 매출이 작년보다 얼마나 늘었어?"
+    )
+
+
+def temporal_delta_reply(answer: str) -> str:
+    body = {
+        "answer": answer,
+        "used_fact_ids": ["fact_rev_2024", "fact_rev_2025"],
+        "used_calculation_ids": ["calc_delta", "calc_delta_pct"],
+        "used_evidence_ids": ["ev_2024", "ev_2025"],
+    }
+
+    return json.dumps(body, ensure_ascii=False)
+
+
+def test_q07_answer_copying_the_payload_strings_passes() -> None:
+    """
+    payload의 문자열을 그대로 쓴 Q07 문장은 통과한다.
+
+    수치를 손으로 적지 않고 payload에서 읽어 쓴다. 적어 두면 payload 표기가 바뀌는 날 이
+    고정이 함께 틀리고, 그때 통과하는 문장이 실제로 통과할 문장인지 알 수 없다.
+    """
+    payload = temporal_delta_payload()
+
+    previous, current = payload.facts
+
+    amount, rate = payload.calculations
+
+    answer = (
+        f"한미반도체의 연결 기준 매출액은 {previous.fiscal_year}년 {previous.display_value}, "
+        f"{current.fiscal_year}년 {current.display_value}입니다. "
+        f"증감액은 {amount.display_value}, 증감률은 {rate.display_value}입니다."
+    )
+
+    # 실제로 그 문자열이 payload에 실린 표기인지 함께 본다.
+    assert amount.display_value == "17,767,427,980원"
+    assert rate.display_value == "3.1789%"
+
+    validate_answer(parse_model_answer(temporal_delta_reply(answer)), payload)
+
+
+def test_deterministic_q07_sentence_passes_the_validator() -> None:
+    """결정론 문장이 자기 검증기에 걸리면 대조군이 사라진다."""
+    result = temporal_delta_result()
+
+    payload = build_grounded_payload(
+        result, question="한미반도체 매출이 작년보다 얼마나 늘었어?"
+    )
+
+    sentence = build_answer_response(result).answer
+
+    validate_answer(parse_model_answer(temporal_delta_reply(sentence)), payload)
+
+
+def q07_answer_with_delta(delta: str) -> str:
+    """증감액 자리만 갈아 끼운 Q07 문장. 나머지 수치는 payload에서 읽는다."""
+    payload = temporal_delta_payload()
+
+    previous, current = payload.facts
+
+    rate = payload.calculations[1]
+
+    return (
+        f"한미반도체의 연결 기준 매출액은 {previous.fiscal_year}년 {previous.display_value}, "
+        f"{current.fiscal_year}년 {current.display_value}입니다. "
+        f"증감액은 {delta}, 증감률은 {rate.display_value}입니다."
+    )
+
+
+@pytest.mark.parametrize(
+    "delta",
+    [
+        # 표기 규칙이 생기기 전 payload가 싣던 문자열. 이제는 근거 밖의 수치다.
+        "17767427980.0000원",
+        # 반올림·단위 환산. 규칙이 바뀌어도 이쪽이 통과해서는 안 된다.
+        "약 177억원",
+        "17,767,427,981원",
+    ],
+    ids=["pre-grouping", "abbreviated", "off-by-one"],
+)
+def test_q07_answer_not_matching_the_payload_delta_is_rejected(delta: str) -> None:
+    """
+    payload의 문자열과 다른 증감액은 거절된다.
+
+    표기 규칙을 바꾼 것은 payload가 무엇을 싣는가이지 검증기가 무엇을 통과시키는가가 아니다.
+    규칙 이전의 문자열(17767427980.0000원)이 이제 거절되는 것이 그 증거다. 검증기는 그때와
+    같은 일을 하고 있고, 대조할 문자열만 달라졌다.
+    """
+    payload = temporal_delta_payload()
+
+    with pytest.raises(AnswerRejectedError) as caught:
+        validate_answer(
+            parse_model_answer(temporal_delta_reply(q07_answer_with_delta(delta))), payload
+        )
+
+    assert caught.value.code == "ungrounded_number"
+
+
+def test_q07_answer_using_the_grouped_delta_passes() -> None:
+    """대조군. payload가 싣는 표기를 그대로 쓴 문장은 통과한다."""
+    payload = temporal_delta_payload()
+
+    amount = payload.calculations[0]
+
+    assert amount.display_value == "17,767,427,980원"
+
+    validate_answer(
+        parse_model_answer(temporal_delta_reply(q07_answer_with_delta(amount.display_value))),
+        payload,
+    )
+
+
+# --------------------------------------------------------------------------
+# 답에 실리는 값과 보조 값
+#
+# payload에 실린 Fact가 모두 답의 일부인 것은 아니다. 파생값을 만든 원천 Fact는 그 파생값이
+# 무엇에서 나왔는지를 붙들어 두려고 함께 실린다. 그것까지 문장에 요구하면 결정론 경로가 자기
+# 검증기에 걸린다. Q08과 Q11이 실제로 걸렸다.
+#
+# 여기서 고정하는 것은 두 가지다. 완결성의 하한이 참조 위상에서 정해진다는 것과, 그 완화가
+# 근거 밖의 수치를 열지 않는다는 것이다. 뒤쪽이 특히 중요하다. 하한을 낮춘 것이 상한을 함께
+# 낮추면 검증이 약해진 것이고, 그 사실은 통과한 문장만 봐서는 드러나지 않는다.
+# --------------------------------------------------------------------------
+
+
+def margin_ratio(
+    calculation_id: str,
+    *,
+    numerator: str,
+    denominator: str,
+    value: str,
+) -> CalculationResult:
+    return CalculationResult(
+        calculation_id=calculation_id,
+        operation=OPERATION_RATIO,
+        inputs=[
+            ResultInputReference(input_type=ResultInputType.FACT, input_id=numerator),
+            ResultInputReference(input_type=ResultInputType.FACT, input_id=denominator),
+        ],
+        value=value,
+        unit=UNIT_PERCENT,
+        evidence_ids=[f"ev_{numerator}", f"ev_{denominator}"],
+    )
+
+
+def periodic_fact(
+    fact_id: str,
+    *,
+    company: str,
+    metric: MetricConcept,
+    year: int,
+    raw: str,
+    normalized: int,
+) -> Fact:
+    return Fact(
+        fact_id=fact_id,
+        company=company,
+        metric=metric,
+        fiscal_year=year,
+        fiscal_period="FY",
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+        raw_value=raw,
+        raw_unit="원",
+        normalized_value=normalized,
+        normalized_unit="KRW",
+        evidence_ids=[f"ev_{fact_id}"],
+    )
+
+
+def source(evidence_id: str) -> Evidence:
+    return Evidence(
+        evidence_id=evidence_id, doc_id="doc_a", location_type=EvidenceLocationType.TABLE
+    )
+
+
+Q08_QUESTION = "한미반도체 영업이익률이 2024년이랑 2025년에 어떻게 달라졌어?"
+
+Q11_QUESTION = "A사랑 B사 중에 2025년 영업이익률이 더 높은 곳은 어디야?"
+
+
+def derived_delta_result() -> AgentExecutionResult:
+    """Q08 모양. 원천 Fact 4건, 기간별 비율 2건, 두 비율의 차이 1건."""
+    facts = [
+        periodic_fact(
+            "f_oi_2024",
+            company="한미반도체",
+            metric=MetricConcept.OPERATING_INCOME,
+            year=2024,
+            raw="100",
+            normalized=100,
+        ),
+        periodic_fact(
+            "f_rev_2024",
+            company="한미반도체",
+            metric=MetricConcept.REVENUE,
+            year=2024,
+            raw="1,000",
+            normalized=1000,
+        ),
+        periodic_fact(
+            "f_oi_2025",
+            company="한미반도체",
+            metric=MetricConcept.OPERATING_INCOME,
+            year=2025,
+            raw="90",
+            normalized=90,
+        ),
+        periodic_fact(
+            "f_rev_2025",
+            company="한미반도체",
+            metric=MetricConcept.REVENUE,
+            year=2025,
+            raw="1,000",
+            normalized=1000,
+        ),
+    ]
+
+    change = CalculationResult(
+        calculation_id="calc_margin_diff",
+        operation=OPERATION_DIFF_PP,
+        inputs=[
+            ResultInputReference(
+                input_type=ResultInputType.CALCULATION, input_id="calc_margin_2024"
+            ),
+            ResultInputReference(
+                input_type=ResultInputType.CALCULATION, input_id="calc_margin_2025"
+            ),
+        ],
+        value="-1.0000",
+        unit=UNIT_PERCENTAGE_POINT,
+        evidence_ids=["ev_f_oi_2024", "ev_f_rev_2024", "ev_f_oi_2025", "ev_f_rev_2025"],
+    )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=facts,
+        calculations=[
+            margin_ratio(
+                "calc_margin_2024",
+                numerator="f_oi_2024",
+                denominator="f_rev_2024",
+                value="10.0000",
+            ),
+            margin_ratio(
+                "calc_margin_2025",
+                numerator="f_oi_2025",
+                denominator="f_rev_2025",
+                value="9.0000",
+            ),
+            change,
+        ],
+        evidence=[source(f"ev_{fact.fact_id}") for fact in facts],
+    )
+
+
+def margin_comparison_result() -> AgentExecutionResult:
+    """Q11 모양. 두 기업의 원천 Fact 4건, 기업별 비율 2건, 그 둘의 우열 1건."""
+    facts = [
+        periodic_fact(
+            "f_a_oi",
+            company="A사",
+            metric=MetricConcept.OPERATING_INCOME,
+            year=2025,
+            raw="200",
+            normalized=200,
+        ),
+        periodic_fact(
+            "f_a_rev",
+            company="A사",
+            metric=MetricConcept.REVENUE,
+            year=2025,
+            raw="1,000",
+            normalized=1000,
+        ),
+        periodic_fact(
+            "f_b_oi",
+            company="B사",
+            metric=MetricConcept.OPERATING_INCOME,
+            year=2025,
+            raw="100",
+            normalized=100,
+        ),
+        periodic_fact(
+            "f_b_rev",
+            company="B사",
+            metric=MetricConcept.REVENUE,
+            year=2025,
+            raw="1,000",
+            normalized=1000,
+        ),
+    ]
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=facts,
+        calculations=[
+            margin_ratio(
+                "calc_margin_a", numerator="f_a_oi", denominator="f_a_rev", value="20.0000"
+            ),
+            margin_ratio(
+                "calc_margin_b", numerator="f_b_oi", denominator="f_b_rev", value="10.0000"
+            ),
+        ],
+        comparisons=[
+            ComparisonResult(
+                comparison_id="cmp_margin",
+                left=ResultInputReference(
+                    input_type=ResultInputType.CALCULATION, input_id="calc_margin_a"
+                ),
+                right=ResultInputReference(
+                    input_type=ResultInputType.CALCULATION, input_id="calc_margin_b"
+                ),
+                relation=ComparisonRelation.LEFT_GREATER,
+            )
+        ],
+        evidence=[source(f"ev_{fact.fact_id}") for fact in facts],
+    )
+
+
+def reply_declaring(payload: GroundedPayload, answer: str) -> str:
+    """payload가 싣고 있는 id를 그대로 신고하는 응답."""
+    return json.dumps(
+        {
+            "answer": answer,
+            "used_fact_ids": [item.fact_id for item in payload.facts],
+            "used_calculation_ids": [item.calculation_id for item in payload.calculations],
+            "used_evidence_ids": [item.evidence_id for item in payload.evidence],
+        },
+        ensure_ascii=False,
+    )
+
+
+DETERMINISTIC_SHAPES: dict[str, tuple[object, str]] = {
+    "Q01 single fact": (fact_result, QUESTION),
+    "Q07 temporal delta": (temporal_delta_result, "한미반도체 매출이 작년보다 얼마나 늘었어?"),
+    "Q08 derived delta": (derived_delta_result, Q08_QUESTION),
+    "Q10 fact compare": (
+        lambda: comparison_result(ComparisonRelation.LEFT_GREATER),
+        "A사와 B사 중 어디가 더 커?",
+    ),
+    "Q11 margin compare": (margin_comparison_result, Q11_QUESTION),
+    "event history": (history_result, HISTORY_QUESTION),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(DETERMINISTIC_SHAPES))
+def test_deterministic_answer_validates_against_its_own_payload(shape: str) -> None:
+    """
+    결정론 문장이 자기 payload의 검증기를 통과한다.
+
+    이 자리가 없어서 Q08과 Q11이 오래 어긋나 있었다. 두 문항의 결정론 문장은 원천 Fact의 값을
+    적지 않는데 검증기는 그것을 요구했고, 그 사실은 외부 모델을 켜기 전까지 드러나지 않았다.
+    모양이 늘 때 같은 어긋남이 다시 생기지 않도록 모양별로 한 번씩 지나가게 둔다.
+    """
+    build, question = DETERMINISTIC_SHAPES[shape]
+
+    result = build()  # type: ignore[operator]
+
+    payload = build_grounded_payload(result, question=question)
+
+    sentence = build_answer_response(result).answer
+
+    validate_answer(parse_model_answer(reply_declaring(payload, sentence)), payload)
+
+
+def test_calculation_input_facts_are_supporting() -> None:
+    """파생값을 만든 원천 Fact는 그 파생값이 대신 답한다."""
+    result = derived_delta_result()
+
+    payload = build_grounded_payload(result, question=Q08_QUESTION)
+
+    # 네 Fact 모두 비율의 입력이다.
+    assert {item.fact_id for item in payload.facts} == {
+        "f_oi_2024",
+        "f_rev_2024",
+        "f_oi_2025",
+        "f_rev_2025",
+    }
+
+    answer = (
+        "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%, 2025년 9.0000%이며, "
+        "두 연도의 차이는 -1.0000%p입니다."
+    )
+
+    validate_answer(parse_model_answer(reply_declaring(payload, answer)), payload)
+
+
+def test_supporting_fact_may_be_stated_verbatim() -> None:
+    """보조로 내려간 값도 화이트리스트에 남는다. 적어도 되고, 적으면 그대로여야 한다."""
+    result = derived_delta_result()
+
+    payload = build_grounded_payload(result, question=Q08_QUESTION)
+
+    answer = (
+        "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%, 2025년 9.0000%이며, "
+        "두 연도의 차이는 -1.0000%p입니다. 2025년 영업이익은 90원입니다."
+    )
+
+    validate_answer(parse_model_answer(reply_declaring(payload, answer)), payload)
+
+
+def test_supporting_fact_stated_with_an_altered_value_is_rejected() -> None:
+    """
+    하한을 낮춘 것이 상한을 함께 낮추지 않았는지 본다.
+
+    보조 값은 '적지 않아도 된다'이지 '아무렇게나 적어도 된다'가 아니다. _allowed_numbers는
+    그대로이므로 자릿수를 바꿔 적으면 근거 밖의 수치가 된다.
+    """
+    result = derived_delta_result()
+
+    payload = build_grounded_payload(result, question=Q08_QUESTION)
+
+    answer = (
+        "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%, 2025년 9.0000%이며, "
+        "두 연도의 차이는 -1.0000%p입니다. 2025년 영업이익은 91원입니다."
+    )
+
+    with pytest.raises(AnswerRejectedError) as caught:
+        validate_answer(parse_model_answer(reply_declaring(payload, answer)), payload)
+
+    assert caught.value.code == "ungrounded_number"
+
+
+def test_every_calculation_stays_required_at_any_depth() -> None:
+    """다른 계산의 입력으로 쓰인 계산도 빠지면 안 된다. 대변할 값이 없다."""
+    result = derived_delta_result()
+
+    payload = build_grounded_payload(result, question=Q08_QUESTION)
+
+    # 2024년 비율을 뺀 문장. 나머지는 그대로다.
+    answer = (
+        "한미반도체의 연결 기준 영업이익률은 2025년 9.0000%이며, "
+        "두 연도의 차이는 -1.0000%p입니다."
+    )
+
+    with pytest.raises(AnswerRejectedError) as caught:
+        validate_answer(parse_model_answer(reply_declaring(payload, answer)), payload)
+
+    assert caught.value.code == "value_dropped"
+
+
+@pytest.mark.parametrize("dropped", ["delta", "delta_pct"])
+def test_q07_calculations_stay_required(dropped: str) -> None:
+    """증감액과 증감률은 어느 쪽도 보조가 아니다."""
+    payload = temporal_delta_payload()
+
+    amount, rate = payload.calculations
+
+    kept = rate.display_value if dropped == "delta" else amount.display_value
+
+    answer = f"한미반도체의 매출액 변화는 {kept}입니다."
+
+    with pytest.raises(AnswerRejectedError) as caught:
+        validate_answer(parse_model_answer(temporal_delta_reply(answer)), payload)
+
+    assert caught.value.code == "value_dropped"
+
+
+def test_q07_answer_may_omit_the_source_facts() -> None:
+    """
+    변화만 물은 질문에서 원천 Fact는 보조다.
+
+    실측에서 HCX-007이 실제로 이 모양의 문장을 돌려주었고, 규칙이 '전부'이던 동안에는
+    value_dropped로 거절됐다.
+    """
+    payload = temporal_delta_payload()
+
+    amount, rate = payload.calculations
+
+    answer = (
+        f"한미반도체의 매출액은 작년보다 {amount.display_value} 늘었고, "
+        f"증감률은 {rate.display_value}입니다."
+    )
+
+    validate_answer(parse_model_answer(temporal_delta_reply(answer)), payload)
+
+
+def test_comparison_operands_are_not_supporting() -> None:
+    """
+    우열 판정은 값을 대신 말해 주지 않는다.
+
+    left_id/right_id를 보조 집합에 넣으면 Q10에서 값을 하나도 적지 않은 판정 문장이 통과한다.
+    """
+    result = comparison_result(ComparisonRelation.LEFT_GREATER)
+
+    payload = build_grounded_payload(result, question="A사와 B사 중 어디가 더 커?")
+
+    assert payload.comparisons
+
+    with pytest.raises(AnswerRejectedError) as caught:
+        validate_answer(
+            parse_model_answer(
+                reply_declaring(payload, "A사 쪽이 B사보다 더 큽니다.")
+            ),
+            payload,
+        )
+
+    assert caught.value.code == "value_dropped"
+
+
+def test_payload_without_calculations_exempts_no_fact() -> None:
+    """계산이 없으면 보조도 없다. Q01과 Q10의 완결성 기준은 이 변경 전과 같다."""
+    for payload in (fact_payload(), build_grounded_payload(
+        comparison_result(ComparisonRelation.LEFT_GREATER), question="A사와 B사 중 어디가 더 커?"
+    )):
+        assert not payload.calculations
+
+        assert _facts_consumed_by_calculations(payload) == frozenset()
+
+
+def test_calculation_ids_never_become_supporting_facts() -> None:
+    """
+    input_ids에는 계산 id도 섞인다(Q08의 변화량). 그것이 보조 집합에 들어가면 안 된다.
+
+    들어가면 그 id를 가진 계산이 문장에서 빠져도 통과하게 된다. 종류를 문자열 모양으로 짐작하지
+    않고 payload의 Fact id 집합과 교집합을 취하는 이유다.
+    """
+    payload = build_grounded_payload(derived_delta_result(), question=Q08_QUESTION)
+
+    supporting = _facts_consumed_by_calculations(payload)
+
+    known_facts = {item.fact_id for item in payload.facts}
+
+    assert supporting <= known_facts
+
+    assert not supporting & {item.calculation_id for item in payload.calculations}
+
+
+# --------------------------------------------------------------------------
+# 값과 주인의 짝
+#
+# 수치 검증은 값의 집합만 본다. 주인을 맞바꿔 적어도 쓰인 수치는 모두 payload 안에 있고 빠진
+# 값도 없으므로, 짝을 보지 않으면 걸리는 자리가 없다.
+#
+# 주인은 축이 여럿이다. 연도를 맞바꾼 문장(Q08)과 기업을 맞바꾼 문장(Q10·Q11)은 같은 실패이며
+# 한 규칙이 함께 본다(_require_bound_values). 아래는 축마다 그 짝이 남아 있는지 고정한다.
+# --------------------------------------------------------------------------
+
+
+def q08_payload_and_ids() -> tuple[GroundedPayload, AgentExecutionResult]:
+    result = derived_delta_result()
+
+    return build_grounded_payload(result, question=Q08_QUESTION), result
+
+
+def q08_verdict(answer: str) -> str | None:
+    """Q08 payload에 대해 문장을 검증하고 거절 코드를 돌려준다. 통과면 None."""
+    payload, _ = q08_payload_and_ids()
+
+    try:
+        validate_answer(parse_model_answer(reply_declaring(payload, answer)), payload)
+    except AnswerRejectedError as error:
+        return error.code
+
+    return None
+
+
+def test_q08_deterministic_sentence_keeps_each_year_with_its_value() -> None:
+    """대조군. 결정론 문장은 연도 바로 뒤에 그 해의 값을 적는다."""
+    payload, result = q08_payload_and_ids()
+
+    sentence = build_answer_response(result).answer
+
+    # 이 고정이 무엇을 보고 있는지 문장으로 남긴다. payload가 정한 짝이 아래 그대로 나온다.
+    bound = {item.fiscal_year: item.display_value for item in payload.calculations}
+
+    assert bound == {2024: "10.0000%", 2025: "9.0000%", None: "-1.0000%p"}
+
+    assert "2024년 10.0000%" in sentence
+    assert "2025년 9.0000%" in sentence
+
+    assert q08_verdict(sentence) is None
+
+
+def test_q08_answer_swapping_the_two_years_is_rejected() -> None:
+    """
+    맞바꾼 문장이 이 규칙 전에는 통과했다.
+
+    쓰인 수치는 10.0000%·9.0000%·-1.0000%p로 payload와 같고 빠진 값도 없다. 틀렸다는 사실은
+    값이 아니라 값과 해의 짝에만 남으며, 그것을 보는 자리가 여기 말고는 없다.
+    """
+    assert (
+        q08_verdict(
+            "한미반도체의 연결 기준 영업이익률은 2024년 9.0000%, 2025년 10.0000%이며, "
+            "두 연도의 차이는 -1.0000%p입니다."
+        )
+        == "period_contradiction"
+    )
+
+
+def test_q08_answer_naming_both_years_before_both_values_is_rejected() -> None:
+    """
+    두 값이 다 있어도 어느 해의 것인지 갈리지 않으면 통과시키지 않는다.
+
+    "2024년과 2025년에 각각 A와 B"는 읽는 사람이 순서를 맞춰 읽어야 짝이 선다. 그 순간 짝을
+    세우는 것은 시스템이 아니라 사용자이고, 확정된 (연도, 값)은 답변 어디에도 남지 않는다.
+
+    거절 이유는 어긋남이다. 값 하나가 자기 해가 아닌 해를 함께 부르고 있으며, 맞는 해를 같이
+    불렀다는 것이 틀린 해를 지워 주지 않는다(_bound_owners). 값이 둘 다 있다는 것만으로는
+    부족하다는 계약은 그대로다.
+    """
+    assert (
+        q08_verdict(
+            "한미반도체의 연결 기준 영업이익률은 2024년과 2025년에 각각 10.0000%와 "
+            "9.0000%였습니다. 두 연도의 차이는 -1.0000%p입니다."
+        )
+        == "period_contradiction"
+    )
+
+
+def test_q08_answer_dropping_the_years_is_rejected() -> None:
+    """연도를 떼면 값만 남는다. 그 문장은 어느 해의 값인지 말하지 않는다."""
+    assert (
+        q08_verdict(
+            "한미반도체의 연결 기준 영업이익률은 10.0000%, 9.0000%이며, "
+            "두 연도의 차이는 -1.0000%p입니다."
+        )
+        == "unverifiable_period"
+    )
+
+
+def test_q08_answer_without_a_comma_between_the_periods_passes() -> None:
+    """
+    구절을 쉼표로 나누지 않아도 짝이 서면 통과한다.
+
+    앞 값의 소수점이 경계가 되어 앞 구절의 연도가 다음 값의 범위로 넘어오지 않는다. 결정론
+    문장의 어순만 통과시키는 규칙이 아니다.
+    """
+    assert (
+        q08_verdict(
+            "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%이며 2025년 9.0000%입니다. "
+            "두 연도의 차이는 -1.0000%p입니다."
+        )
+        is None
+    )
+
+
+def test_q08_value_appearing_inside_another_value_does_not_break_the_binding() -> None:
+    """
+    같은 문자열이 다른 값 안에 들어 있어도 짝이 서면 통과한다.
+
+    비율이 1.0000%이고 차이가 -1.0000%p이면 차이를 적은 자리에서도 비율의 문자열이 잡힌다.
+    그 자리는 연도를 부르지 않으므로 짝을 세우지도 무너뜨리지도 않는다. 여기서는 그 자리가
+    제대로 묶인 자리보다 문장 앞에 오게 두어, 먼저 잡힌 자리 하나로 판정하지 않는지 본다.
+    """
+    result = derived_delta_result()
+
+    result.calculations[0].value = "1.0000"
+
+    payload = build_grounded_payload(result, question=Q08_QUESTION)
+
+    assert payload.calculations[0].display_value == "1.0000%"
+    assert payload.calculations[2].display_value == "-1.0000%p"
+
+    answer = (
+        "한미반도체의 연결 기준 영업이익률은 두 연도의 차이가 -1.0000%p이며, "
+        "2024년 1.0000%, 2025년 9.0000%입니다."
+    )
+
+    validate_answer(parse_model_answer(reply_declaring(payload, answer)), payload)
+
+
+def test_q11_binds_by_company_and_not_by_period() -> None:
+    """
+    같은 해의 두 기업을 견준 결과는 기업 축으로 묶고 연도 축으로는 묶지 않는다.
+
+    두 비율이 같은 해에 걸려 있어 연도로는 어느 쪽도 특정되지 않는다. 그 축으로 묶으라고 하면
+    두 값이 같은 주인에 걸려 어느 쪽도 확인되지 않는다. 값을 가르는 축은 기업명이다.
+    """
+    result = margin_comparison_result()
+
+    payload = build_grounded_payload(result, question=Q11_QUESTION)
+
+    # 어느 축이 켜지고 어느 축이 꺼지는지를 payload에서 확인한다.
+    assert {item.fiscal_year for item in payload.calculations} == {2025}
+    assert {item.company for item in payload.calculations} == {"A사", "B사"}
+
+    validate_answer(
+        parse_model_answer(reply_declaring(payload, build_answer_response(result).answer)),
+        payload,
+    )
+
+
+def test_q07_between_period_values_are_not_bound_to_a_year() -> None:
+    """
+    두 기간 사이의 값은 회계연도 자리가 비어 있어 짝을 요구받지 않는다.
+
+    증감액을 한쪽 해에 묶으면 그것이 그 해의 값으로 읽힌다. Q07의 두 Calculation이 모두 그
+    자리이며, 원천 값은 Fact가 들고 있다.
+    """
+    result = temporal_delta_result()
+
+    payload = build_grounded_payload(
+        result, question="한미반도체 매출이 작년보다 얼마나 늘었어?"
+    )
+
+    assert {item.fiscal_year for item in payload.calculations} == {None}
+
+    validate_answer(
+        parse_model_answer(reply_declaring(payload, build_answer_response(result).answer)),
+        payload,
+    )
+
+
+def verdict(payload: GroundedPayload, answer: str) -> str | None:
+    """문장을 검증하고 거절 코드를 돌려준다. 통과면 None."""
+    try:
+        validate_answer(parse_model_answer(reply_declaring(payload, answer)), payload)
+    except AnswerRejectedError as error:
+        return error.code
+
+    return None
+
+
+def test_q08_correct_pair_followed_by_a_wrong_year_is_rejected() -> None:
+    """
+    맞는 짝을 먼저 적고 뒤에서 뒤집는 문장을 통과시키지 않는다.
+
+    맞게 붙은 자리를 하나 찾고 멈추면 이 문장이 통과한다. 앞의 올바른 짝이 뒤의 어긋남을 지워
+    주지 않는다. 뒤집는 진술도 사용자가 읽는 문장의 일부다.
+    """
+    payload, _ = q08_payload_and_ids()
+
+    assert (
+        verdict(
+            payload,
+            "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%, 2025년 9.0000%입니다. "
+            "두 연도의 차이는 -1.0000%p입니다. 그런데 2025년 값은 10.0000%입니다.",
+        )
+        == "period_contradiction"
+    )
+
+
+def identical_margin_payload() -> GroundedPayload:
+    """두 해의 비율이 같은 수인 Q08 모양."""
+    result = derived_delta_result()
+
+    result.calculations[1].value = "10.0000"
+    result.calculations[2].value = "0.0000"
+
+    return build_grounded_payload(result, question=Q08_QUESTION)
+
+
+def test_identical_values_on_both_years_bind_to_both() -> None:
+    """
+    두 해의 값이 같은 수여도 각각 자기 해에 붙어야 한다.
+
+    표기가 같다고 해서 한 번의 올바른 짝이 두 항목을 함께 만족시키지 않는다. 그렇게 두면 한 해의
+    값만 적고 나머지 해는 이름도 대지 않은 문장이 통과한다.
+    """
+    payload = identical_margin_payload()
+
+    assert [item.display_value for item in payload.calculations] == [
+        "10.0000%",
+        "10.0000%",
+        "0.0000%p",
+    ]
+
+    assert (
+        verdict(
+            payload,
+            "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%, 2025년 10.0000%이며, "
+            "두 연도의 차이는 0.0000%p입니다.",
+        )
+        is None
+    )
+
+    assert (
+        verdict(
+            payload,
+            "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%, 10.0000%이며, "
+            "두 연도의 차이는 0.0000%p입니다.",
+        )
+        == "unverifiable_period"
+    )
+
+
+def test_supporting_fact_stated_under_the_wrong_year_is_rejected() -> None:
+    """
+    보조 Fact는 적지 않아도 되지만, 적었다면 자기 해에 붙어야 한다.
+
+    하한과 상한이 다른 자리다. 빠뜨리는 것은 허용되고(그 값은 파생값이 대신 답한다) 틀리게 적는
+    것은 허용되지 않는다.
+    """
+    payload, _ = q08_payload_and_ids()
+
+    correct = (
+        "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%, 2025년 9.0000%이며, "
+        "두 연도의 차이는 -1.0000%p입니다. 2024년 영업이익은 100원입니다."
+    )
+
+    wrong = correct.replace("2024년 영업이익은", "2025년 영업이익은")
+
+    assert verdict(payload, correct) is None
+
+    assert verdict(payload, wrong) == "period_contradiction"
+
+
+def test_q07_source_facts_swapped_between_years_are_rejected() -> None:
+    """
+    원천 Fact도 연도에 묶인다. Calculation만 보면 이 문장이 통과한다.
+
+    Q07의 증감액·증감률은 두 기간 사이의 값이라 연도 자리가 비어 있고, 연도를 가진 것은 원천
+    Fact 두 건뿐이다. 검사가 Calculation만 돌면 이 모양에는 연도 짝을 보는 자리가 하나도 없다.
+    """
+    result = temporal_delta_result()
+
+    payload = build_grounded_payload(
+        result, question="한미반도체 매출이 작년보다 얼마나 늘었어?"
+    )
+
+    assert (
+        verdict(
+            payload,
+            "한미반도체의 연결 기준 매출액은 2024년 576,684,619,527원, "
+            "2025년 558,917,191,547원입니다. 증감액은 17,767,427,980원, "
+            "증감률은 3.1789%입니다.",
+        )
+        == "period_contradiction"
+    )
+
+    # 보조 Fact이므로 아예 적지 않는 문장은 그대로 통과한다.
+    assert (
+        verdict(
+            payload,
+            "한미반도체의 연결 기준 매출액 증감액은 17,767,427,980원, 증감률은 3.1789%입니다.",
+        )
+        is None
+    )
+
+
+def test_q11_swapped_company_values_are_rejected() -> None:
+    """
+    기업과 값을 맞바꾼 문장. 수치도 기업명도 우열 판정도 모두 맞다.
+
+    틀린 것은 어느 값이 누구의 것인가뿐이며, 그 사실은 짝에만 남는다.
+    """
+    payload = build_grounded_payload(margin_comparison_result(), question=Q11_QUESTION)
+
+    assert (
+        verdict(
+            payload,
+            "A사의 2025년 연결 기준 영업이익률은 10.0000%, "
+            "B사의 2025년 연결 기준 영업이익률은 20.0000%입니다. A사 쪽이 더 큽니다.",
+        )
+        == "company_contradiction"
+    )
+
+
+def test_q11_company_values_without_a_company_are_rejected() -> None:
+    """두 값이 다 있어도 누구의 것인지 갈리지 않으면 통과시키지 않는다."""
+    payload = build_grounded_payload(margin_comparison_result(), question=Q11_QUESTION)
+
+    assert (
+        verdict(
+            payload,
+            "2025년 연결 기준 영업이익률은 20.0000%, 10.0000%입니다. A사 쪽이 더 큽니다.",
+        )
+        == "unverifiable_company"
+    )
+
+
+def test_q11_correct_pair_followed_by_a_wrong_company_is_rejected() -> None:
+    """기업 축에서도 뒤에서 뒤집는 진술을 통과시키지 않는다."""
+    payload = build_grounded_payload(margin_comparison_result(), question=Q11_QUESTION)
+
+    assert (
+        verdict(
+            payload,
+            "A사의 2025년 연결 기준 영업이익률은 20.0000%, "
+            "B사의 2025년 연결 기준 영업이익률은 10.0000%입니다. A사 쪽이 더 큽니다. "
+            "참고로 B사 값은 20.0000%입니다.",
+        )
+        == "company_contradiction"
+    )
+
+
+def test_value_owned_by_two_companies_binds_to_either() -> None:
+    """
+    같은 표기를 두 기업이 함께 쓸 수 있다.
+
+    Q11의 두 기업은 매출액이 같은 1,000원이다. 주인을 하나로 정해 두면 둘 중 하나를 적은 문장이
+    어긋났다고 판정된다. 그래서 그 표기를 싣고 있는 payload 항목 전부에서 주인을 모은다.
+    """
+    payload = build_grounded_payload(margin_comparison_result(), question=Q11_QUESTION)
+
+    shared = [item.display_value for item in payload.facts if item.display_value == "1,000원"]
+
+    assert len(shared) == 2
+
+    assert (
+        verdict(
+            payload,
+            "A사의 2025년 연결 기준 영업이익률은 20.0000%, "
+            "B사의 2025년 연결 기준 영업이익률은 10.0000%입니다. "
+            "A사의 매출액은 1,000원, B사의 매출액은 1,000원입니다. A사 쪽이 더 큽니다.",
+        )
+        is None
+    )
+
+
+def test_q10_swapped_fact_values_are_rejected() -> None:
+    """
+    Fact 비교에서도 기업과 값이 묶인다.
+
+    Q10은 Calculation이 없다. 검사가 Calculation만 돌면 이 모양에는 짝을 보는 자리가 없고,
+    우열 판정은 값을 대신 말해 주지 않으므로 맞바꾼 문장이 그대로 나간다.
+    """
+    result = comparison_result(ComparisonRelation.LEFT_GREATER)
+
+    payload = build_grounded_payload(result, question="A사와 B사 중 어디가 더 커?")
+
+    assert (
+        verdict(
+            payload,
+            "A사의 2025년 연결 기준 매출액은 90원(정규화 90.0원), "
+            "B사의 2025년 연결 기준 매출액은 100원(정규화 100.0원)입니다. A사 쪽이 더 큽니다.",
+        )
+        == "company_contradiction"
+    )
+
+
+def test_stating_only_one_rendering_of_a_value_is_enough() -> None:
+    """
+    한 항목을 부르는 이름이 여럿이면 그중 하나로만 적어도 된다.
+
+    완결성 규칙이 표기와 정규화 표기 중 하나를 인정하므로(_require_every_value_is_stated) 짝도
+    항목이 지고 표기가 지지 않는다. 표기마다 짝을 요구하면 적지 않은 쪽이 걸린다.
+    """
+    result = comparison_result(ComparisonRelation.LEFT_GREATER)
+
+    payload = build_grounded_payload(result, question="A사와 B사 중 어디가 더 커?")
+
+    assert {item.normalized_display for item in payload.facts} == {"100.0원", "90.0원"}
+
+    assert (
+        verdict(
+            payload,
+            "A사의 2025년 연결 기준 매출액은 100.0원, B사의 2025년 연결 기준 매출액은 "
+            "90.0원입니다. A사 쪽이 더 큽니다.",
+        )
+        is None
+    )
+
+    assert (
+        verdict(
+            payload,
+            "A사의 2025년 연결 기준 매출액은 90.0원, B사의 2025년 연결 기준 매출액은 "
+            "100.0원입니다. A사 쪽이 더 큽니다.",
+        )
+        == "company_contradiction"
+    )
+
+
+def test_single_owner_axes_stay_inactive() -> None:
+    """
+    주인이 하나뿐인 축은 켜지지 않는다.
+
+    Q01은 기업도 연도도 하나다. 그 축으로 묶으라고 요구하면 확인할 것이 없는 자리에서 문장 형태만
+    좁히게 된다.
+    """
+    payload = build_grounded_payload(fact_result(), question=QUESTION)
+
+    assert len({item.company for item in payload.facts}) == 1
+    assert len({item.fiscal_year for item in payload.facts}) == 1
+
+    assert verdict(payload, build_answer_response(fact_result()).answer) is None
+
+
+Q08_HEAD = (
+    "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%, 2025년 9.0000%이며, "
+    "두 연도의 차이는 -1.0000%p입니다. "
+)
+
+Q11_HEAD = (
+    "A사의 2025년 연결 기준 영업이익률은 20.0000%, "
+    "B사의 2025년 연결 기준 영업이익률은 10.0000%입니다. "
+)
+
+
+def q11_payload() -> GroundedPayload:
+    return build_grounded_payload(margin_comparison_result(), question=Q11_QUESTION)
+
+
+def q07_payload() -> GroundedPayload:
+    return build_grounded_payload(
+        temporal_delta_result(), question="한미반도체 매출이 작년보다 얼마나 늘었어?"
+    )
+
+
+# --------------------------------------------------------------------------
+# 여러 주인을 함께 부른 자리
+#
+# 맞는 주인과 틀린 주인을 같은 구절에서 부른 자리를 통과시키지 않는다. 맞는 이름이 옆에 있다는
+# 것이 틀린 이름을 지워 주지 않는다.
+# --------------------------------------------------------------------------
+
+
+def test_period_multi_owner_clause_contradiction_is_rejected() -> None:
+    """
+    맞는 짝을 적은 뒤 두 해를 함께 부르며 뒤집는 문장.
+
+    이 자리를 중립으로 두면 그 진술이 그대로 나간다. 10.0000%는 2024년의 값이고 문장은 그것을
+    2025년의 값이라고 말한다.
+    """
+    payload, _ = q08_payload_and_ids()
+
+    assert verdict(payload, Q08_HEAD.strip()) is None
+
+    assert (
+        verdict(payload, Q08_HEAD + "2024년과 2025년 중 2025년 값은 10.0000%입니다.")
+        == "period_contradiction"
+    )
+
+
+def test_company_multi_owner_clause_contradiction_is_rejected() -> None:
+    """기업 축에서도 같다. 두 기업을 함께 부르며 뒤집는 문장을 통과시키지 않는다."""
+    payload = q11_payload()
+
+    assert verdict(payload, Q11_HEAD + "A사 쪽이 더 큽니다.") is None
+
+    assert (
+        verdict(
+            payload,
+            Q11_HEAD + "A사 쪽이 더 큽니다. A사와 B사 가운데 B사는 20.0000%입니다.",
+        )
+        == "company_contradiction"
+    )
+
+
+def test_multi_owner_clause_is_allowed_when_both_owners_are_valid() -> None:
+    """
+    두 주인을 함께 불러도 둘 다 그 값의 주인이면 어긋난 것이 아니다.
+
+    두 해의 비율이 같은 수일 때 "2024년과 2025년 모두 10.0000%"는 맞는 문장이다. 그 표기의
+    주인 집합에 두 해가 모두 있으므로 어느 쪽을 불러도 자기 주인이다.
+    """
+    payload = identical_margin_payload()
+
+    assert (
+        verdict(
+            payload,
+            "한미반도체의 연결 기준 영업이익률은 2024년과 2025년 모두 10.0000%이며, "
+            "두 연도의 차이는 0.0000%p입니다.",
+        )
+        is None
+    )
+
+
+def test_multi_owner_clause_is_allowed_across_companies_sharing_a_value() -> None:
+    """기업 축에서도 같다. Q11의 두 기업은 매출액이 같은 1,000원이다."""
+    payload = q11_payload()
+
+    assert (
+        verdict(
+            payload,
+            Q11_HEAD + "A사와 B사의 매출액은 모두 1,000원입니다. A사 쪽이 더 큽니다.",
+        )
+        is None
+    )
+
+
+# --------------------------------------------------------------------------
+# 값이 어느 지표의 것인가
+#
+# 지표 이름은 값의 이름표로도 문장의 주어로도 쓰인다. 구절에 적힌 이름을 곧 그 값의 이름표로
+# 보면 "매출액은 작년보다 …원 늘었고"를 거절하게 된다. 그래서 정당한 이름의 집합을 payload의
+# 참조 구조에서 끌어낸다.
+# --------------------------------------------------------------------------
+
+
+def test_metric_owners_are_derived_from_the_reference_graph() -> None:
+    """
+    값마다 정당한 지표 이름을 참조에서 끌어낸다.
+
+    Fact는 자기 지표 하나다. Calculation은 자기 이름에 더해, 입력이 한 지표로 모일 때 그 지표를
+    함께 받는다. 모이지 않으면 자기 이름만 받는다.
+    """
+    payload, _ = q08_payload_and_ids()
+
+    owners = _metric_owners(payload)
+
+    # 원천 Fact는 자기 지표뿐이다.
+    assert owners["f_rev_2024"] == frozenset({"매출액"})
+    assert owners["f_oi_2024"] == frozenset({"영업이익"})
+
+    # 비율은 분자·분모의 이름을 물려받지 않는다. 어느 쪽의 값도 아니기 때문이다.
+    assert owners["calc_margin_2024"] == frozenset({"영업이익률"})
+
+    # 두 비율의 차이는 그 비율에 관한 값이다. 입력이 한 지표로 모인다.
+    assert owners["calc_margin_diff"] == frozenset({"영업이익률", "차이"})
+
+    # 매출액 두 건의 증감액은 매출액에 관한 값이다.
+    delta = _metric_owners(q07_payload())
+
+    assert delta["calc_delta"] == frozenset({"매출액", "증감액"})
+    assert delta["calc_delta_pct"] == frozenset({"매출액", "증감률"})
+
+
+def test_delta_may_be_described_with_its_source_metric() -> None:
+    """
+    실측에서 HCX-007이 돌려준 문장. 그 값은 증감액이고 매출액은 문장의 주어다.
+
+    이름의 근접만 보는 규칙은 이 답을 metric_contradiction으로 거절한다. 증감액이 매출액 두
+    건에서 나왔다는 사실이 payload의 참조에 남아 있고, 그것이 이 문장을 통과시키는 근거다.
+    """
+    payload = q07_payload()
+
+    assert (
+        verdict(
+            payload,
+            "한미반도체의 매출액은 작년보다 17,767,427,980원 늘었고, "
+            "증감률은 3.1789%입니다.",
+        )
+        is None
+    )
+
+
+def test_source_fact_stated_under_another_metric_is_rejected() -> None:
+    """
+    원천 Fact를 다른 지표 이름 아래 적은 문장. 연도도 기업도 맞다.
+
+    Q07 payload에는 영업이익이 없다. 실린 이름만 알아보면 이 문장은 모르는 단어를 지나치듯
+    통과한다. 지표 표기의 목록이 닫혀 있어(answer_builder의 대응표) 그것을 알아볼 수 있다.
+    """
+    payload = q07_payload()
+
+    assert (
+        verdict(
+            payload,
+            "한미반도체의 연결 기준 영업이익은 2024년 558,917,191,547원, "
+            "2025년 576,684,619,527원입니다. 증감액은 17,767,427,980원, "
+            "증감률은 3.1789%입니다.",
+        )
+        == "metric_contradiction"
+    )
+
+
+def test_delta_stated_under_an_unrelated_metric_is_rejected() -> None:
+    """증감액이 받는 이름은 자기 이름과 원천 지표뿐이다. 그 밖의 이름은 어긋남이다."""
+    payload = q07_payload()
+
+    head = (
+        "한미반도체의 연결 기준 매출액은 2024년 558,917,191,547원, "
+        "2025년 576,684,619,527원입니다. "
+    )
+
+    assert (
+        verdict(payload, head + "영업이익은 17,767,427,980원 늘었고, 증감률은 3.1789%입니다.")
+        == "metric_contradiction"
+    )
+
+    assert (
+        verdict(payload, head + "영업이익률은 17,767,427,980원, 증감률은 3.1789%입니다.")
+        == "metric_contradiction"
+    )
+
+
+def test_q08_source_facts_must_keep_their_own_metric() -> None:
+    """보조 Fact를 적었다면 자기 지표 아래여야 한다. 빼는 것은 그대로 허용된다."""
+    payload, _ = q08_payload_and_ids()
+
+    assert verdict(payload, Q08_HEAD + "2024년 매출액은 1,000원입니다.") is None
+
+    assert (
+        verdict(payload, Q08_HEAD + "2024년 영업이익은 1,000원입니다.")
+        == "metric_contradiction"
+    )
+
+    assert (
+        verdict(payload, Q08_HEAD + "2024년 매출액은 100원입니다.")
+        == "metric_contradiction"
+    )
+
+    # 보조 Fact를 하나도 적지 않은 문장은 그대로 통과한다.
+    assert verdict(payload, Q08_HEAD.strip()) is None
+
+
+def test_ratio_does_not_inherit_its_numerator_or_denominator_metric() -> None:
+    """
+    영업이익률은 영업이익과 매출액에서 나오지만 둘 중 어느 쪽의 값도 아니다.
+
+    분자·분모의 이름을 물려주면 "매출액은 10.0000%"가 통과하고, 그 문장은 비율을 원천 금액의
+    값으로 말한다.
+    """
+    payload, _ = q08_payload_and_ids()
+
+    assert (
+        verdict(
+            payload,
+            "한미반도체의 연결 기준 매출액은 2024년 10.0000%, 2025년 9.0000%이며, "
+            "두 연도의 차이는 -1.0000%p입니다.",
+        )
+        == "metric_contradiction"
+    )
+
+
+def test_diff_between_ratios_is_about_the_ratio() -> None:
+    """두 비율의 차이는 그 비율에 관한 값이다. 원천 지표의 값으로 불리면 어긋남이다."""
+    payload, _ = q08_payload_and_ids()
+
+    head = "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%, 2025년 9.0000%이며, "
+
+    assert verdict(payload, head + "영업이익률은 -1.0000%p 달라졌습니다.") is None
+
+    assert (
+        verdict(payload, head + "매출액은 -1.0000%p 달라졌습니다.") == "metric_contradiction"
+    )
+
+
+def test_q11_source_fact_metric_swap_is_rejected() -> None:
+    """Q11에서도 원천 Fact는 자기 지표 아래여야 한다."""
+    payload = q11_payload()
+
+    assert verdict(payload, Q11_HEAD + "A사의 영업이익은 200원입니다. A사 쪽이 더 큽니다.") is None
+
+    assert (
+        verdict(payload, Q11_HEAD + "A사의 매출액은 200원입니다. A사 쪽이 더 큽니다.")
+        == "metric_contradiction"
+    )
+
+
+def test_period_spanning_values_are_not_bound_to_one_year() -> None:
+    """
+    두 기간 사이의 값에는 연도 축이 해당하지 않는다.
+
+    "2025년 증감액"과 "2024년 대비 차이"는 한 해를 함께 부르지만 그 값을 그 해의 값이라고 말하는
+    것이 아니다. 한국어에서 통상 쓰는 표기이며, 이것을 어긋남으로 보면 맞는 답을 거절한다.
+
+    회계연도 자리가 비어 있다는 것이 그 판단의 근거다(_period_owner). 값이 달라지는 것이 아니라
+    축이 해당하지 않는다.
+    """
+    assert (
+        verdict(
+            q07_payload(),
+            "한미반도체의 연결 기준 매출액은 2024년 558,917,191,547원, "
+            "2025년 576,684,619,527원입니다. 2025년 증감액은 17,767,427,980원, "
+            "증감률은 3.1789%입니다.",
+        )
+        is None
+    )
+
+    payload, _ = q08_payload_and_ids()
+
+    assert (
+        verdict(
+            payload,
+            "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%, 2025년 9.0000%이며, "
+            "2024년 대비 차이는 -1.0000%p입니다.",
+        )
+        is None
+    )
+
+
+# --------------------------------------------------------------------------
+# 이력이 센 것과 그 셈
+#
+# 이력에는 셈이 둘 있고 문장에서는 둘 다 "N건"으로 적힌다. 숫자만 보면 어느 셈인지 알 수 없어
+# 두 셈을 맞바꿔 적어도 쓰인 숫자는 그대로였다. 무엇을 센 것인지가 그 셈의 주인이다.
+# --------------------------------------------------------------------------
+
+
+def test_event_counts_carry_what_they_counted() -> None:
+    """
+    셈마다 무엇을 센 것인지와 문장에 적히는 표기를 함께 싣는다.
+
+    정수만 실으면 두 셈이 같은 모양이 된다. 표기의 정본은 문장을 만드는 쪽이며
+    (answer_builder.EVENT_COUNT_LABELS, event_count_display) payload는 그것을 나르기만 한다.
+    """
+    payload = counted_history_payload(documents=2, changes=1)
+
+    counts = payload.event_histories[0].counts
+
+    assert [(item.kind_label, item.display_value) for item in counts] == [
+        ("공시", "2건"),
+        ("변경 항목", "1건"),
+    ]
+
+    # 모델에게 보내는 형태는 지금까지와 같다. 이 표기는 검증에만 쓴다.
+    assert "counts" not in payload.as_dict()["event_histories"][0]  # type: ignore[index]
+
+
+def test_event_history_deterministic_answer_binds_each_count() -> None:
+    """대조군. 결정론 문장은 센 것의 이름 바로 뒤에 그 셈을 적는다."""
+    result = counted_history_result(documents=2, changes=1)
+
+    payload = build_grounded_payload(result, question=HISTORY_QUESTION)
+
+    sentence = build_answer_response(result).answer
+
+    assert "공시 2건" in sentence
+    assert "변경 항목은 1건" in sentence
+
+    assert verdict(payload, sentence) is None
+
+
+def test_event_counts_swapped_between_kinds_are_rejected() -> None:
+    """
+    두 셈을 맞바꾼 문장. 쓰인 숫자는 그대로 2와 1이고 빠진 값도 없다.
+
+    이 규칙 전에는 통과했다. 완결성 규칙이 공시 건수의 숫자가 문장 어딘가에 있는지만 보았고,
+    그 숫자는 변경 건수 자리에 적혀 있어도 발견됐다.
+    """
+    payload = counted_history_payload(documents=2, changes=1)
+
+    assert (
+        verdict(
+            payload,
+            "관련 공시 1건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 2건입니다.",
+        )
+        == "count_contradiction"
+    )
+
+
+def test_event_count_contradicted_later_is_rejected() -> None:
+    """맞는 짝을 먼저 적고 뒤에서 뒤집는 문장도 통과시키지 않는다."""
+    payload = counted_history_payload(documents=2, changes=1)
+
+    head = "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 1건입니다. "
+
+    assert verdict(payload, head.strip()) is None
+
+    assert verdict(payload, head + "그런데 변경 항목은 2건입니다.") == "count_contradiction"
+
+    assert verdict(payload, head + "공시는 1건입니다.") == "count_contradiction"
+
+
+def test_event_count_without_its_kind_is_rejected() -> None:
+    """
+    셈만 적고 무엇을 센 것인지 말하지 않으면 통과시키지 않는다.
+
+    공시 건수는 답에 실려야 하는 값이다(_require_every_value_is_stated). 그 숫자가 어느 셈인지
+    문장이 말하지 않으면 읽는 사람은 무엇이 2건인지 알 수 없다.
+    """
+    payload = counted_history_payload(documents=2, changes=1)
+
+    assert (
+        verdict(payload, "관련 이력 2건을 확인했습니다. 확인된 변경 항목은 1건입니다.")
+        == "unverifiable_count"
+    )
+
+
+def test_change_count_may_be_omitted() -> None:
+    """
+    변경 건수는 빠뜨려도 된다. 공시 건수가 빠지면 기존 규칙이 먼저 막는다.
+
+    결정론 문장도 공시 1건짜리 이력에서는 변경 건수를 적지 않는다. 무엇이 요구되는지를 짝
+    검사가 새로 정하지 않고 완결성 규칙이 이미 정한 것을 따라간다.
+    """
+    payload = counted_history_payload(documents=2, changes=1)
+
+    assert verdict(payload, "관련 공시 2건으로 이어지는 이력을 확인했습니다.") is None
+
+    assert verdict(payload, "확인된 변경 항목은 1건입니다.") == "value_dropped"
+
+    # 공시 1건짜리 이력의 결정론 문장은 변경 건수를 적지 않는다.
+    single = counted_history_result(documents=1, changes=0)
+
+    assert (
+        verdict(
+            build_grounded_payload(single, question=HISTORY_QUESTION),
+            build_answer_response(single).answer,
+        )
+        is None
+    )
+
+
+def test_equal_event_counts_bind_to_both_kinds() -> None:
+    """
+    두 셈이 같은 수여도 각각 자기 이름 아래 적히면 통과한다.
+
+    그 표기의 주인 집합에 두 종류가 모두 있으므로 어느 쪽을 불러도 자기 주인이다.
+    """
+    payload = counted_history_payload(documents=2, changes=2)
+
+    assert (
+        verdict(
+            payload,
+            "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 2건입니다.",
+        )
+        is None
+    )
+
+
+def test_event_count_rendering_carries_its_unit() -> None:
+    """
+    셈은 "N건"으로 찾는다. 맨 숫자로 찾으면 다른 수치의 자릿수와 부딪친다.
+
+    짧은 셈이 긴 셈 안에 들어 있는 경우도 긴 쪽이 이긴다(_unshadowed). 12건 안의 2건이 변경
+    건수가 나타난 자리로 세어지면 공시 건수가 변경 항목에 붙었다고 판정된다.
+    """
+    payload = counted_history_payload(documents=12, changes=2)
+
+    assert (
+        verdict(
+            payload,
+            "관련 공시 12건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 2건입니다.",
+        )
+        is None
+    )
+
+    assert (
+        verdict(
+            payload,
+            "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 12건입니다.",
+        )
+        == "count_contradiction"
+    )
+
+    # 0건은 10건 안에 있다. 변경이 없는 이력의 결정론 문장이 그 자리다.
+    empty = counted_history_result(documents=10, changes=0)
+
+    assert (
+        verdict(
+            build_grounded_payload(empty, question=HISTORY_QUESTION),
+            build_answer_response(empty).answer,
+        )
+        is None
+    )
+
+
+def test_incomplete_chain_counts_are_bound_too() -> None:
+    """체인을 다 보지 못한 이력의 문장에서도 셈은 자기 이름 아래여야 한다."""
+    result = counted_history_result(documents=3, changes=2, chain_complete=False)
+
+    payload = build_grounded_payload(result, question=HISTORY_QUESTION)
+
+    assert verdict(payload, build_answer_response(result).answer) is None
+
+    assert (
+        verdict(
+            payload,
+            "관련 공시 2건까지 확인했습니다. 확인된 변경 항목은 3건입니다.",
+        )
+        == "count_contradiction"
+    )
 
 
 # --------------------------------------------------------------------------

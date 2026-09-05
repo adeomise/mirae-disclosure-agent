@@ -914,9 +914,14 @@ def test_q07_builds_a_deterministic_answer(q07_result) -> None:
     for value in Q07_VALUES.values():
         assert value in answer
 
-    # 증감액과 증감률이 저장된 자릿수 그대로 실린다.
-    assert "200000000.0000" in answer
+    # 증감액은 자릿수 구분 규칙을 지나 실린다(answer_builder._grouped_amount). 지워지는 것은
+    # quantize가 만든 뜻 없는 소수 이하 0뿐이고 값은 그대로다. 증감률은 백분율 축이라 그 규칙을
+    # 지나지 않으며 저장된 자릿수 그대로 실린다.
+    assert "200,000,000원" in answer
     assert "20.0000%" in answer
+
+    # 구조화 결과의 값은 표기와 무관하게 계산 계층이 넘긴 그대로다.
+    assert q07_result.calculations[0].value == "200000000.0000"
 
 
 def test_q07_answer_does_not_claim_a_direction(q07_result) -> None:

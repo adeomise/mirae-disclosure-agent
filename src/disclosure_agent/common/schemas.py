@@ -383,6 +383,13 @@ class AgentExecutionResult(BaseModel):
     # 이쪽은 두 서술의 변화 항목이라, 한 목록에 담으면 받는 쪽이 어느 것이 수치 판정인지
     # 항목마다 확인해야 한다.
     narrative_comparisons: list[NarrativeComparisonResult] = Field(default_factory=list)
+    # 질문이 요청한 결정적 처리. QueryPlan.operations와 같은 어휘를 그대로 옮긴다.
+    #
+    # 계획이 표현 계층까지 넘어오지 않으므로, 무엇을 요청했는지는 이 자리로만 전달된다.
+    # 값을 만들지 않는다. 세는 일도 여기서 하지 않으며, 담기는 것은 요청의 이름뿐이다.
+    #
+    # 기본값이 비어 있어 이 필드를 채우지 않는 기존 producer는 지금까지와 똑같이 동작한다.
+    operations: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     conversion_gaps: list[ConversionGap] = Field(default_factory=list)
 

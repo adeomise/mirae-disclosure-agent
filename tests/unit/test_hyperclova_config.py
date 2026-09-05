@@ -17,7 +17,7 @@ from disclosure_agent.common.config import HyperClovaSettings, get_hyperclova_se
 
 COMPLETE = {
     "api_key": "test-key",
-    "api_url": "https://example.invalid/v3/chat-completions/HCX",
+    "api_url": "https://example.invalid/v3/chat-completions/HCX-005",
     "model": "HCX-005",
 }
 

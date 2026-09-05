@@ -33,7 +33,11 @@ from disclosure_agent.agent.query_analyzer import (
     AMBIGUOUS_COMPANY_REASON,
     build_company_resolver,
 )
-from disclosure_agent.common.enums import ExecutionStatus
+from disclosure_agent.common.enums import (
+    AnswerabilityReason,
+    AnswerabilityStatus,
+    ExecutionStatus,
+)
 from disclosure_agent.retrieval.metadata_filter import (
     list_company_names,
     list_company_universe,
@@ -163,6 +167,14 @@ Q04_ALIAS_SPELLING = "삼바 2025년 사업보고서에서 설비 투자 관련 
 # 계열사 접두어. 실제 코퍼스에서 후보가 여럿이며, 그중 하나를 고르지 않아야 한다.
 AMBIGUOUS_PREFIX_QUESTION = "삼성 2025년 연결 기준 매출액이 얼마야?"
 
+# T1-011 원문. 위와 같은 접두어지만 지표·회계기준을 밝히지 않은 짧은 표현이다.
+#
+# 두 표기를 함께 두는 이유:
+#     기업 표현을 하나로 확정하지 못했다는 판정은 질문이 무엇을 물었는지보다 앞이다. 한
+#     표기만 고정해 두면, 뒤쪽 판정(지표 인식·회계기준 기본값)이 바뀔 때 이 경로가 그 영향을
+#     받는지 여부가 드러나지 않는다.
+AMBIGUOUS_PREFIX_SHORT_QUESTION = "삼성 2025년 매출 알려줘."
+
 
 def _answer(question: str):
     return router.answer_question(
@@ -221,21 +233,41 @@ def test_alias_spelling_reaches_the_same_canonical_company_end_to_end() -> None:
 
 
 @pytest.mark.corpus
-def test_ambiguous_prefix_is_blocked_at_the_public_boundary() -> None:
+@pytest.mark.parametrize(
+    "question",
+    [AMBIGUOUS_PREFIX_QUESTION, AMBIGUOUS_PREFIX_SHORT_QUESTION],
+)
+def test_ambiguous_prefix_is_unresolved_at_the_public_boundary(question: str) -> None:
     """
-    실제 코퍼스에서도 계열사 접두어는 계획 단계에서 막혀야 한다.
+    실제 코퍼스에서도 계열사 접두어는 후보 하나로 확정되지 않아야 한다.
+
+    BLOCKED가 아닌 이유:
+        해석기는 인식 후보를 모두 보고 "여덟 곳이 걸렸고 그중 하나를 고를 근거가 없다"까지
+        확정했다. 판정에 이르지 못하고 멈춘 것이 아니므로 실행은 끝났고, 답할 수 없는 이유가
+        UNRESOLVED/AMBIGUOUS_MATCH다. BLOCKED로 보고하면 되묻기로 풀리는 질문이 파이프라인
+        고장과 같은 모양으로 나간다.
 
     사유를 함께 고정하는 이유:
-        BLOCKED만 보면 '그런 기업 없음'으로 막힌 것과 구분되지 않는다. 실제로 일어난 일은
-        후보가 여럿이라 고르지 않은 것이고, 두 사유가 한 이름으로 보고되면 여덟 곳이 있는
-        질문에 '없다'고 답하게 된다.
+        상태만 보면 '그런 기업 없음'으로 막힌 것과 구분되지 않는다. 실제로 일어난 일은 후보가
+        여럿이라 고르지 않은 것이고, 두 사유가 한 이름으로 보고되면 여덟 곳이 있는 질문에
+        '없다'고 답하게 된다. 코퍼스에 없는 기업이 여전히 BLOCKED/unknown_company인 것은
+        tests/integration/test_pattern_a.py가 짝으로 고정한다.
     """
-    result = _answer(AMBIGUOUS_PREFIX_QUESTION)
+    result = _answer(question)
 
-    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
+    assert result.answerability_reason is AnswerabilityReason.AMBIGUOUS_MATCH
 
-    assert result.execution_issue.stage == "query_plan"
-    assert result.execution_issue.reason == AMBIGUOUS_COMPANY_REASON
+    assert result.execution_issue is None
 
+    assert result.answerability_detail.stage == "query_plan"
+    assert result.answerability_detail.reason == AMBIGUOUS_COMPANY_REASON
+
+    # 어느 후보들 사이에서 모호했는지가 결과에 남아야 한다. 사유만 남으면 되묻는 쪽이
+    # 무엇을 되물어야 할지 알 수 없다.
+    assert "삼성전자" in result.answerability_detail.detail
+
+    # 후보 중 하나를 고르지 않았으므로 조회도 일어나지 않는다.
     assert result.facts == []
     assert result.evidence == []

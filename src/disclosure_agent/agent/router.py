@@ -71,6 +71,7 @@ from disclosure_agent.agent.normalization import (
     answerability_reason_for_policy_category,
     blocked_execution,
     refused_execution,
+    stopped_execution,
 )
 from disclosure_agent.agent.query_analyzer import (
     INTENT_CONTRACT_FACT,
@@ -294,6 +295,14 @@ def answer_question(
         )
 
     except UnsupportedQuestionError as error:
-        return blocked_execution(STAGE_QUERY_PLAN, error.reason, error.detail)
+        # 정지 사유를 여기서 해석하지 않는다. 어떤 사유가 실행 중단이고 어떤 사유가 정상적으로
+        # 끝난 답변 가능성 판정인지는 agent.normalization의 ANSWERABILITY_BY_STOP 하나가
+        # 정하며, 대응표에 없는 사유는 예전과 같이 BLOCKED로 나간다.
+        #
+        # blocked_execution을 쓰지 않는 이유:
+        #     그쪽은 무조건 BLOCKED를 만든다. 계획 단계의 정지 중에도 '후보를 다 보고 내린
+        #     판정'이 섞여 있고(ambiguous_company_match), 그것까지 실행 중단으로 보고하면
+        #     되묻기로 풀리는 질문이 파이프라인 고장과 같은 모양으로 나간다.
+        return stopped_execution(STAGE_QUERY_PLAN, error.reason, error.detail)
 
     return dispatch(plan, corpus_root=corpus_root, manifest_path=resolved_manifest)

@@ -30,11 +30,14 @@ from disclosure_agent.agent.company_resolution import (
 from disclosure_agent.agent.query_analyzer import (
     AMBIGUOUS_COMPANY_REASON,
     INTENT_CROSS_ENTITY_COMPARE,
+    INTENT_DOCUMENT_SUMMARY,
     INTENT_SINGLE_FACT,
     UnsupportedQuestionError,
+    _business_profile_residual,
     build_query_plan,
     resolve_companies,
 )
+from disclosure_agent.common.enums import SectionScope
 
 # tests/unit/test_company_resolution.py와 같은 모양의 인식 후보다. 실제 코퍼스를 읽지 않는
 # 이유도 같다.
@@ -395,3 +398,98 @@ def test_resolution_provenance_is_available_without_a_plan(
     assert [mention.raw for mention in resolution.mentions] == [raw]
     assert resolution.companies == (canonical,)
     assert resolution.mentions[0].method == method
+
+
+# --------------------------------------------------------------------------
+# 기업 소개 요약(Q05)과 사용자 표기
+# --------------------------------------------------------------------------
+#
+# Q05는 "이 질문에 답하지 않을 요청이 남았는가"를 세어 경로를 연다. 세려면 질문에서 기업을
+# 가리킨 말을 걷어내야 하고, 그 말은 canonical이 아니라 사용자가 쓴 표기다. canonical만
+# 걷어내면 '현대차'·'삼바'가 남은 요청으로 세어져 정상 Q05가 막힌다.
+
+Q05_ANCHORS = dict.fromkeys(KNOWN_COMPANIES, 2025)
+
+
+def _profile_plan(question: str):
+    return build_query_plan(
+        question,
+        known_companies=KNOWN_COMPANIES,
+        company_universe=UNIVERSE,
+        fiscal_year_anchors=Q05_ANCHORS,
+    )
+
+
+@pytest.mark.parametrize(
+    ("question", "canonical"),
+    [
+        # canonical 표기 그대로.
+        ("현대자동차는 무슨 사업을 하고 대표 제품이 뭐야?", "현대자동차"),
+        # 상장명. manifest가 아는 표기이며 canonical과 글자가 다르다.
+        ("현대차는 무슨 사업을 하고 대표 제품이 뭐야?", "현대자동차"),
+        ("삼성화재는 어떤 사업을 하고 주요한 제품이 뭐야?", "삼성화재해상보험"),
+        ("KT는 무슨 사업을 하고 대표 제품이 뭐야?", "케이티"),
+        # 등록된 별칭.
+        ("삼바는 무슨 사업을 하고 대표 제품이 뭐야?", "삼성바이오로직스"),
+        # 유일하게 걸리는 부분명.
+        ("레인보우는 무슨 사업을 하고 주력 제품이 뭐야?", "레인보우로보틱스"),
+    ],
+)
+def test_business_profile_opens_for_every_recognized_company_wording(
+    question: str,
+    canonical: str,
+) -> None:
+    """
+    어느 표기로 물었든 같은 Q05 계획이 된다.
+
+    계획에 담기는 이름은 canonical 하나다. 사용자 표기가 계획으로 새어 나가면 Retrieval이
+    그 이름으로 문서를 찾고, 상장명·별칭으로 물은 질문이 조용히 빈 결과가 된다.
+    """
+    plan = _profile_plan(question)
+
+    assert plan.intent == INTENT_DOCUMENT_SUMMARY
+    assert plan.companies == (canonical,)
+    assert plan.section_scopes == (
+        SectionScope.BUSINESS_OVERVIEW,
+        SectionScope.PRODUCTS,
+    )
+
+
+@pytest.mark.parametrize(
+    ("question", "surviving"),
+    [
+        ("현대차는 무슨 사업을 하고 대표 제품 출시일도 알려줘", "출시일"),
+        ("삼바는 무슨 사업을 하고 대표 제품이 뭐고 생산량도 알려줘", "생산량"),
+        ("현대차는 어떤 사업을 하고 어떤 제품이 주력인지와 가격도 알려줘", "가격"),
+        ("KT는 무슨 사업을 하고 핵심 제품 원가 알려줘", "원가"),
+        ("삼성화재는 어떤 사업을 하고 주력 제품 납기도 알려줘", "납기"),
+    ],
+)
+def test_user_wording_does_not_hide_a_remaining_request(
+    question: str,
+    surviving: str,
+) -> None:
+    """
+    사용자 표기를 걷어내는 일이 남은 요청까지 함께 걷어내지는 않는다.
+
+    걷어내는 대상을 넓히면 반대쪽으로 틀릴 수 있다. 상장명·별칭을 지우느라 질문이 함께 물은
+    속성까지 사라지면, 이번에는 그 요청이 조용히 요약으로 축소된다. 두 방향을 함께 고정한다.
+    """
+    resolution = resolve_companies(
+        question,
+        known_companies=KNOWN_COMPANIES,
+        company_universe=UNIVERSE,
+    )
+
+    residual = _business_profile_residual(
+        question,
+        resolution.companies,
+        resolution.surfaces,
+    )
+
+    assert surviving in residual
+
+    with pytest.raises(UnsupportedQuestionError) as error:
+        _profile_plan(question)
+
+    assert error.value.reason == "missing_year"

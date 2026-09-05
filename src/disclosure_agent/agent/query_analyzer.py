@@ -1978,7 +1978,11 @@ def _looks_like_facility_investment_aggregate(question: str) -> bool:
     )
 
 
-def _business_profile_residual(question: str, companies: tuple[str, ...]) -> str:
+def _business_profile_residual(
+    question: str,
+    companies: tuple[str, ...],
+    subject_names: tuple[str, ...] = (),
+) -> str:
     """기업 소개 요약이 의미를 가져가고 남은 말을 돌려준다. 빈 문자열이면 남은 요청이 없다.
 
     걷어내는 것은 넷이다.
@@ -1995,9 +1999,21 @@ def _business_profile_residual(question: str, companies: tuple[str, ...]) -> str
         공백을 걷어낸 문자열 하나를 두고 전부 처리한다. find_product_phrase_span이 돌려주는
         자리도 같은 기준이다. 원문과 걷어낸 문자열을 섞어 쓰면 자리가 어긋난다.
 
-    기업명을 정규화한 표기로도 지우는 이유:
-        질문이 "한미반도체(주)"라고 쓰고 목록의 이름은 "한미반도체"일 수 있다. 두 표기를
-        모두 지우고, 그래도 남는 법인격 표기는 위 목록이 받는다.
+    canonical과 subject_names를 함께 지우는 이유:
+        계획에 담기는 것은 canonical 하나지만, 질문에 적히는 것은 사용자가 쓴 표기다.
+        "현대차는 무슨 사업을 하고 대표 제품이 뭐야?"에서 canonical은 '현대자동차'이고
+        질문에는 '현대차'가 적혀 있다. canonical만 지우면 '현대차'가 남고, 남은 요청이
+        있다고 세어져 정상 Q05가 막힌다. 별칭('삼바')도 같다.
+
+        그 표기를 여기서 다시 찾지 않는다. 무엇이 기업을 가리켰는지는 이미
+        CompanyResolution이 판정했고 surfaces에 담겨 있다(호출부가 subject_names로 넘긴다).
+        여기서 별칭 규칙을 다시 두면 해석기와 두 벌이 되고, 한쪽만 늘어난 날 같은 질문이
+        경로에 따라 갈린다. 이 모듈의 다른 자리(_names_the_subject·주제어 추출)가 같은
+        값을 같은 이유로 받는다.
+
+    긴 표기부터 지우는 이유:
+        짧은 표기가 먼저 지워지면 긴 표기의 일부만 사라진다('기아'를 먼저 지우면
+        '기아자동차'가 '자동차'로 남는다).
     """
     compacted = "".join(question.split())
 
@@ -2009,13 +2025,19 @@ def _business_profile_residual(question: str, companies: tuple[str, ...]) -> str
     for token in BUSINESS_DESCRIPTION_TOKENS:
         compacted = compacted.replace(token, "")
 
-    for company in companies:
-        compacted = compacted.replace(company, "")
+    # canonical 표기, 그 정규화 표기, 그리고 질문에 실제로 적힌 표기.
+    subject_wording = {
+        name
+        for name in (
+            *companies,
+            *(normalize_company_name(company) for company in companies),
+            *subject_names,
+        )
+        if name
+    }
 
-        normalized = normalize_company_name(company)
-
-        if normalized:
-            compacted = compacted.replace(normalized, "")
+    for name in sorted(subject_wording, key=len, reverse=True):
+        compacted = compacted.replace(name, "")
 
     # 절대연도의 숫자. 뒤에서부터 지워야 앞 구간의 자리가 어긋나지 않는다.
     for start, end, _ in reversed(find_year_spans(compacted)):
@@ -2024,7 +2046,11 @@ def _business_profile_residual(question: str, companies: tuple[str, ...]) -> str
     return _BUSINESS_PROFILE_SCAFFOLDING_PATTERN.sub("", compacted)
 
 
-def _looks_like_business_profile(question: str, companies: tuple[str, ...] = ()) -> bool:
+def _looks_like_business_profile(
+    question: str,
+    companies: tuple[str, ...] = (),
+    subject_names: tuple[str, ...] = (),
+) -> bool:
     """
     기업이 무슨 사업을 하고 주력 제품이 무엇인지 함께 묻는 질문인가(Q05).
 
@@ -2043,10 +2069,20 @@ def _looks_like_business_profile(question: str, companies: tuple[str, ...] = ())
 
     기업명을 받는 이유:
         남은 말을 세려면 기업명이 남은 요청이 아니라는 것을 알아야 한다. 이 모듈은 기업명을
-        추측하지 않으므로 호출부가 확정한 목록을 그대로 받는다. 기본값이 빈 튜플인 것은
+        추측하지 않으므로 호출부가 확정한 결과를 그대로 받는다. 기본값이 빈 튜플인 것은
         기업명을 찾지 못한 질문도 판정 자체는 할 수 있어야 하기 때문이며, 그 경우 기업명이
         남은 요청으로 세어져 경로가 열리지 않는다. 기업을 확정하지 못한 질문은 어차피 뒤에서
         막힌다.
+
+    둘을 함께 받는 이유:
+        companies는 canonical identity이고 subject_names는 질문에 실제로 적힌 표기다
+        (CompanyResolution.surfaces). 계획에 담기는 것은 앞엣것뿐이지만, 질문에서 걷어내야
+        하는 것은 뒤엣것이다. '현대차'로 물으면 canonical은 '현대자동차'이므로 canonical만
+        지워서는 질문에 적힌 '현대차'가 남는다.
+
+        CompanyResolution을 통째로 받지 않는다. 이 판정에 필요한 것은 두 목록뿐이고, 이
+        모듈의 다른 자리(_looks_like_event_summary·_extract_counterparty)가 이미 같은 두
+        값을 같은 이름으로 받는다. 같은 것을 같은 모양으로 받는 쪽이 읽기 쉽다.
 
     판정 순서에 대해:
         이력 판정보다 뒤, 일반 요약 판정보다 앞이다. 일반 요약 판정은 요약 요청 표현과
@@ -2065,7 +2101,7 @@ def _looks_like_business_profile(question: str, companies: tuple[str, ...] = ())
     if not matches_product_phrase(question):
         return False
 
-    return _business_profile_residual(question, companies) == ""
+    return _business_profile_residual(question, companies, subject_names) == ""
 
 
 def _build_business_profile_plan(
@@ -3348,7 +3384,7 @@ def build_query_plan(
     # 기업 소개 요약(Q05)은 일반 요약 판정보다 앞이다. 일반 요약 판정은 이 질문을
     # 알아보지 못하므로 순서가 결과를 바꾸지는 않지만, 앞에 두어야 두 판정이 서로 다른
     # 질문 모양을 본다는 것이 자리에서 드러난다.
-    if _looks_like_business_profile(question, companies):
+    if _looks_like_business_profile(question, companies, subject_names):
         return _build_business_profile_plan(question, companies, fiscal_year_anchors)
 
     if _looks_like_document_summary(question):

@@ -635,10 +635,23 @@ def _first_inclusion_request(question: str) -> tuple[str, str] | None:
 
         clause = question[clause_start : verb.start()]
 
-        # 앵커는 절 전체에서, 편입처와 테마는 '담다'의 논항 구간에서 찾는다. 범위가 다른
-        # 것이 이 판정의 요점이다. 주제 표지가 앵커를 서술어 너머로 밀어내는 반면
-        # ("주식은 실적을 보고 담아도 될까?"), 편입처와 테마는 '담다'에 매여 있어야 한다.
-        anchor = _last(_INVESTMENT_OBJECT_ANCHOR, clause)
+        # 매매 대상은 질문 전체에서, 편입처와 테마는 '담다' 앞자리에서 찾는다. 범위가 다른
+        # 것이 이 판정의 요점이다.
+        #
+        # 대상을 절 안에서만 찾으면 같은 질문 안에서 대상이 사라진다. 앞 요청이 무엇을 두고
+        # 하는 말인지 밝혀 놓았는데도, 요청 경계 하나만 넘으면 판정이 대상을 잃었다.
+        #
+        #     "삼성전자 주식 좀 알려줘. 지금 담아도 될까?"
+        #     "삼성전자 주식 알려주고, 담아도 될까?"
+        #
+        # 두 질문 모두 담는 것이 무엇인지 이미 적혀 있다. 그래서 대상은 이 질문 안에서 앞서
+        # 적힌 것을 이어 쓴다. 이어 쓰는 범위는 **입력된 질문 하나**로 끝난다. 대화 turn을
+        # 넘지 않고, 대명사도 풀지 않는다. 앞에 명시된 매매 대상 표기를 그대로 찾을 뿐이다.
+        #
+        # 이어 쓰기가 판정을 느슨하게 만들지 않는다. 대상은 F3의 필요조건일 뿐이고, 통과
+        # 여부는 아래 닫힌 수록 문법의 증명이 정한다. "삼성전자 주식 알려줘. 표에 담아도
+        # 될까?"는 대상을 이어받고도 편입처가 증명되어 그대로 통과한다.
+        anchor = _last(_INVESTMENT_OBJECT_ANCHOR, question[: verb.start()])
 
         if anchor is None:
             # 매매 대상이 없다. 무엇을 담든 매매가 아니다.
@@ -646,15 +659,15 @@ def _first_inclusion_request(question: str) -> tuple[str, str] | None:
 
         slot = _inclusion_slot(clause)
 
-        if slot is None:
-            # 자리가 비었다. 증명할 것이 없다.
-            continue
+        # 자리가 비어 있으면 증명할 것이 없고, 증명되지 않은 것은 F3다. 앞 요청에서 대상만
+        # 이어받고 이 요청에는 편입처도 테마도 적히지 않은 형태가 여기 온다
+        # ("삼성전자 주식 좀 알려줘. 지금 담아도 될까?").
 
         # 수록 증명 1 — 자리를 문서 편입처가 차지했다.
-        content_destination = _CONTENT_DESTINATION.fullmatch(slot) is not None
+        content_destination = slot is not None and _CONTENT_DESTINATION.fullmatch(slot) is not None
 
         # 수록 증명 2 — 자리를 내용 목적격이 차지했다.
-        theme = _ACCUSATIVE_THEME.fullmatch(slot)
+        theme = _ACCUSATIVE_THEME.fullmatch(slot) if slot is not None else None
         content_theme = theme is not None and theme.group("head").endswith(_CONTENT_NOUN)
 
         if content_destination or content_theme:
@@ -662,7 +675,9 @@ def _first_inclusion_request(question: str) -> tuple[str, str] | None:
             continue
 
         # 증명이 서지 않으면 F3다. 결합이 모호한 경우도 여기로 온다.
-        return "편입 판단 요구", question[clause_start + anchor.start() : verb.end()].strip()
+        # 진단 원문은 매매 대상부터 어미까지 담는다. 대상이 앞 요청에 있으면 그 자리부터이며,
+        # 어느 표기를 이어받았는지가 그대로 드러난다.
+        return "편입 판단 요구", question[anchor.start() : verb.end()].strip()
 
     return None
 

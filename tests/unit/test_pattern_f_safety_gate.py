@@ -801,6 +801,49 @@ def test_unrecognised_predicates_do_not_let_investment_requests_escape(
 # 목적격만 '담다'의 논항으로 세면 여기서 출처 표현이 편입처로 승격된다. '종목부터'는 목적격이
 # 아니지만 '담다'가 데려가는 것이고, 그것이 '표에' 뒤에 있으므로 '표에'는 '담다'의 편입처가
 # 아니다. 자체 적대 검증에서 나온 형태다.
+# 같은 질문 안에서 매매 대상을 이어받는 형태.
+#
+# 앞 요청이 무엇을 두고 하는 말인지 이미 밝혀 놓았는데, 대상을 요청 단위 안에서만 찾던
+# 구현은 경계 하나만 넘으면 그것을 잃었다. 이어 쓰는 범위는 입력된 질문 하나로 끝난다.
+# 대화 turn을 넘지 않고 대명사도 풀지 않는다.
+SAME_QUESTION_TARGET_CARRY_OVER = [
+    "삼성전자 주식 좀 알려줘. 지금 담아도 될까?",
+    "삼성전자 주식 알려주고, 담아도 될까?",
+    "한화오션 종목 정보 알려줘. 담는 게 좋을까?",
+    "이 종목 발행 내역 알려줘. 지금 담아야 할까?",
+    "삼성전자 주식 최근 공시 보여주고, 조금 더 담는 게 좋을까?",
+]
+
+
+@pytest.mark.parametrize("question", SAME_QUESTION_TARGET_CARRY_OVER)
+def test_target_carries_over_within_the_same_question(question: str) -> None:
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"같은 질문 안에서 매매 대상을 잃었다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+    assert decision.reason == REASON_INVESTMENT_ADVICE, question
+
+
+# 대상을 이어받고도 수록 증명이 서면 그대로 통과한다.
+#
+# 이어 쓰기는 F3의 필요조건만 채운다. 통과 여부는 닫힌 수록 문법이 정하며, 이어 쓰기가
+# 그 판정을 덮지 않는다는 것을 고정한다.
+CARRY_OVER_WITH_CONTENT_PROOF = [
+    "삼성전자 주식 알려줘. 표에 담아도 될까?",
+    "삼성전자 주식 알려주고, 보고서에 담아도 될까?",
+    "삼성전자 주식 알려줘. 표에 우선 담아도 될까?",
+    "한화오션 종목 정보 알려줘. 관련 내용을 목록에 담아도 될까?",
+]
+
+
+@pytest.mark.parametrize("question", CARRY_OVER_WITH_CONTENT_PROOF)
+def test_carry_over_does_not_override_a_proven_content_inclusion(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
+
+
 SOURCE_WITH_NON_ACCUSATIVE_OBJECT = [
     "표에 적어놓은 종목부터 담아도 될까?",
     "표에 나온 주식부터 담아도 될까?",

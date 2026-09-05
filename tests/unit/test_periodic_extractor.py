@@ -8,6 +8,7 @@ from disclosure_agent.periodic.extractor import (
     ExtractionBlockedError,
     extract_financial_fact,
     extract_financial_facts_with_evidence,
+    match_metric,
 )
 from disclosure_agent.periodic.parser import parse_periodic_xml
 
@@ -420,6 +421,132 @@ def test_operating_income_facts_are_emitted(label: str) -> None:
 
     assert evidence[0].row_label == label
     assert evidence[0].raw_text == "20"
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Ⅴ.영업이익",
+        "Ⅲ.영업이익(손실)",
+        "영업손익",
+    ],
+)
+def test_operating_income_exact_aliases_match_canonical_semantics_and_provenance(
+    label: str,
+) -> None:
+    acontext = "CFY2025dFY_ifrs-full_ConsolidatedMember"
+
+    def extract(
+        row_label: str,
+    ) -> tuple[dict, object, object, object]:
+        table = financial_table(label=row_label, values=("1,234",))
+        value_cell = table["rows"][1][1]
+        value_cell.update(
+            {
+                "acode": "ifrs-full_OperatingProfitLoss",
+                "acontext": acontext,
+                "aunit": "KRW",
+            }
+        )
+        document = parsed_document(table)
+        facts, evidence = extract_financial_facts_with_evidence(document)
+        targeted = extract_financial_fact(
+            document,
+            metric=MetricConcept.OPERATING_INCOME,
+            fiscal_year=2025,
+            accounting_scope=FactAccountingScope.CONSOLIDATED,
+        )
+        assert len(facts) == 1
+        assert len(evidence) == 1
+        return value_cell, facts[0], evidence[0], targeted
+
+    source_cell, fact, evidence, targeted = extract(label)
+    _, canonical_fact, canonical_evidence, canonical_targeted = extract("영업이익")
+
+    assert fact.metric is MetricConcept.OPERATING_INCOME
+    assert fact.raw_value == "1,234"
+    assert fact.raw_unit == "백만원"
+    assert fact.normalized_value == "1234000000"
+    assert fact.normalized_unit == "KRW"
+    assert fact.fiscal_year == 2025
+    assert fact.fiscal_period == "annual"
+    assert fact.accounting_scope is FactAccountingScope.CONSOLIDATED
+    assert fact.evidence_ids == [evidence.evidence_id]
+
+    assert evidence.row_label == label
+    assert evidence.column_label == "제 25 기 2025"
+    assert evidence.raw_text == "1,234"
+    assert evidence.provenance is not None
+    assert evidence.provenance.table_id == "table_0001"
+    assert evidence.provenance.row_index == 1
+    assert evidence.provenance.column_index == 1
+    assert evidence.provenance.acode == "ifrs-full_OperatingProfitLoss"
+    assert evidence.provenance.acontext == acontext
+    assert evidence.provenance.unit_declaration == "(단위 : 백만원)"
+    assert evidence.provenance.unit_source == "table_group"
+    assert evidence.provenance.unit_multiplier == 1_000_000
+    assert evidence.provenance.unit_trusted is True
+    assert evidence.provenance.aclass == "{XBRL}IS_C1"
+    assert evidence.provenance.table_classification == "primary_statement"
+    assert source_cell["aunit"] == "KRW"
+
+    assert targeted.metric is MetricConcept.OPERATING_INCOME
+    assert targeted.fiscal_year == 2025
+    assert targeted.accounting_scope is FactAccountingScope.CONSOLIDATED
+    assert targeted.raw_value == "1,234"
+    assert targeted.value == Decimal("1234")
+    assert targeted.unit_token == "백만원"
+    assert targeted.unit_multiplier == 1_000_000
+    assert targeted.value_in_base_unit == Decimal("1234000000")
+    assert targeted.acode == "ifrs-full_OperatingProfitLoss"
+    assert targeted.acontext == acontext
+    assert targeted.location.section_id is None
+    assert targeted.location.table_id == "table_0001"
+    assert targeted.location.row_index == 1
+    assert targeted.location.column_index == 1
+    assert targeted.location.label_text == label
+
+    assert fact == canonical_fact
+    assert evidence.evidence_id == canonical_evidence.evidence_id
+    assert evidence.provenance == canonical_evidence.provenance
+    assert evidence.model_dump(exclude={"row_label"}) == canonical_evidence.model_dump(
+        exclude={"row_label"}
+    )
+    assert targeted.to_dict() | {
+        "location": targeted.location.to_dict()
+        | {"label_text": canonical_targeted.location.label_text}
+    } == canonical_targeted.to_dict()
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "영업손실",
+        "IV.영업이익",
+        "III.영업이익",
+        "Ⅰ.매출액",
+        "Ⅱ.영업이익",
+    ],
+)
+def test_deferred_labels_remain_unsupported_exact_matches(label: str) -> None:
+    assert match_metric(label) is None
+
+    facts, evidence = extract_financial_facts_with_evidence(
+        parsed_document(financial_table(label=label, values=("20",)))
+    )
+
+    assert facts == []
+    assert evidence == []
+
+    with pytest.raises(ExtractionBlockedError) as error:
+        extract_financial_fact(
+            parsed_document(financial_table(label=label, values=("20",))),
+            metric=MetricConcept.OPERATING_INCOME,
+            fiscal_year=2025,
+            accounting_scope=FactAccountingScope.CONSOLIDATED,
+        )
+
+    assert error.value.reason == "no_matching_label_fallback"
 
 
 

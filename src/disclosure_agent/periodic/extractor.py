@@ -933,8 +933,11 @@ METRIC_ALIASES: dict[MetricConcept, set[str]] = {
         "영업수익",
     },
     MetricConcept.OPERATING_INCOME: {
+        "Ⅴ.영업이익",
+        "Ⅲ.영업이익(손실)",
         "영업이익",
         "영업이익(손실)",
+        "영업손익",
     },
 }
 

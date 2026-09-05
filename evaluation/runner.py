@@ -20,6 +20,7 @@ from disclosure_agent.common.enums import (
     ComparisonRelation,
     EventLinkResolutionStatus,
     EventType,
+    EvidenceLocationType,
     ExecutionStatus,
     FactAccountingScope,
     MetricConcept,
@@ -29,6 +30,7 @@ from disclosure_agent.common.enums import (
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
     Event,
+    Evidence,
     Fact,
     ResolvedEventState,
     ResolvedFieldValue,
@@ -77,6 +79,35 @@ class ExpectedEvent(BaseModel):
     company: str | None = None
     source_doc_id: str | None = None
     is_correction: bool | None = None
+
+
+class ExpectedEvidence(BaseModel):
+    """Fields that one distinct predicted Evidence must match.
+
+    Every other Expected* type pins identity through a typed carrier that already
+    references Evidence by id (Fact, Calculation, DocumentSummary, EventHistory), so
+    `integrity.*_evidence_references` can confirm those references resolve. A result
+    can also carry Evidence that no typed carrier references at all — Pattern C's
+    narrative-compare path does this when it retains Evidence for a fiscal year it
+    resolved before stopping on a later year it could not (Q09). `counts.evidence`
+    alone cannot tell that retained Evidence apart from same-count Evidence pulled
+    from the wrong filing: two results with three Evidence rows are indistinguishable
+    to a count-only gold even when one result's rows come from an unresolved
+    candidate document. `doc_id` is the identity that distinguishes them; it is
+    required rather than optional because an ExpectedEvidence without it would not
+    pin anything a bare `counts.evidence` integer doesn't already pin.
+
+    `section_path` is compared for exact list equality, mirroring how `DocumentSummary`
+    and `Fact` gold already compare their own fields. `raw_text` has no field here:
+    committing source excerpts to gold would recreate the values this repository's
+    no-source-values rule already forbids elsewhere (D6, `evaluation/README.md`), and
+    doc_id + section_path already say which filing and which part of it the row came
+    from without quoting it.
+    """
+
+    doc_id: str
+    location_type: EvidenceLocationType | None = None
+    section_path: list[str] | None = None
 
 
 class ExpectedResolvedField(BaseModel):
@@ -204,11 +235,13 @@ class GoldAnswer(BaseModel):
     document_summaries: list[ExpectedDocumentSummary] | None = None
     comparisons: list[ExpectedComparison] | None = None
     min_evidence_count: int = Field(ge=0)
+    evidence: list[ExpectedEvidence] | None = None
     events: list[ExpectedEvent] | None = None
     resolved_event_states: list[ExpectedResolvedEventState] | None = None
     event_history: EventHistoryExpectation | None = None
     counts: CollectionCounts | None = None
     answerability_detail_reason: str | None = None
+    answerability_detail_stage: str | None = None
     integrity: IntegrityExpectation | None = None
     semantic_count: SemanticCountExpectation | None = None
 
@@ -523,6 +556,28 @@ def _events_match_distinctly(expected: list[ExpectedEvent], actual: list[Event])
     candidates = [
         [index for index, event in enumerate(actual) if _event_matches(item, event)]
         for item in expected
+    ]
+    return _match_distinctly(candidates)
+
+
+def _evidence_matches(expected: ExpectedEvidence, actual: Evidence) -> bool:
+    expected_fields = expected.model_dump(exclude_none=True)
+    return all(getattr(actual, field) == value for field, value in expected_fields.items())
+
+
+def _evidence_match_distinctly(
+    expected: list[ExpectedEvidence], actual: list[Evidence]
+) -> bool:
+    """Return whether every expectation can match a distinct actual Evidence.
+
+    Same distinct-matching contract as facts/events/resolved_event_states: each
+    ExpectedEvidence must claim its own actual row, so N identical expectations
+    (e.g. "3 rows from doc_id=X") require N actual rows that satisfy that identity,
+    not one matching row counted three times.
+    """
+    candidates = [
+        [index for index, item in enumerate(actual) if _evidence_matches(expectation, item)]
+        for expectation in expected
     ]
     return _match_distinctly(candidates)
 
@@ -888,6 +943,17 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
                 "answerability_detail.reason: "
                 f"expected {gold.answerability_detail_reason}, got {actual}"
             )
+    if gold.answerability_detail_stage is not None:
+        actual = (
+            prediction.answerability_detail.stage
+            if prediction.answerability_detail is not None
+            else None
+        )
+        if actual != gold.answerability_detail_stage:
+            failures.append(
+                "answerability_detail.stage: "
+                f"expected {gold.answerability_detail_stage}, got {actual}"
+            )
 
     if gold.counts is not None:
         for field, expected in gold.counts.model_dump(exclude_none=True).items():
@@ -904,6 +970,11 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
     expected_facts = gold.expected_facts()
     if expected_facts and not _facts_match_distinctly(expected_facts, prediction.facts):
         failures.append("facts: expected fields did not match distinct predicted Facts")
+
+    if gold.evidence is not None and not _evidence_match_distinctly(
+        gold.evidence, prediction.evidence
+    ):
+        failures.append("evidence: expected fields did not match distinct predicted Evidence")
 
     if gold.document_summaries is not None and not _document_summaries_match_distinctly(
         gold.document_summaries, prediction

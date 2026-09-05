@@ -63,6 +63,19 @@ documents to belong to the same history chain. Unrelated Evidence that is not re
 by an EventHistory or FieldChange is not restricted. Value-level EventHistory and other
 content rubrics remain future extensions.
 
+`GoldAnswer.evidence` fixes a list of partial `ExpectedEvidence` (`doc_id`, optional
+`location_type`, optional `section_path`) matched distinctly against the prediction's
+`evidence`, the same distinct-matching contract as Fact/Event/DocumentSummary. It exists
+for results whose Evidence is not referenced by any typed carrier at all, so the
+integrity checks above — which all confirm a typed carrier's evidence_ids resolve —
+never look at it. Pattern C's narrative-compare path does this when it retains one
+fiscal year's Evidence after resolving that year and then stops on a later year it
+could not resolve to one filing (Q09): `counts.evidence` alone pins how many Evidence
+rows come back, not which document they came from, so a result that retained the same
+number of rows from the wrong (unresolved) candidate document would still pass a
+count-only gold. `doc_id` is required on `ExpectedEvidence` for that reason — an
+expectation without it would not pin anything `counts.evidence` doesn't already pin.
+
 ## Semantic count contract
 
 Some questions ask "how many times" ("몇 번") about something a result represents with
@@ -143,6 +156,35 @@ than leaving stale root-filing values in place.
 `as_of_date` and `corpus_snapshot` on `QuestionCase` stay `null`. No explicit as-of
 contract exists yet, and `q07` deliberately exercises the default anchor path.
 
+### Q09: fail-closed on an ambiguous filing, not a narrative-pairing judgment
+
+`q09` ("삼성바이오로직스 사업 구조가 2023년이랑 2025년이랑 어떻게 달라졌어?") is Pattern
+C's narrative-compare path (`agent.handlers.temporal_compare`'s `is_narrative_plan`
+branch), not its numeric one: it asks about the business-overview Section across two
+fiscal years, not a metric. That path never builds a `NarrativeComparisonResult` — there
+is no rule yet for pairing one fiscal year's narrative items with the next — so its only
+two outcomes are `COMPLETED/UNANSWERABLE/not_comparable` (both years' Sections secured,
+nothing to pair them with) or an earlier stop.
+
+In the current corpus snapshot it is the earlier stop. FY2023 has one annual report and
+resolves normally; FY2025 has both an original filing and a `[기재정정]` correction, and
+no periodic-report version-selection policy exists yet (D5, `docs/agent_design/
+open_decisions.md`), so the handler does not guess between them. The result is
+`COMPLETED/UNRESOLVED/ambiguous_match` with `answerability_detail_reason=
+"ambiguous_filing"` — not `not_comparable` — and only FY2023's three Evidence rows are
+retained; FY2025 never produces any.
+
+A `counts`-only gold cannot tell that retained Evidence apart from the same count of
+rows pulled from one of the unresolved FY2025 candidates instead, so `q09`'s gold also
+pins `evidence` (`ExpectedEvidence` × 3, `doc_id="periodic_20240307000835"`,
+`section_path=["II. 사업의 내용", "1. 사업의 개요"]`) — see the `ExpectedEvidence`
+paragraph above. If the corpus later gains a periodic-filing version policy (D5) or the
+FY2025 correction is removed, the handler may resolve FY2025 and reach the
+`not_comparable` narrative-pairing judgment, or resolve both Sections' pairing entirely;
+update `reason`, `answerability_detail_reason`, `counts`, and `evidence` together rather
+than leaving this snapshot's ambiguous-filing values in place — this gold pins today's
+observed fail-closed behavior, not a final target for Q09.
+
 Local prediction and evaluation result files belong under `results/` and must not
 contain source documents or secrets.
 
@@ -152,13 +194,11 @@ Live mode executes the active regression cases through the public Agent entry po
 and evaluates the returned `AgentExecutionResult` objects with the same deterministic
 comparator:
 
-The current active regression set contains exactly seventeen representative questions:
-`Q01`, `Q02`, `Q03`, `Q04`, `Q05`, `Q06`, `Q07`, `Q08`, `Q10`, `Q11`, `Q12`, `Q13`, `Q14`,
-`Q15`, `Q16`, `Q17`, and `Q18`. Only `Q09` remains `lifecycle="future"`. Therefore, a
-reported live-Agent result of `17/17` applies only to those seventeen active cases; it
-is not a result for all 18 representative questions. This list is derived from
-`evaluation/questions.jsonl` (`lifecycle` per case) and must be re-checked against that
-file — not assumed — whenever a case's lifecycle changes.
+The current active regression set contains all eighteen representative questions:
+`Q01` through `Q18`. No case remains `lifecycle="future"`. Therefore, a reported
+live-Agent result of `18/18` is a result for every representative question. This list
+is derived from `evaluation/questions.jsonl` (`lifecycle` per case) and must be
+re-checked against that file — not assumed — whenever a case's lifecycle changes.
 
 ```text
 uv run python -m evaluation.runner --run-agent --corpus-root path/to/corpus

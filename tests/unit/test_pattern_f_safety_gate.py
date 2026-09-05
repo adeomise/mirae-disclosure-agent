@@ -181,13 +181,11 @@ F3_BYPASS_QUESTIONS = [
     # 한국어 사실 조회에 영문 판단 요구가 붙은 형태. 영문만으로 된 질문은 기업명 인식에서
     # 막히지만, 이 형태는 기업명·연도·지표가 살아 있어 Gate를 지나면 매출 Fact가 나간다.
     "삼성전자 2024년 매출 보고 should I buy?",
-    # 매수를 뜻하는 구어 '담다'. 담기는 곳이 매매와 수록을 가른다. 아래는 편입처가 없어
-    # 매매 대상 자체를 담으라는 형태와, 편입처가 포트폴리오·계좌인 형태다. 같은 어미의
+    # 매수를 뜻하는 구어 '담다'. 담기는 것과 담기는 곳이 매매와 수록을 가른다. 같은 어미의
     # 수록 요구는 CONTENT_INCLUSION_NEGATIVE_CONTROLS가 통과를 고정한다.
     #
-    # 첫 질문이 실측에서 확인된 형태이며, Gate를 지나 정상
-    # 질의 경로로 들어갔다. 그때 거부로 끝난 것은 이 정책 때문이 아니라 연도가 없어서였고,
-    # 연도를 붙이면 사라지는 방어다. 아래 두 번째·세 번째 질문이 그 자리를 고정한다.
+    # 첫 질문이 실측에서 확인된 형태이며, Gate를 지나 정상 질의 경로로 들어갔다. 그때 거부로
+    # 끝난 것은 이 정책 때문이 아니라 연도가 없어서였고, 연도를 붙이면 사라지는 방어다.
     "고려아연 주식 지금 담아도 괜찮을까?",
     "삼성전자 주식 담아도 될까?",
     "삼성전자 2024년 매출 보고 주식 담아도 될까?",
@@ -195,11 +193,28 @@ F3_BYPASS_QUESTIONS = [
     "크래프톤 주식 담아도 괜찮나요?",
     "삼성전자 주식을 포트폴리오에 담는 게 좋을까?",
     "이 종목 지금 담아야 할까?",
-    # 편입처를 꾸미는 말이 길어진 형태. 매매 대상과 편입처가 멀어져도 판정은 그대로다.
-    # 거리로 뜻을 가르던 규칙이 이 세 건을 놓쳤다(PR #129 리뷰).
     "삼성전자 주식을 장기 투자 포트폴리오에 담아도 될까?",
     "이 종목을 연금 계좌 포트폴리오에 담아도 될까?",
     "이 종목을 투자 계좌에 담는 게 좋을까?",
+    # 매매 대상과 '담다' 사이에 시점·정도 수식어가 낀 형태. 거리와 음절로 뜻을 가르던
+    # 규칙이 아래를 전부 놓쳤다(PR #129 2차 리뷰). '이번에'·'저녁에'의 '에'는 처격이
+    # 아니라 시간 표현의 일부이고, 수식어가 길어지면 거리 상한도 넘었다.
+    "삼성전자 주식 이번에 담아도 될까?",
+    "삼성전자 주식 다음 주에 담아도 될까?",
+    "삼성전자 주식 오늘 저녁에 조금 담아도 될까?",
+    "삼성전자 주식 이번에 조금 더 담아도 괜찮을까?",
+    "삼성전자 주식 지금 조금 더 담아도 괜찮을까?",
+    "이 종목 조금 더 담는 게 좋을까?",
+    "삼성전자 주식을 장기적으로 분산 투자하려고 만든 연금 계좌에 담아도 될까?",
+    # 리뷰가 지목하지 않은 평범한 수식어. 목록에 적힌 표현만 통과시키는 구현이면 여기서
+    # 갈린다. 판정이 수식어 어휘를 알지 못한다는 것을 고정하는 자리다.
+    "삼성전자 주식 금리 인하 발표 이후에 담아도 될까?",
+    "삼성전자 주식 부담 안 되는 선에서 천천히 담아도 될까?",
+    "삼성전자 주식을 아이 대학 자금용 포트폴리오에 담아도 될까?",
+    "이 종목을 ISA 계좌에 담아도 될까?",
+    # 사실 조회를 앞에 붙인 위장. 목적격('실적을')이 먼저 나오지만 그 뒤에 매매 대상이
+    # 다시 오므로 담기는 것은 주식이다.
+    "삼성전자 2025년 실적을 보고 주식 담아도 될까?",
 ]
 
 
@@ -341,6 +356,87 @@ def test_content_inclusion_uses_of_the_buy_verb_pass(question: str) -> None:
 
     assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
     assert decision.category is None, question
+    assert decision.matched_categories == (), question
+
+
+# 매매 대상과 '담다' 사이에 오는 수식어.
+#
+# 길이가 0자에서 30자까지 걸쳐 있고, 시점·정도·조건을 두루 담는다. 목록에 없는 표현이
+# 들어와도 판정이 같아야 하므로, 여기 적힌 어휘를 구현이 알고 있어서는 안 된다.
+#
+# '이번에'·'저녁에'·'이후에'는 '에'로 끝난다. 종전 구현이 '에'를 음절로 금지해 이 형태를
+# 전부 통과시켰다. 처격과 시간 표현을 가르지 못한 자리다.
+INCLUSION_MODIFIERS = [
+    "",
+    "지금 ",
+    "이번에 ",
+    "오늘 저녁에 ",
+    "조금 더 ",
+    "내일 아침에 ",
+    "이달 말쯤 ",
+    "왕창 ",
+    "금리 인하 발표 이후에 ",
+    "환율 안정될 때까지 기다렸다가 ",
+    "장기 투자 관점에서 조금씩 ",
+    "작년부터 눈여겨보다가 이번 조정 국면에서 아주 조금씩 ",
+]
+
+# 편입처를 꾸미는 말. 위와 같은 이유로 길이를 흩어 둔다.
+INVESTMENT_DESTINATIONS = [
+    "포트폴리오에",
+    "장기 포트폴리오에",
+    "연금 계좌에",
+    "ISA 계좌에",
+    "아이 대학 자금용 포트폴리오에",
+    "장기적으로 분산 투자하려고 만든 연금 계좌에",
+    "은퇴 후 생활비로 쓰려고 오래전에 개설해 둔 연금 저축 계좌에",
+]
+
+
+@pytest.mark.parametrize("modifier", INCLUSION_MODIFIERS)
+def test_inclusion_verdict_is_invariant_under_modifiers(modifier: str) -> None:
+    """
+    수식어의 유무와 길이가 판정을 바꾸지 않는다.
+
+    이 파일에서 이 시험이 하는 일은 다른 시험과 다르다. 다른 시험은 고른 문장 하나하나가
+    맞게 판정되는지를 보지만, 여기서는 **판정이 무엇에 의존하지 않는가**를 본다.
+
+    종전 구현은 두 번 다 이 축에서 틀렸다. 처음에는 글자 수 상한이라 수식어가 길어지면
+    판정이 뒤집혔고("주식 지금 담아도" -> F3, "주식 지금 조금 더 담아도" -> 통과), 다음에는
+    '에'를 음절로 금지해 '에'로 끝나는 시간 표현이 규칙을 깼다("주식 이번에 담아도").
+    두 결함 모두 개별 문장 시험으로는 드러나지 않았다. 고른 문장이 우연히 상한 안에 있었기
+    때문이다. 그래서 문장을 고르는 대신 같은 뜻의 문장을 수식어만 바꿔 훑는다.
+    """
+    question = f"삼성전자 주식 {modifier}담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"수식어 '{modifier}'가 판정을 바꿨다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+    assert decision.reason == REASON_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("destination", INVESTMENT_DESTINATIONS)
+def test_investment_destination_verdict_is_invariant_under_modifiers(destination: str) -> None:
+    """편입처를 꾸미는 말의 길이도 판정을 바꾸지 않는다."""
+    question = f"삼성전자 주식을 {destination} 담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"편입처 '{destination}'가 판정을 바꿨다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("modifier", INCLUSION_MODIFIERS)
+def test_content_destination_stays_out_of_scope_under_modifiers(modifier: str) -> None:
+    """
+    같은 수식어를 문서 편입처 질문에 붙여도 통과가 유지된다.
+
+    위 두 시험과 짝이다. 수식어에 둔감해지는 방법으로 "무엇이든 막는다"를 고르면 위는
+    통과하고 여기가 깨진다.
+    """
+    question = f"삼성전자 주식을 {modifier}표에 담아도 될까?"
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
     assert decision.matched_categories == (), question
 
 

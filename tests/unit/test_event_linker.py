@@ -545,58 +545,129 @@ def test_missing_link_field_correction_keeps_the_chain_incomplete(
     assert chain.is_complete is False
 
 
-def test_unresolvable_correction_does_not_poison_chains_when_roots_are_many(
+def test_root_filed_after_the_correction_is_not_a_competing_root(
     make_event_filing,
     make_exchange_document,
 ) -> None:
     """
-    다른 원공시의 것일 수 있는 미해결 정정이 선택된 체인을 오염시키면 안 된다.
+    정정보다 나중에 나온 원공시를 경쟁 후보로 세지 않는다.
 
-    기업·유형이 같고 제출일이 뒤라는 것만으로는 어느 이력의 정정인지 세울 수 없다. 그 상태로
-    선택된 루트에 귀속시키면 무관한 정정 하나가 멀쩡한 체인 전부를 미완결로 만든다. 실측
-    코퍼스에서 원공시가 32건인 그룹에도 자기참조 정정이 있다.
+        B0001 원공시    2025-04-01
+        B0002 정정      2025-05-01   자기참조. 연결 실패
+        A0001 원공시    2025-08-30
 
-    이 정정은 어느 체인에도 남지 않는다. 알려진 한계이며, 넓게 엮는 것보다 좁게 멈추는 쪽을
-    택한 결과다.
+    B0002가 제출된 날 A0001은 존재하지 않았다. 그러므로 B0002가 정정했을 수 있는 원공시는
+    B0001 하나뿐이고, B0001 체인에서 사라지면 안 된다. 후보 집합 전체의 원공시를 세면
+    '원공시가 2건이라 모른다'가 되어 그 정정이 어느 체인에도 남지 않고, B0001이 완결로
+    답해진다. BB17과 같은 오류다.
+
+    반대로 A0001은 B0002보다 뒤에 나왔으므로 B0002에게 정정당할 수 없다. A0001 체인은
+    그대로 완결이어야 한다.
     """
     filings, documents = _q13_shaped_chain(make_event_filing, make_exchange_document)
 
-    # 같은 기업·같은 유형의 다른 이력.
-    other_root = make_event_filing("B0001", "20250401")
+    earlier_root = make_event_filing("B0001", "20250401")
 
-    other_correction = make_event_filing("B0002", "20250501", is_correction=True)
+    earlier_correction = make_event_filing("B0002", "20250501", is_correction=True)
 
-    # 이 정정은 B0001의 것이지만 원공시 제출일로 자기 접수일을 적었다.
     documents["B0001"] = make_exchange_document()
     documents["B0002"] = make_exchange_document(
         original_filing_date="2025-05-01",
         correction_date="2025-05-01",
     )
 
-    selected = build_filing_chain(
-        root_receipt_no="A0001",
-        filings=[*filings, other_root, other_correction],
+    everything = [*filings, earlier_root, earlier_correction]
+
+    # 정정 시점에 존재하던 원공시가 B0001 하나뿐이다. 그 체인은 미완결이어야 한다.
+    earlier_chain = build_filing_chain(
+        root_receipt_no="B0001",
+        filings=everything,
         documents=documents,
         event_type="supply_contract",
     )
 
-    assert [entry.filing.receipt_no for entry in selected.entries] == [
+    assert [link.correction_receipt_no for link in earlier_chain.unresolved_links] == [
+        "B0002"
+    ]
+    assert earlier_chain.is_complete is False
+
+    # 연결을 지어내지는 않는다. 정정은 여전히 B0001에 붙지 않았다.
+    assert [entry.filing.receipt_no for entry in earlier_chain.entries] == ["B0001"]
+    assert earlier_chain.unresolved_links[0].original is None
+
+    # 정정보다 뒤에 나온 원공시의 체인은 오염되지 않는다.
+    later_chain = build_filing_chain(
+        root_receipt_no="A0001",
+        filings=everything,
+        documents=documents,
+        event_type="supply_contract",
+    )
+
+    assert [entry.filing.receipt_no for entry in later_chain.entries] == [
         "A0001",
         "A0002",
         "A0003",
     ]
-    assert selected.unresolved_links == ()
-    assert selected.is_complete is True
+    assert later_chain.unresolved_links == ()
+    assert later_chain.is_complete is True
 
-    # 반대쪽 루트도 마찬가지다. 어느 쪽으로도 기울이지 않는다.
-    other = build_filing_chain(
-        root_receipt_no="B0001",
-        filings=[*filings, other_root, other_correction],
-        documents=documents,
-        event_type="supply_contract",
+
+def test_correction_with_several_earlier_roots_is_not_attached_to_any_chain(
+    make_event_filing,
+    make_exchange_document,
+) -> None:
+    """
+    정정 시점에 이미 원공시가 여럿이었다면 어느 체인의 것인지 정하지 않는다.
+
+        A0001 원공시    2025-03-01
+        B0001 원공시    2025-04-01
+        C0001 정정      2025-05-01   연결 정보 없음
+
+    둘 다 시간상 가능하다. 하나를 고르면 다른 계약의 이력에 없는 정정을 붙이게 되고, 둘 다에
+    붙이면 무관한 정정 하나가 멀쩡한 체인 둘을 미완결로 만든다. 어느 쪽도 하지 않는다.
+
+    그 결과 이 정정은 어느 체인에도 남지 않는다. FilingChain이 루트 단위 구조여서 '이 그룹
+    어딘가에 붙지 못한 정정이 있다'를 담을 자리가 없기 때문이며, 알려진 한계다.
+    """
+    first_root = make_event_filing("A0001", "20250301")
+
+    second_root = make_event_filing("B0001", "20250401")
+
+    correction = make_event_filing("C0001", "20250501", is_correction=True)
+
+    documents = {
+        "A0001": make_exchange_document(),
+        "B0001": make_exchange_document(),
+        "C0001": make_exchange_document(
+            original_filing_date=None,
+            correction_date="2025-05-01",
+        ),
+    }
+
+    filings = [first_root, second_root, correction]
+
+    for root_receipt_no in ("A0001", "B0001"):
+        chain = build_filing_chain(
+            root_receipt_no=root_receipt_no,
+            filings=filings,
+            documents=documents,
+            event_type="supply_contract",
+        )
+
+        # 어느 루트에도 임의로 배정하지 않는다.
+        assert [entry.filing.receipt_no for entry in chain.entries] == [root_receipt_no]
+        assert chain.unresolved_links == ()
+
+    # 연결 판정 자체는 그대로 남는다. 없는 연결을 만들지 않았다는 것이 여기서 드러난다.
+    result = link_correction(
+        correction,
+        document=documents["C0001"],
+        candidates=filings,
     )
 
-    assert other.unresolved_links == ()
+    assert result.status == LINK_STATUS_MISSING_LINK_FIELD
+    assert result.original is None
+    assert result.candidates == ()
 
 
 def test_resolved_correction_of_another_root_does_not_reach_this_chain(

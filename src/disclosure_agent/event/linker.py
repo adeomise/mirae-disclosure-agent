@@ -34,8 +34,10 @@ TODO:
 - 세부유형이 바뀌는 정정의 처리
 - 자기참조 원공시 제출일을 적은 정정의 대상 복구. 지금은 그런 정정을 미해결로 남겨
   chain_complete=False로 만들 뿐(_might_belong_to_chain), 대상을 되찾지는 않는다.
-  실측 코퍼스에 자기참조 정정이 있고(엘에스일렉트릭 20240813800252 등), 원공시가 여럿인
-  후보 집합에서는 어느 체인에도 남지 않는다.
+  실측 코퍼스에 자기참조 정정이 있고(엘에스일렉트릭 20240813800252 등), 정정 시점에 이미
+  원공시가 여럿이었던 경우에는 어느 체인에도 남지 않는다.
+- 루트에 매이지 않는 미해결 표현. FilingChain은 루트 단위여서 '이 그룹 어딘가에 붙지 못한
+  정정이 있다'를 담을 자리가 없다.
 """
 
 from __future__ import annotations
@@ -348,7 +350,7 @@ def build_filing_chain(
         if not joined:
             break
 
-    sole_root = _sole_root(filings)
+    roots = tuple(filing for filing in filings if not filing.is_correction)
 
     unresolved = tuple(
         links[correction.receipt_no]
@@ -357,7 +359,7 @@ def build_filing_chain(
             links[correction.receipt_no],
             chain_members,
             correction=correction,
-            sole_root=sole_root,
+            roots=roots,
         )
     )
 
@@ -383,16 +385,45 @@ def build_filing_chain(
     )
 
 
-def _sole_root(filings: Sequence[FilingLike]) -> FilingLike | None:
+def _temporally_plausible_roots(
+    roots: Sequence[FilingLike],
+    correction: FilingLike,
+) -> list[FilingLike]:
     """
-    후보 집합이 인정하는 원공시가 정확히 1건이면 그것을 돌려준다. 아니면 None.
+    이 정정이 정정했을 수 있는 원공시만 남긴다.
 
-    후보 집합은 (기업, 공시 세부유형)으로 이미 좁혀져 있다. 그 안에 정정이 아닌 공시가
-    하나뿐이라면, 이 집합 안에서 정정이 붙을 수 있는 이력의 출발점은 그 하나뿐이다.
+    후보 집합은 (기업, 공시 세부유형)으로 이미 좁혀져 있다. 거기서 더 좁히는 기준은 시간
+    하나다. 정정보다 나중에 제출된 원공시는 정정 시점에 존재하지 않았으므로 그 정정의
+    대상일 수 없다.
+
+    전체 집합의 원공시 개수를 세면 안 되는 이유:
+        나중에 나온 원공시까지 세면 "이 정정이 어느 이력의 것인지 모른다"는 판정이 실제보다
+        쉽게 나온다. 정정 시점에 이력이 하나뿐이었는데도 그 뒤에 다른 계약이 하나 더 공시됐다는
+        이유로 미해결 정정이 어느 체인에도 남지 않고 사라진다. 그러면 원래 붙었어야 할 체인이
+        완결로 답해지며, 이 모듈이 막으려는 바로 그 오류가 다시 난다.
+
+    같은 날 제출을 가능으로 보는 이유:
+        receipt_date는 날짜이지 시각이 아니다. 그리고 find_original_candidates가 원공시를
+        찾는 조건 자체가 '같은 날짜'다. 즉 같은 날 낸 정정은 예외가 아니라 정상 연결 경로이며,
+        실측 코퍼스에서 정상 연결된 정정 253건 중 6건이 원공시와 같은 날 제출됐다.
+        같은 날을 빼면 실재하는 원공시가 후보에서 빠져 가짜 판정이 나온다.
+
+    날짜를 모르면 빼지 않는다. 모르는 것을 근거로 지우지 않는다.
     """
-    roots = [filing for filing in filings if not filing.is_correction]
+    correction_date = normalize_filing_date(correction.receipt_date)
 
-    return roots[0] if len(roots) == 1 else None
+    if correction_date is None:
+        return list(roots)
+
+    plausible: list[FilingLike] = []
+
+    for root in roots:
+        root_date = normalize_filing_date(root.receipt_date)
+
+        if root_date is None or root_date <= correction_date:
+            plausible.append(root)
+
+    return plausible
 
 
 def _link_field_is_uninformative(
@@ -433,7 +464,7 @@ def _might_belong_to_chain(
     chain_members: Mapping[str, FilingLike],
     *,
     correction: FilingLike,
-    sole_root: FilingLike | None,
+    roots: Sequence[FilingLike],
 ) -> bool:
     """
     연결에 실패한 정정이 이 체인에 속할 수 있었는지 본다.
@@ -443,8 +474,8 @@ def _might_belong_to_chain(
     1. 후보 중 하나가 체인 구성원인 경우(주로 ambiguous_link). 대상 후보 안에 이 체인의
        문서가 들어 있으므로 이 체인의 미해결 항목이다.
 
-    2. 연결 정보 자체가 무의미하고(_link_field_is_uninformative), 후보 집합이 인정하는
-       원공시가 이 체인의 루트 하나뿐인 경우.
+    2. 연결 정보 자체가 무의미하고(_link_field_is_uninformative), 이 정정이 정정했을 수
+       있는 원공시(_temporally_plausible_roots)가 이 체인의 루트 하나뿐인 경우.
 
     2번을 남기는 이유:
         후보가 비어 있다는 것을 '이 체인과 무관하다'는 증거로 쓰던 자리다. 그것은 대상 날짜를
@@ -456,39 +487,36 @@ def _might_belong_to_chain(
         어디에 붙는지 모를 때는 붙이지 못했다는 사실을 남긴다. 여기서 EventLink를 지어내지
         않는다. 대상을 되찾는 일은 별도 과제다.
 
-    루트가 여럿이면 2번을 적용하지 않는 이유:
-        같은 기업의 같은 유형 공시라도 계약·투자마다 이력이 따로 있다. 후보 집합에 원공시가
-        여럿이면 이 정정이 그중 어느 이력의 것인지 정할 수 없고, 그 상태로 선택된 루트에
-        귀속시키면 무관한 정정 하나가 멀쩡한 체인 전부를 미완결로 만든다. 실측 코퍼스에서
-        원공시가 32건인 그룹에도 자기참조 정정이 있다. 기업·유형·시점이 겹친다는 것만으로는
-        관계를 세우지 못하므로, 세울 수 없을 때는 넓게 엮는 대신 좁게 멈춘다.
+    개수를 시간으로 세는 이유:
+        후보 집합 전체의 원공시를 세면, 정정보다 나중에 나온 원공시가 경쟁 후보로 잡힌다.
+        정정 시점에는 이력이 하나뿐이었는데 그 뒤에 다른 계약이 공시됐다는 이유만으로 판정이
+        '모른다'로 바뀌고, 그 정정은 원래 붙었어야 할 체인에서도 사라진다. 존재하지도 않던
+        문서를 근거로 아는 것을 모른다고 하는 셈이다.
 
-        그래서 루트가 여럿인 경우 이 정정은 어느 체인에도 남지 않는다. 알려진 한계이며,
-        호출자가 후보 전체에 link_correction을 돌려 따로 드러내야 한다.
+    plausible 루트가 여럿이면 2번을 적용하지 않는 이유:
+        같은 기업의 같은 유형 공시라도 계약·투자마다 이력이 따로 있다. 정정 시점에 이미
+        원공시가 여럿이었다면 이 정정이 그중 어느 이력의 것인지 정할 수 없다. 그 상태로
+        선택된 루트에 귀속시키면 무관한 정정 하나가 멀쩡한 체인 전부를 미완결로 만든다.
+        실측 코퍼스에서 그런 정정 하나 앞에 원공시가 16건까지 있다. 하나를 고르지 않고,
+        전부에 붙이지도 않는다.
 
-    루트보다 먼저 제출된 정정은 빼는 이유:
-        루트가 나오기 전에 제출된 문서는 그 루트를 정정한 것일 수 없다. 날짜를 하나라도
-        읽지 못하면 빼지 않는다. 모르는 것을 근거로 지우지 않는다.
+        그래서 plausible 루트가 여럿인 경우 이 정정은 어느 체인에도 남지 않는다. 알려진
+        한계다. FilingChain은 루트에 매인 구조라 '그룹 어딘가에 미해결이 있다'를 담을 자리가
+        없다. 그 사실은 호출자가 후보 전체에 link_correction을 돌려 따로 드러내야 한다.
+
+    선택된 루트가 정정보다 나중에 나온 경우:
+        그 루트는 plausible 집합에 들어가지 않으므로 이 체인은 오염되지 않는다. 루트가 나오기
+        전에 제출된 문서는 그 루트를 정정한 것일 수 없다.
     """
     if any(candidate.receipt_no in chain_members for candidate in result.candidates):
         return True
 
-    if sole_root is None or sole_root.receipt_no not in chain_members:
-        return False
-
     if not _link_field_is_uninformative(result, correction):
         return False
 
-    return not _precedes(correction, sole_root)
+    plausible = _temporally_plausible_roots(roots, correction)
 
-
-def _precedes(filing: FilingLike, other: FilingLike) -> bool:
-    """filing이 other보다 먼저 제출됐는가. 한쪽이라도 날짜를 모르면 False."""
-    filing_date = normalize_filing_date(filing.receipt_date)
-
-    other_date = normalize_filing_date(other.receipt_date)
-
-    if filing_date is None or other_date is None:
+    if len(plausible) != 1:
         return False
 
-    return filing_date < other_date
+    return plausible[0].receipt_no in chain_members

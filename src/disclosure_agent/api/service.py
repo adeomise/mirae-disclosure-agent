@@ -181,6 +181,23 @@ class AgentAskService:
     verbalize_fn: Verbalize = default_verbalize
 
     def answer(self, request: AskRequest) -> AnswerResponse:
+        response, _ = self.answer_with_execution_result(request)
+        return response
+
+    def answer_with_execution_result(
+        self, request: AskRequest
+    ) -> tuple[AnswerResponse, AgentExecutionResult]:
+        """
+        `answer`와 완전히 같은 실행 경로를 한 번만 태우되, 원본 실행 결과도 함께 돌려준다.
+
+        AnswerResponse에는 자리가 없는 진단(calculations/comparisons/document_summaries 등)이
+        필요한 소비자(예: organizer adapter의 process trace)를 위한 것이다. `answer_question_fn`을
+        두 번 부르지 않는다 — 같은 질문을 다시 실행하면 파이프라인이 두 벌이 되는 것과 같고,
+        비결정적 경로(HyperCLOVA)가 있다면 두 호출의 결과가 갈릴 수도 있다.
+
+        예외 계약은 `answer`와 동일하다. BLOCKED/FAILED는 원본 결과를 담을 자리가 없으므로
+        (실행이 끝나지 못했다) 이전과 같이 AgentExecutionHTTPError로 올라간다.
+        """
         result = self.answer_question_fn(
             request.question,
             corpus_root=self.corpus_root,
@@ -188,7 +205,7 @@ class AgentAskService:
         )
 
         if result.execution_status is ExecutionStatus.COMPLETED:
-            return self._completed_response(request.question, result)
+            return self._completed_response(request.question, result), result
 
         issue = result.execution_issue
         if issue is None:

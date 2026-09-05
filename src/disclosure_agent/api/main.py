@@ -6,10 +6,12 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from disclosure_agent.api.organizer import router as organizer_router
 from disclosure_agent.api.routes import router
 
 app = FastAPI(title="Disclosure Agent", version="0.1.0")
 app.include_router(router)
+app.include_router(organizer_router)
 
 UI_DIR = Path(__file__).parent / "ui"
 app.mount("/static", StaticFiles(directory=UI_DIR), name="static")

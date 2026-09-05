@@ -152,10 +152,13 @@ Live mode executes the active regression cases through the public Agent entry po
 and evaluates the returned `AgentExecutionResult` objects with the same deterministic
 comparator:
 
-The current active regression set contains exactly sixteen representative questions:
-`Q01`, `Q02`, `Q03`, `Q04`, `Q05`, `Q06`, `Q07`, `Q08`, `Q10`, `Q11`, `Q12`, `Q13`, `Q15`,
-`Q16`, `Q17`, and `Q18`. Therefore, a reported live-Agent result of `16/16` applies only
-to those sixteen active cases; it is not a result for all 18 representative questions.
+The current active regression set contains exactly seventeen representative questions:
+`Q01`, `Q02`, `Q03`, `Q04`, `Q05`, `Q06`, `Q07`, `Q08`, `Q10`, `Q11`, `Q12`, `Q13`, `Q14`,
+`Q15`, `Q16`, `Q17`, and `Q18`. Only `Q09` remains `lifecycle="future"`. Therefore, a
+reported live-Agent result of `17/17` applies only to those seventeen active cases; it
+is not a result for all 18 representative questions. This list is derived from
+`evaluation/questions.jsonl` (`lifecycle` per case) and must be re-checked against that
+file — not assumed — whenever a case's lifecycle changes.
 
 ```text
 uv run python -m evaluation.runner --run-agent --corpus-root path/to/corpus

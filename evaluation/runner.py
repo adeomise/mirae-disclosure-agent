@@ -222,13 +222,47 @@ class ExpectedDocumentSummary(BaseModel):
     fiscal_year: int | None = None
 
 
+class ExecutionIssueExpectation(BaseModel):
+    """Stable execution-boundary fields for one blocked or failed result."""
+
+    stage: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class AcceptableOutcome(BaseModel):
+    """One exact execution/answerability boundary accepted by a Gold case."""
+
+    execution_status: ExecutionStatus
+    status: AnswerabilityStatus | None
+    reason: AnswerabilityReason | None = None
+    execution_issue: ExecutionIssueExpectation | None = None
+
+    @model_validator(mode="after")
+    def validate_answerability(self) -> AcceptableOutcome:
+        if self.status in {
+            AnswerabilityStatus.ANSWERABLE,
+            AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        }:
+            raise ValueError("acceptable outcomes are limited to fail-closed results")
+        if self.status is None and self.reason is not None:
+            raise ValueError("null status must not define an answerability reason")
+        if self.status is not None and self.reason is None:
+            raise ValueError("non-answerable outcomes must define a reason")
+        return self
+
+
 class GoldAnswer(BaseModel):
     """Deterministic expectations independent of Pattern-internal result shapes."""
 
     case_id: str = Field(min_length=1)
     execution_status: ExecutionStatus | None = None
-    status: AnswerabilityStatus
+    status: AnswerabilityStatus | None = None
     reason: AnswerabilityReason | None = None
+    execution_issue: ExecutionIssueExpectation | None = None
+    acceptable_outcomes: list[AcceptableOutcome] | None = Field(
+        default=None,
+        min_length=2,
+    )
     fact: ExpectedFact | None = None
     facts: list[ExpectedFact] | None = None
     calculations: list[ExpectedCalculation] | None = None
@@ -251,9 +285,24 @@ class GoldAnswer(BaseModel):
             AnswerabilityStatus.ANSWERABLE,
             AnswerabilityStatus.PARTIALLY_ANSWERABLE,
         }
+        if self.acceptable_outcomes is not None:
+            boundary_fields = {
+                "execution_status",
+                "status",
+                "reason",
+                "execution_issue",
+            }
+            duplicated = boundary_fields & self.model_fields_set
+            if duplicated:
+                raise ValueError(
+                    "acceptable_outcomes cannot be combined with top-level boundary "
+                    f"fields: {sorted(duplicated)}"
+                )
         if self.status is AnswerabilityStatus.ANSWERABLE and self.reason is not None:
             raise ValueError("ANSWERABLE cases must not define a failure reason")
-        if self.status not in answerable and self.reason is None:
+        if self.status is None and self.reason is not None:
+            raise ValueError("null status must not define an answerability reason")
+        if self.status is not None and self.status not in answerable and self.reason is None:
             raise ValueError("non-answerable cases must define a reason")
         if self.status is AnswerabilityStatus.UNANSWERABLE and (
             self.fact is not None or self.facts
@@ -904,8 +953,62 @@ def _calculation_value_failures(result: PredictionCase) -> list[str]:
     return failures
 
 
-def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str]:
-    """Return stable, human-readable field failures for one prediction."""
+def _value(value: ExecutionStatus | AnswerabilityStatus | AnswerabilityReason | None):
+    return value.value if value is not None else None
+
+
+def _outcome_failures(
+    outcome: AcceptableOutcome,
+    prediction: PredictionCase,
+) -> list[str]:
+    """Compare every field in one complete top-level outcome."""
+    failures: list[str] = []
+    if prediction.execution_status is not outcome.execution_status:
+        failures.append(
+            "execution_status: "
+            f"expected {outcome.execution_status.value}, "
+            f"got {prediction.execution_status.value}"
+        )
+    if prediction.answerability_status is not outcome.status:
+        failures.append(
+            "answerability_status: "
+            f"expected {_value(outcome.status)}, "
+            f"got {_value(prediction.answerability_status)}"
+        )
+    if prediction.answerability_reason is not outcome.reason:
+        failures.append(
+            "answerability_reason: "
+            f"expected {_value(outcome.reason)}, "
+            f"got {_value(prediction.answerability_reason)}"
+        )
+
+    expected_issue = outcome.execution_issue
+    actual_issue = prediction.execution_issue
+    if expected_issue is None:
+        if actual_issue is not None:
+            failures.append("execution_issue: expected None, got an issue")
+        return failures
+    if actual_issue is None:
+        failures.append("execution_issue: expected an issue, got None")
+        return failures
+    if actual_issue.stage != expected_issue.stage:
+        failures.append(
+            "execution_issue.stage: "
+            f"expected {expected_issue.stage}, got {actual_issue.stage}"
+        )
+    if actual_issue.reason != expected_issue.reason:
+        failures.append(
+            "execution_issue.reason: "
+            f"expected {expected_issue.reason}, got {actual_issue.reason}"
+        )
+    return failures
+
+
+def _single_outcome_failures(
+    gold: GoldAnswer,
+    prediction: PredictionCase,
+) -> list[str]:
+    """Preserve the pre-extension comparison semantics for a single Gold outcome."""
     failures: list[str] = []
     if (
         gold.execution_status is not None
@@ -916,22 +1019,54 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
             f"expected {gold.execution_status.value}, got {prediction.execution_status.value}"
         )
     if prediction.answerability_status is not gold.status:
-        actual = (
-            prediction.answerability_status.value
-            if prediction.answerability_status is not None
-            else None
-        )
         failures.append(
-            f"answerability_status: expected {gold.status.value}, got {actual}"
+            "answerability_status: "
+            f"expected {_value(gold.status)}, "
+            f"got {_value(prediction.answerability_status)}"
         )
     if prediction.answerability_reason is not gold.reason:
-        actual = (
-            prediction.answerability_reason.value
-            if prediction.answerability_reason is not None
-            else None
+        failures.append(
+            "answerability_reason: "
+            f"expected {_value(gold.reason)}, "
+            f"got {_value(prediction.answerability_reason)}"
         )
-        expected = gold.reason.value if gold.reason is not None else None
-        failures.append(f"answerability_reason: expected {expected}, got {actual}")
+    if gold.execution_issue is not None:
+        actual_issue = prediction.execution_issue
+        if actual_issue is None:
+            failures.append("execution_issue: expected an issue, got None")
+        else:
+            if actual_issue.stage != gold.execution_issue.stage:
+                failures.append(
+                    "execution_issue.stage: "
+                    f"expected {gold.execution_issue.stage}, got {actual_issue.stage}"
+                )
+            if actual_issue.reason != gold.execution_issue.reason:
+                failures.append(
+                    "execution_issue.reason: "
+                    f"expected {gold.execution_issue.reason}, got {actual_issue.reason}"
+                )
+    return failures
+
+
+def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str]:
+    """Return stable, human-readable field failures for one prediction."""
+    if gold.acceptable_outcomes is None:
+        failures = _single_outcome_failures(gold, prediction)
+    else:
+        outcome_failures = [
+            _outcome_failures(outcome, prediction)
+            for outcome in gold.acceptable_outcomes
+        ]
+        failures = []
+        if all(outcome_failures):
+            details = "; ".join(
+                f"outcome[{index}]: {', '.join(items)}"
+                for index, items in enumerate(outcome_failures)
+            )
+            failures.append(
+                "acceptable_outcomes: prediction did not match any outcome; " + details
+            )
+
     if gold.answerability_detail_reason is not None:
         actual = (
             prediction.answerability_detail.reason

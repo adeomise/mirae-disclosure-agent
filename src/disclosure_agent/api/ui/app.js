@@ -755,7 +755,8 @@ const renderResponse = (response) => {
 
   fields.status.textContent = statusMeta.label;
   fields.answer.textContent =
-    response.answer || "답변 문장이 제공되지 않았습니다.";
+    cleanAnswerText(response.answer) ||
+    "답변 문장이 제공되지 않았습니다.";
 
   resultCard.dataset.status = status;
 
@@ -938,3 +939,8 @@ const EXECUTION_REASON_LABELS = {
       "지원되는 공시 유형으로 다시 질문해 주세요.",
   },
 };
+
+const cleanAnswerText = (answer = "") =>
+  String(answer)
+    .replace(/\s*\(정규화\s*[\d,]+원\)/g, "")
+    .trim();

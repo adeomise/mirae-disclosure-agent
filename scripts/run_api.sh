@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -eu
 
-echo "FastAPI application is not implemented yet."
+uv run uvicorn disclosure_agent.api.main:app --host 0.0.0.0 --port 8000

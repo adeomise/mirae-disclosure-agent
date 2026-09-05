@@ -9,9 +9,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
-from disclosure_agent.agent.answer_builder import build_answer_response
+from disclosure_agent.agent.answer_builder import (
+    OPERATION_DELTA,
+    OPERATION_DELTA_PCT,
+    OPERATION_DIFF_PP,
+    UNIT_PERCENTAGE_POINT,
+    build_answer_response,
+)
 from disclosure_agent.agent.derived_metrics import OPERATION_RATIO, UNIT_PERCENT
 from disclosure_agent.agent.grounded_payload import (
     PayloadNotGroundableError,
@@ -378,6 +386,366 @@ def test_answerable_result_has_no_limitation() -> None:
 
 
 # --------------------------------------------------------------------------
+# 기간 변화 — Q07 증감, Q08 파생지표 변화
+#
+# 두 모양은 우열 판정 없이 Fact를 여러 건 싣는다. 그 조합은 원래 payload가 막던 자리이고,
+# 여기서 고정하는 것은 "결정론 경로가 답하는 이 두 모양만 열렸다"이다.
+#
+# 수치를 결정론 문장과 대조한다. 같은 계산이 두 경로에서 다른 자릿수로 불리면 HCX 답변의 수치
+# 검증이 쓰는 화이트리스트가 결정론 문장과 어긋나고, 그 어긋남은 문장만 보면 보이지 않는다.
+# --------------------------------------------------------------------------
+
+
+def revenue_fact(fact_id: str, *, fiscal_year: int, raw: str, normalized: int) -> Fact:
+    return fact(
+        fact_id,
+        fiscal_year=fiscal_year,
+        raw_value=raw,
+        normalized_value=normalized,
+        evidence_ids=[f"ev_rev_{fiscal_year}"],
+    )
+
+
+def operating_income_fact(fact_id: str, *, fiscal_year: int, raw: str, normalized: int) -> Fact:
+    return fact(
+        fact_id,
+        metric=MetricConcept.OPERATING_INCOME,
+        fiscal_year=fiscal_year,
+        raw_value=raw,
+        normalized_value=normalized,
+        evidence_ids=[f"ev_oi_{fiscal_year}"],
+    )
+
+
+def fact_inputs(*fact_ids: str) -> list[ResultInputReference]:
+    return [
+        ResultInputReference(input_type=ResultInputType.FACT, input_id=fact_id)
+        for fact_id in fact_ids
+    ]
+
+
+def calculation_inputs(*calculation_ids: str) -> list[ResultInputReference]:
+    return [
+        ResultInputReference(input_type=ResultInputType.CALCULATION, input_id=calculation_id)
+        for calculation_id in calculation_ids
+    ]
+
+
+def temporal_delta_result(
+    *,
+    delta_value: str = "17767427980.0000",
+    delta_pct_value: str = "3.1789",
+    rate_inputs: list[ResultInputReference] | None = None,
+) -> AgentExecutionResult:
+    """Q07 모양. 원천 Fact 2건과 그 둘에서 나온 증감액·증감률.
+
+    참조 순서는 calculator.delta의 계약대로 previous, current다. 두 Calculation이 같은 순서로
+    같은 Fact를 가리켜야 결정론 경로가 이 모양을 알아본다(_is_temporal_delta_shape).
+    """
+    previous = revenue_fact(
+        "fact_rev_2024", fiscal_year=2024, raw="558,917,191,547", normalized=558917191547
+    )
+
+    current = revenue_fact(
+        "fact_rev_2025", fiscal_year=2025, raw="576,684,619,527", normalized=576684619527
+    )
+
+    ordered = fact_inputs("fact_rev_2024", "fact_rev_2025")
+
+    amount = CalculationResult(
+        calculation_id="calc_revenue_delta",
+        operation=OPERATION_DELTA,
+        inputs=ordered,
+        value=delta_value,
+        # 증감액의 단위는 정책이 아니라 두 Fact가 함께 쓰는 정규화 단위다
+        # (calculator._shared_normalized_unit).
+        unit="KRW",
+        evidence_ids=["ev_rev_2024", "ev_rev_2025"],
+    )
+
+    rate = CalculationResult(
+        calculation_id="calc_revenue_delta_pct",
+        operation=OPERATION_DELTA_PCT,
+        inputs=fact_inputs("fact_rev_2024", "fact_rev_2025")
+        if rate_inputs is None
+        else rate_inputs,
+        value=delta_pct_value,
+        unit=UNIT_PERCENT,
+        evidence_ids=["ev_rev_2024", "ev_rev_2025"],
+    )
+
+    return completed(
+        facts=[previous, current],
+        calculations=[amount, rate],
+        evidence=[
+            evidence("ev_rev_2024", "doc_2024"),
+            evidence("ev_rev_2025", "doc_2025"),
+        ],
+    )
+
+
+def temporal_derived_delta_result(
+    *,
+    margin_2024_value: str = "45.6940",
+    margin_2025_value: str = "43.5923",
+    change_value: str = "-2.1017",
+) -> AgentExecutionResult:
+    """Q08 모양. 원천 Fact 4건, 기간별 비율 2건, 두 비율의 차이 1건.
+
+    비율의 참조 순서는 파생지표 대응표의 (분자, 분모)와 같아야 하고, 차이의 참조 순서는
+    calculator.diff의 계약대로 old, new다.
+    """
+    facts = [
+        operating_income_fact(
+            "fact_oi_2024", fiscal_year=2024, raw="255,391,604,854", normalized=255391604854
+        ),
+        revenue_fact(
+            "fact_rev_2024", fiscal_year=2024, raw="558,917,191,547", normalized=558917191547
+        ),
+        operating_income_fact(
+            "fact_oi_2025", fiscal_year=2025, raw="251,390,142,142", normalized=251390142142
+        ),
+        revenue_fact(
+            "fact_rev_2025", fiscal_year=2025, raw="576,684,619,527", normalized=576684619527
+        ),
+    ]
+
+    margin_2024 = CalculationResult(
+        calculation_id="calc_margin_2024",
+        operation=OPERATION_RATIO,
+        inputs=fact_inputs("fact_oi_2024", "fact_rev_2024"),
+        value=margin_2024_value,
+        unit=UNIT_PERCENT,
+        evidence_ids=["ev_oi_2024", "ev_rev_2024"],
+    )
+
+    margin_2025 = CalculationResult(
+        calculation_id="calc_margin_2025",
+        operation=OPERATION_RATIO,
+        inputs=fact_inputs("fact_oi_2025", "fact_rev_2025"),
+        value=margin_2025_value,
+        unit=UNIT_PERCENT,
+        evidence_ids=["ev_oi_2025", "ev_rev_2025"],
+    )
+
+    change = CalculationResult(
+        calculation_id="calc_margin_diff",
+        operation=OPERATION_DIFF_PP,
+        inputs=calculation_inputs("calc_margin_2024", "calc_margin_2025"),
+        value=change_value,
+        unit=UNIT_PERCENTAGE_POINT,
+        evidence_ids=["ev_oi_2024", "ev_rev_2024", "ev_oi_2025", "ev_rev_2025"],
+    )
+
+    return completed(
+        facts=facts,
+        calculations=[margin_2024, margin_2025, change],
+        evidence=[
+            evidence("ev_oi_2024", "doc_2024"),
+            evidence("ev_rev_2024", "doc_2024"),
+            evidence("ev_oi_2025", "doc_2025"),
+            evidence("ev_rev_2025", "doc_2025"),
+        ],
+    )
+
+
+def test_temporal_delta_carries_every_fact_calculation_and_evidence() -> None:
+    """Q07의 근거가 하나도 빠지지 않고 실린다. 빠지면 그 값이 답변 어디에도 남지 않는다."""
+    payload = grounded(temporal_delta_result())
+
+    assert [item.fact_id for item in payload.facts] == [  # type: ignore[attr-defined]
+        "fact_rev_2024",
+        "fact_rev_2025",
+    ]
+
+    assert [
+        item.calculation_id
+        for item in payload.calculations  # type: ignore[attr-defined]
+    ] == ["calc_revenue_delta", "calc_revenue_delta_pct"]
+
+    assert [item.evidence_id for item in payload.evidence] == [  # type: ignore[attr-defined]
+        "ev_rev_2024",
+        "ev_rev_2025",
+    ]
+
+    # 우열 판정도 이력도 만들지 않는다. 없는 판정을 payload가 지어내지 않는다.
+    assert payload.comparisons == ()  # type: ignore[attr-defined]
+    assert payload.event_histories == ()  # type: ignore[attr-defined]
+    assert payload.limitation is None  # type: ignore[attr-defined]
+
+
+def test_temporal_delta_names_and_values_come_from_the_deterministic_tables() -> None:
+    """증감액과 증감률의 이름·값·단위를 payload가 새로 만들지 않는다."""
+    result = temporal_delta_result()
+
+    payload = grounded(result)
+
+    amount, rate = payload.calculations  # type: ignore[attr-defined]
+
+    assert (amount.metric_label, rate.metric_label) == ("증감액", "증감률")
+
+    # 증감액은 원천 Fact의 정규화 단위를, 증감률은 계산 계층의 결과 단위를 쓴다. 두 어휘를
+    # 한 표기로 뭉개면 "3.1789원"이나 "17767427980.0000%"가 나온다.
+    assert amount.display_value == "17,767,427,980원"
+    assert rate.display_value == "3.1789%"
+
+    sentence = build_answer_response(result).answer
+
+    assert amount.display_value in sentence
+    assert rate.display_value in sentence
+
+
+def test_temporal_delta_preserves_input_order_and_leaves_the_year_empty() -> None:
+    """
+    참조 순서는 이전, 이후다. 뒤집히면 부호가 뒤집힌 증감이 되고 뒤집힌 값도 그럴듯하다.
+
+    회계연도를 싣지 않는 이유는 증감이 두 해 사이의 값이기 때문이다. 한쪽 해를 골라 적으면
+    그 값이 그 해의 값으로 읽힌다. 두 해는 원천 Fact가 갖고 있고 input_ids가 그것을 가리킨다.
+    """
+    payload = grounded(temporal_delta_result())
+
+    ordered = ("fact_rev_2024", "fact_rev_2025")
+
+    for calculation in payload.calculations:  # type: ignore[attr-defined]
+        assert calculation.input_ids == ordered
+        assert calculation.fiscal_year is None
+        assert calculation.company == "한미반도체"
+        assert calculation.scope_label == "연결"
+
+    assert [item.fiscal_year for item in payload.facts] == [2024, 2025]  # type: ignore[attr-defined]
+
+    body = payload.as_dict()  # type: ignore[attr-defined]
+
+    assert all("fiscal_year" not in item for item in body["calculations"])
+
+
+def test_temporal_delta_values_are_carried_not_recomputed() -> None:
+    """계산 계층이 확정한 값을 그대로 옮긴다. 여기서 빼거나 나누지 않는다."""
+    # 두 Fact의 차이(17,767,427,980)와 다른 값을 일부러 싣는다. payload가 검산해 고쳐 쓰면
+    # 이 값이 살아남지 않는다.
+    result = temporal_delta_result(delta_value="999.0000", delta_pct_value="0.0001")
+
+    payload = grounded(result)
+
+    amount, rate = payload.calculations  # type: ignore[attr-defined]
+
+    assert amount.display_value == "999원"
+    assert rate.display_value == "0.0001%"
+
+
+def test_temporal_derived_delta_carries_every_fact_calculation_and_evidence() -> None:
+    """Q08은 원천 Fact 4건과 계산 3건을 함께 싣는다. 비율만 보내면 근거가 끊긴다."""
+    payload = grounded(temporal_derived_delta_result())
+
+    assert [item.fact_id for item in payload.facts] == [  # type: ignore[attr-defined]
+        "fact_oi_2024",
+        "fact_rev_2024",
+        "fact_oi_2025",
+        "fact_rev_2025",
+    ]
+
+    assert [
+        item.calculation_id
+        for item in payload.calculations  # type: ignore[attr-defined]
+    ] == ["calc_margin_2024", "calc_margin_2025", "calc_margin_diff"]
+
+    assert [item.evidence_id for item in payload.evidence] == [  # type: ignore[attr-defined]
+        "ev_oi_2024",
+        "ev_rev_2024",
+        "ev_oi_2025",
+        "ev_rev_2025",
+    ]
+
+    assert payload.comparisons == ()  # type: ignore[attr-defined]
+    assert payload.event_histories == ()  # type: ignore[attr-defined]
+
+
+def test_temporal_derived_delta_names_and_values_come_from_the_deterministic_tables() -> None:
+    """비율은 파생지표 대응표가, 차이는 기간 변화 대응표가 이름을 정한다."""
+    result = temporal_derived_delta_result()
+
+    payload = grounded(result)
+
+    previous, current, change = payload.calculations  # type: ignore[attr-defined]
+
+    assert (previous.metric_label, current.metric_label) == ("영업이익률", "영업이익률")
+    assert change.metric_label == "차이"
+
+    # 백분율과 percentage point는 축이 다르다. 차이에 %를 붙이면 비율 자체가 2.1017% 달라졌다는
+    # 뜻이 되고, 그 문장은 형식이 정상이라 축이 바뀐 사실이 어디에도 남지 않는다.
+    assert (previous.display_value, current.display_value) == ("45.6940%", "43.5923%")
+    assert change.display_value == "-2.1017%p"
+
+    sentence = build_answer_response(result).answer
+
+    for calculation in payload.calculations:  # type: ignore[attr-defined]
+        assert calculation.display_value in sentence
+
+
+def test_temporal_derived_delta_preserves_the_reference_chain() -> None:
+    """
+    차이는 원천 Fact가 아니라 두 비율을 가리킨다. 그 배선이 무엇의 변화인지를 정한다.
+
+    비율은 각자 한 해의 값이므로 회계연도를 싣고, 차이는 두 해 사이의 값이므로 비운다.
+    """
+    payload = grounded(temporal_derived_delta_result())
+
+    previous, current, change = payload.calculations  # type: ignore[attr-defined]
+
+    assert previous.input_ids == ("fact_oi_2024", "fact_rev_2024")
+    assert current.input_ids == ("fact_oi_2025", "fact_rev_2025")
+    assert change.input_ids == ("calc_margin_2024", "calc_margin_2025")
+
+    assert (previous.fiscal_year, current.fiscal_year) == (2024, 2025)
+    assert change.fiscal_year is None
+
+    for calculation in payload.calculations:  # type: ignore[attr-defined]
+        assert calculation.company == "한미반도체"
+        assert calculation.scope_label == "연결"
+
+
+def test_temporal_derived_delta_values_are_carried_not_recomputed() -> None:
+    """비율도 차이도 계산 계층이 확정한 값이다. payload는 나누지도 빼지도 않는다."""
+    # 어느 값도 입력에서 다시 만들어지지 않는다. 비율은 영업이익/매출이 아니고, 차이는 두
+    # 비율의 뺄셈이 아니다. 검산해 고쳐 쓰는 경로가 있으면 이 값들이 살아남지 않는다.
+    result = temporal_derived_delta_result(
+        margin_2024_value="11.1111",
+        margin_2025_value="22.2222",
+        change_value="99.9999",
+    )
+
+    payload = grounded(result)
+
+    previous, current, change = payload.calculations  # type: ignore[attr-defined]
+
+    assert (previous.display_value, current.display_value) == ("11.1111%", "22.2222%")
+    assert change.display_value == "99.9999%p"
+
+
+@pytest.mark.parametrize(
+    "build",
+    [temporal_delta_result, temporal_derived_delta_result],
+    ids=["q07", "q08"],
+)
+def test_temporal_shapes_do_not_mutate_the_execution_result(
+    build: Callable[[], AgentExecutionResult],
+) -> None:
+    """
+    payload를 만들어도 결정론 결과는 그대로다.
+
+    같은 결과가 결정론 문장과 payload 양쪽에 쓰이므로, 여기서 한 글자라도 고치면 연동을 켰다는
+    이유만으로 구조화 응답이 달라진다. 그 차이는 응답만 보면 어느 쪽이 원본인지 알 수 없다.
+    """
+    result = build()
+
+    before = result.model_dump(mode="json")
+
+    grounded(result)
+
+    assert result.model_dump(mode="json") == before
+
+
+# --------------------------------------------------------------------------
 # 지원하지 않는 모양 — fail closed
 # --------------------------------------------------------------------------
 
@@ -448,6 +816,59 @@ def test_multiple_facts_without_a_comparison_are_not_grounded() -> None:
     )
 
     with pytest.raises(PayloadNotGroundableError, match="우열 판정 없이"):
+        grounded(result)
+
+
+def test_delta_with_mismatched_input_order_is_not_grounded() -> None:
+    """
+    증감액과 증감률이 같은 Fact를 반대 순서로 가리키면 두 수치의 부호가 서로 어긋난다.
+
+    결정론 경로가 그 모양을 알아보지 못하고 멈추므로(_is_temporal_delta_shape), payload도
+    멈춘다. 개수만 맞는 결과가 연동 쪽에서만 답해지지 않는다.
+    """
+    reversed_rate = temporal_delta_result(
+        rate_inputs=fact_inputs("fact_rev_2025", "fact_rev_2024")
+    )
+
+    with pytest.raises(PayloadNotGroundableError, match="우열 판정 없이"):
+        grounded(reversed_rate)
+
+
+def test_three_calculations_outside_the_derived_delta_shape_are_not_grounded() -> None:
+    """계산 3건을 실은 임의의 결과가 Q08 경로로 열리지 않는다."""
+    result = temporal_derived_delta_result()
+
+    # 연산 이름의 순서를 어긋내면 _is_temporal_derived_delta_shape이 알아보지 못한다.
+    result.calculations[0].operation = OPERATION_DIFF_PP
+
+    with pytest.raises(PayloadNotGroundableError, match="우열 판정 없이"):
+        grounded(result)
+
+
+def test_change_calculation_outside_the_derived_delta_shape_is_not_grounded() -> None:
+    """
+    Calculation을 입력으로 갖는 값은 그 모양이 확인된 자리에서만 열린다.
+
+    Q08 모양을 벗어나면 개념 이름을 정할 대응표가 없다. 여기서 이름을 붙이면 파생 개념 어휘가
+    결정론 대응표 밖에 한 벌 더 생긴다.
+    """
+    result = temporal_derived_delta_result()
+
+    # 우열 판정을 붙여 Q08 인식 경로를 지나가게 한다. 그러면 차이는 일반 경로로 내려간다.
+    result.comparisons.append(
+        ComparisonResult(
+            comparison_id="cmp_margin",
+            left=ResultInputReference(
+                input_type=ResultInputType.CALCULATION, input_id="calc_margin_2024"
+            ),
+            right=ResultInputReference(
+                input_type=ResultInputType.CALCULATION, input_id="calc_margin_2025"
+            ),
+            relation=ComparisonRelation.LEFT_GREATER,
+        )
+    )
+
+    with pytest.raises(PayloadNotGroundableError, match="calc_margin_diff"):
         grounded(result)
 
 

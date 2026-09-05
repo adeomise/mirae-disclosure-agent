@@ -136,13 +136,14 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q07",
         "q08",
         "q10",
+        "q11",
         "q12",
         "q13",
         "q15",
         "q17",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 5
+    assert sum(question.lifecycle == "future" for question in representative) == 4
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -618,6 +619,125 @@ def test_active_q12_gold_pins_actual_aggregate_comparison_structure() -> None:
     assert q12.integrity.calculation_evidence_references is True
     assert q12.integrity.result_input_references is True
     assert q12.integrity.calculation_values_from_inputs is True
+
+
+def test_active_q11_gold_pins_actual_operating_margin_comparison() -> None:
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    q11 = {gold.case_id: gold for gold in loaded.gold_answers}["q11"]
+
+    assert questions["q11"].lifecycle == "active"
+    assert q11.counts.model_dump(exclude_none=True) == {
+        "facts": 4,
+        "evidence": 4,
+        "calculations": 2,
+        "comparisons": 1,
+    }
+    assert [
+        fact.model_dump(exclude_none=True, mode="json")
+        for fact in q11.expected_facts()
+    ] == [
+        {
+            "company": "에이치디현대중공업(주)",
+            "metric": "revenue",
+            "fiscal_year": 2025,
+            "accounting_scope": "consolidated",
+            "normalized_value": "17580633257000",
+            "normalized_unit": "원",
+        },
+        {
+            "company": "에이치디현대중공업(주)",
+            "metric": "operating_income",
+            "fiscal_year": 2025,
+            "accounting_scope": "consolidated",
+            "normalized_value": "2037510103000",
+            "normalized_unit": "원",
+        },
+        {
+            "company": "삼성중공업(주)",
+            "metric": "revenue",
+            "fiscal_year": 2025,
+            "accounting_scope": "consolidated",
+            "normalized_value": "10650010702818",
+            "normalized_unit": "원",
+        },
+        {
+            "company": "삼성중공업(주)",
+            "metric": "operating_income",
+            "fiscal_year": 2025,
+            "accounting_scope": "consolidated",
+            "normalized_value": "862210880029",
+            "normalized_unit": "원",
+        },
+    ]
+    assert [
+        calculation.model_dump(exclude_none=True, mode="json")
+        for calculation in q11.calculations
+    ] == [
+        {
+            "calculation_id": "calculation_operating_margin_2025_HD현대중공업",
+            "operation": "ratio",
+            "unit": "percent",
+            "value": "11.5895",
+            "inputs": [
+                {
+                    "input_type": "fact",
+                    "input_id": (
+                        "fact_periodic_20260320000859_operating_income_table_0127_r5_c1"
+                    ),
+                },
+                {
+                    "input_type": "fact",
+                    "input_id": "fact_periodic_20260320000859_revenue_table_0127_r1_c1",
+                },
+            ],
+            "evidence_ids": [
+                "evidence_periodic_20260320000859_table_0127_r5_c1",
+                "evidence_periodic_20260320000859_table_0127_r1_c1",
+            ],
+        },
+        {
+            "calculation_id": "calculation_operating_margin_2025_삼성중공업",
+            "operation": "ratio",
+            "unit": "percent",
+            "value": "8.0959",
+            "inputs": [
+                {
+                    "input_type": "fact",
+                    "input_id": (
+                        "fact_periodic_20260312001037_operating_income_table_0102_r5_c1"
+                    ),
+                },
+                {
+                    "input_type": "fact",
+                    "input_id": "fact_periodic_20260312001037_revenue_table_0102_r1_c1",
+                },
+            ],
+            "evidence_ids": [
+                "evidence_periodic_20260312001037_table_0102_r5_c1",
+                "evidence_periodic_20260312001037_table_0102_r1_c1",
+            ],
+        },
+    ]
+    assert [
+        comparison.model_dump(mode="json") for comparison in q11.comparisons
+    ] == [
+        {
+            "left": {
+                "input_type": "calculation",
+                "input_id": "calculation_operating_margin_2025_HD현대중공업",
+            },
+            "right": {
+                "input_type": "calculation",
+                "input_id": "calculation_operating_margin_2025_삼성중공업",
+            },
+            "relation": "left_greater",
+        }
+    ]
+    assert q11.integrity.fact_evidence_references is True
+    assert q11.integrity.calculation_evidence_references is True
+    assert q11.integrity.result_input_references is True
+    assert q11.integrity.calculation_values_from_inputs is True
 
 
 def test_active_q03_gold_pins_actual_holding_facts_and_evidence() -> None:
@@ -2225,6 +2345,185 @@ def test_q08_rejects_wrong_source_fact_with_internally_consistent_calculations()
     failures = compare_prediction(q08, PredictionCase.model_validate(actual))
 
     assert failures == ["facts: expected fields did not match distinct predicted Facts"]
+
+
+def q11_prediction(**overrides) -> PredictionCase:
+    facts = [
+        {
+            "fact_id": "fact_periodic_20260320000859_revenue_table_0127_r1_c1",
+            "company": "에이치디현대중공업(주)",
+            "metric": "revenue",
+            "fiscal_year": 2025,
+            "accounting_scope": "consolidated",
+            "normalized_value": "17580633257000",
+            "normalized_unit": "원",
+            "evidence_ids": ["evidence_periodic_20260320000859_table_0127_r1_c1"],
+        },
+        {
+            "fact_id": "fact_periodic_20260320000859_operating_income_table_0127_r5_c1",
+            "company": "에이치디현대중공업(주)",
+            "metric": "operating_income",
+            "fiscal_year": 2025,
+            "accounting_scope": "consolidated",
+            "normalized_value": "2037510103000",
+            "normalized_unit": "원",
+            "evidence_ids": ["evidence_periodic_20260320000859_table_0127_r5_c1"],
+        },
+        {
+            "fact_id": "fact_periodic_20260312001037_revenue_table_0102_r1_c1",
+            "company": "삼성중공업(주)",
+            "metric": "revenue",
+            "fiscal_year": 2025,
+            "accounting_scope": "consolidated",
+            "normalized_value": "10650010702818",
+            "normalized_unit": "원",
+            "evidence_ids": ["evidence_periodic_20260312001037_table_0102_r1_c1"],
+        },
+        {
+            "fact_id": "fact_periodic_20260312001037_operating_income_table_0102_r5_c1",
+            "company": "삼성중공업(주)",
+            "metric": "operating_income",
+            "fiscal_year": 2025,
+            "accounting_scope": "consolidated",
+            "normalized_value": "862210880029",
+            "normalized_unit": "원",
+            "evidence_ids": ["evidence_periodic_20260312001037_table_0102_r5_c1"],
+        },
+    ]
+    evidence = [
+        {
+            "evidence_id": "evidence_periodic_20260320000859_table_0127_r1_c1",
+            "doc_id": "periodic_20260320000859",
+            "location_type": "table",
+        },
+        {
+            "evidence_id": "evidence_periodic_20260320000859_table_0127_r5_c1",
+            "doc_id": "periodic_20260320000859",
+            "location_type": "table",
+        },
+        {
+            "evidence_id": "evidence_periodic_20260312001037_table_0102_r1_c1",
+            "doc_id": "periodic_20260312001037",
+            "location_type": "table",
+        },
+        {
+            "evidence_id": "evidence_periodic_20260312001037_table_0102_r5_c1",
+            "doc_id": "periodic_20260312001037",
+            "location_type": "table",
+        },
+    ]
+    calculations = [
+        {
+            "calculation_id": "calculation_operating_margin_2025_HD현대중공업",
+            "operation": "ratio",
+            "inputs": [
+                {
+                    "input_type": "fact",
+                    "input_id": (
+                        "fact_periodic_20260320000859_operating_income_table_0127_r5_c1"
+                    ),
+                },
+                {
+                    "input_type": "fact",
+                    "input_id": "fact_periodic_20260320000859_revenue_table_0127_r1_c1",
+                },
+            ],
+            "value": "11.5895",
+            "unit": "percent",
+            "evidence_ids": [
+                "evidence_periodic_20260320000859_table_0127_r5_c1",
+                "evidence_periodic_20260320000859_table_0127_r1_c1",
+            ],
+        },
+        {
+            "calculation_id": "calculation_operating_margin_2025_삼성중공업",
+            "operation": "ratio",
+            "inputs": [
+                {
+                    "input_type": "fact",
+                    "input_id": (
+                        "fact_periodic_20260312001037_operating_income_table_0102_r5_c1"
+                    ),
+                },
+                {
+                    "input_type": "fact",
+                    "input_id": "fact_periodic_20260312001037_revenue_table_0102_r1_c1",
+                },
+            ],
+            "value": "8.0959",
+            "unit": "percent",
+            "evidence_ids": [
+                "evidence_periodic_20260312001037_table_0102_r5_c1",
+                "evidence_periodic_20260312001037_table_0102_r1_c1",
+            ],
+        },
+    ]
+    comparisons = [
+        {
+            "comparison_id": "comparison_operating_margin_2025_HD현대중공업_vs_삼성중공업",
+            "left": {
+                "input_type": "calculation",
+                "input_id": "calculation_operating_margin_2025_HD현대중공업",
+            },
+            "right": {
+                "input_type": "calculation",
+                "input_id": "calculation_operating_margin_2025_삼성중공업",
+            },
+            "relation": "left_greater",
+        }
+    ]
+    values = {
+        "facts": facts,
+        "evidence": evidence,
+        "calculations": calculations,
+        "comparisons": comparisons,
+    }
+    values.update(overrides)
+    return prediction("q11", **values)
+
+
+def test_q11_actual_shaped_prediction_passes_the_comparator() -> None:
+    q11 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q11"]
+
+    assert compare_prediction(q11, q11_prediction()) == []
+
+
+def test_q11_rejects_wrong_source_fact_with_internally_consistent_calculation() -> None:
+    """
+    영업이익 1원 오차의 회귀 방지.
+
+    분모(매출)가 조 단위이므로 원 단위 오차는 %p 4자리 반올림 안에 흡수되어
+    Calculation 값(8.0959)이 그대로 재현된다. calculation_values_from_inputs는
+    "자기 자신이 참조한 Fact"로부터 재계산하므로 이 mutation을 잡지 못하고,
+    실제로 값을 다시 확보했는지는 Fact 자체의 identity/value 고정만이 잡는다.
+    """
+    q11 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q11"]
+    actual = q11_prediction().model_dump(mode="python")
+    for fact in actual["facts"]:
+        if fact["company"] == "삼성중공업(주)" and fact["metric"] == "operating_income":
+            # Deliberately wrong by one won while preserving every reference.
+            fact["normalized_value"] = "862210880030"
+    # Calculation value is unchanged: rounded to 4dp, off-by-one-won does not move it.
+    assert actual["calculations"][1]["value"] == "8.0959"
+
+    failures = compare_prediction(q11, PredictionCase.model_validate(actual))
+
+    assert failures == ["facts: expected fields did not match distinct predicted Facts"]
+
+
+def test_q11_swapped_calculation_ids_fail_even_when_other_fields_are_unchanged() -> None:
+    q11 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q11"]
+    actual = q11_prediction().model_dump(mode="python")
+    swapped_ids = [
+        actual["calculations"][1]["calculation_id"],
+        actual["calculations"][0]["calculation_id"],
+    ]
+    for calculation, calculation_id in zip(actual["calculations"], swapped_ids, strict=True):
+        calculation["calculation_id"] = calculation_id
+
+    failures = compare_prediction(q11, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("calculations:") for item in failures)
 
 
 def aggregate_prediction() -> PredictionCase:

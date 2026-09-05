@@ -371,7 +371,6 @@ CONTENT_INCLUSION_NEGATIVE_CONTROLS = [
     # '사업 포트폴리오'·'제품 포트폴리오'는 사업의 개요가 쓰는 낱말이고 투자 편입처가
     # 아니다. '포트폴리오' 한 낱말로 판정하면 여기가 함께 막힌다.
     "사업 포트폴리오에 어떤 내용을 담는 게 좋을까?",
-    "자기주식 취득 내용을 사업 포트폴리오에 담는 게 좋을까?",
     "제품 포트폴리오에 이 종목 관련 내용을 담아도 될까?",
     # 편입처에 보조사가 겹쳐 붙은 형태. 문서 편입처와 투자 편입처가 서로 다른 조사 목록을
     # 갖고 있어 '계좌에라도'만 잡히던 어긋남을 고정한다(PR #129 4차 리뷰).
@@ -413,6 +412,31 @@ def test_content_inclusion_uses_of_the_buy_verb_pass(question: str) -> None:
     assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
     assert decision.category is None, question
     assert decision.matched_categories == (), question
+
+
+# 지원 문법 밖이라 보수적으로 막히는 수록 요구.
+#
+# 통과가 아니라 F3인 것을 **의도된 동작으로** 고정한다. 지원 문법은 '담다' 바로 앞자리에
+# 인정된 문서 편입처나 내용 목적격이 오는 두 형태뿐이고, 아래는 그 자리에 투자 편입처 표기가
+# 온다. 뜻으로는 수록 요구지만 자리로는 증명되지 않으므로 F3에 남는다.
+#
+# 이 케이스를 통과시키려면 '사업 포트폴리오'를 문서 편입처로 인정해야 하는데, 그러면
+# "주식을 포트폴리오에 담아도 될까?"와 가르는 근거가 '사업'이라는 수식어 하나가 된다.
+# 안전 계약이 우회 방지를 우선하므로 넓히지 않는다.
+#
+# 조직자 코퍼스·평가 gold·대표질문에 '담다' 질문이 한 건도 없어 제품 요구가 걸려 있지 않다.
+# 이 문장은 PR #129 진행 중 적대 회귀로 만들어진 합성 케이스다.
+UNSUPPORTED_CONTENT_CONSERVATIVELY_BLOCKED = [
+    "자기주식 취득 내용을 사업 포트폴리오에 담는 게 좋을까?",
+]
+
+
+@pytest.mark.parametrize("question", UNSUPPORTED_CONTENT_CONSERVATIVELY_BLOCKED)
+def test_unsupported_content_syntax_is_conservatively_refused(question: str) -> None:
+    decision = screen_question(question)
+
+    assert not decision.allowed, question
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
 
 
 # 매매 대상과 '담다' 사이에 오는 수식어.
@@ -645,6 +669,23 @@ SOURCE_CONTAINERS = ["표", "보고서", "공시", "목록", "리스트", "자�
 # 관형형 서술어. 목록에 적힌 동사를 구현이 알고 있어서는 안 된다. 어미로 가려야 한다.
 SOURCE_PREDICATES = ["나온", "적힌", "있는", "확인한", "발견한", "찾아본", "기재된", "올라온"]
 
+# 판정이 서술어를 알아보는 데 기대고 있지 않다는 것을 고정하는 목록.
+#
+# 실재하지만 흔치 않은 어형과 아예 지어낸 어형을 섞었다. '적어놓은'·'써놓은'은 조사 음절
+# '은'으로 끝나 종전 구현의 서술어 판별에서 빠졌고, 그래서 출처 표현이 살아남아 투자 판단
+# 요구가 수록 요구로 샜다(PR #129 6차 리뷰). 지금 판정은 이 어형들을 알아보지 않는다.
+# 알아보지 못한 것은 증명되지 않은 것이고, 증명되지 않으면 F3다.
+UNRECOGNISED_PREDICATES = [
+    "적어놓은",
+    "써놓은",
+    "끄적여놓은",
+    "갈무리한",
+    "옮겨적은",
+    "간종그린",
+    "얼기설기묶은",
+    "뒤적인",
+]
+
 # 앞 서술어가 데려가는 목적어와 그 서술어.
 PRECEDING_OBJECTS = ["실적", "공시", "매출", "재무제표", "경쟁사 수치"]
 PRECEDING_PREDICATES = ["보고", "확인하고", "검토하고", "참고해서", "살펴보고", "비교해보고"]
@@ -732,6 +773,66 @@ ATTACHMENT_CONTRAST_PAIRS = [
         "삼성전자 주식을 참고 자료에 담아도 될까?",
     ),
 ]
+
+
+@pytest.mark.parametrize("predicate", UNRECOGNISED_PREDICATES)
+@pytest.mark.parametrize("container", SOURCE_CONTAINERS)
+def test_unrecognised_predicates_do_not_let_investment_requests_escape(
+    container: str, predicate: str
+) -> None:
+    """
+    알아보지 못한 서술어가 출처 표현을 살려 두지 못한다.
+
+    이 시험이 이 파일에서 가장 중요한 자리다. 판정을 "서술어를 찾아 그 앞을 버린다"로 짜면
+    못 알아본 서술어 하나가 곧 안전 구멍이 된다. 지금 판정은 반대로 짜여 있다. 수록 요구임이
+    증명될 때만 통과시키고, 여기서는 '담다'의 테마가 주식이므로 증명이 서지 않는다.
+
+    그러므로 구현이 아래 어형을 알아보는지 여부는 판정과 무관해야 한다.
+    """
+    question = f"{container}에 {predicate} 삼성전자 주식을 담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"알아보지 못한 서술어가 판정을 뒤집었다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+# 매매 대상에 목적격이 아닌 조사가 붙은 출처 형태.
+#
+# 목적격만 '담다'의 논항으로 세면 여기서 출처 표현이 편입처로 승격된다. '종목부터'는 목적격이
+# 아니지만 '담다'가 데려가는 것이고, 그것이 '표에' 뒤에 있으므로 '표에'는 '담다'의 편입처가
+# 아니다. 자체 적대 검증에서 나온 형태다.
+SOURCE_WITH_NON_ACCUSATIVE_OBJECT = [
+    "표에 적어놓은 종목부터 담아도 될까?",
+    "표에 나온 주식부터 담아도 될까?",
+    "공시에 적힌 종목이라도 담아도 될까?",
+    "보고서에 있는 주식도 담아도 될까?",
+    "목록에 올라온 종목만 담아도 될까?",
+]
+
+
+@pytest.mark.parametrize("question", SOURCE_WITH_NON_ACCUSATIVE_OBJECT)
+def test_non_accusative_object_still_blocks_a_source_container(question: str) -> None:
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"출처 표현이 편입처로 승격됐다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("predicate", UNRECOGNISED_PREDICATES)
+def test_unrecognised_predicates_do_not_erase_a_proven_content_destination(
+    predicate: str,
+) -> None:
+    """
+    반대 방향. 알아보지 못한 서술어가 증명된 수록 요구를 F3로 바꾸지 못한다.
+
+    위 시험과 짝이며, 둘이 함께 "판정은 서술어 인식에 기대지 않는다"를 양방향으로 고정한다.
+    한쪽만 두면 "무엇이든 막는다"로도 통과할 수 있다.
+    """
+    question = f"삼성전자 주식 관련 내용을 {predicate} 표에 담아도 될까?"
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
 
 
 @pytest.mark.parametrize(("refused", "allowed"), ATTACHMENT_CONTRAST_PAIRS)

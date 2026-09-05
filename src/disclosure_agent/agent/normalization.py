@@ -74,9 +74,11 @@ from disclosure_agent.agent.answer_builder import (
     STAGE_CONTRACT_ADAPTATION,
     STAGE_EXTRACTION,
     STAGE_FILING_DISCOVERY,
+    STAGE_QUERY_PLAN,
     STAGE_SECTION_NAVIGATION,
     BlockedInfo,
 )
+from disclosure_agent.agent.query_analyzer import AMBIGUOUS_COMPANY_REASON
 from disclosure_agent.agent.safety import (
     CATEGORY_EXTERNAL_INFORMATION,
     CATEGORY_FORWARD_LOOKING,
@@ -160,8 +162,14 @@ class Answerability:
 #         것이지 파이프라인이 멈춘 것이 아니다.
 #     ambiguous_candidates / ambiguous_root
 #         후보를 모두 찾았고 그중 하나로 좁힐 근거가 없다고 판정했다. 판정 자체는 끝났다.
+#     ambiguous_company_match
+#         인식 후보 목록 전체와 대조한 결과다. 위 둘과 같은 자리이며, 코퍼스를 여는 단계가
+#         아니라 질의 해석 단계에서 났을 뿐이다. 아래 설명 참조.
 #
 # 반대로 목록에 넣지 않은 것들:
+#     unknown_company / missing_year / unsupported_period 등 나머지 query_plan 사유
+#         질문을 계획으로 옮기지 못한 것이다. 코퍼스에 답이 있는지에 대한 판정이 아니므로
+#         대응표에 넣지 않으며, 그대로 BLOCKED다.
 #     parse_failed / manifest_missing / path_unresolved / main_document_missing
 #         문서를 열지 못했다. 답이 없는지조차 알지 못한다.
 #     missing_acontext / missing_table_unit / untrusted_table_unit / unparsable_value
@@ -182,6 +190,24 @@ class Answerability:
 #         것이 아니므로 INSUFFICIENT_EVIDENCE가 아니고, 코퍼스에 답이 없다는 판정도 아니다.
 #         대응하는 Contract 값이 아직 없어 실행 중단으로 둔다.
 ANSWERABILITY_BY_STOP: dict[tuple[str, str], Answerability] = {
+    # 질문이 가리킨 기업 표현에 맞는 후보가 여럿이라 그중 하나를 고르지 않았다.
+    #
+    # 질의 해석 단계의 정지 사유 중 이 하나만 대응표에 두는 이유:
+    #     이 판정은 인식 후보 목록 전체와 대조한 뒤에 나온다. manifest가 아는 표기를 모두 보고
+    #     "여덟 곳이 걸렸고 그중 하나를 고를 근거가 없다"까지 확정했으므로, 판정에 이르지 못하고
+    #     멈춘 것이 아니다. 문서 목록을 모두 보고 내리는 ambiguous_root·ambiguous_filing와 같은
+    #     자리이며, 코퍼스를 여느냐 인식 후보 목록을 보느냐만 다르다.
+    #
+    #     BLOCKED로 두면 사용자에게 "실행이 멈췄다"로 나간다. 실제로 일어난 일은 답할 수 있는지
+    #     판정을 끝냈고 대상을 좁히지 못했다는 것이고, 그 차이는 되묻기를 안내할지 말지를 가른다.
+    #
+    # 후보를 하나 고르지 않는다. 어느 후보들 사이에서 모호했는지는 _resolve_companies가 적어 둔
+    # answerability_detail 원문에 그대로 남으며, 이 자리에서 그것을 요약하거나 좁히지 않는다.
+    # Pattern A의 ambiguous_candidates가 같은 방식이다(아래 주석 참조).
+    (STAGE_QUERY_PLAN, AMBIGUOUS_COMPANY_REASON): Answerability(
+        AnswerabilityStatus.UNRESOLVED,
+        AnswerabilityReason.AMBIGUOUS_MATCH,
+    ),
     (STAGE_FILING_DISCOVERY, REASON_NO_MATCHING_FILING): Answerability(
         AnswerabilityStatus.UNANSWERABLE,
         AnswerabilityReason.NOT_FOUND,
@@ -546,6 +572,35 @@ def _stopped_execution(
         evidence=list(evidence),
         warnings=list(warnings),
         conversion_gaps=list(conversion_gaps),
+    )
+
+
+def stopped_execution(
+    stage: str,
+    reason: str,
+    detail: str,
+    *,
+    warnings: Sequence[str] = (),
+) -> AgentExecutionResult:
+    """
+    아직 Pattern 결과가 없는 단계에서 멈춘 지점 하나를 실행 결과로 옮긴다.
+
+    _stopped_execution과 같은 대응표를 쓰며, BlockedInfo를 만들 것이 없는 호출자용 입구다.
+    질의 해석 단계(query_plan)가 그 자리다. 그 단계의 정지 사유는 UnsupportedQuestionError의
+    reason 문자열로만 오고, Pattern이 돌기 전이라 함께 실을 facts·evidence도 없다.
+
+    blocked_execution과 나누는 이유:
+        blocked_execution은 무조건 BLOCKED를 만든다. 호출자가 그것을 쓰면 "이 정지는 실행
+        중단인가 답변 가능성 판정인가"를 호출자가 정하게 되고, 그 판단이 대응표 밖에 하나 더
+        생긴다. 여기로 보내면 판단하는 곳은 ANSWERABILITY_BY_STOP 하나로 남는다.
+
+        대응표에 없는 사유는 그대로 BLOCKED다. 그래서 이 함수로 바꿔도 매핑을 더하기 전에는
+        기존 동작이 한 줄도 달라지지 않으며, 반대로 모든 정지 사유가 한꺼번에 답변 가능성
+        판정으로 새지도 않는다.
+    """
+    return _stopped_execution(
+        BlockedInfo(stage=stage, reason=reason, detail=detail),
+        warnings=warnings,
     )
 
 

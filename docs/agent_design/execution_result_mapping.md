@@ -45,7 +45,8 @@ Pattern A(단일 사실)와 Pattern E(정정 이력)의 내부 결과를 공통 
 | `extraction` / `unsupported_metric`, `unsupported_accounting_scope` | `BLOCKED` | – | – | 있음 |
 | `evidence` / `missing_doc_id` | `BLOCKED` | – | – | 있음 |
 | `filing_discovery` / `manifest_missing`, `path_unresolved`, `main_document_missing`, `unknown_document_class`, `unknown_period_kind`, `unparsable_date_range` | `BLOCKED` | – | – | 있음 |
-| `query_plan` / * | `BLOCKED` | – | – | 있음 |
+| `query_plan` / `ambiguous_company_match` | `COMPLETED` | `UNRESOLVED` | `AMBIGUOUS_MATCH` (§4 참조) | – |
+| `query_plan` / 그 밖의 사유(`unknown_company`, `missing_year`, `unsupported_period`, `unsupported_metric` 등) | `BLOCKED` | – | – | 있음 |
 | `routing` / `unimplemented_intent`, `unknown_intent` | `BLOCKED` | – | – | 있음 |
 | `contract_adaptation` / `unconvertible_fact` | `BLOCKED` | – | – | 있음 |
 
@@ -58,6 +59,24 @@ Pattern A(단일 사실)와 Pattern E(정정 이력)의 내부 결과를 공통 
 이 사유들의 `detail`은 "Parser가 …를 제공해야 합니다", "그대로 쓰면 자릿수 오류가
 발생합니다"라고 밝힙니다. 값은 문서 안에 있는데 파이프라인이 안전하게 읽어내지 못한
 상태이며, 코퍼스에 대한 판정이 아닙니다.
+
+### `query_plan` 단계에서 하나만 `COMPLETED`인 이유
+
+`ambiguous_company_match`는 인식 후보 목록 전체와 대조한 뒤에 나오는 판정입니다. manifest가
+아는 표기를 모두 보고 "여러 곳이 걸렸고 그중 하나를 고를 근거가 없다"까지 확정했으므로,
+판정에 이르지 못하고 멈춘 것이 아닙니다. 문서 목록을 모두 보고 내리는
+`filing_discovery`/`ambiguous_root`와 같은 자리이며, 코퍼스를 여느냐 인식 후보 목록을
+보느냐만 다릅니다.
+
+같은 단계의 나머지 사유는 질문을 계획으로 옮기지 못한 것입니다. `unknown_company`는 "그
+기업이 이 코퍼스에 없다"이고, `missing_year`·`unsupported_period`는 조회 조건을 만들지
+못한 것입니다. 코퍼스에 답이 있는지에 대한 판정이 아니므로 `BLOCKED`로 남습니다.
+
+두 갈래를 나누지 않으면 되묻기로 풀리는 질문("삼성 2025년 매출 알려줘.")과 코퍼스에 없는
+기업을 물은 질문이 같은 상태로 보고됩니다.
+
+어느 후보들 사이에서 모호했는지는 `answerability_detail`의 원문에 남습니다. 후보 중 하나를
+고르지 않으며, 이 판정 뒤에는 Fact·Evidence 조회가 일어나지 않습니다.
 
 ### `contract_adaptation` 단계
 

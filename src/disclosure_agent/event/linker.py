@@ -32,6 +32,10 @@
 TODO:
 - 후속·해지 공시 방향의 연결(본문 '관련공시' 필드)
 - 세부유형이 바뀌는 정정의 처리
+- 자기참조 원공시 제출일을 적은 정정의 대상 복구. 지금은 그런 정정을 미해결로 남겨
+  chain_complete=False로 만들 뿐(_might_belong_to_chain), 대상을 되찾지는 않는다.
+  실측 코퍼스에 자기참조 정정이 있고(엘에스일렉트릭 20240813800252 등), 원공시가 여럿인
+  후보 집합에서는 어느 체인에도 남지 않는다.
 """
 
 from __future__ import annotations
@@ -298,12 +302,8 @@ def build_filing_chain(
     정정이 직전 정정을 가리키는 다단 체인을 따라가기 위해, 더 붙는 문서가 없을 때까지
     반복해서 확장한다.
 
-    연결하지 못한 정정 중 이 체인에 속할 수 있었던 것(후보에 체인 구성원이 들어 있는 경우)은
-    unresolved_links에 남긴다. 조용히 빼면 이력이 완결된 것처럼 보인다.
-
-    반대로 incomplete_chain과 missing_link_field는 어느 체인 것인지 알 수 없어 여기에
-    귀속시키지 않는다. 대상이 후보 집합 밖이거나 원문이 대상을 밝히지 않은 경우다.
-    그런 정정이 있다는 사실은 호출자가 후보 전체에 link_correction을 돌려 따로 드러내야 한다.
+    연결하지 못한 정정 중 이 체인에 속할 수 있었던 것은 unresolved_links에 남긴다. 조용히
+    빼면 이력이 완결된 것처럼 보인다. 무엇을 남기는지는 _might_belong_to_chain이 정한다.
 
     입력 순서에 의존하지 않는다. 결과는 공시일과 접수번호 순으로 정렬한다.
     """
@@ -348,10 +348,17 @@ def build_filing_chain(
         if not joined:
             break
 
+    sole_root = _sole_root(filings)
+
     unresolved = tuple(
         links[correction.receipt_no]
         for correction in sorted(pending, key=_sort_key)
-        if _might_belong_to_chain(links[correction.receipt_no], chain_members)
+        if _might_belong_to_chain(
+            links[correction.receipt_no],
+            chain_members,
+            correction=correction,
+            sole_root=sole_root,
+        )
     )
 
     entries = tuple(
@@ -376,16 +383,112 @@ def build_filing_chain(
     )
 
 
+def _sole_root(filings: Sequence[FilingLike]) -> FilingLike | None:
+    """
+    후보 집합이 인정하는 원공시가 정확히 1건이면 그것을 돌려준다. 아니면 None.
+
+    후보 집합은 (기업, 공시 세부유형)으로 이미 좁혀져 있다. 그 안에 정정이 아닌 공시가
+    하나뿐이라면, 이 집합 안에서 정정이 붙을 수 있는 이력의 출발점은 그 하나뿐이다.
+    """
+    roots = [filing for filing in filings if not filing.is_correction]
+
+    return roots[0] if len(roots) == 1 else None
+
+
+def _link_field_is_uninformative(
+    result: LinkResult,
+    correction: FilingLike,
+) -> bool:
+    """
+    이 정정의 연결 정보가 대상을 가릴 근거를 전혀 주지 못했는가.
+
+    두 경우다.
+
+        missing_link_field   원문이 원공시 제출일을 밝히지 않았거나 파서가 읽지 못했다.
+        자기참조 날짜         읽어낸 원공시 제출일이 이 정정 자신의 접수일과 같다. 정정은
+                             자기 자신을 정정할 수 없으므로 그 값은 대상을 가리키지 못한다.
+                             실측 코퍼스에 실재한다(예: 엘에스일렉트릭 20240813800252가
+                             original_filing_date로 자기 접수일 2024-08-13을 적었다).
+
+    날짜가 자기참조가 아닌 incomplete_chain은 여기 들어오지 않는다. 그때 날짜는 대상이 언제
+    제출됐는지를 실제로 말해 주고, 그 날짜에 해당하는 후보가 없다는 것은 대상이 후보 집합
+    밖이라는 근거가 된다. 근거가 있는 배제와 근거가 없는 배제를 같은 값으로 묶지 않는다.
+    """
+    if result.status == LINK_STATUS_MISSING_LINK_FIELD:
+        return True
+
+    if result.status != LINK_STATUS_INCOMPLETE_CHAIN:
+        return False
+
+    correction_date = normalize_filing_date(correction.receipt_date)
+
+    if correction_date is None:
+        return False
+
+    return normalize_filing_date(result.original_filing_date) == correction_date
+
+
 def _might_belong_to_chain(
     result: LinkResult,
     chain_members: Mapping[str, FilingLike],
+    *,
+    correction: FilingLike,
+    sole_root: FilingLike | None,
 ) -> bool:
     """
     연결에 실패한 정정이 이 체인에 속할 수 있었는지 본다.
 
-    후보 중 하나라도 체인 구성원이면 이 체인의 미해결 항목으로 본다. 후보가 아예 없는
-    경우(incomplete_chain)는 대상이 후보 집합 밖이므로 이 체인과 무관하다고 판단한다.
+    두 갈래로 남긴다.
+
+    1. 후보 중 하나가 체인 구성원인 경우(주로 ambiguous_link). 대상 후보 안에 이 체인의
+       문서가 들어 있으므로 이 체인의 미해결 항목이다.
+
+    2. 연결 정보 자체가 무의미하고(_link_field_is_uninformative), 후보 집합이 인정하는
+       원공시가 이 체인의 루트 하나뿐인 경우.
+
+    2번을 남기는 이유:
+        후보가 비어 있다는 것을 '이 체인과 무관하다'는 증거로 쓰던 자리다. 그것은 대상 날짜를
+        읽어냈을 때만 성립하는 추론이다. 날짜를 못 읽었거나 읽은 값이 자기 자신을 가리키면
+        어느 체인 것인지 가릴 근거가 하나도 없고, 근거 없이 무관하다고 정하면 그 정정은
+        결과에서 사라진다. 그러면 실제로는 뒤에 변경이 있었는데 chain_complete=True가 되어
+        "이후 변경된 내용은 확인되지 않았습니다"가 나간다. 형식이 온전한 채로 틀린 답이다.
+
+        어디에 붙는지 모를 때는 붙이지 못했다는 사실을 남긴다. 여기서 EventLink를 지어내지
+        않는다. 대상을 되찾는 일은 별도 과제다.
+
+    루트가 여럿이면 2번을 적용하지 않는 이유:
+        같은 기업의 같은 유형 공시라도 계약·투자마다 이력이 따로 있다. 후보 집합에 원공시가
+        여럿이면 이 정정이 그중 어느 이력의 것인지 정할 수 없고, 그 상태로 선택된 루트에
+        귀속시키면 무관한 정정 하나가 멀쩡한 체인 전부를 미완결로 만든다. 실측 코퍼스에서
+        원공시가 32건인 그룹에도 자기참조 정정이 있다. 기업·유형·시점이 겹친다는 것만으로는
+        관계를 세우지 못하므로, 세울 수 없을 때는 넓게 엮는 대신 좁게 멈춘다.
+
+        그래서 루트가 여럿인 경우 이 정정은 어느 체인에도 남지 않는다. 알려진 한계이며,
+        호출자가 후보 전체에 link_correction을 돌려 따로 드러내야 한다.
+
+    루트보다 먼저 제출된 정정은 빼는 이유:
+        루트가 나오기 전에 제출된 문서는 그 루트를 정정한 것일 수 없다. 날짜를 하나라도
+        읽지 못하면 빼지 않는다. 모르는 것을 근거로 지우지 않는다.
     """
-    return any(
-        candidate.receipt_no in chain_members for candidate in result.candidates
-    )
+    if any(candidate.receipt_no in chain_members for candidate in result.candidates):
+        return True
+
+    if sole_root is None or sole_root.receipt_no not in chain_members:
+        return False
+
+    if not _link_field_is_uninformative(result, correction):
+        return False
+
+    return not _precedes(correction, sole_root)
+
+
+def _precedes(filing: FilingLike, other: FilingLike) -> bool:
+    """filing이 other보다 먼저 제출됐는가. 한쪽이라도 날짜를 모르면 False."""
+    filing_date = normalize_filing_date(filing.receipt_date)
+
+    other_date = normalize_filing_date(other.receipt_date)
+
+    if filing_date is None or other_date is None:
+        return False
+
+    return filing_date < other_date

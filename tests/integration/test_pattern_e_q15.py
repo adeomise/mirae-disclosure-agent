@@ -57,6 +57,7 @@ from disclosure_agent.agent.answer_builder import (
     REASON_AMBIGUOUS_ROOT,
     REASON_UNVERIFIED_COUNTERPARTY,
     STAGE_FILING_DISCOVERY,
+    build_answer_response,
 )
 from disclosure_agent.agent.handlers.event_history import (
     EVENT_TYPE_BY_DOCUMENT_SUBTYPE,
@@ -106,6 +107,22 @@ Q12 = (
 Q14 = "LG에너지솔루션이 포드랑 맺었던 배터리 공급계약, 지금 어떻게 됐어?"
 
 REAL_COMPANIES = ("레인보우로보틱스", "LG이노텍", "LG에너지솔루션", "HD현대일렉트릭")
+
+# BB17. 실측 코퍼스에서 정정공시가 원공시 제출일로 자기 접수일을 적은 질문이다.
+#
+# 이 정정(exchange_20240813800252)은 실재하고 파싱도 된다. 투자금액 803억 -> 1,008억,
+# 투자기간 종료일 2025-09-30 -> 2025-10-31을 바꾼다. 그런데 연결이 자기 자신을 가리켜
+# 대상을 특정하지 못하고, 예전 구현은 그 정정을 조용히 빼고 완결 체인이라고 답했다.
+BB17_QUESTION = "엘에스일렉트릭이 2024년에 낸 신규 시설투자 공시, 그 뒤에 수정된 부분이 있어?"
+
+BB17_COMPANIES = ("엘에스일렉트릭",)
+
+BB17_CORRECTION_RECEIPT_NO = "20240813800252"
+
+BB17_CORRECTION_DOC_ID = f"exchange_{BB17_CORRECTION_RECEIPT_NO}"
+
+# 이력이 완결됐을 때만 쓸 수 있는 문장. 이 질문에는 나오면 안 된다.
+NO_LATER_CHANGE_SENTENCE = "이후 변경된 내용은 확인되지 않았습니다"
 
 # 실측 코퍼스에서 공급계약 원공시가 한 건뿐인 기업을 쓰는 대조쌍.
 #
@@ -1319,3 +1336,81 @@ def test_named_counterparty_with_several_roots_still_stops_at_ambiguous_root() -
     assert len(internal.root_candidate_doc_ids) > 1
     assert internal.blocked is not None
     assert internal.blocked.reason == REASON_AMBIGUOUS_ROOT
+
+
+# --------------------------------------------------------------------------
+# BB17 — 자기참조 정정이 완결 체인으로 둔갑하지 않는다
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.corpus
+def test_bb17_self_referential_correction_is_not_reported_as_a_complete_chain() -> None:
+    """
+    연결하지 못한 정정이 있는 이력을 "변경 없음"으로 답하지 않는다.
+
+    이 PR은 연결을 되찾지 않는다. 정정은 여전히 원공시에 붙지 않는다. 고정하는 것은 그
+    정정이 사라지지 않는다는 것과, 사라지지 않았으므로 완결이라고 말하지 않는다는 것이다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    plan = build_query_plan(BB17_QUESTION, known_companies=BB17_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+
+    result = answer_question(BB17_QUESTION, corpus_root=corpus_root)
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.INCOMPLETE_CHAIN
+
+    assert len(result.event_histories) == 1
+
+    history = result.event_histories[0]
+
+    assert history.chain_complete is False
+
+    # 미해결 정정이 구조에 남아 있다. 접수번호를 잃어버리면 무엇이 미해결인지 알 수 없다.
+    unresolved_receipt_nos = [
+        receipt_no
+        for gap in result.conversion_gaps
+        for receipt_no in gap.dropped.get("unresolved_correction_receipt_nos", [])
+    ]
+
+    assert unresolved_receipt_nos == [BB17_CORRECTION_RECEIPT_NO]
+
+    # 어느 정정을 Contract 상태로 옮기지 못했는지도 그 정정을 지목해 남는다.
+    assert BB17_CORRECTION_DOC_ID in {gap.subject for gap in result.conversion_gaps}
+
+    # 없는 연결을 지어내지 않는다. 정정은 원공시에 붙지 않은 상태 그대로다.
+    assert history.document_ids == ["exchange_20240521800037"]
+
+    answer = build_answer_response(result).answer
+
+    assert NO_LATER_CHANGE_SENTENCE not in answer
+
+
+@pytest.mark.corpus
+def test_q15_answer_is_unchanged_by_the_bb17_fix() -> None:
+    """
+    fail-closed 규칙이 정상 체인을 건드리지 않는다.
+
+    Q15는 원공시 1건 + 정정 3건이 전부 연결되는 이력이다. 이 체인에는 연결 정보가 무의미한
+    정정이 없으므로 새 규칙이 발동할 자리가 없고, 답 문장도 그대로여야 한다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    result = answer_question(Q15, corpus_root=corpus_root)
+
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert result.event_histories[0].chain_complete is True
+
+    answer = build_answer_response(result).answer
+
+    assert "이력을 확인했습니다" in answer

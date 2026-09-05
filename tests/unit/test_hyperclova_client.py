@@ -27,6 +27,7 @@ from disclosure_agent.agent.hyperclova import (
     HyperClovaUnavailableError,
     build_chat_client,
     capabilities_for,
+    endpoint_model_name,
     extract_api_status_code,
     extract_finish_reason,
     extract_message_content,
@@ -38,14 +39,30 @@ API_KEY = "super-secret-key"
 
 ANSWER = "한미반도체(주)의 2025년 연결 기준 매출액은 576,684,619,527원입니다."
 
+BASE_ENDPOINT = "https://example.invalid/v3/chat-completions"
+
+# 튜닝 모델 경로. 마지막 segment가 모델 이름이 아니다.
+TASK_ENDPOINT = "https://example.invalid/v3/tasks/abc123/chat-completions"
+
+
+def endpoint_for(model: str) -> str:
+    return f"{BASE_ENDPOINT}/{model}"
+
 
 def make_settings(**overrides: object) -> HyperClovaSettings:
+    """
+    설정 객체. api_url을 따로 주지 않으면 model에 맞는 완전한 엔드포인트를 만든다.
+
+    URL의 모델과 settings.model이 어긋난 설정은 이제 요청 전에 거절된다. 기본값을 한 모델로
+    고정해 두면 모델을 바꿔 넣는 테스트가 전부 그 어긋남을 만들게 되고, 그 테스트들이 무엇을
+    고정하려 했는지와 상관없이 실패한다. 어긋남은 그것을 시험하는 자리에서만 만든다.
+    """
     values: dict[str, object] = {
         "api_key": API_KEY,
-        "api_url": "https://example.invalid/v3/chat-completions/HCX-005",
         "model": "HCX-005",
     }
     values.update(overrides)
+    values.setdefault("api_url", endpoint_for(str(values["model"])))
 
     return HyperClovaSettings(
         _env_file=None,  # type: ignore[arg-type]
@@ -418,56 +435,148 @@ def test_model_name_reaches_the_request_url() -> None:
     assert post.calls[0]["url"].endswith("/v3/chat-completions/HCX-005")
 
 
-def test_base_v3_path_gets_the_model_appended() -> None:
+@pytest.mark.parametrize("model", ["HCX-005", "HCX-007"])
+def test_base_v3_path_gets_the_model_appended(model: str) -> None:
     """기본 경로만 준 설정이 404로만 드러나지 않게 한다."""
     post = RecordingPost(json_response(200, ok_payload()))
 
-    settings = make_settings().model_copy(
-        update={"api_url": "https://example.invalid/v3/chat-completions"}
-    )
+    settings = make_settings(model=model).model_copy(update={"api_url": BASE_ENDPOINT})
 
     HttpHyperClovaClient(settings=settings, post=post).complete(
         system_prompt="S",
         user_message="U",
     )
 
-    assert post.calls[0]["url"] == "https://example.invalid/v3/chat-completions/HCX-005"
+    assert post.calls[0]["url"] == f"{BASE_ENDPOINT}/{model}"
+
+
+@pytest.mark.parametrize(
+    ("api_url", "model", "expected"),
+    [
+        # 모델 자리가 비어 있으면 settings.model을 붙인다.
+        (BASE_ENDPOINT, "HCX-005", f"{BASE_ENDPOINT}/HCX-005"),
+        (BASE_ENDPOINT, "HCX-007", f"{BASE_ENDPOINT}/HCX-007"),
+        # 이미 완전하고 이름도 같으면 그대로 쓴다.
+        (f"{BASE_ENDPOINT}/HCX-005", "HCX-005", f"{BASE_ENDPOINT}/HCX-005"),
+        (f"{BASE_ENDPOINT}/HCX-007", "HCX-007", f"{BASE_ENDPOINT}/HCX-007"),
+        # 뒤에 붙은 슬래시가 모델을 두 번 붙이거나 어긋남으로 보이게 만들지 않는다.
+        (f"{BASE_ENDPOINT}/HCX-005/", "HCX-005", f"{BASE_ENDPOINT}/HCX-005"),
+        (f"{BASE_ENDPOINT}/", "HCX-005", f"{BASE_ENDPOINT}/HCX-005"),
+        # 모르는 경로 모양은 추측해서 이어 붙이지 않는다.
+        (TASK_ENDPOINT, "HCX-005", TASK_ENDPOINT),
+    ],
+)
+def test_endpoint_resolution_never_doubles_or_guesses(
+    api_url: str,
+    model: str,
+    expected: str,
+) -> None:
+    assert resolve_endpoint(api_url, model) == expected
+
+
+def test_endpoint_is_left_alone_without_a_model() -> None:
+    """모델이 비면 '/'를 붙이지 않는다. 그 상태는 build_chat_client가 먼저 막는다."""
+    assert resolve_endpoint(BASE_ENDPOINT, "  ") == BASE_ENDPOINT
+
+
+# --------------------------------------------------------------------------
+# 엔드포인트와 모델의 어긋남
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("api_url", "model"),
+    [
+        # 본문은 settings.model로 갈린다. 이 설정은 HCX-005에게 HCX-007 계약을 보낸다.
+        (f"{BASE_ENDPOINT}/HCX-005", "HCX-007"),
+        # 반대 방향도 같다. HCX-007에게 maxTokens를 보내면 40001이다.
+        (f"{BASE_ENDPOINT}/HCX-007", "HCX-005"),
+        (f"{BASE_ENDPOINT}/HCX-005/", "HCX-007"),
+    ],
+)
+def test_endpoint_model_mismatch_is_rejected(api_url: str, model: str) -> None:
+    """
+    URL이 부르는 모델과 본문이 따르는 계약이 갈린 설정은 풀리지 않는다.
+
+    그냥 두면 요청은 나가고 400으로 거절되며, 4xx는 재시도하지 않으므로 설정이 틀렸다는
+    사실이 '모델이 형식을 안 지킨다'로만 보인다.
+    """
+    with pytest.raises(HyperClovaRequestError) as raised:
+        resolve_endpoint(api_url, model)
+
+    message = str(raised.value)
+
+    assert model in message
+    assert API_KEY not in message
+
+
+@pytest.mark.parametrize(
+    ("api_url", "model"),
+    [
+        (f"{BASE_ENDPOINT}/HCX-005", "HCX-007"),
+        (f"{BASE_ENDPOINT}/HCX-007", "HCX-005"),
+    ],
+)
+def test_endpoint_model_mismatch_fails_before_the_network(api_url: str, model: str) -> None:
+    """
+    어긋남은 POST 앞에서 멈춘다.
+
+    요청이 한 번이라도 나가면 거절 사유가 서버에서 오게 되고, 그 사유는 자격 증명 오류나
+    파라미터 오류와 같은 모양이라 설정이 틀렸다는 사실이 드러나지 않는다.
+    """
+    post = RecordingPost(json_response(200, ok_payload()))
+
+    settings = make_settings(model=model).model_copy(update={"api_url": api_url})
+
+    with pytest.raises(HyperClovaRequestError):
+        HttpHyperClovaClient(settings=settings, post=post).complete(
+            system_prompt="S",
+            user_message="U",
+        )
+
+    assert post.calls == []
+
+
+@pytest.mark.parametrize("model", ["HCX-005", "HCX-007"])
+def test_task_endpoint_is_used_as_given_without_inferring_a_model(model: str) -> None:
+    """
+    모르는 경로의 마지막 segment를 모델 이름으로 읽지 않는다.
+
+    읽으면 튜닝 모델의 /v3/tasks/{taskId}/chat-completions가 'chat-completions라는 모델과
+    어긋난다'로 판정되어, 지금 동작하는 배포가 요청도 못 보내고 멈춘다.
+    """
+    post = RecordingPost(json_response(200, ok_payload()))
+
+    settings = make_settings(model=model).model_copy(update={"api_url": TASK_ENDPOINT})
+
+    HttpHyperClovaClient(settings=settings, post=post).complete(
+        system_prompt="S",
+        user_message="U",
+    )
+
+    assert post.calls[0]["url"] == TASK_ENDPOINT
 
 
 @pytest.mark.parametrize(
     ("api_url", "expected"),
     [
-        # 이미 완전한 엔드포인트는 그대로 쓴다.
-        (
-            "https://example.invalid/v3/chat-completions/HCX-005",
-            "https://example.invalid/v3/chat-completions/HCX-005",
-        ),
-        # 뒤에 붙은 슬래시가 모델을 두 번 붙이게 만들지 않는다.
-        (
-            "https://example.invalid/v3/chat-completions/HCX-005/",
-            "https://example.invalid/v3/chat-completions/HCX-005",
-        ),
-        (
-            "https://example.invalid/v3/chat-completions/",
-            "https://example.invalid/v3/chat-completions/HCX-005",
-        ),
-        # 모르는 경로 모양은 추측해서 이어 붙이지 않는다.
-        (
-            "https://example.invalid/v3/tasks/abc123/chat-completions",
-            "https://example.invalid/v3/tasks/abc123/chat-completions",
-        ),
+        (f"{BASE_ENDPOINT}/HCX-005", "HCX-005"),
+        (f"{BASE_ENDPOINT}/HCX-007", "HCX-007"),
+        # 모델 자리가 비어 있는 기본 경로는 이름을 싣고 있지 않다.
+        (BASE_ENDPOINT, None),
+        # 튜닝 모델 경로와 그 밖의 모양은 아는 모양이 아니다.
+        (TASK_ENDPOINT, None),
+        (f"{BASE_ENDPOINT}/HCX-005/extra", None),
+        # v1은 아는 모양이 아니다. 본문 규격도 다르고, 이 클라이언트는 v3만 보낸다.
+        ("https://example.invalid/v1/chat-completions/HCX-005", None),
+        ("", None),
     ],
 )
-def test_endpoint_resolution_never_doubles_or_guesses(api_url: str, expected: str) -> None:
-    assert resolve_endpoint(api_url, "HCX-005") == expected
-
-
-def test_endpoint_is_left_alone_without_a_model() -> None:
-    """모델이 비면 '/'를 붙이지 않는다. 그 상태는 build_chat_client가 먼저 막는다."""
-    assert (
-        resolve_endpoint("https://example.invalid/v3/chat-completions", "  ")
-        == "https://example.invalid/v3/chat-completions"
-    )
+def test_endpoint_model_name_is_read_only_from_the_known_shape(
+    api_url: str,
+    expected: str | None,
+) -> None:
+    assert endpoint_model_name(api_url) == expected
 
 
 # --------------------------------------------------------------------------
@@ -508,9 +617,35 @@ def test_truncated_response_is_reported_instead_of_passing_silently(
 
     logged = caplog.text
 
-    assert "maxTokens" in logged
+    # 상한을 부르는 이름은 모델군이 정한다. HCX-005는 maxTokens다.
+    assert "maxTokens=512" in logged
     assert API_KEY not in logged
     assert "576,684,619,527" not in logged
+
+
+def test_truncation_warning_names_the_field_the_model_actually_uses(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    경고가 늘 maxTokens라고 적으면 HCX-007 운영자는 없는 필드를 찾게 된다.
+
+    HCX-007에 maxTokens를 보내면 40001로 거절된다. 그 이름은 이 배포의 설정 어디에도 없다.
+    """
+    payload = ok_payload('{"answer": "한미반도체(주)의 2025년 연결 기준 매')
+    payload["result"]["finishReason"] = "length"
+
+    post = RecordingPost(json_response(200, payload))
+
+    with caplog.at_level(logging.WARNING, logger="disclosure_agent.agent.hyperclova"):
+        client(post, model="HCX-007", max_retries=0).complete(
+            system_prompt="S",
+            user_message="U",
+        )
+
+    logged = caplog.text
+
+    assert "maxCompletionTokens=512" in logged
+    assert "maxTokens=" not in logged
 
 
 def test_completed_response_is_not_reported_as_truncated(

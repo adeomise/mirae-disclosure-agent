@@ -20,6 +20,9 @@
 - 모델 이름은 URL에 실린다(v3: /v3/chat-completions/{modelName}). HYPERCLOVA_API_URL을
   모델까지 포함한 완전한 경로로 줘도 되고 기본 경로까지만 줘도 되며, 뒤쪽이면 여기서
   HYPERCLOVA_MODEL을 붙인다(resolve_endpoint).
+- 완전한 경로의 모델 이름이 HYPERCLOVA_MODEL과 다르면 요청을 만들지 않는다. URL이 부르는
+  모델과 본문이 따르는 계약이 갈리기 때문이다. 아는 모양(/v3/chat-completions/{modelName})
+  에서만 판정하며, 그 밖의 경로에서 마지막 segment를 모델 이름으로 읽지 않는다.
 
 재시도 정책:
 - 다시 물어서 달라질 수 있는 실패만 재시도한다(연결 실패, 타임아웃, 429, 5xx).
@@ -200,6 +203,23 @@ def capabilities_for(model: str) -> ModelCapabilities:
     return MODEL_CAPABILITIES.get(model.strip(), LEGACY_CAPABILITIES)
 
 
+def endpoint_model_name(api_url: str) -> str | None:
+    """
+    URL이 아는 모양일 때 거기 실려 있는 모델 이름. 아니면 None.
+
+    아는 모양은 하나다: /v3/chat-completions/{modelName}. 그 밖의 경로에서 마지막 segment를
+    모델 이름이라고 읽지 않는다. 튜닝 모델의 /v3/tasks/{taskId}/chat-completions가 그렇고,
+    배포마다 다른 경로 규칙도 그렇다. 추측한 이름으로 설정을 판정하면 멀쩡한 배포가 요청도
+    못 보내고 멈춘다.
+    """
+    head, separator, tail = api_url.rpartition("/")
+
+    if separator and tail and head.endswith(V3_CHAT_COMPLETIONS_PATH):
+        return tail
+
+    return None
+
+
 def resolve_endpoint(api_url: str, model: str) -> str:
     """
     실제로 POST할 URL.
@@ -211,9 +231,16 @@ def resolve_endpoint(api_url: str, model: str) -> str:
     세 가지만 구분한다. 그 밖의 경로는 손대지 않는다. 배포마다 경로 규칙이 다르고, 모르는
     모양을 추측해서 이어 붙이면 멀쩡한 설정을 깨뜨린다.
 
-    - 이미 /{model}로 끝나면 완전한 엔드포인트다. 그대로 쓴다.
     - /v3/chat-completions로 끝나면 모델 자리가 비어 있는 것이다. /{model}을 붙인다.
+    - /v3/chat-completions/{name}이면 완전한 엔드포인트다. name이 settings.model과 같을
+      때만 그대로 쓰고, 다르면 요청을 만들지 않는다(아래).
     - 그 밖(예: 튜닝 모델의 /v3/tasks/{taskId}/chat-completions)은 그대로 쓴다.
+
+    아는 모양에서 이름이 어긋나면 HyperClovaRequestError로 멈춘다. 그냥 두면 URL이 부르는
+    모델과 본문이 따르는 계약이 갈린다. 본문 모양은 settings.model로만 갈리므로
+    (MODEL_CAPABILITIES), 예를 들어 URL이 HCX-005이고 MODEL이 HCX-007이면 HCX-005에게
+    maxCompletionTokens와 responseFormat을 보내게 된다. 그 요청은 400으로 거절되고 4xx는
+    재시도하지 않으므로, 설정이 틀렸다는 사실이 '모델이 형식을 안 지킨다'로만 보인다.
     """
     url = api_url.strip().rstrip("/")
 
@@ -222,11 +249,17 @@ def resolve_endpoint(api_url: str, model: str) -> str:
 
     name = model.strip()
 
-    if url.endswith(f"/{name}"):
-        return url
-
     if url.endswith(V3_CHAT_COMPLETIONS_PATH):
         return f"{url}/{name}"
+
+    endpoint_model = endpoint_model_name(url)
+
+    if endpoint_model is not None and endpoint_model != name:
+        # URL은 밖에서 온 설정이라 그대로 옮기지 않는다. 어긋난 두 이름만으로 무엇을
+        # 고쳐야 하는지가 정해진다.
+        raise HyperClovaRequestError(
+            f"endpoint model {endpoint_model!r} does not match the configured model {name!r}"
+        )
 
     return url
 
@@ -241,7 +274,8 @@ class HttpHyperClovaClient:
 
     api_url은 모델 경로까지 포함한 완전한 엔드포인트로 줘도 되고, v3 chat-completions
     기본 경로까지만 줘도 된다. 뒤쪽이면 settings.model을 {modelName} 자리에 붙인다
-    (resolve_endpoint). 그 밖의 경로는 손대지 않는다.
+    (resolve_endpoint). 그 밖의 경로는 손대지 않는다. 앞쪽인데 URL의 모델 이름이
+    settings.model과 다르면 POST하기 전에 HyperClovaRequestError로 멈춘다.
 
     v1과 본문이 호환되지 않는다. 반복 패널티의 이름이 다르고(repetitionPenalty 대
     repeatPenalty) 범위도 다르므로, v1 경로에 이 본문을 보내면 그 값이 조용히 기본값으로
@@ -316,6 +350,10 @@ class HttpHyperClovaClient:
         return body
 
     def complete(self, *, system_prompt: str, user_message: str) -> str:
+        # 본문보다 먼저 푼다. URL이 부르는 모델과 본문이 따르는 계약이 어긋나면 여기서
+        # 멈추며, 그 자리는 첫 POST 앞이다.
+        endpoint = self.endpoint
+
         body = self.build_request_body(system_prompt=system_prompt, user_message=user_message)
 
         attempts = self.settings.max_retries + 1
@@ -324,7 +362,7 @@ class HttpHyperClovaClient:
 
         for attempt in range(1, attempts + 1):
             try:
-                return self._attempt(body)
+                return self._attempt(body, endpoint)
 
             except HyperClovaRequestError:
                 # 같은 요청을 다시 보내도 같은 답이 온다.
@@ -343,7 +381,7 @@ class HttpHyperClovaClient:
 
         raise last_error if last_error else HyperClovaUnavailableError("no attempt was made")
 
-    def _attempt(self, body: Mapping[str, Any]) -> str:
+    def _attempt(self, body: Mapping[str, Any], endpoint: str) -> str:
         headers = {
             "Authorization": f"Bearer {self.settings.api_key}",
             "Content-Type": "application/json",
@@ -353,7 +391,7 @@ class HttpHyperClovaClient:
 
         try:
             response = self.post(
-                self.endpoint,
+                endpoint,
                 headers=headers,
                 json=body,
                 timeout=self.settings.timeout_seconds,
@@ -400,9 +438,12 @@ class HttpHyperClovaClient:
             # 끊긴 응답은 JSON 봉투가 닫히지 않아 verbalizer가 not_json으로 거절한다. 틀린
             # 답이 나가지는 않지만, 연동이 정상인데도 결정론 문장만 나가는 상태가 이어진다.
             # 그 원인이 출력 예산이라는 사실은 여기서만 알 수 있다.
+            # 상한을 부르는 이름은 모델군이 정한다(maxTokens 대 maxCompletionTokens).
+            # 늘 maxTokens라고 적으면 HCX-007 운영자가 없는 필드를 찾게 된다.
             logger.warning(
-                "HyperCLOVA X response hit the output budget (maxTokens=%d); "
+                "HyperCLOVA X response hit the output budget (%s=%d); "
                 "the answer is truncated and will be rejected downstream",
+                self.capabilities.token_budget_field,
                 self.settings.max_tokens,
             )
 

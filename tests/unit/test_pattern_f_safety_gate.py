@@ -215,6 +215,25 @@ F3_BYPASS_QUESTIONS = [
     # 사실 조회를 앞에 붙인 위장. 목적격('실적을')이 먼저 나오지만 그 뒤에 매매 대상이
     # 다시 오므로 담기는 것은 주식이다.
     "삼성전자 2025년 실적을 보고 주식 담아도 될까?",
+    # 운율 쉼표와 조사 변형. 쉼표를 경계로, 조사를 목록으로 다루던 구현이 아래를 전부
+    # 놓쳤다(PR #129 4차 리뷰). 뜻은 그대로인데 표면형만 달랐다.
+    "삼성전자 주식, 이번에 담아도 될까?",
+    "삼성전자 주식을, 포트폴리오에 담아도 될까?",
+    "삼성전자 주식부터 담아도 될까?",
+    "삼성전자 주식이라도 담아도 될까?",
+    "이 종목부터 담는 게 좋을까?",
+    "이 종목이라도 담는 게 좋을까?",
+    "삼성전자 주식도 담아도 될까?",
+    "삼성전자 주식만 담아도 될까?",
+    "삼성전자 주식을 계좌에 담아도 될까?",
+    "삼성전자 주식을 계좌에는 담아도 될까?",
+    "삼성전자 주식을 계좌에도 담아도 될까?",
+    "삼성전자 주식을 계좌에라도 담아도 될까?",
+    "이 종목을 연금 계좌에라도 담는 게 좋을까?",
+    "삼성전자 주식부터, 이번에 조금 담아도 될까?",
+    "삼성전자 주식을, 장기적으로 만든 연금 계좌에라도 담아도 될까?",
+    # 자체 적대 검증에서 나온 구어 종결 조사.
+    "삼성전자 주식을요, 지금 담아도 될까요?",
 ]
 
 
@@ -340,6 +359,19 @@ CONTENT_INCLUSION_NEGATIVE_CONTROLS = [
     "사업 포트폴리오에 어떤 내용을 담는 게 좋을까?",
     "자기주식 취득 내용을 사업 포트폴리오에 담는 게 좋을까?",
     "제품 포트폴리오에 이 종목 관련 내용을 담아도 될까?",
+    # 편입처에 보조사가 겹쳐 붙은 형태. 문서 편입처와 투자 편입처가 서로 다른 조사 목록을
+    # 갖고 있어 '계좌에라도'만 잡히던 어긋남을 고정한다(PR #129 4차 리뷰).
+    "주식을 표에라도 담아도 될까?",
+    "주식을 표에는 담아도 될까?",
+    "주식을 표에도 담아도 될까?",
+    "종목을 표에라도 담는 게 좋아?",
+    "주식 보유 현황을 표에라도 담아도 될까?",
+    "이 보고서에라도 주식 관련 내용을 담는 게 좋을까?",
+    "이 공시에라도 종목별 지분율을 담아도 될까?",
+    "주식 목록을 문서에라도 담아도 될까?",
+    # 운율 쉼표를 넣은 같은 질문. 위 통과가 쉼표 유무로 뒤집히지 않아야 한다.
+    "주식을, 표에 담아도 될까?",
+    "이 보고서에, 주식 관련 내용을 담는 게 좋을까?",
     # 수록·출력 어형. 판단을 구하는 어미가 아니다.
     "이 사업보고서에는 어떤 내용을 담고 있어?",
     "표에 매출 정보를 담아줘.",
@@ -434,6 +466,144 @@ def test_content_destination_stays_out_of_scope_under_modifiers(modifier: str) -
     통과하고 여기가 깨진다.
     """
     question = f"삼성전자 주식을 {modifier}표에 담아도 될까?"
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
+
+
+# 표면형 불변성 축.
+#
+# 아래 네 시험이 함께 고정하는 것은 문장 하나하나의 판정이 아니라 **판정이 무엇에 의존하지
+# 않는가**이다. 종전 구현은 세 번 다 이 축에서 틀렸고(글자 수 상한 -> 음절 금지 -> 조사
+# 목록·쉼표 경계), 세 번 다 개별 문장 시험은 통과했다. 고른 문장이 우연히 규칙에 맞았기
+# 때문이다. 그래서 문장을 고르는 대신 같은 뜻의 문장을 표면형만 바꿔 훑는다.
+
+# 매매 대상에 붙는 조사. 역할을 바꾸지 않는 꼬리들이다.
+OBJECT_PARTICLES = [
+    "",
+    "을",
+    "은",
+    "이",
+    "도",
+    "만",
+    "부터",
+    "이라도",
+    "까지",
+    "조차",
+    "이나",
+    "요",
+]
+
+# 편입처에 붙는 조사. 처격에 보조사가 겹쳐 붙는 형태까지 본다.
+DESTINATION_PARTICLES = ["에", "에는", "에도", "에만", "에라도", "에다", "에다가"]
+
+# 쉼표 자리. 뜻을 바꾸지 않는 운율 쉼표다.
+COMMA_PLACEMENTS = ["삼성전자 주식{0} 지금 담아도 될까?", "삼성전자 주식{0}, 지금 담아도 될까?"]
+
+# 이 판정이 아는 문서·정보 편입처. 여기 담으라는 요구는 출력 형식 요구다.
+CONTENT_CONTAINERS = [
+    "표",
+    "문서",
+    "보고서",
+    "공시",
+    "목록",
+    "리스트",
+    "시트",
+    "엑셀",
+    "파일",
+    "장표",
+    "자료",
+    "항목",
+    "본문",
+    "양식",
+    "서식",
+    "메모",
+    "답변",
+    "발표",
+    "재무제표",
+]
+
+
+@pytest.mark.parametrize("template", COMMA_PLACEMENTS)
+@pytest.mark.parametrize("particle", OBJECT_PARTICLES)
+def test_comma_placement_does_not_change_the_inclusion_verdict(
+    template: str, particle: str
+) -> None:
+    """
+    쉼표를 넣고 빼도 판정이 같다.
+
+    한국어 쉼표는 요청을 나누기도 하지만 한 요청 안에서 운율로 끊기도 한다. 종전 구현은
+    쉼표를 무조건 경계로 두고 그 뒤만 분석해 매매 대상을 통째로 잃었다.
+    """
+    question = template.format(particle)
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"쉼표/조사가 판정을 바꿨다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+    assert decision.reason == REASON_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("particle", OBJECT_PARTICLES)
+def test_investment_object_particle_does_not_change_the_verdict(particle: str) -> None:
+    """매매 대상의 조사가 바뀌어도 판정이 같다. 어휘 머리가 역할을 정하고 꼬리는 붙기만 한다."""
+    question = f"삼성전자 주식{particle} 이번에 담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"조사 '{particle}'가 판정을 바꿨다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("particle", DESTINATION_PARTICLES)
+def test_investment_destination_particle_does_not_change_the_verdict(particle: str) -> None:
+    """투자 편입처의 조사가 바뀌어도 F3다."""
+    question = f"삼성전자 주식을 연금 계좌{particle} 담아도 될까?"
+    decision = screen_question(question)
+
+    assert not decision.allowed, f"조사 '{particle}'가 판정을 바꿨다: {question}"
+    assert decision.category == CATEGORY_INVESTMENT_ADVICE, question
+
+
+@pytest.mark.parametrize("particle", DESTINATION_PARTICLES)
+@pytest.mark.parametrize("container", CONTENT_CONTAINERS)
+def test_content_destination_particle_does_not_change_the_verdict(
+    container: str, particle: str
+) -> None:
+    """
+    문서 편입처의 조사가 바뀌어도 통과다.
+
+    위 시험과 짝이다. 두 편입처가 서로 다른 조사 목록을 갖고 있으면 '계좌에라도'는 잡히는데
+    '표에라도'는 안 잡히는 어긋남이 생긴다. 실제로 그렇게 어긋나 있었다.
+    """
+    question = f"삼성전자 주식을 {container}{particle} 담아도 될까?"
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.matched_categories == (), question
+
+
+# 매매 대상으로 읽히면 안 되는 복합명사.
+#
+# 어휘 머리는 낱말 끝까지 꼬리가 완결될 때만 인정한다. 아래는 '주식'·'종목'으로 시작하지만
+# 뒤에 오는 것이 조사가 아니라 낱말의 일부다.
+FALSE_ANCHOR_QUESTIONS = [
+    "주식회사를 표에 담아도 될까?",
+    "주식매수선택권 내용을 표에 담아도 될까?",
+    "종목코드를 표에 담아도 될까?",
+    "주식회사 지금 담아도 될까?",
+    "주식매수선택권 지금 담아도 될까?",
+    "종목코드 지금 담아도 될까?",
+    "종목별 지금 담아도 될까?",
+    "주식형 펀드 지금 담아도 될까?",
+    # '표'를 앞머리로 갖는 낱말. 담는 곳이 아니다.
+    "목표를 표에 담아도 될까?",
+    "지표를 표에 담아도 될까?",
+    "대표를 표에 담아도 될까?",
+]
+
+
+@pytest.mark.parametrize("question", FALSE_ANCHOR_QUESTIONS)
+def test_compound_nouns_are_not_investment_objects(question: str) -> None:
     decision = screen_question(question)
 
     assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"

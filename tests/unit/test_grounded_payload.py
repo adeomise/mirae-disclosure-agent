@@ -29,6 +29,8 @@ from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
     ComparisonRelation,
+    EventLinkRelation,
+    EventLinkResolutionStatus,
     EventType,
     EvidenceLocationType,
     ExecutionStatus,
@@ -46,10 +48,12 @@ from disclosure_agent.common.schemas import (
     DocumentSummary,
     Event,
     EventHistory,
+    EventLink,
     Evidence,
     EvidenceProvenance,
     Fact,
     FieldChange,
+    RawReference,
     ResultInputReference,
     SummaryItem,
 )
@@ -365,6 +369,106 @@ def test_event_history_carries_counts_and_completeness_only() -> None:
 
     assert "contract_amount" not in body
     assert "120" not in body
+
+
+def q15_shaped_result() -> AgentExecutionResult:
+    """실측 Q15와 같은 모양. 공시 4건, 필드 변경 4건, EventLink 3건.
+
+    사용자가 "몇 번 바뀌었어?"로 묻는 셈은 정정 이력의 개수이며 여기서는 3이다. payload가 싣는
+    두 셈(4와 4)에는 그 값이 없다.
+    """
+    history = EventHistory(
+        event_id="evt_facility",
+        document_ids=["doc_original", "doc_fix_1", "doc_fix_2", "doc_fix_3"],
+        changes=[
+            FieldChange(field_name="investment_amount", before=100.0, after=120.0, unit="원"),
+            FieldChange(field_name="investment_end_date", before="2025-01-01", after="2025-06-01"),
+            FieldChange(field_name="investment_amount", before=120.0, after=140.0, unit="원"),
+            FieldChange(field_name="investment_end_date", before="2025-06-01", after="2026-01-01"),
+        ],
+        chain_complete=True,
+    )
+
+    links = [
+        EventLink(
+            link_id=f"link_fix_{index}",
+            source_doc_id=f"doc_fix_{index}",
+            relation=EventLinkRelation.CORRECTION_OF,
+            raw_reference=RawReference(
+                document_title="신규시설투자등",
+                original_filing_date="2024-04-30",
+                correction_filing_date=f"2025-0{index}-01",
+                correction_reason="정정",
+            ),
+            resolved_doc_id="doc_original",
+            resolution_status=EventLinkResolutionStatus.RESOLVED,
+        )
+        for index in (1, 2, 3)
+    ]
+
+    return completed(
+        status=AnswerabilityStatus.ANSWERABLE,
+        event_histories=[history],
+        event_links=links,
+        evidence=[evidence()],
+    )
+
+
+def test_event_links_block_grounding() -> None:
+    """
+    답에 필요한 셈이 payload에 없는 모양은 외부 모델에 넘기지 않는다.
+
+    "몇 번 바뀌었어?"의 답은 EventLink의 개수(3)이고 payload가 싣는 셈은 공시 4건과 필드 변경
+    4건뿐이다. 그대로 보내면 모델은 갖고 있는 수로 답하며 "4번 바뀌었습니다"가 나간다. 그 4는
+    payload 안의 수라서 수치 검증도 값-주인 짝 검사도 통과하고, 틀렸다는 사실이 남는 자리가
+    없다.
+
+    셈을 여기서 새로 싣지 않는다. 그 값을 무엇이라 부르고 어떤 표기로 적을지가 결정론 경로에도
+    아직 없으므로, 그 계약이 생기기 전까지 이 모양은 통째로 결정론 경로에 맡긴다.
+    """
+    result = q15_shaped_result()
+
+    # 문제의 전제. 답이 될 3은 payload가 싣는 두 셈 어디에도 없다.
+    assert len(result.event_histories[0].document_ids) == 4
+    assert len(result.event_histories[0].changes) == 4
+    assert len(result.event_links) == 3
+
+    with pytest.raises(PayloadNotGroundableError, match="EventLink"):
+        grounded(result)
+
+
+def test_q15_shaped_result_keeps_its_deterministic_answer_and_count() -> None:
+    """
+    막는 것은 외부 모델 경로뿐이다. 결정론 경로는 그대로 답하고, 사용자에게 답할 셈도 그대로
+    남는다.
+
+    EventLink는 구조화 응답에 실려 나가므로 "몇 번"의 값 3은 사라지지 않는다. 그 값을 문장으로
+    옮기는 일은 이 PR의 범위가 아니다.
+    """
+    result = q15_shaped_result()
+
+    response = build_answer_response(result)
+
+    assert response.answer
+    assert len(response.event_links) == 3
+
+
+def test_event_history_without_links_is_still_grounded() -> None:
+    """
+    셈이 모두 표현된 이력은 지금까지와 같이 넘어간다.
+
+    EventLink가 없으면 payload 밖에 남는 셈이 없다. 막는 기준은 이력이라는 모양 자체가 아니라
+    표현하지 못하는 셈이 있는지다.
+    """
+    result = history_result()
+
+    assert result.event_links == []
+
+    payload = grounded(result)
+
+    [history] = payload.event_histories  # type: ignore[attr-defined]
+
+    assert (history.document_count, history.change_count) == (2, 1)
 
 
 def test_partial_history_carries_the_deterministic_limitation_sentence() -> None:

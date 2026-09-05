@@ -72,6 +72,7 @@ from disclosure_agent.agent.derived_metrics import (
     UNIT_PERCENT,
     DerivedMetric,
 )
+from disclosure_agent.agent.query_vocabulary import OPERATION_CHANGE_COUNT
 from disclosure_agent.agent.safety import (
     REASON_FORWARD_LOOKING_PREDICTION,
     REASON_INVESTMENT_ADVICE,
@@ -3395,3 +3396,91 @@ def test_partial_source_support_has_a_partial_limitation_message() -> None:
 
     assert message.strip()
     assert "원문 근거" in message
+
+
+# --------------------------------------------------------------------------
+# 이력이 몇 차례 정정됐는가
+#
+# 사용자가 "몇 번 바뀌었어?"로 묻는 값은 정정 이력의 개수이며, 변경 항목 건수가 아니다. 실측
+# Q15가 공시 4건·변경 항목 4건·정정 3회로 세 값이 모두 다르다.
+# --------------------------------------------------------------------------
+
+
+def q15_shaped_history_result(*, count_requested: bool) -> AgentExecutionResult:
+    """실측 Q15와 같은 모양. 공시 4건, 필드 변경 4건, EventLink 3건."""
+    history = EventHistory(
+        event_id="evt_facility",
+        document_ids=["doc_root", "doc_fix_1", "doc_fix_2", "doc_fix_3"],
+        changes=[
+            FieldChange(field_name="investment_amount", before=100.0, after=120.0),
+            FieldChange(field_name="investment_end_date", before="2025-01-01", after="2025-06-01"),
+            FieldChange(field_name="investment_amount", before=120.0, after=140.0),
+            FieldChange(field_name="investment_end_date", before="2025-06-01", after="2026-01-01"),
+        ],
+        chain_complete=True,
+    )
+
+    links = [
+        EventLink(
+            link_id=f"link_fix_{index}",
+            source_doc_id=f"doc_fix_{index}",
+            relation=EventLinkRelation.CORRECTION_OF,
+            raw_reference=RawReference(
+                document_title="신규시설투자등",
+                original_filing_date="2024-04-30",
+                correction_filing_date=f"2025-0{index}-01",
+                correction_reason="정정",
+            ),
+            resolved_doc_id="doc_root",
+            resolution_status=EventLinkResolutionStatus.RESOLVED,
+        )
+        for index in (1, 2, 3)
+    ]
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        event_histories=[history],
+        event_links=links,
+        evidence=[make_evidence()],
+        operations=[OPERATION_CHANGE_COUNT] if count_requested else [],
+    )
+
+
+def test_count_question_answer_states_the_correction_count() -> None:
+    """
+    횟수를 물은 질문에는 정정 이력의 개수로 답한다.
+
+    변경 항목 건수로 답하면 "네 번 바뀌었다"가 되어 틀린다. 정정 한 건이 여러 필드를 바꿀 수
+    있어 변경 항목은 정정 횟수보다 많아진다.
+    """
+    result = q15_shaped_history_result(count_requested=True)
+
+    # 세 값이 모두 다르다는 것이 이 고정의 전제다.
+    assert len(result.event_histories[0].document_ids) == 4
+    assert len(result.event_histories[0].changes) == 4
+    assert len(result.event_links) == 3
+
+    answer = build_answer_response(result).answer
+
+    assert "3회" in answer
+
+    # 4를 바뀐 횟수로 부르지 않는다.
+    assert "4회" not in answer
+    assert "4번" not in answer
+
+
+def test_content_question_answer_states_no_correction_count() -> None:
+    """
+    묻지 않은 질문에 횟수를 덧붙이지 않는다.
+
+    결과에 없는 것을 말하는 것이 아니라, 사용자가 묻지 않은 것을 답의 일부로 만드는 일이다.
+    """
+    answer = build_answer_response(q15_shaped_history_result(count_requested=False)).answer
+
+    assert "정정되었습니다" not in answer
+    assert "3회" not in answer
+
+    # 이력 문장 자체는 지금까지와 같다.
+    assert "관련 공시 4건" in answer
+    assert "확인된 변경 항목은 4건입니다" in answer

@@ -43,6 +43,9 @@ __all__ = [
     "find_years",
     "matches_product_phrase",
     "normalize_aggregate_request",
+    "normalize_change_count_request",
+    "OPERATION_CHANGE_COUNT",
+    "CHANGE_COUNT_REQUEST_PATTERN",
 ]
 
 
@@ -388,12 +391,41 @@ OPERATION_AGGREGATE = "aggregate"
 #     자리만 읽는다. "전부 더 하락했어"는 '더'와 '하락' 사이가 떨어져 있어 걸리지 않는다.
 #
 #     '다 더해'는 넣지 않는다. "~보다 더해"가 같은 글자를 담고 있어 비교 질문을 끌어온다.
+# 이력이 몇 차례 정정됐는지를 세는 요청. QueryPlan.operations의 어휘다.
+OPERATION_CHANGE_COUNT = "change_count"
+
+
 AGGREGATE_REQUEST_PATTERN = re.compile(
     r"합치|합쳐|합친"
     r"|합산"
     r"|합계|총합"
     r"|(?:전부|모두|전체)\s*더(?:해|한|하면|하고|하기|할|합)"
 )
+
+
+# 정정이 몇 차례 있었는지를 묻는 표현.
+#
+# 이력 질문에는 두 갈래가 있다. "무엇이 바뀌었어?"는 바뀐 내용을 묻고, "몇 번 바뀌었어?"는
+# 바뀐 횟수를 묻는다. 앞쪽은 변경 항목으로 답하고 뒤쪽은 정정 이력의 개수로 답하는데, 두 값이
+# 다르다. Q15 실측이 변경 항목 4건에 정정 3회다. 계획이 이 구분을 담지 않으면 어느 쪽을 묻든
+# 같은 문장이 나가고, 횟수를 물은 질문은 답을 받지 못한다.
+#
+# 수량 표현을 요구한다:
+#     '번'과 '회'는 횟수가 아닌 자리에 훨씬 자주 쓰인다("이번", "1회차", "번호"). 그래서
+#     '몇'이 앞에 붙은 자리만 읽는다. "몇 번째"는 넣지 않는다. 순서를 묻는 말이고 답이
+#     개수가 아니다.
+#
+# 이 판정은 여기까지다. 무엇을 세는지는 계획이 정하고(query_analyzer의 이력 계획),
+# 그 값을 어떻게 적을지는 문장을 만드는 쪽이 정한다(answer_builder).
+CHANGE_COUNT_REQUEST_PATTERN = re.compile(r"몇\s*(?:번|회|차례)(?!째)")
+
+
+def normalize_change_count_request(question: str) -> str | None:
+    """질문이 정정 횟수를 요청했으면 정본 이름으로 옮긴다. 아니면 None이며 추측하지 않는다."""
+    if CHANGE_COUNT_REQUEST_PATTERN.search(question) is None:
+        return None
+
+    return OPERATION_CHANGE_COUNT
 
 
 def normalize_aggregate_request(question: str) -> str | None:

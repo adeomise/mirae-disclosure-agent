@@ -73,6 +73,10 @@ from disclosure_agent.agent.query_analyzer import (
     UnsupportedQuestionError,
     build_query_plan,
 )
+from disclosure_agent.agent.query_vocabulary import (
+    OPERATION_CHANGE_COUNT,
+    normalize_change_count_request,
+)
 from disclosure_agent.agent.router import answer_question
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
@@ -486,6 +490,48 @@ def test_supply_contract_history_question_with_a_month_still_requires_a_year() -
         )
 
     assert error.value.reason == "missing_year"
+
+
+def test_count_question_carries_the_change_count_request() -> None:
+    """
+    "몇 번 바뀌었어?"는 횟수를 묻는다. 그 사실을 계획이 담는다.
+
+    이력을 확보하는 절차는 두 갈래가 같다. 다른 것은 그 이력의 무엇을 답으로 삼는가뿐이고,
+    그 구분은 질문에만 있다. 계획이 담지 않으면 표현 계층은 횟수를 물은 질문과 내용을 물은
+    질문을 가르지 못한다.
+    """
+    plan = build_query_plan(SYNTHETIC_Q15, known_companies=KNOWN_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert OPERATION_CHANGE_COUNT in plan.operations
+
+
+def test_content_question_does_not_carry_the_change_count_request() -> None:
+    """
+    "바뀐 내용 있어?"는 내용을 묻는다. 횟수를 요청한 적이 없다.
+
+    이 자리를 비워 두지 않으면 묻지 않은 값이 답에 실린다.
+    """
+    plan = build_query_plan(SYNTHETIC_Q13, known_companies=KNOWN_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.operations == ()
+
+
+def test_ordinal_wording_is_not_a_count_request() -> None:
+    """
+    "몇 번째"는 순서를 묻는 말이고 답이 개수가 아니다.
+
+    '번'과 '회'는 횟수가 아닌 자리에 훨씬 자주 쓰인다. 어휘를 넓게 잡으면 순서를 물은 질문에
+    개수가 답으로 나간다.
+    """
+    assert normalize_change_count_request("몇 번째로 바뀐 거야?") is None
+    assert normalize_change_count_request("이번 계약은 어떻게 됐어?") is None
+    assert normalize_change_count_request("1회차 계약 내용 알려줘") is None
+
+    assert normalize_change_count_request("몇 번 바뀌었어?") == OPERATION_CHANGE_COUNT
+    assert normalize_change_count_request("몇 회 정정됐어?") == OPERATION_CHANGE_COUNT
+    assert normalize_change_count_request("몇 차례 바뀌었어?") == OPERATION_CHANGE_COUNT
 
 
 def test_q13_shaped_question_keeps_its_supply_contract_plan() -> None:

@@ -76,6 +76,7 @@ from disclosure_agent.agent.derived_metrics import DerivedMetric
 #     건드리게 되고, 표현 하나를 받아들이는 변경과 지원 범위를 넓히는 변경이 구분되지 않는다.
 from disclosure_agent.agent.query_vocabulary import (
     OPERATION_AGGREGATE,
+    OPERATION_CHANGE_COUNT,
     PRODUCT_TOKENS,
     YEAR_PATTERN,
     find_contract_fields,
@@ -84,6 +85,7 @@ from disclosure_agent.agent.query_vocabulary import (
     find_years,
     matches_product_phrase,
     normalize_aggregate_request,
+    normalize_change_count_request,
 )
 from disclosure_agent.common.enums import (
     ChainPolicy,
@@ -3145,6 +3147,16 @@ def _build_event_history_plan(
         # (_extract_event_counterparty 참조).
         counterparty=_extract_event_counterparty(question, companies[0], subject_names),
         chain_policy=ChainPolicy.FULL_CHAIN,
+        # 횟수를 물었는지를 담는다. 묻지 않았으면 빈 튜플이며, 그때의 동작은 지금까지와 같다.
+        #
+        # intent로 가르지 않는 이유는 두 갈래가 같은 이력을 확보하기 때문이다. 확보 절차도
+        # 근거도 같고 다른 것은 그 이력의 무엇을 답으로 삼는가뿐이다. intent를 나누면 handler가
+        # 두 벌이 된다.
+        operations=(
+            (OPERATION_CHANGE_COUNT,)
+            if normalize_change_count_request(question) == OPERATION_CHANGE_COUNT
+            else ()
+        ),
     )
 
 

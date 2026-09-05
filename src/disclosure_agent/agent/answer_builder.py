@@ -44,6 +44,7 @@ from disclosure_agent.agent.derived_metrics import (
 )
 from disclosure_agent.agent.evidence import Evidence
 from disclosure_agent.agent.query_analyzer import QueryPlan
+from disclosure_agent.agent.query_vocabulary import OPERATION_CHANGE_COUNT
 from disclosure_agent.agent.safety import (
     REASON_FORWARD_LOOKING_PREDICTION,
     REASON_INVESTMENT_ADVICE,
@@ -524,6 +525,21 @@ EVENT_COUNT_LABELS: dict[str, str] = {
 }
 
 EVENT_COUNT_UNIT = "건"
+
+# 정정 이력의 셈. "몇 번 바뀌었어?"가 묻는 값이다.
+#
+# 위 두 셈과 다른 축이라 EVENT_COUNT_LABELS에 넣지 않는다. 공시 건수는 이력에 속한 문서의
+# 수이고, 변경 항목 건수는 그 문서들이 바꾼 필드의 수다. 사용자가 "몇 번"으로 묻는 것은
+# 정정이 몇 차례 있었는가이며 그 값은 EventLink의 개수다. 실측 Q15가 공시 4건·변경 항목
+# 4건·정정 3회이고, 세 값이 모두 다르다.
+#
+# 단위가 '건'이 아니라 '회'인 이유도 같다. 앞의 둘은 세는 대상이 있는 셈이고 이쪽은 횟수다.
+CORRECTION_COUNT_UNIT = "회"
+
+
+def correction_count_display(count: int) -> str:
+    """정정 횟수가 문장에 적히는 표기."""
+    return f"{count}{CORRECTION_COUNT_UNIT}"
 
 
 def event_count_display(count: int) -> str:
@@ -1288,7 +1304,16 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
         # partial은 _limitation에만 넘긴다. 완결 여부는 _event_history_sentence가
         # history.chain_complete에서 직접 읽는다.
         return _join(
-            _event_history_sentence(result.event_histories),
+            _event_history_sentence(
+                result.event_histories,
+                # 세는 일은 여기서 한다. 질문이 요청했는지는 계획이 정했고
+                # (query_analyzer의 이력 계획) 그 요청은 결과가 날라 왔다.
+                correction_count=(
+                    len(result.event_links)
+                    if OPERATION_CHANGE_COUNT in result.operations
+                    else None
+                ),
+            ),
             _limitation(result, partial=partial),
         )
 
@@ -2797,7 +2822,11 @@ def _calculation_value(calculation: CalculationResult) -> str:
     return rendered
 
 
-def _event_history_sentence(histories: list[EventHistory]) -> str:
+def _event_history_sentence(
+    histories: list[EventHistory],
+    *,
+    correction_count: int | None = None,
+) -> str:
     """
     EventHistory 1건을 문장으로 옮긴다.
 
@@ -2814,6 +2843,18 @@ def _event_history_sentence(histories: list[EventHistory]) -> str:
 
     구조화 결과에 적힌 것만 말한다. 공시 건수는 document_ids에서, 변경 건수는 changes에서
     센다.
+
+    correction_count는 "몇 번 바뀌었어?"에 답할 값이다:
+        질문이 횟수를 물었을 때만 온다. None이면 묻지 않은 것이고, 그때 이 문장은 지금까지와
+        같다. 묻지 않은 질문에 횟수를 덧붙이면 결과에 없는 것을 말하는 것이 아니라 사용자가
+        묻지 않은 것을 답의 일부로 만든다.
+
+        값은 EventLink의 개수다. 변경 항목 건수가 아니다. 두 값은 다르며(실측 Q15가 변경 항목
+        4건에 정정 3회) 변경 항목 쪽으로 답하면 "네 번 바뀌었다"가 되어 틀린다. 변경 항목은
+        정정 한 건이 여러 필드를 바꿀 수 있어 정정 횟수보다 많아진다.
+
+        세는 일은 호출부가 한다. 이 함수는 EventLink를 받지 않으며, 받아서 세면 무엇을 셀지를
+        정하는 자리가 둘로 갈린다.
 
     변경 항목의 '이름'은 문장에 넣지 않는다:
         FieldChange.field_name은 canonical 영문 식별자(contract_amount 등)이고, 한국어 문장에
@@ -2861,6 +2902,11 @@ def _event_history_sentence(histories: list[EventHistory]) -> str:
             f"관련 {EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT]} "
             f"{event_count_display(document_count)}으로 이어지는 이력을 확인했습니다."
         )
+
+    if correction_count is not None:
+        # 문서 문장 바로 뒤에 둔다. 아래 변경 항목 건수와 나란히 놓여야 두 셈이 다른 것을
+        # 세고 있다는 것이 문장에서 드러난다.
+        sentence = f"{sentence} 이후 {correction_count_display(correction_count)} 정정되었습니다."
 
     change_count = len(history.changes)
 

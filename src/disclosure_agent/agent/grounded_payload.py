@@ -430,6 +430,21 @@ def _resolve_supported_shape(result: AgentExecutionResult) -> _ResultShape:
     payload에는 그것을 담을 자리가 없다. 그대로 보내면 모델은 값을 하나도 받지 못한 채
     EventHistory의 건수만 보고 요약 문장을 지어내게 된다.
 
+    EventLink도 같은 자리다. "그동안 계획이 몇 번 바뀌었어?"가 묻는 셈은 정정 이력의 개수이고
+    그것은 EventLink의 개수다. payload가 싣는 셈은 공시 건수와 필드 변경 건수뿐이다
+    (GroundedEventHistory). 실측 Q15가 공시 4건·필드 변경 4건·EventLink 3건이므로, 답이 될
+    3은 payload 어디에도 없다.
+
+    없는 값을 안 보내는 것으로 끝나지 않는다. 모델은 받은 수로 답하며 "4번 바뀌었습니다"가
+    나간다. 그 4는 payload 안의 수라서 수치 검증도, 값-주인 짝 검사도 통과한다. 틀렸다는 사실이
+    남는 자리가 없다.
+
+    여기서 EventLink를 싣는 자리를 만들지 않는다. 그 셈을 무엇이라 부르고 어떤 표기로 적을지는
+    결정론 경로에도 아직 없다(answer_builder._event_history_sentence는 공시와 변경 항목만
+    적는다). 표기가 정해지기 전에 payload에 먼저 실으면 그 자리가 사실상의 정본이 된다.
+    그때까지 이 모양은 통째로 결정론 경로에 맡긴다. 구조화 결과에는 EventLink가 그대로 실려
+    나가므로(answer_builder.build_answer_response) 셈 자체가 사라지지는 않는다.
+
     다중 Fact는 반대다. 결정론 경로가 답하는 두 모양(Q07 증감, Q08 파생지표 변화)은 값도 관계도
     payload가 그대로 담을 수 있다. 그래서 그 둘만 열고 나머지 다중 Fact는 그대로 막는다. 계약
     묶음(Q02)·지분공시 묶음(Q03)은 결정론 경로가 답하지만 아직 열지 않았다. 여는 자리는 여기가
@@ -446,6 +461,13 @@ def _resolve_supported_shape(result: AgentExecutionResult) -> _ResultShape:
             f"ResolvedEventState {len(result.resolved_event_states)}건이 실려 있습니다. "
             "이벤트 단건 요약은 아직 payload로 옮기지 않으며, 상태를 뺀 나머지만 보내지 "
             "않습니다."
+        )
+
+    if result.event_links:
+        raise PayloadNotGroundableError(
+            f"EventLink {len(result.event_links)}건이 실려 있습니다. "
+            "이력이 몇 번 바뀌었는지를 세는 값이 payload에 없어, 답에 필요한 셈을 보내지 못한 채 "
+            "다른 셈만 보내게 됩니다."
         )
 
     if result.comparisons and result.event_histories:

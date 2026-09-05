@@ -886,6 +886,7 @@ def normalize_event_history_result(result: EventHistoryResult) -> AgentExecution
         event_histories=[result.history],
         event_links=list(result.links),
         evidence=list(result.evidence),
+        operations=list(result.plan.operations),
         warnings=warnings,
         conversion_gaps=gaps,
     )

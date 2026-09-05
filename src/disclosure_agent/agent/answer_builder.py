@@ -44,6 +44,7 @@ from disclosure_agent.agent.derived_metrics import (
 )
 from disclosure_agent.agent.evidence import Evidence
 from disclosure_agent.agent.query_analyzer import QueryPlan
+from disclosure_agent.agent.query_vocabulary import OPERATION_CHANGE_COUNT
 from disclosure_agent.agent.safety import (
     REASON_FORWARD_LOOKING_PREDICTION,
     REASON_INVESTMENT_ADVICE,
@@ -506,6 +507,48 @@ DERIVED_METRIC_LABELS: dict[DerivedMetric, str] = {
     DerivedMetric.OPERATING_MARGIN: "영업이익률",
 }
 
+# 이력이 세는 것의 이름과 그 셈의 단위.
+#
+# 이력에는 셈이 둘 있고(확인한 공시, 확인된 변경) 문장에서는 둘 다 "N건"으로 적힌다. 숫자만
+# 보면 어느 셈인지 알 수 없으므로 무엇을 센 것인지를 이름으로 남긴다.
+#
+# 대응표로 두는 이유는 이 이름이 두 곳에서 쓰이기 때문이다. 아래 _event_history_sentence가
+# 문장을 만들 때 쓰고, grounded_payload가 검증기에 넘길 표기를 만들 때 읽는다. 문장에 직접
+# 적어 두면 검증기가 같은 한국어를 따로 한 벌 더 갖게 되고, 한쪽만 바뀌는 날 검증기는 문장에
+# 없는 이름을 찾게 된다.
+EVENT_COUNT_DOCUMENT = "document"
+EVENT_COUNT_CHANGE = "change"
+
+EVENT_COUNT_LABELS: dict[str, str] = {
+    EVENT_COUNT_DOCUMENT: "공시",
+    EVENT_COUNT_CHANGE: "변경 항목",
+}
+
+EVENT_COUNT_UNIT = "건"
+
+# 정정 이력의 셈. "몇 번 바뀌었어?"가 묻는 값이다.
+#
+# 위 두 셈과 다른 축이라 EVENT_COUNT_LABELS에 넣지 않는다. 공시 건수는 이력에 속한 문서의
+# 수이고, 변경 항목 건수는 그 문서들이 바꾼 필드의 수다. 사용자가 "몇 번"으로 묻는 것은
+# 정정이 몇 차례 있었는가이며 그 값은 EventLink의 개수다. 실측 Q15가 공시 4건·변경 항목
+# 4건·정정 3회이고, 세 값이 모두 다르다.
+#
+# 단위가 '건'이 아니라 '회'인 이유도 같다. 앞의 둘은 세는 대상이 있는 셈이고 이쪽은 횟수다.
+CORRECTION_COUNT_UNIT = "회"
+
+
+def correction_count_display(count: int) -> str:
+    """정정 횟수가 문장에 적히는 표기."""
+    return f"{count}{CORRECTION_COUNT_UNIT}"
+
+
+def event_count_display(count: int) -> str:
+    """이력의 셈이 문장에 적히는 표기.
+
+    단위를 붙인 문자열이다. 맨 숫자로 두면 금액이나 연도의 자릿수와 구별되지 않는다.
+    """
+    return f"{count}{EVENT_COUNT_UNIT}"
+
 # 변화량의 결과 단위. 백분율 두 건의 차이는 %가 아니라 percentage point다.
 #
 # agent.calculator가 정본이며 아래 OPERATION_DELTA 주석이 적어 둔 순환 import 때문에 그쪽에서
@@ -541,6 +584,32 @@ CALCULATION_UNIT_LABELS: dict[str, str] = {
 OPERATION_DELTA = "delta"
 OPERATION_DELTA_PCT = "delta_pct"
 OPERATION_DIFF_PP = "diff_pp"
+
+# Pattern C가 만드는 계산의 개념 표기.
+#
+# _derived_metric_label이 쓰는 DERIVED_METRIC_LABELS와 나란히 두되 합치지 않는다. 열쇠의
+# 성질이 다르다:
+#     DERIVED_METRIC_LABELS   파생 개념 자체의 이름(영업이익률). 분자·분모 조합이 정의이며
+#                             agent.derived_metrics가 정본이다.
+#     이 표                   두 기간 사이의 변화를 부르는 이름(증감액·증감률·차이). 어느
+#                             지표의 변화인지와 무관하게 연산 이름만으로 정해진다.
+#
+# 합치면 "매출액의 증감액"과 "영업이익률" 두 종류의 이름이 한 표에 섞이고, 대응을 찾지 못했을
+# 때 어느 쪽 대응표를 고쳐야 하는지 알 수 없게 된다.
+#
+# 문장 안의 리터럴로 두지 않는 이유:
+#     grounded_payload가 같은 이름을 읽어야 한다. 그쪽이 자기 표를 만들면 같은 계산이 결정론
+#     문장과 HCX payload에서 다른 이름으로 불리고, 어느 쪽이 정본인지 알 수 없게 된다
+#     (grounded_payload 모듈 docstring "표기의 정본은 answer_builder다").
+#
+#     문장 구절이 아니라 개념 이름만 담는다. "두 연도의 차이는"에서 표에 있는 것은 "차이"뿐이며,
+#     앞뒤의 "두 연도의"와 조사는 문장 조립이 붙인다. 구절째 담으면 payload가 쓰려면 잘라내야
+#     하고, 그 가공이 문장 조립 규칙을 payload 계층으로 옮겨 오는 일이 된다.
+TEMPORAL_OPERATION_LABELS: dict[str, str] = {
+    OPERATION_DELTA: "증감액",
+    OPERATION_DELTA_PCT: "증감률",
+    OPERATION_DIFF_PP: "차이",
+}
 
 # Q12가 만드는 기업별 합계 연산 이름. calculator가 이 모듈의 정지 사유를 import하므로 같은
 # 순환 import 제약이 있으며, 테스트에서 calculator의 정본 이름과 함께 고정한다. 이 이름을
@@ -1235,7 +1304,16 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
         # partial은 _limitation에만 넘긴다. 완결 여부는 _event_history_sentence가
         # history.chain_complete에서 직접 읽는다.
         return _join(
-            _event_history_sentence(result.event_histories),
+            _event_history_sentence(
+                result.event_histories,
+                # 세는 일은 여기서 한다. 질문이 요청했는지는 계획이 정했고
+                # (query_analyzer의 이력 계획) 그 요청은 결과가 날라 왔다.
+                correction_count=(
+                    len(result.event_links)
+                    if OPERATION_CHANGE_COUNT in result.operations
+                    else None
+                ),
+            ),
             _limitation(result, partial=partial),
         )
 
@@ -1562,11 +1640,16 @@ def _temporal_delta_sentence(result: AgentExecutionResult) -> str:
 
     label = _metric_label(metric)
 
+    amount_label = TEMPORAL_OPERATION_LABELS[OPERATION_DELTA]
+
+    rate_label = TEMPORAL_OPERATION_LABELS[OPERATION_DELTA_PCT]
+
     return _join(
         f"{company}의 {_scope_phrase(scope)}{label}{_topic_particle(label)} "
         f"{_period_phrase(previous)}{_fact_value(previous)}, "
         f"{_period_phrase(current)}{_fact_value(current)}입니다.",
-        f"증감액은 {_delta_amount(amount)}, 증감률은 {_calculation_value(rate)}입니다.",
+        f"{amount_label}{_topic_particle(amount_label)} {_delta_amount(amount)}, "
+        f"{rate_label}{_topic_particle(rate_label)} {_calculation_value(rate)}입니다.",
     )
 
 
@@ -1581,6 +1664,9 @@ def _delta_amount(calculation: CalculationResult) -> str:
 
     표기가 없으면 멈춘다. 정규화 단위를 그대로 문장에 적으면 한국어 문장에 추출 계층의 어휘가
     실린다(_normalized_value_with_unit과 같은 자리).
+
+    값은 _grouped_amount가 정한다. 계산 계층이 넘기는 문자열을 그대로 적지 않는 이유는 아래
+    그 함수의 docstring에 있다.
     """
     label = (
         FACT_NORMALIZED_UNIT_LABELS.get(calculation.unit)
@@ -1594,7 +1680,7 @@ def _delta_amount(calculation: CalculationResult) -> str:
             "FACT_NORMALIZED_UNIT_LABELS에 추가하십시오."
         )
 
-    rendered = _value_with_unit(calculation.value, label)
+    rendered = _value_with_unit(_grouped_amount(calculation), label)
 
     if rendered is None:
         raise MissingAnswerSupportError(
@@ -1603,6 +1689,82 @@ def _delta_amount(calculation: CalculationResult) -> str:
         )
 
     return rendered
+
+
+def _grouped_amount(calculation: CalculationResult) -> str | None:
+    """
+    금액 증감의 수치 표기. 세 자리마다 쉼표를 넣고 의미 없는 소수점 이하 0을 지운다.
+
+    계산 계층의 문자열을 그대로 적지 않는 이유:
+        calculator.delta는 저장 자릿수로 quantize한 값을 문자열로 넘긴다. 원 단위 금액에서
+        그 결과는 17767427980.0000처럼 쉼표가 없고 뜻 없는 소수 네 자리가 붙은 표기가 된다.
+        같은 문장의 원천 Fact 값은 공시 원문 표기라 558,917,191,547처럼 쉼표가 있으므로, 한
+        문장 안에 같은 축의 금액이 두 방식으로 적힌다.
+
+        그 불일치가 외부 모델 경로에서 실패로 나타났다. HCX-007은 세 번의 실측 호출에서 모두
+        증감액을 17,767,427,980원으로 다시 적었고, 그 응답은 근거에 없는 수치로 거절됐다
+        (verbalizer._require_grounded_numbers). 지시문을 두 차례 좁혀도 같았다. 모델이 한 일은
+        반올림이 아니라 같은 문장 안의 표기를 맞춘 것이며, 사람이 읽어도 그쪽이 자연스럽다.
+
+        그래서 지시문을 더 조이는 대신 표기를 하나로 만든다. 결정론 문장과 payload가 같은
+        함수를 지나므로(_delta_amount의 호출자는 이 두 곳뿐이다) 두 경로의 문자열이 갈릴 수
+        없고, 검증기가 화이트리스트로 쓰는 값도 같은 것이 된다.
+
+    값을 바꾸지 않는다:
+        CalculationResult.value도 unit도 손대지 않는다. 여기서 정하는 것은 그 값을 문장에 어떻게
+        적는가뿐이며, 응답에 실리는 구조화 결과는 계산 계층이 넘긴 그대로다.
+
+        지우는 것은 소수점 이하의 뜻 없는 0뿐이다. 17767427980.0000의 네 자리는 quantize가
+        만든 자리이고 값이 아니다. 0이 아닌 소수부는 그대로 둔다. 반올림하면 답변에 실린
+        Calculation.value와 문장의 수치가 어긋나고, 그 어긋남은 검산하는 쪽에서만 드러난다.
+
+        부호도 그대로 둔다. 감소를 뜻하는 -를 지우면 방향이 사라지고, 그 사실은 문장 어디에도
+        남지 않는다.
+
+    읽지 못하는 값에서 멈춘다:
+        수로 읽히지 않는 문자열을 그대로 흘리면 이 함수를 지나고도 표기가 갈린 값이 남는다.
+        그때 갈리는 쪽은 결정론 문장과 payload가 아니라 이 규칙을 따른 값과 따르지 않은 값이며,
+        어느 쪽이 규칙을 지난 것인지 문장만 보고는 알 수 없다.
+
+    다른 계산 결과의 표기는 건드리지 않는다. 파생지표의 비율과 변화량은 백분율 축이라 자릿수
+    구분이 필요 없고, 그쪽 표기는 _calculation_value가 정본이다.
+    """
+    if calculation.value is None:
+        return None
+
+    text = str(calculation.value).strip()
+
+    if not text:
+        return None
+
+    try:
+        amount = Decimal(text)
+
+    except InvalidOperation as error:
+        raise UnsupportedResultShapeError(
+            f"수로 읽지 못한 증감액입니다: {calculation.value!r}. "
+            "표기 규칙을 지나지 않은 값을 문장에 적지 않습니다."
+        ) from error
+
+    if not amount.is_finite():
+        raise UnsupportedResultShapeError(
+            f"유한하지 않은 증감액입니다: {calculation.value!r}."
+        )
+
+    # 지수 표기를 거치지 않는다. Decimal.normalize()는 뜻 없는 0을 지우면서 큰 값을
+    # 1.776742798E+10으로 바꾸고, 그 표기는 문장에 적을 것이 못 된다.
+    digits = format(abs(amount), "f")
+
+    integer, _, fraction = digits.partition(".")
+
+    fraction = fraction.rstrip("0")
+
+    grouped = f"{int(integer):,}"
+
+    # 부호는 값에서 읽는다. -0.0000처럼 0으로 정리되는 값에 -를 붙이지 않기 위해서다.
+    sign = "-" if amount < 0 else ""
+
+    return f"{sign}{grouped}.{fraction}" if fraction else f"{sign}{grouped}"
 
 
 def _is_temporal_derived_delta_shape(result: AgentExecutionResult) -> bool:
@@ -1839,12 +2001,14 @@ def _temporal_derived_delta_sentence(result: AgentExecutionResult) -> str:
     # 두 비율과 그 차이를 한 문장으로 잇는다. 차이를 별도 문장으로 떼면 그 수치가 어느 두 값
     # 사이의 것인지가 문장 구조에서 사라지고, %와 %p가 서로 다른 문장에 흩어져 같은 축의
     # 값처럼 읽힌다.
+    change_label = TEMPORAL_OPERATION_LABELS[OPERATION_DIFF_PP]
+
     return (
         f"{previous.company}의 {_scope_phrase(previous.scope)}{previous.label}"
         f"{_topic_particle(previous.label)} "
         f"{previous.period}{previous.value}, "
         f"{current.period}{current.value}이며, "
-        f"두 연도의 차이는 {difference}입니다."
+        f"두 연도의 {change_label}{_topic_particle(change_label)} {difference}입니다."
     )
 
 
@@ -2658,7 +2822,11 @@ def _calculation_value(calculation: CalculationResult) -> str:
     return rendered
 
 
-def _event_history_sentence(histories: list[EventHistory]) -> str:
+def _event_history_sentence(
+    histories: list[EventHistory],
+    *,
+    correction_count: int | None = None,
+) -> str:
     """
     EventHistory 1건을 문장으로 옮긴다.
 
@@ -2675,6 +2843,18 @@ def _event_history_sentence(histories: list[EventHistory]) -> str:
 
     구조화 결과에 적힌 것만 말한다. 공시 건수는 document_ids에서, 변경 건수는 changes에서
     센다.
+
+    correction_count는 "몇 번 바뀌었어?"에 답할 값이다:
+        질문이 횟수를 물었을 때만 온다. None이면 묻지 않은 것이고, 그때 이 문장은 지금까지와
+        같다. 묻지 않은 질문에 횟수를 덧붙이면 결과에 없는 것을 말하는 것이 아니라 사용자가
+        묻지 않은 것을 답의 일부로 만든다.
+
+        값은 EventLink의 개수다. 변경 항목 건수가 아니다. 두 값은 다르며(실측 Q15가 변경 항목
+        4건에 정정 3회) 변경 항목 쪽으로 답하면 "네 번 바뀌었다"가 되어 틀린다. 변경 항목은
+        정정 한 건이 여러 필드를 바꿀 수 있어 정정 횟수보다 많아진다.
+
+        세는 일은 호출부가 한다. 이 함수는 EventLink를 받지 않으며, 받아서 세면 무엇을 셀지를
+        정하는 자리가 둘로 갈린다.
 
     변경 항목의 '이름'은 문장에 넣지 않는다:
         FieldChange.field_name은 canonical 영문 식별자(contract_amount 등)이고, 한국어 문장에
@@ -2705,23 +2885,41 @@ def _event_history_sentence(histories: list[EventHistory]) -> str:
 
     if incomplete:
         # 체인을 다 보지 못했다. "변경이 없었다"는 확정 진술을 붙이지 않는다.
-        sentence = f"관련 공시 {document_count}건까지 확인했습니다."
+        sentence = (
+            f"관련 {EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT]} "
+            f"{event_count_display(document_count)}까지 확인했습니다."
+        )
 
     elif document_count == 1:
-        return "관련 공시 1건을 확인했으며, 이후 변경된 내용은 확인되지 않았습니다."
+        return (
+            f"관련 {EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT]} "
+            f"{event_count_display(document_count)}을 확인했으며, "
+            "이후 변경된 내용은 확인되지 않았습니다."
+        )
 
     else:
-        sentence = f"관련 공시 {document_count}건으로 이어지는 이력을 확인했습니다."
+        sentence = (
+            f"관련 {EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT]} "
+            f"{event_count_display(document_count)}으로 이어지는 이력을 확인했습니다."
+        )
+
+    if correction_count is not None:
+        # 문서 문장 바로 뒤에 둔다. 아래 변경 항목 건수와 나란히 놓여야 두 셈이 다른 것을
+        # 세고 있다는 것이 문장에서 드러난다.
+        sentence = f"{sentence} 이후 {correction_count_display(correction_count)} 정정되었습니다."
 
     change_count = len(history.changes)
 
     if change_count:
-        return f"{sentence} 확인된 변경 항목은 {change_count}건입니다."
+        return (
+            f"{sentence} 확인된 {EVENT_COUNT_LABELS[EVENT_COUNT_CHANGE]}은 "
+            f"{event_count_display(change_count)}입니다."
+        )
 
     if incomplete:
         return sentence
 
-    return f"{sentence} 확인된 변경 항목은 없습니다."
+    return f"{sentence} 확인된 {EVENT_COUNT_LABELS[EVENT_COUNT_CHANGE]}은 없습니다."
 
 
 def _limitation(result: AgentExecutionResult, *, partial: bool) -> str:

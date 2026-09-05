@@ -14,10 +14,15 @@
     뜻하는지는 producer가 정한다.
 
 결정론 경로가 답하지 못하는 모양은 여기서도 답하지 않는다:
-    build_answer_response가 거부하는 결과 조합(Fact와 EventHistory 동시, 비교 없는 다중
-    Fact 등)은 build_grounded_payload도 거부한다. 한쪽만 통과시키면 연동을 켰을 때에만
-    답해지는 결과가 생기고, 같은 질문이 설정에 따라 다르게 처리된다. 연동은 표현을 바꾸는
-    일이지 답할 수 있는 범위를 넓히는 일이 아니다.
+    build_answer_response가 거부하는 결과 조합(Fact와 EventHistory 동시, 어느 모양으로도
+    읽히지 않는 다중 Fact 등)은 build_grounded_payload도 거부한다. 한쪽만 통과시키면 연동을
+    켰을 때에만 답해지는 결과가 생기고, 같은 질문이 설정에 따라 다르게 처리된다. 연동은
+    표현을 바꾸는 일이지 답할 수 있는 범위를 넓히는 일이 아니다.
+
+    반대 방향도 마찬가지다. 결정론 경로가 답하는 모양이라고 해서 자동으로 열리지는 않는다.
+    payload가 그 답의 재료를 전부 담을 수 있어야 열린다. 현재 열린 다중 Fact 모양은 기간 변화
+    둘뿐이며(Q07 증감, Q08 파생지표 변화), 그 둘을 알아보는 판정은 answer_builder의 인식
+    함수에 묻는다. 여기서 개수를 다시 적으면 인식 규칙이 두 벌이 된다.
 
     그래서 일부 carrier만 골라 보내지 않는다. 표현할 수 없는 carrier가 섞여 있으면 나머지를
     보내는 대신 멈춘다. 남은 것만 보내면 빠진 쪽이 답변 어디에도 남지 않는다.
@@ -54,26 +59,41 @@
 
 TODO:
 - DocumentSummary(Pattern B) 지원. 현재는 요약 결과를 만나면 멈추고 결정론 경로에 맡긴다.
+- 계약 묶음(Q02)·지분공시 묶음(Q03) 지원. 결정론 경로는 답하지만 그 모양의 payload 표기가
+  아직 정해지지 않아 멈춘다.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from enum import StrEnum
 
 from disclosure_agent.agent.answer_builder import (
     ACCOUNTING_SCOPE_LABELS,
+    EVENT_COUNT_CHANGE,
+    EVENT_COUNT_DOCUMENT,
+    EVENT_COUNT_LABELS,
     FULL_YEAR_FISCAL_PERIODS,
     LIMITATION_MESSAGE_BY_REASON,
     LIMITATION_WITHOUT_REASON_MESSAGE,
     METRIC_LABELS,
     SCOPE_OMITTED_IN_ANSWER,
+    TEMPORAL_OPERATION_LABELS,
+    UNIT_PERCENTAGE_POINT,
     AnswerBuildError,
     _calculation_value,
+    _calculation_value_in_unit,
+    _delta_amount,
     _derived_metric_label,
     _fact_value,
+    _is_temporal_delta_shape,
+    _is_temporal_derived_delta_shape,
     _normalized_value_with_unit,
+    _referenced_fact,
+    event_count_display,
 )
+from disclosure_agent.agent.derived_metrics import UNIT_PERCENT
 from disclosure_agent.common.enums import AnswerabilityStatus, ResultInputType
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
@@ -85,6 +105,21 @@ from disclosure_agent.common.schemas import (
 VERBALIZABLE_STATUSES: frozenset[AnswerabilityStatus] = frozenset(
     {AnswerabilityStatus.ANSWERABLE, AnswerabilityStatus.PARTIALLY_ANSWERABLE}
 )
+
+
+class _ResultShape(StrEnum):
+    """옮길 수 있다고 확인한 결과 모양.
+
+    계산을 어떻게 옮길지가 모양마다 다르기 때문에 이름을 붙여 들고 다닌다. 모양을 확인한
+    자리와 옮기는 자리가 각자 다시 판정하면, 두 판정이 갈리는 날 확인하지 않은 모양이 옮겨진다.
+
+    Q07·Q08을 한 이름으로 합치지 않는다. answer_builder가 두 모양을 따로 알아보는 것과 같은
+    이유이며(개수도 참조 배선도 다르다), 합치면 어느 쪽도 아닌 결과가 함께 통과한다.
+    """
+
+    GENERAL = "general"
+    TEMPORAL_DELTA = "temporal_delta"
+    TEMPORAL_DERIVED_DELTA = "temporal_derived_delta"
 
 
 class PayloadNotGroundableError(RuntimeError):
@@ -126,6 +161,11 @@ class GroundedCalculation:
 
     입력은 id로만 가리킨다. 입력 값을 함께 실으면 모델이 검산하거나 다시 계산할 표면이
     생긴다. 계산은 agent.calculator가 끝냈고 그 값이 정본이다.
+
+    fiscal_year가 None인 것은 두 가지 중 하나다. 입력 Fact에 회계연도가 없거나, 이 값이 두 기간
+    사이의 것이라 어느 한 해의 값이 아니거나다(증감액·증감률·차이). 뒤쪽에 한쪽 해를 골라
+    적으면 그 값이 그 해의 값으로 읽히고, 어느 두 해 사이의 것인지가 payload에서 사라진다.
+    두 해는 input_ids가 순서대로 가리키는 값들이 갖고 있다.
     """
 
     calculation_id: str
@@ -149,6 +189,21 @@ class GroundedComparison:
 
 
 @dataclass(frozen=True)
+class GroundedEventCount:
+    """이력이 센 것 1건. 무엇을 셌는지와 그 셈이 문장에 적히는 표기.
+
+    셈을 정수로만 실으면 두 셈이 같은 모양이 된다. 공시 2건과 변경 1건을 맞바꿔 적은 문장에서
+    쓰인 숫자는 여전히 2와 1이고, 어느 쪽이 무엇의 셈인지는 숫자에 남지 않는다.
+
+    표기의 정본은 answer_builder다(EVENT_COUNT_LABELS, event_count_display). 이 자리는 그것을
+    검증 계층까지 나르기만 한다.
+    """
+
+    kind_label: str
+    display_value: str
+
+
+@dataclass(frozen=True)
 class GroundedEventHistory:
     """이력 1건의 셈.
 
@@ -165,6 +220,11 @@ class GroundedEventHistory:
     document_count: int
     change_count: int
     chain_complete: bool
+    # 셈마다 무엇을 센 것인지. 전송하지 않는다(as_dict 참조).
+    #
+    # 모델에게는 지금까지와 같은 정수를 보낸다. 이 표기는 돌아온 문장에서 어느 셈이 어느
+    # 숫자에 걸렸는지 볼 때 쓰는 기준이며, 보내는 재료가 아니다.
+    counts: tuple[GroundedEventCount, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -296,14 +356,12 @@ def build_grounded_payload(
             "거부·미해결 문장은 결정론 대응표가 정본입니다."
         )
 
-    _require_supported_shape(result)
+    shape = _resolve_supported_shape(result)
 
     try:
         facts = tuple(_ground_fact(fact) for fact in result.facts)
 
-        calculations = tuple(
-            _ground_calculation(calculation, result.facts) for calculation in result.calculations
-        )
+        calculations = _ground_calculations(result, shape)
 
     except AnswerBuildError as error:
         # 표기가 정해지지 않은 값이다. 여기서 generic 표기를 만들면 대응표가 두 벌이 된다.
@@ -325,6 +383,16 @@ def build_grounded_payload(
             document_count=len(history.document_ids),
             change_count=len(history.changes),
             chain_complete=history.chain_complete,
+            counts=(
+                GroundedEventCount(
+                    kind_label=EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT],
+                    display_value=event_count_display(len(history.document_ids)),
+                ),
+                GroundedEventCount(
+                    kind_label=EVENT_COUNT_LABELS[EVENT_COUNT_CHANGE],
+                    display_value=event_count_display(len(history.changes)),
+                ),
+            ),
         )
         for history in result.event_histories
     )
@@ -346,9 +414,9 @@ def build_grounded_payload(
     )
 
 
-def _require_supported_shape(result: AgentExecutionResult) -> None:
+def _resolve_supported_shape(result: AgentExecutionResult) -> _ResultShape:
     """
-    결정론 경로가 답하는 결과 모양인지 확인한다.
+    결정론 경로가 답하는 결과 모양인지 확인하고, 그 모양의 이름을 돌려준다.
 
     각 줄의 근거는 answer_builder._supported_answer의 같은 분기다. 규칙을 새로 만들지 않고
     그쪽이 이미 거부하는 조합을 여기서도 거부한다. 한쪽만 통과시키면 연동을 켰을 때에만
@@ -361,6 +429,26 @@ def _require_supported_shape(result: AgentExecutionResult) -> None:
     ResolvedEventState도 같은 자리다. 이벤트 단건 요약(Q06)의 답은 그 상태의 필드 값들이고,
     payload에는 그것을 담을 자리가 없다. 그대로 보내면 모델은 값을 하나도 받지 못한 채
     EventHistory의 건수만 보고 요약 문장을 지어내게 된다.
+
+    EventLink도 같은 자리다. "그동안 계획이 몇 번 바뀌었어?"가 묻는 셈은 정정 이력의 개수이고
+    그것은 EventLink의 개수다. payload가 싣는 셈은 공시 건수와 필드 변경 건수뿐이다
+    (GroundedEventHistory). 실측 Q15가 공시 4건·필드 변경 4건·EventLink 3건이므로, 답이 될
+    3은 payload 어디에도 없다.
+
+    없는 값을 안 보내는 것으로 끝나지 않는다. 모델은 받은 수로 답하며 "4번 바뀌었습니다"가
+    나간다. 그 4는 payload 안의 수라서 수치 검증도, 값-주인 짝 검사도 통과한다. 틀렸다는 사실이
+    남는 자리가 없다.
+
+    여기서 EventLink를 싣는 자리를 만들지 않는다. 그 셈을 무엇이라 부르고 어떤 표기로 적을지는
+    결정론 경로에도 아직 없다(answer_builder._event_history_sentence는 공시와 변경 항목만
+    적는다). 표기가 정해지기 전에 payload에 먼저 실으면 그 자리가 사실상의 정본이 된다.
+    그때까지 이 모양은 통째로 결정론 경로에 맡긴다. 구조화 결과에는 EventLink가 그대로 실려
+    나가므로(answer_builder.build_answer_response) 셈 자체가 사라지지는 않는다.
+
+    다중 Fact는 반대다. 결정론 경로가 답하는 두 모양(Q07 증감, Q08 파생지표 변화)은 값도 관계도
+    payload가 그대로 담을 수 있다. 그래서 그 둘만 열고 나머지 다중 Fact는 그대로 막는다. 계약
+    묶음(Q02)·지분공시 묶음(Q03)은 결정론 경로가 답하지만 아직 열지 않았다. 여는 자리는 여기가
+    아니라 그 모양의 표기를 정하는 자리다.
     """
     if result.document_summaries:
         raise PayloadNotGroundableError(
@@ -373,6 +461,13 @@ def _require_supported_shape(result: AgentExecutionResult) -> None:
             f"ResolvedEventState {len(result.resolved_event_states)}건이 실려 있습니다. "
             "이벤트 단건 요약은 아직 payload로 옮기지 않으며, 상태를 뺀 나머지만 보내지 "
             "않습니다."
+        )
+
+    if result.event_links:
+        raise PayloadNotGroundableError(
+            f"EventLink {len(result.event_links)}건이 실려 있습니다. "
+            "이력이 몇 번 바뀌었는지를 세는 값이 payload에 없어, 답에 필요한 셈을 보내지 못한 채 "
+            "다른 셈만 보내게 됩니다."
         )
 
     if result.comparisons and result.event_histories:
@@ -389,15 +484,48 @@ def _require_supported_shape(result: AgentExecutionResult) -> None:
         )
 
     if len(result.facts) > 1 and not result.comparisons:
-        raise PayloadNotGroundableError(
-            f"우열 판정 없이 Fact가 {len(result.facts)}건입니다. 결정론 경로도 이 모양을 "
-            "문장으로 옮기지 않습니다(_single_fact_sentence)."
-        )
+        # 결정론 경로가 이 자리에서 먼저 가르는 두 모양(Q07·Q08)만 연다.
+        #
+        # 개수를 느슨하게 열지 않는다. 아래 판정은 answer_builder의 인식 함수를 그대로 부르며,
+        # 그 함수들은 연산 이름의 순서와 참조 배선까지 본다. 여기서 "Fact 2건 또는 4건"처럼
+        # 다시 적으면 인식 규칙이 두 벌이 되고, 한쪽만 고쳐지는 날 결정론 경로가 문장으로
+        # 옮기지 않는 모양이 payload로만 나간다.
+        shape = _temporal_shape(result)
+
+        if shape is None:
+            raise PayloadNotGroundableError(
+                f"우열 판정 없이 Fact가 {len(result.facts)}건입니다. 결정론 경로도 이 모양을 "
+                "문장으로 옮기지 않습니다(_single_fact_sentence)."
+            )
+
+        return shape
 
     if not (result.facts or result.calculations or result.event_histories):
         raise PayloadNotGroundableError(
             "옮길 근거가 없습니다. facts/calculations/event_histories가 모두 비어 있습니다."
         )
+
+    return _ResultShape.GENERAL
+
+
+def _temporal_shape(result: AgentExecutionResult) -> _ResultShape | None:
+    """
+    기간 변화 결과의 모양. 둘 중 어느 쪽도 아니면 None.
+
+    판정을 여기서 만들지 않고 answer_builder의 인식 함수에 묻는다. 그쪽이 정본이며, 같은
+    질문에 두 곳이 다르게 답할 여지를 남기지 않는다.
+
+    순서는 answer_builder._supported_answer와 같다. 두 모양은 Fact·Calculation 개수가 달라
+    동시에 참이 될 수 없지만, 순서를 맞춰 두면 한쪽 인식 함수가 넓어지는 날에도 두 경로가 같은
+    모양을 고른다.
+    """
+    if _is_temporal_delta_shape(result):
+        return _ResultShape.TEMPORAL_DELTA
+
+    if _is_temporal_derived_delta_shape(result):
+        return _ResultShape.TEMPORAL_DERIVED_DELTA
+
+    return None
 
 
 def _ground_fact(fact: Fact) -> GroundedFact:
@@ -468,20 +596,214 @@ def _fiscal_year(fact: Fact) -> int | None:
     return fact.fiscal_year
 
 
+def _ground_calculations(
+    result: AgentExecutionResult,
+    shape: _ResultShape,
+) -> tuple[GroundedCalculation, ...]:
+    """
+    실린 계산 결과 전부를 확인된 모양대로 옮긴다.
+
+    모양마다 나누는 이유는 같은 CalculationResult가 자리에 따라 다른 것을 뜻하기 때문이다.
+    한 기간 안의 비율은 그 해의 값이고, 두 기간 사이의 증감은 어느 한 해의 값이 아니다. 한
+    경로로 합치면 뒤쪽에도 연도를 붙이게 되고, 그 연도는 결과가 말하지 않은 값이다.
+    """
+    if shape is _ResultShape.TEMPORAL_DELTA:
+        return _ground_temporal_delta(result)
+
+    if shape is _ResultShape.TEMPORAL_DERIVED_DELTA:
+        return _ground_temporal_derived_delta(result)
+
+    return tuple(
+        _ground_calculation(calculation, result.facts) for calculation in result.calculations
+    )
+
+
+def _ground_temporal_delta(result: AgentExecutionResult) -> tuple[GroundedCalculation, ...]:
+    """
+    Q07의 증감액·증감률을 옮긴다.
+
+    무엇을 확인하지 않는가:
+        개수도 연산 이름도 참조 배선도 여기서 다시 보지 않는다. _is_temporal_delta_shape이
+        이미 확인했고(_temporal_shape), 같은 것을 두 곳에서 보면 한쪽만 고쳐지는 날 두 판정이
+        갈린다. 여기서 하는 일은 확인이 끝난 결과를 옮기는 것뿐이다.
+
+    이전·이후를 Fact 목록의 순서에서 읽지 않는다. 증감액의 inputs가 previous, current
+    순서라는 것이 계산 계층의 계약이고(calculator.delta), 결정론 문장도 같은 참조를 따라
+    읽는다(answer_builder._temporal_delta_sentence).
+
+    회계연도를 싣지 않는다:
+        증감은 두 해 사이의 값이며 어느 한 해의 값이 아니다. 한쪽 해를 골라 적으면 그 값이 그
+        해의 값으로 읽히고, 어느 두 해 사이의 것인지가 payload에서 사라진다.
+
+        두 해가 payload에서 사라지지는 않는다. 그 값은 원천 Fact 2건에 실려 있고, input_ids가
+        순서대로 그 둘을 가리킨다. 모델이 기간을 적으려면 그 Fact를 보고 적어야 하며, 그것이
+        결과가 말한 유일한 자리다.
+
+    증감액과 증감률의 표기를 한 함수로 만들지 않는다. 두 값의 단위 어휘가 다르다. 증감액은
+    원천 Fact의 정규화 단위를 물려받고(원), 증감률은 계산 계층의 결과 단위다(percent). 결정론
+    문장이 두 자리에서 서로 다른 대응표를 읽는 것과 같은 이유이며, 여기서도 그쪽 함수를 그대로
+    부른다.
+    """
+    amount, rate = result.calculations
+
+    sources = [_referenced_fact(result, item.input_id) for item in amount.inputs]
+
+    company = _converged(amount, {fact.company for fact in sources}, attribute="company")
+
+    scope_label = _converged(
+        amount, {_scope_label(fact) for fact in sources}, attribute="accounting_scope"
+    )
+
+    return (
+        _ground_temporal_calculation(
+            amount,
+            company=company,
+            scope_label=scope_label,
+            display_value=_delta_amount(amount),
+        ),
+        _ground_temporal_calculation(
+            rate,
+            company=company,
+            scope_label=scope_label,
+            display_value=_calculation_value(rate),
+        ),
+    )
+
+
+def _ground_temporal_derived_delta(
+    result: AgentExecutionResult,
+) -> tuple[GroundedCalculation, ...]:
+    """
+    Q08의 기간별 비율 2건과 그 차이를 옮긴다.
+
+    앞의 두 비율은 일반 경로로 옮긴다. 한 기간 안의 파생값이므로 회계연도가 한 값으로 모이고,
+    개념 이름도 파생지표 대응표가 이미 갖고 있다(영업이익률). 그 자리를 따로 만들면 같은 비율이
+    Q08에서만 다르게 불릴 여지가 생긴다.
+
+    다른 것은 표기를 만드는 함수뿐이다. 일반 경로는 단위 표기만 보지만, 여기서는 그 자리에 와야
+    할 단위까지 본다(_calculation_value_in_unit). 백분율과 percentage point는 축이 다르고, 표기
+    대응표만 보면 축이 바뀐 값도 그럴듯한 문자열이 된다. 결정론 문장이 두 자리 모두에 기대
+    단위를 적어 두는 것과 같은 확인이다.
+
+    차이는 입력이 Fact가 아니라 Calculation이다. 그래서 기업·회계기준을 원천 Fact가 아니라 앞의
+    두 비율에서 읽는다. 그 둘은 방금 옮기면서 각자의 원천 Fact로 확정한 값이므로, 여기서 한 번
+    더 Fact로 내려가지 않는다.
+
+    회계연도는 증감과 같은 이유로 싣지 않는다. 두 해 사이의 값이며, 그 두 해는 앞의 두 비율에
+    실려 있고 input_ids가 순서대로 그 둘을 가리킨다.
+    """
+    previous, current, change = result.calculations
+
+    ratios = tuple(
+        _ground_calculation(
+            ratio,
+            result.facts,
+            display_value=_calculation_value_in_unit(
+                ratio, expected_unit=UNIT_PERCENT, subject="기간별 비율"
+            ),
+        )
+        for ratio in (previous, current)
+    )
+
+    company = _converged(change, {ratio.company for ratio in ratios}, attribute="company")
+
+    scope_label = _converged(
+        change, {ratio.scope_label for ratio in ratios}, attribute="accounting_scope"
+    )
+
+    grounded_change = _ground_temporal_calculation(
+        change,
+        company=company,
+        scope_label=scope_label,
+        display_value=_calculation_value_in_unit(
+            change, expected_unit=UNIT_PERCENTAGE_POINT, subject="변화량"
+        ),
+    )
+
+    return (*ratios, grounded_change)
+
+
+def _ground_temporal_calculation(
+    calculation: CalculationResult,
+    *,
+    company: str,
+    scope_label: str | None,
+    display_value: str,
+) -> GroundedCalculation:
+    """
+    두 기간 사이의 값 1건을 옮긴다. 회계연도 자리는 비운다.
+
+    개념 이름은 연산 이름으로 되짚는다. 파생지표 대응표는 분자·분모 조합으로 개념을 찾으므로
+    (agent.derived_metrics) 두 기간 사이의 값에는 닿지 않는다. 그 대신 결정론 문장이 쓰는
+    대응표를 그대로 읽는다(answer_builder.TEMPORAL_OPERATION_LABELS).
+    """
+    label = TEMPORAL_OPERATION_LABELS.get(calculation.operation)
+
+    if label is None:
+        raise PayloadNotGroundableError(
+            f"표기가 정해지지 않은 기간 변화 연산입니다: {calculation.operation!r}. "
+            "TEMPORAL_OPERATION_LABELS에 없는 연산은 외부 모델에 넘기지 않습니다."
+        )
+
+    return GroundedCalculation(
+        calculation_id=calculation.calculation_id,
+        metric_label=label,
+        company=company,
+        fiscal_year=None,
+        scope_label=scope_label,
+        display_value=display_value,
+        input_ids=tuple(item.input_id for item in calculation.inputs),
+        evidence_ids=tuple(calculation.evidence_ids),
+    )
+
+
+def _converged[Value](
+    calculation: CalculationResult,
+    values: set[Value],
+    *,
+    attribute: str,
+) -> Value:
+    """
+    입력들이 한 값으로 모이는 속성을 읽는다. 갈리면 멈춘다.
+
+    한쪽을 골라 싣지 않는다. 고르면 그 값이 무엇에서 나왔는지가 payload에서 사라지고, 사라진
+    사실은 어디에도 남지 않는다(answer_builder._single_source_attribute와 같은 자리).
+    """
+    if len(values) != 1:
+        raise PayloadNotGroundableError(
+            f"Calculation {calculation.calculation_id!r}의 입력 {attribute}가 한 값으로 "
+            f"모이지 않습니다: {sorted(str(value) for value in values)}. "
+            "어느 것의 값인지 정해지지 않았습니다."
+        )
+
+    return next(iter(values))
+
+
 def _ground_calculation(
     calculation: CalculationResult,
     facts: list[Fact],
+    *,
+    display_value: str | None = None,
 ) -> GroundedCalculation:
     """
-    계산 결과 1건의 표기를 확정한다.
+    한 기간 안의 파생값 1건의 표기를 확정한다.
 
-    입력이 전부 Fact인 파생값만 옮긴다. 입력이 다른 Calculation인 값(기간 간 변화량 등)은
-    개념 이름을 정할 대응표가 아직 없다. answer_builder._derived_metric_label이 그 대응표를
+    입력이 전부 Fact인 파생값만 옮긴다. 입력이 다른 Calculation인 값은 개념 이름을 정할
+    대응표가 여기에 없다. answer_builder._derived_metric_label이 그 대응표를
     agent.derived_metrics에서 읽고, 거기에는 원천 지표 조합만 등록돼 있다.
 
-    그런 값에 "변화량" 같은 이름을 여기서 붙이지 않는다. 그러면 파생 개념 어휘가 결정론
-    대응표 밖에 한 벌 더 생기고, 두 경로가 같은 계산을 다르게 부르게 된다. 이름을 정하는
-    자리는 대응표이며, 정해지기 전까지 이 결과는 외부 모델에 넘기지 않는다.
+    그런 값에 이름을 여기서 붙이지 않는다. 그러면 파생 개념 어휘가 결정론 대응표 밖에 한 벌 더
+    생기고, 두 경로가 같은 계산을 다르게 부르게 된다. 결정론 경로가 이름을 정해 둔 기간 변화
+    값(Q08의 차이)은 이 함수가 아니라 _ground_temporal_calculation이 옮긴다.
+
+    입력 Fact를 참조 순서로 읽는다. Fact 목록의 순서로 읽지 않는 이유는 파생 개념의 이름이
+    분자·분모의 순서로 정해지기 때문이다. 목록 순서가 우연히 뒤집힌 결과에서는 대응을 찾지 못해
+    멈추게 되고, 그 정지는 결과가 틀려서가 아니라 읽는 순서가 틀려서 생긴다. 결정론 경로도 같은
+    참조를 따라 읽는다(answer_builder._derived_period_value).
+
+    display_value를 받는 자리는 그 자리에 와야 할 단위가 정해져 있는 경우다(Q08의 기간별 비율).
+    단위 확인을 이 함수에 넣지 않는 이유는 기대 단위가 자리마다 다르기 때문이며, 무엇이 와야
+    하는지는 그 모양을 아는 쪽이 정한다.
     """
     if any(item.input_type is not ResultInputType.FACT for item in calculation.inputs):
         raise PayloadNotGroundableError(
@@ -490,15 +812,15 @@ def _ground_calculation(
             "외부 모델에 넘기지 않습니다."
         )
 
-    input_ids = {item.input_id for item in calculation.inputs}
+    known = {fact.fact_id: fact for fact in facts}
 
-    sources = [fact for fact in facts if fact.fact_id in input_ids]
-
-    if len(sources) != len(calculation.inputs):
+    if any(item.input_id not in known for item in calculation.inputs):
         raise PayloadNotGroundableError(
             f"Calculation {calculation.calculation_id!r}의 입력 Fact를 결과 안에서 모두 찾지 "
             "못했습니다. 무엇에서 나온 값인지 확정할 수 없어 넘기지 않습니다."
         )
+
+    sources = [known[item.input_id] for item in calculation.inputs]
 
     companies = {fact.company for fact in sources}
     years = {_fiscal_year(fact) for fact in sources}
@@ -522,7 +844,9 @@ def _ground_calculation(
         company=companies.pop(),
         fiscal_year=years.pop(),
         scope_label=scopes.pop(),
-        display_value=_calculation_value(calculation),
+        display_value=(
+            _calculation_value(calculation) if display_value is None else display_value
+        ),
         input_ids=tuple(item.input_id for item in calculation.inputs),
         evidence_ids=tuple(calculation.evidence_ids),
     )

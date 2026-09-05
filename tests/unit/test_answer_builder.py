@@ -72,6 +72,7 @@ from disclosure_agent.agent.derived_metrics import (
     UNIT_PERCENT,
     DerivedMetric,
 )
+from disclosure_agent.agent.query_vocabulary import OPERATION_CHANGE_COUNT
 from disclosure_agent.agent.safety import (
     REASON_FORWARD_LOOKING_PREDICTION,
     REASON_INVESTMENT_ADVICE,
@@ -2744,7 +2745,7 @@ def test_temporal_delta_result_becomes_a_sentence() -> None:
     assert SYNTHETIC_COMPANY in answer
     assert "2024년" in answer
     assert "2025년" in answer
-    assert "200000000.0000원" in answer
+    assert "200,000,000원" in answer
     assert "20.0000%" in answer
 
 
@@ -2759,7 +2760,7 @@ def test_temporal_delta_wording_is_unchanged_by_the_derived_metric_path() -> Non
     """
     assert build_answer_response(temporal_delta_result()).answer == (
         f"{SYNTHETIC_COMPANY}의 연결 기준 매출액은 2024년 1,000백만원, 2025년 1,200백만원입니다. "
-        "증감액은 200000000.0000원, 증감률은 20.0000%입니다."
+        "증감액은 200,000,000원, 증감률은 20.0000%입니다."
     )
 
 
@@ -2816,6 +2817,82 @@ def test_delta_calculations_pointing_elsewhere_still_stop() -> None:
     result = temporal_delta_result(
         calculations=[
             _delta_calculation(input_ids=("fact_2024", "fact_9999")),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+            ),
+        ]
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        # quantize가 만든 뜻 없는 소수 네 자리는 지운다. 값이 아니라 자리다.
+        ("200000000.0000", "200,000,000원"),
+        # 부호는 값에서 읽어 그대로 둔다. 지우면 감소가 증가로 읽힌다.
+        ("-200000000.0000", "-200,000,000원"),
+        # 0이 아닌 소수부는 남긴다. 반올림하면 응답에 실린 Calculation.value와 어긋난다.
+        ("200000000.5000", "200,000,000.5원"),
+        ("200000000.0001", "200,000,000.0001원"),
+        # 세 자리 미만은 구분할 것이 없다.
+        ("999.0000", "999원"),
+        # 0으로 정리되는 값에 -를 붙이지 않는다.
+        ("-0.0000", "0원"),
+    ],
+)
+def test_delta_amount_groups_digits_and_drops_insignificant_zeroes(
+    stored: str,
+    expected: str,
+) -> None:
+    """
+    증감액 표기 규칙.
+
+    같은 문장의 원천 Fact 값이 공시 원문 표기(1,000백만원)라 쉼표를 쓰므로, 증감액만 쉼표 없이
+    적으면 한 문장에 같은 축의 금액이 두 방식으로 실린다. 그 불일치가 외부 모델 경로에서
+    실패로 나타났다(_grouped_amount docstring).
+
+    값을 바꾸지 않는다. 지우는 것은 소수점 이하의 뜻 없는 0뿐이고, 0이 아닌 자리와 부호는
+    그대로 둔다.
+    """
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(value=stored),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+            ),
+        ]
+    )
+
+    assert expected in build_answer_response(result).answer
+
+
+def test_delta_amount_does_not_change_the_stored_calculation() -> None:
+    """표기를 정하는 일이 계산 결과를 고치는 일이 되지 않는다."""
+    result = temporal_delta_result()
+
+    stored = result.calculations[0].model_dump(mode="json")
+
+    build_answer_response(result)
+
+    assert result.calculations[0].model_dump(mode="json") == stored
+    assert result.calculations[0].value == "200000000.0000"
+    assert result.calculations[0].unit == "원"
+
+
+def test_delta_amount_that_is_not_a_number_stops() -> None:
+    """규칙을 지나지 못한 값을 그대로 흘리면 표기가 갈린 채 문장에 실린다."""
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(value="약 이백억"),
             _delta_calculation(
                 calculation_id="calculation_revenue_delta_pct_2024_2025",
                 operation=OPERATION_DELTA_PCT,
@@ -2889,7 +2966,7 @@ def test_delta_and_delta_pct_in_the_same_order_are_accepted() -> None:
 
     answer = build_answer_response(result).answer
 
-    assert "200000000.0000원" in answer
+    assert "200,000,000원" in answer
     assert "20.0000%" in answer
 
 
@@ -3319,3 +3396,91 @@ def test_partial_source_support_has_a_partial_limitation_message() -> None:
 
     assert message.strip()
     assert "원문 근거" in message
+
+
+# --------------------------------------------------------------------------
+# 이력이 몇 차례 정정됐는가
+#
+# 사용자가 "몇 번 바뀌었어?"로 묻는 값은 정정 이력의 개수이며, 변경 항목 건수가 아니다. 실측
+# Q15가 공시 4건·변경 항목 4건·정정 3회로 세 값이 모두 다르다.
+# --------------------------------------------------------------------------
+
+
+def q15_shaped_history_result(*, count_requested: bool) -> AgentExecutionResult:
+    """실측 Q15와 같은 모양. 공시 4건, 필드 변경 4건, EventLink 3건."""
+    history = EventHistory(
+        event_id="evt_facility",
+        document_ids=["doc_root", "doc_fix_1", "doc_fix_2", "doc_fix_3"],
+        changes=[
+            FieldChange(field_name="investment_amount", before=100.0, after=120.0),
+            FieldChange(field_name="investment_end_date", before="2025-01-01", after="2025-06-01"),
+            FieldChange(field_name="investment_amount", before=120.0, after=140.0),
+            FieldChange(field_name="investment_end_date", before="2025-06-01", after="2026-01-01"),
+        ],
+        chain_complete=True,
+    )
+
+    links = [
+        EventLink(
+            link_id=f"link_fix_{index}",
+            source_doc_id=f"doc_fix_{index}",
+            relation=EventLinkRelation.CORRECTION_OF,
+            raw_reference=RawReference(
+                document_title="신규시설투자등",
+                original_filing_date="2024-04-30",
+                correction_filing_date=f"2025-0{index}-01",
+                correction_reason="정정",
+            ),
+            resolved_doc_id="doc_root",
+            resolution_status=EventLinkResolutionStatus.RESOLVED,
+        )
+        for index in (1, 2, 3)
+    ]
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        event_histories=[history],
+        event_links=links,
+        evidence=[make_evidence()],
+        operations=[OPERATION_CHANGE_COUNT] if count_requested else [],
+    )
+
+
+def test_count_question_answer_states_the_correction_count() -> None:
+    """
+    횟수를 물은 질문에는 정정 이력의 개수로 답한다.
+
+    변경 항목 건수로 답하면 "네 번 바뀌었다"가 되어 틀린다. 정정 한 건이 여러 필드를 바꿀 수
+    있어 변경 항목은 정정 횟수보다 많아진다.
+    """
+    result = q15_shaped_history_result(count_requested=True)
+
+    # 세 값이 모두 다르다는 것이 이 고정의 전제다.
+    assert len(result.event_histories[0].document_ids) == 4
+    assert len(result.event_histories[0].changes) == 4
+    assert len(result.event_links) == 3
+
+    answer = build_answer_response(result).answer
+
+    assert "3회" in answer
+
+    # 4를 바뀐 횟수로 부르지 않는다.
+    assert "4회" not in answer
+    assert "4번" not in answer
+
+
+def test_content_question_answer_states_no_correction_count() -> None:
+    """
+    묻지 않은 질문에 횟수를 덧붙이지 않는다.
+
+    결과에 없는 것을 말하는 것이 아니라, 사용자가 묻지 않은 것을 답의 일부로 만드는 일이다.
+    """
+    answer = build_answer_response(q15_shaped_history_result(count_requested=False)).answer
+
+    assert "정정되었습니다" not in answer
+    assert "3회" not in answer
+
+    # 이력 문장 자체는 지금까지와 같다.
+    assert "관련 공시 4건" in answer
+    assert "확인된 변경 항목은 4건입니다" in answer

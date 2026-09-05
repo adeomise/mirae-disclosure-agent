@@ -316,6 +316,73 @@ def test_malformed_percent_comparison_document_reaches_targeted_extractor(
     assert fact.location.label_text == "매출액"
 
 
+def test_incomplete_korean_text_document_matches_valid_extractor_provenance(
+    tmp_path: Path,
+) -> None:
+    template = """<DOCUMENT>
+      <DOCUMENT-NAME>합성 정기보고서</DOCUMENT-NAME>
+      <COMPANY-NAME>테스트기업</COMPANY-NAME>
+      <BODY><SECTION-1><TITLE>합성 재무정보</TITLE>
+        <P>미완성 표기 {fragment}</P>
+        <TABLE-GROUP ACLASS="{{XBRL}}IS_C1">
+          <TITLE>연결재무제표</TITLE>
+          <TABLE>
+            <TR><TD>(단위 : 백만원)</TD></TR>
+            <TR><TH>항목</TH><TH>제 1 기 2099</TH></TR>
+            <TR><TD>매출액</TD><TE ACODE="ifrs-full_Revenue"
+              ACONTEXT="CFY2099dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember"
+              AUNIT="KRW">123</TE></TR>
+          </TABLE>
+        </TABLE-GROUP>
+      </SECTION-1></BODY>
+    </DOCUMENT>"""
+    source = tmp_path / "SYNTHETIC_KOREAN_TEXT.xml"
+    source.write_text(template.format(fragment="<가상"), encoding="utf-8")
+    malformed_document = parse_periodic_xml(source)
+    malformed_fact = extract_financial_fact(
+        malformed_document,
+        metric=MetricConcept.REVENUE,
+        fiscal_year=2099,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+    )
+    malformed_facts, malformed_evidence = extract_financial_facts_with_evidence(
+        malformed_document
+    )
+
+    source.write_text(template.format(fragment="&lt;가상"), encoding="utf-8")
+    valid_document = parse_periodic_xml(source)
+    valid_fact = extract_financial_fact(
+        valid_document,
+        metric=MetricConcept.REVENUE,
+        fiscal_year=2099,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+    )
+    valid_facts, valid_evidence = extract_financial_facts_with_evidence(valid_document)
+
+    assert malformed_fact == valid_fact
+    assert malformed_fact.metric is MetricConcept.REVENUE
+    assert malformed_fact.fiscal_year == 2099
+    assert malformed_fact.accounting_scope is FactAccountingScope.CONSOLIDATED
+    assert malformed_fact.raw_value == "123"
+    assert malformed_fact.value == Decimal("123")
+    assert malformed_fact.unit_multiplier == 1_000_000
+    assert malformed_fact.value_in_base_unit == Decimal("123000000")
+    assert malformed_fact.location.table_id == "table_0001"
+    assert malformed_fact.location.row_index == 2
+    assert malformed_fact.location.column_index == 1
+
+    assert malformed_facts == valid_facts
+    assert malformed_evidence == valid_evidence
+    assert malformed_facts[0].normalized_value == "123000000"
+    assert malformed_facts[0].normalized_unit == "KRW"
+    assert malformed_facts[0].evidence_ids == [malformed_evidence[0].evidence_id]
+    assert malformed_evidence[0].provenance is not None
+    assert malformed_evidence[0].provenance.table_id == "table_0001"
+    assert malformed_evidence[0].provenance.row_index == 2
+    assert malformed_evidence[0].provenance.column_index == 1
+    assert malformed_evidence[0].provenance.unit_multiplier == 1_000_000
+
+
 @pytest.mark.parametrize(
     "label",
     [

@@ -75,14 +75,22 @@ DART_STRUCTURAL_TAGS = {
     "TR",
     "TU",
 }
+_DART_STRUCTURAL_CLOSING_NAMES = "|".join(
+    sorted(map(re.escape, DART_STRUCTURAL_TAGS), key=len, reverse=True)
+)
+MALFORMED_INCOMPLETE_KOREAN_TEXT_PATTERN = re.compile(
+    rf"<(?=[가-힣]{{1,9}}[ \t]*"
+    rf"</(?:{_DART_STRUCTURAL_CLOSING_NAMES}|SECTION-\d+)[ \t]*>)"
+)
 
 
 def _repair_malformed_percent_comparisons_in_text(fragment: str) -> str:
-    """Element text의 malformed percent 비교 연산자만 escape한다.
+    """Element text의 audit-confirmed malformed literal ``<``만 escape한다.
 
     호출자는 CDATA/comment/processing instruction을 제외한 fragment를 전달한다.
     start/end tag와 quoted attribute 안의 동일 문자열은 strict parser가 계속
-    검증하도록 그대로 둔다.
+    검증하도록 그대로 둔다. percent 비교식과 structural closing tag 직전의
+    미완성 한글 token은 서로 독립된 좁은 문법으로 판정한다.
     """
     parts: list[str] = []
     unchanged_start = 0
@@ -100,10 +108,16 @@ def _repair_malformed_percent_comparisons_in_text(fragment: str) -> str:
                 fragment,
                 position,
             )
-            if comparison is not None:
+            incomplete_korean_text = (
+                MALFORMED_INCOMPLETE_KOREAN_TEXT_PATTERN.match(
+                    fragment,
+                    position,
+                )
+            )
+            if comparison is not None or incomplete_korean_text is not None:
                 parts.append(fragment[unchanged_start:position])
                 parts.append("&lt;")
-                position = comparison.end()
+                position += 1
                 unchanged_start = position
                 continue
 
@@ -128,10 +142,11 @@ def _repair_malformed_percent_comparisons_in_text(fragment: str) -> str:
 
 
 def sanitize_dart_xml_text(xml_text: str) -> str:
-    """DART 본문의 entity/pseudo-tag/percent 비교식 오류만 보수적으로 교정한다.
+    """DART 본문의 entity/pseudo-tag/literal ``<`` 오류만 보수적으로 교정한다.
 
     정상 entity는 그대로 두며, 구조 tag allowlist 밖의 ``<...>``는 text로
-    escape한다. 숫자 percent 앞의 raw ``<``만 비교 연산자로 escape한다.
+    escape한다. audit으로 확정한 percent 비교식과 미완성 한글 text의 raw
+    ``<``만 text node에서 escape한다.
     XML 선언, comment, CDATA, processing instruction은 변경하지 않는다.
     """
 

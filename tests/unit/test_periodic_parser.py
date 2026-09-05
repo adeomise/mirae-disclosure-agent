@@ -164,6 +164,32 @@ def _comparison_document(comparison: str) -> str:
     </DOCUMENT>"""
 
 
+def _incomplete_korean_text_document(fragment: str) -> str:
+    return f"""<DOCUMENT>
+      <DOCUMENT-NAME>합성 정기보고서</DOCUMENT-NAME>
+      <COMPANY-NAME>테스트기업</COMPANY-NAME>
+      <BODY>
+        <SECTION-1>
+          <TITLE>합성 재무정보</TITLE>
+          <P>미완성 표기 {fragment}</P>
+          <TABLE-GROUP ACLASS="{{XBRL}}IS_C1" ADELETETABLE="N">
+            <TITLE>연결재무제표</TITLE>
+            <TABLE>
+              <TR><TD>(단위 : 백만원)</TD></TR>
+              <TR><TH>항목</TH><TH>제 1 기 2099</TH></TR>
+              <TR>
+                <TD>매출액</TD>
+                <TE ACODE="ifrs-full_Revenue"
+                    ACONTEXT="CFY2099dFY_ifrs-full_ConsolidatedAndSeparateFinancialStatementsAxis_ifrs-full_ConsolidatedMember"
+                    AUNIT="KRW">123</TE>
+              </TR>
+            </TABLE>
+          </TABLE-GROUP>
+        </SECTION-1>
+      </BODY>
+    </DOCUMENT>"""
+
+
 def _attribute_comparison_document(
     *,
     attribute_value: str,
@@ -333,6 +359,96 @@ def test_repeated_malformed_percent_comparisons_preserve_order(
         "첫째 < 10%, 둘째 < 5%",
         "후속 문단",
     ]
+
+
+@pytest.mark.parametrize("horizontal_whitespace", ["", " \t "])
+def test_incomplete_korean_text_matches_valid_equivalent_with_provenance(
+    tmp_path: Path,
+    horizontal_whitespace: str,
+) -> None:
+    malformed_source = _incomplete_korean_text_document(
+        f"<가상{horizontal_whitespace}"
+    )
+    valid_source = _incomplete_korean_text_document(
+        f"&lt;가상{horizontal_whitespace}"
+    )
+    malformed_path = tmp_path / "MALFORMED_KOREAN_TEXT.xml"
+    valid_path = tmp_path / "VALID_KOREAN_TEXT.xml"
+    malformed_path.write_text(malformed_source, encoding="utf-8")
+    valid_path.write_text(valid_source, encoding="utf-8")
+
+    malformed = parse_periodic_xml(malformed_path)
+    valid = parse_periodic_xml(valid_path)
+
+    assert sanitize_dart_xml_text(malformed_source) == valid_source
+    assert sanitize_dart_xml_text(valid_source) == valid_source
+    assert malformed["sections"] == valid["sections"]
+    assert malformed["table_groups"] == valid["table_groups"]
+    assert malformed["tables"] == valid["tables"]
+    assert malformed["sections"][0]["text"] == "미완성 표기 <가상"
+
+    cell = malformed["tables"][0]["rows"][2][1]
+    assert cell["acode"] == "ifrs-full_Revenue"
+    assert cell["acontext"].startswith("CFY2099dFY_")
+    assert cell["aunit"] == "KRW"
+    assert cell["provenance"] == {
+        "section_id": "section_0001",
+        "table_group_id": "table_group_0001",
+        "table_id": "table_0001",
+        "row_index": 2,
+        "col_index": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<SECTION-1><P ATEST="<가상">본문</P></SECTION-1>',
+        "<SECTION-1><P ATEST=<가상</P></SECTION-1>",
+        "<SECTION-1><P>미지원 <ASCII_TOKEN</P></SECTION-1>",
+        "<SECTION-1><P>미지원 <가상1</P></SECTION-1>",
+        "<SECTION-1><P>미지원 <가A</P></SECTION-1>",
+        "<SECTION-1><P>미지원 <가나다라마바사아자차</P></SECTION-1>",
+        "<SECTION-1><P>미지원 <</P></SECTION-1>",
+        "<SECTION-1><P>미지원 <가상</UNKNOWN></P></SECTION-1>",
+        "<SECTION-1><P>미지원 <가상\n</P></SECTION-1>",
+    ],
+)
+def test_incomplete_korean_text_boundary_cases_remain_fail_closed(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    with pytest.raises(ValueError, match="XML 파싱에 실패했습니다"):
+        parse_xml(tmp_path, body)
+
+
+def test_quoted_gt_preserves_korean_text_repair_boundary(tmp_path: Path) -> None:
+    malformed = _attribute_comparison_document(
+        attribute_value="synthetic > text",
+        cell_text="본문 <가상",
+    )
+    sanitized = sanitize_dart_xml_text(malformed)
+
+    assert 'ATEST="synthetic > text"' in sanitized
+    assert ">본문 &lt;가상</TD>" in sanitized
+
+    source = tmp_path / "QUOTED_GT_KOREAN_TEXT.xml"
+    source.write_text(malformed, encoding="utf-8")
+    parsed = parse_periodic_xml(source)
+    assert parsed["tables"][0]["rows"][0][0]["text"] == "본문 <가상"
+
+
+def test_incomplete_korean_text_in_protected_regions_is_noop() -> None:
+    protected = """<?xml version="1.0" encoding="UTF-8"?>
+    <DOCUMENT><?audit token="<가상</P>"?>
+      <DOCUMENT-NAME>합성 정기보고서</DOCUMENT-NAME>
+      <COMPANY-NAME>테스트기업</COMPANY-NAME>
+      <BODY><!-- token <가상</P> -->
+        <SECTION-1><P><![CDATA[token <가상</P>]]></P></SECTION-1>
+      </BODY>
+    </DOCUMENT>"""
+
+    assert sanitize_dart_xml_text(protected) == protected
 
 
 @pytest.mark.parametrize(

@@ -259,6 +259,50 @@ def list_company_names(records: list[dict[str, Any]]) -> tuple[str, ...]:
     return tuple(names)
 
 
+def list_company_universe(records: list[dict[str, Any]]) -> tuple[dict[str, str | None], ...]:
+    """
+    manifest에 등장하는 기업을 canonical 표기와 상장명 쌍으로 돌려준다.
+
+    list_company_names와 나란히 두고 합치지 않는다. 돌려주는 것의 성질이 다르다.
+
+        list_company_names      canonical `corp_name`만. 이 값이 downstream identity다.
+        list_company_universe   같은 기업의 인식 후보 표기까지. 질문에서 알아보는 데만 쓴다.
+
+    `listed_name`을 함께 넘기는 이유는 별도 하드코딩을 줄이기 위해서다. '현대차'·'삼성화재'
+    ·'KT'는 manifest가 이미 알고 있는 표기이며, 그것을 코드에 다시 적으면 코퍼스가 바뀔 때
+    두 벌이 어긋난다.
+
+    같은 기업에 서로 다른 상장명이 여러 개면 하나를 고르지 않고 상장명을 비운다. 고르면
+    고른 쪽이 조용히 인식 표기가 되고, 어느 표기로 인식했는지가 결과에 남지 않는다.
+    """
+    listed_names: dict[str, set[str]] = {}
+
+    for record in records:
+        name = record.get("corp_name")
+
+        if not name:
+            continue
+
+        corp_name = unicodedata.normalize("NFC", str(name))
+
+        seen = listed_names.setdefault(corp_name, set())
+
+        listed = record.get("listed_name")
+
+        if listed:
+            seen.add(unicodedata.normalize("NFC", str(listed)))
+
+    # 먼저 전부 모으고 나서 판정한다. 레코드를 훑으면서 정하면, 엇갈림을 확인해 비워 둔
+    # 상장명이 뒤이어 나온 레코드 때문에 다시 채워진다.
+    return tuple(
+        {
+            "corp_name": corp_name,
+            "listed_name": next(iter(seen)) if len(seen) == 1 else None,
+        }
+        for corp_name, seen in listed_names.items()
+    )
+
+
 def latest_annual_fiscal_year_by_company(
     records: list[dict[str, Any]],
 ) -> dict[str, int]:

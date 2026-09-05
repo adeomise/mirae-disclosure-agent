@@ -91,6 +91,7 @@ from disclosure_agent.retrieval.metadata_filter import (
     FilingNotFoundError,
     latest_annual_fiscal_year_by_company,
     list_company_names,
+    list_company_universe,
     load_manifest,
 )
 
@@ -251,6 +252,14 @@ def answer_question(
 
     known_companies = list_company_names(manifest_records)
 
+    # 상장명까지 담은 목록을 함께 넘긴다. '현대차'·'삼성화재'·'KT'처럼 사용자가 흔히 쓰는
+    # 표기는 manifest가 이미 알고 있고, 그것을 코드에 따로 적으면 코퍼스가 바뀔 때 두 벌이
+    # 어긋난다. 무엇으로 인식했든 계획에 담기는 것은 canonical corp_name 하나다.
+    #
+    # manifest를 다시 읽지 않는다. 같은 records에서 두 목록을 함께 유도한다. 이유는 아래
+    # fiscal_year_anchors와 같다.
+    company_universe = list_company_universe(manifest_records)
+
     # 지분공시의 보고자는 corp_name(발행회사) 목록에 없을 수 있다. 지분공시
     # 질문에서만 manifest의 flr_nm을 인식 후보에 더한다.
     if "대량보유" in question:
@@ -281,6 +290,7 @@ def answer_question(
             question,
             known_companies=known_companies,
             fiscal_year_anchors=fiscal_year_anchors,
+            company_universe=company_universe,
         )
 
     except UnsupportedQuestionError as error:

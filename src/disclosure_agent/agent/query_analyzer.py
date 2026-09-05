@@ -48,7 +48,7 @@ TODO:
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -62,6 +62,10 @@ from typing import Any
 #
 # 파생 개념은 추출 계층의 어휘가 아니다. 대응하는 ACODE가 없고 문서에서 읽히지도 않으며,
 # 원천 지표에서 계산으로 만들어진다. 그래서 agent.derived_metrics가 정의한다.
+from disclosure_agent.agent.company_resolution import (
+    CompanyResolution,
+    CompanyResolver,
+)
 from disclosure_agent.agent.derived_metrics import DerivedMetric
 from disclosure_agent.common.enums import (
     ChainPolicy,
@@ -83,6 +87,7 @@ from disclosure_agent.retrieval.metadata_filter import (
 )
 
 __all__ = [
+    "AMBIGUOUS_COMPANY_REASON",
     "ANCHOR_SOURCE_LATEST_ANNUAL_FILING",
     "BUSINESS_DESCRIPTION_TOKENS",
     "BUSINESS_PROFILE_SECTION_SCOPES",
@@ -109,8 +114,10 @@ __all__ = [
     "QueryPlan",
     "RelativePeriod",
     "UnsupportedQuestionError",
+    "build_company_resolver",
     "build_query_plan",
     "normalize_company_name",
+    "resolve_companies",
 ]
 
 # 이번 슬라이스가 다루는 고정 값. common/enums.py는 팀 합의 전이므로 여기서 국소 정의한다.
@@ -187,6 +194,21 @@ KNOWN_INTENTS: tuple[str, ...] = (
 # 특정 기업명을 코드에 넣어 두지 않는다. 그것도 결국 추측이고, 목록에 없는 기업을
 # 조용히 인식하거나 못 하는 차이를 만든다.
 DEFAULT_KNOWN_COMPANIES: tuple[str, ...] = ()
+
+# 기업 표현을 하나로 확정하지 못했을 때의 거절 사유.
+#
+# unknown_company와 따로 두는 것이 규약이다. 둘은 실제로 일어난 일이 다르다.
+#
+#     unknown_company              질문이 가리킨 기업이 이 코퍼스에 없다.
+#     ambiguous_company_match      질문이 가리킨 표현에 맞는 기업이 여럿이며, 그중 하나를
+#                                  고르지 않았다.
+#
+# 한 사유로 묶으면 '삼성'을 물은 사용자에게 '그런 기업 없음'이라고 답하게 된다. 실제로는
+# 여덟 곳이 있고 어느 곳인지만 정해지지 않았다.
+#
+# 값이 company_resolution.RESOLUTION_AMBIGUOUS_MATCH와 다른 것은 층이 다르기 때문이다.
+# 그쪽은 해석 방법(method)의 이름이고, 이쪽은 Router가 결과에 싣는 거절 사유의 이름이다.
+AMBIGUOUS_COMPANY_REASON = "ambiguous_company_match"
 
 # 절대연도. '년'이 붙은 표기만 연도로 읽는다.
 #
@@ -1286,7 +1308,7 @@ def _extract_years(question: str) -> tuple[int, ...]:
 
     첫 매치 하나만 돌려주지 않는다. 두 기간을 묻는 질문에서 하나만 고르면 나머지 기간이
     사라진 채로 답이 조립되고, 사라졌다는 사실이 warnings에도 결과에도 남지 않는다.
-    _extract_companies가 기업에 대해 하는 일과 같다.
+    _resolve_companies가 기업에 대해 하는 일과 같다.
 
     같은 연도가 문장에 여러 번 나오는 것은 두 기간이 아니다("2024년 매출과 2024년 영업이익").
     그래서 값으로 중복을 제거한다. 돌아오는 순서는 질문에 나타난 순서다.
@@ -1420,88 +1442,71 @@ def _require_years(years: tuple[int, ...]) -> tuple[int, ...]:
     return years
 
 
-def _find_unclaimed_span(
-    haystack: str,
-    needle: str,
-    claimed: list[tuple[int, int]],
-) -> tuple[int, int] | None:
+def _resolve_companies(question: str, resolver: CompanyResolver) -> CompanyResolution:
     """
-    이미 다른 회사명이 차지한 구간과 겹치지 않는 첫 출현 위치를 찾는다. 없으면 None.
+    질문 안에서 기업 표현을 전부 찾아 canonical 기업으로 옮긴다.
 
-    이 검사가 다중 기업 판정의 false positive를 막는 자리다. 단순 포함 검사만 하면
-    'LG생활건강'을 물은 질문에서 'LG'가 또 매치되어 한 기업이 두 기업으로 세어진다.
-    """
-    start = haystack.find(needle)
+    회사명을 추측하지 않는다. 실제 규칙은 agent.company_resolution이 가지고 있고, 여기서는
+    그 결과를 질의 해석 계층의 거절 어휘로 옮기기만 한다.
 
-    while start != -1:
-        end = start + len(needle)
+    막는 자리가 셋이며 순서가 규약이다.
 
-        overlaps = any(
-            claim_start < end and start < claim_end for claim_start, claim_end in claimed
-        )
+        모호한 표현이 하나라도 있으면    먼저 막는다. '삼성이랑 현대차 비교해줘'에서 현대차만
+                                        남겨 실행하면, 질문이 지목한 기업 하나가 사라진 채로
+                                        답이 조립되고 사라졌다는 사실이 결과에 남지 않는다.
+                                        일부만 실행하지 않는다.
 
-        if not overlaps:
-            return start, end
+        확정되지 않은 표현이 남으면      해석기가 기업 언급으로 읽었지만 옮기지 않은 표현이다.
+                                        '레인이랑 현대차 2025년 매출 비교해줘'의 '레인'이 그
+                                        자리이며, 후보가 하나뿐이어도 그 근거로는 확정하지
+                                        않는다는 것이 해석기의 규약이다. 여기서 통과시키면
+                                        현대자동차 단독 계획이 만들어져, 확정하지 않기로 한
+                                        표현을 '없는 것'으로 처리한 셈이 된다.
 
-        start = haystack.find(needle, start + 1)
+        하나도 못 찾았으면              기존과 같은 unknown_company다. 모호성 판정이 먼저이므로
+                                        '삼성'처럼 후보가 여럿인 표현이 '모르는 기업'으로
+                                        잘못 보고되지 않는다.
 
-    return None
+    판정 근거는 전부 CompanyResolution의 구조화된 결과다. 질문 문자열을 여기서 다시 들여다보지
+    않는다. 그렇게 하면 기업 인식 규칙이 해석기와 이 함수 두 곳에 생기고, 한쪽만 고쳐질 수 있다.
 
-
-def _extract_companies(question: str, known_companies: tuple[str, ...]) -> tuple[str, ...]:
-    """
-    질문 안에서 알려진 회사명을 전부 찾는다.
-
-    회사명을 추측하지 않고 주어진 목록과의 매칭만 사용한다.
-
-    첫 매치 하나만 돌려주지 않는다. 두 기업을 묻는 질문에서 하나만 고르면 나머지 기업이
-    사라진 채로 답이 조립되고, 사라졌다는 사실이 warnings에도 결과에도 남지 않는다.
-
-    긴 이름부터 배정하고 이미 배정된 구간은 다시 쓰지 않는다. 이름이 서로를 포함하는 경우
-    (예: 한미약품 / 한미)에 한 기업이 둘로 세어지지 않게 하기 위함이다. 조사나 구분자는
-    보지 않는다. 실제로 목록에 있는 회사명이 서로 다른 자리에서 매치될 때만 여러 기업이다.
+    확정되지 않은 표현의 사유를 unknown_company로 두는 이유:
+        '레인'은 후보가 여럿이어서 못 고른 것이 아니다. 이 질문에서 어느 기업인지 정해지지
+        않았다는 뜻이며, 그것은 ambiguous_company_match가 아니라 unknown_company 쪽이다.
+        AMBIGUOUS_COMPANY_REASON으로 보고하면 후보 하나짜리 표현이 '후보가 여럿'으로 보고되고,
+        사유를 읽는 쪽이 그 하나를 답으로 읽는 길이 열린다. 대신 detail에 어느 표현이
+        걸렸는지를 적어, 기업을 하나도 못 찾은 경우와 결과에서 구분되게 둔다.
 
     돌아오는 순서는 질문에 나타난 순서다.
     """
-    normalized_question = normalize_company_name(question)
+    resolution = resolver.resolve_question(question)
 
-    # 정규화한 이름의 길이로 정렬한다. 비교에 쓰는 것이 정규화한 문자열이므로, 원본 표기
-    # 길이로 정렬하면 '(주)' 같은 표기 차이 때문에 포함 관계가 어긋나게 풀린다.
-    ordered = sorted(
-        known_companies,
-        key=lambda name: len(normalize_company_name(name)),
-        reverse=True,
-    )
+    if resolution.ambiguous:
+        mention = resolution.ambiguous[0]
 
-    claimed: list[tuple[int, int]] = []
-    seen: set[str] = set()
-    matches: list[tuple[int, str]] = []
+        raise UnsupportedQuestionError(
+            reason=AMBIGUOUS_COMPANY_REASON,
+            detail=(
+                f"'{mention.raw}'이(가) 가리키는 기업을 하나로 확정할 수 없습니다. "
+                f"후보: {', '.join(mention.candidates)}."
+            ),
+        )
 
-    for company in ordered:
-        normalized_company = normalize_company_name(company)
+    if resolution.unresolved:
+        mention = resolution.unresolved[0]
 
-        # 같은 기업이 표기만 달리해 목록에 여러 번 들어 있을 수 있다. 그것은 두 기업이 아니다.
-        if not normalized_company or normalized_company in seen:
-            continue
+        raise UnsupportedQuestionError(
+            reason="unknown_company",
+            detail=f"'{mention.raw}'이(가) 가리키는 기업을 확정할 수 없습니다.",
+        )
 
-        span = _find_unclaimed_span(normalized_question, normalized_company, claimed)
-
-        if span is None:
-            continue
-
-        claimed.append(span)
-        seen.add(normalized_company)
-        matches.append((span[0], company))
-
-    if not matches:
+    if not resolution.companies:
         raise UnsupportedQuestionError(
             reason="unknown_company",
             detail="질문에서 알려진 기업명을 찾을 수 없습니다.",
         )
 
-    matches.sort()
-
-    return tuple(company for _, company in matches)
+    return resolution
 
 
 def _extract_accounting_scope(question: str) -> tuple[str, bool]:
@@ -1729,7 +1734,7 @@ def _find_event_subtype_rules(question: str) -> tuple[EventSubtypeRule, ...]:
     질문에 맞는 거래소공시 세부유형 규칙을 전부 찾는다. 없으면 빈 튜플.
 
     첫 매치에서 멈추지 않는다. 멈추면 두 유형을 함께 가리킨 질문에서 뒤의 유형이 사라진
-    채로 계획이 만들어지고, 사라졌다는 사실이 어디에도 남지 않는다. _extract_companies가
+    채로 계획이 만들어지고, 사라졌다는 사실이 어디에도 남지 않는다. _resolve_companies가
     기업에 대해, _extract_years가 기간에 대해 하는 일과 같다.
 
     돌아오는 순서는 EVENT_SUBTYPE_RULES의 선언 순서다. 우선순위가 아니라 진단 문자열의
@@ -2106,6 +2111,7 @@ def _build_document_summary_plan(question: str, companies: tuple[str, ...]) -> Q
 def _event_summary_subject_tokens(
     question: str,
     companies: tuple[str, ...],
+    subject_names: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """
     질문에서 어느 이벤트를 가리키는지 밝힌 주제어를 읽는다. 없으면 빈 튜플.
@@ -2132,9 +2138,17 @@ def _event_summary_subject_tokens(
 
     순서는 질문에 나온 순서다.
     """
+    # canonical 이름만으로 걷어내면 별칭·상장명으로 적은 기업명이 남는다. '현대차 공시 내용
+    # 정리해줘'에서 companies는 '현대자동차'뿐이고, 질문에 적힌 '현대차'는 어느 canonical과도
+    # 같지 않아 주제어로 남는다. 그러면 답의 주체가 이벤트를 가르는 조건이 되어, 그 낱말이
+    # 본문에 없는 문서가 전부 탈락한다.
     normalized_companies = {
-        normalize_company_name(company) for company in companies if company
+        normalize_company_name(name)
+        for name in (*companies, *subject_names)
+        if name
     }
+
+    normalized_companies.discard("")
 
     tokens: list[str] = []
 
@@ -2179,7 +2193,11 @@ def _event_summary_subject_tokens(
     return tuple(tokens)
 
 
-def _looks_like_event_summary(question: str, companies: tuple[str, ...]) -> bool:
+def _looks_like_event_summary(
+    question: str,
+    companies: tuple[str, ...],
+    subject_names: tuple[str, ...] = (),
+) -> bool:
     """
     거래소공시 1건의 내용을 정리해 달라는 질문인가.
 
@@ -2216,7 +2234,7 @@ def _looks_like_event_summary(question: str, companies: tuple[str, ...]) -> bool
     if not any(token in compact for token in EVENT_SUMMARY_REQUEST_TOKENS):
         return False
 
-    return bool(_event_summary_subject_tokens(question, companies))
+    return bool(_event_summary_subject_tokens(question, companies, subject_names))
 
 
 def _extract_event_summary_chain_policy(question: str) -> ChainPolicy:
@@ -2239,7 +2257,11 @@ def _extract_event_summary_chain_policy(question: str) -> ChainPolicy:
     return ChainPolicy.LATEST_VALID
 
 
-def _build_event_summary_plan(question: str, companies: tuple[str, ...]) -> QueryPlan:
+def _build_event_summary_plan(
+    question: str,
+    companies: tuple[str, ...],
+    subject_names: tuple[str, ...] = (),
+) -> QueryPlan:
     """
     Q06 계열 거래소공시 단건 요약 계획을 만든다.
 
@@ -2310,7 +2332,7 @@ def _build_event_summary_plan(question: str, companies: tuple[str, ...]) -> Quer
             ),
         )
 
-    subject_tokens = _event_summary_subject_tokens(question, companies)
+    subject_tokens = _event_summary_subject_tokens(question, companies, subject_names)
 
     if not subject_tokens:
         raise UnsupportedQuestionError(
@@ -2367,7 +2389,36 @@ def _find_contract_fields(question: str) -> tuple[MetricConcept, ...]:
     return tuple(fields)
 
 
-def _extract_counterparty(question: str, company: str) -> str | None:
+def _names_the_subject(
+    found: str,
+    company: str,
+    subject_names: tuple[str, ...],
+) -> bool:
+    """
+    읽어 낸 이름이 질문의 대상 기업을 가리키는가.
+
+    canonical 이름만 비교하지 않는다. 사용자가 상장명이나 별칭으로 적었으면 그 표기가
+    canonical과 같지 않고, 그러면 대상 기업 자신이 계약 상대방 자리에 담긴다. 그 이름으로
+    후보를 좁히면 아무 문서도 찾지 못한다.
+
+    subject_names는 이 질문에서 기업을 가리킨 표현들이다(CompanyResolution.surfaces).
+    질문에 실제로 적힌 표기만 들어 있으며, 여기서 새로 만들지 않는다.
+    """
+    normalized_found = normalize_company_name(found)
+
+    if not normalized_found:
+        return False
+
+    return normalized_found in {
+        normalize_company_name(name) for name in (company, *subject_names) if name
+    }
+
+
+def _extract_counterparty(
+    question: str,
+    company: str,
+    subject_names: tuple[str, ...] = (),
+) -> str | None:
     """
     질문이 지목한 계약 상대방. 없으면 None이며 추정하지 않는다.
 
@@ -2388,13 +2439,17 @@ def _extract_counterparty(question: str, company: str) -> str | None:
     if not found:
         return None
 
-    if normalize_company_name(found) == normalize_company_name(company):
+    if _names_the_subject(found, company, subject_names):
         return None
 
     return found
 
 
-def _extract_event_counterparty(question: str, company: str) -> str | None:
+def _extract_event_counterparty(
+    question: str,
+    company: str,
+    subject_names: tuple[str, ...] = (),
+) -> str | None:
     """
     이력 질문이 지목한 계약 상대방. 없으면 None이며 추정하지 않는다.
 
@@ -2427,7 +2482,7 @@ def _extract_event_counterparty(question: str, company: str) -> str | None:
     if not found:
         return None
 
-    if normalize_company_name(found) == normalize_company_name(company):
+    if _names_the_subject(found, company, subject_names):
         return None
 
     return found
@@ -2451,6 +2506,7 @@ def _build_contract_fact_plan(
     question: str,
     companies: tuple[str, ...],
     years: tuple[int, ...],
+    subject_names: tuple[str, ...] = (),
 ) -> QueryPlan:
     """
     Q02 계열 공급계약 단건 사실 조회 계획을 만든다.
@@ -2532,7 +2588,7 @@ def _build_contract_fact_plan(
         accounting_scope=QueryAccountingScope.NOT_APPLICABLE.value,
         metric=None,
         requested_fields=requested_fields,
-        counterparty=_extract_counterparty(question, companies[0]),
+        counterparty=_extract_counterparty(question, companies[0], subject_names),
         month=_extract_month(question),
     )
 
@@ -2765,7 +2821,11 @@ def _build_relative_period_plan(
     )
 
 
-def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> QueryPlan:
+def _build_event_history_plan(
+    question: str,
+    companies: tuple[str, ...],
+    subject_names: tuple[str, ...] = (),
+) -> QueryPlan:
     """
     Q13 계열 정정 이력 조회 계획을 만든다.
 
@@ -2853,7 +2913,7 @@ def _build_event_history_plan(question: str, companies: tuple[str, ...]) -> Quer
         # 조회 조건이 아니라 handler에 넘기는 fail-close 신호다. 상대방으로 후보를 좁히지
         # 않으며, 이 값이 있으면 후보 1건을 답으로 확정하지 않는다
         # (_extract_event_counterparty 참조).
-        counterparty=_extract_event_counterparty(question, companies[0]),
+        counterparty=_extract_event_counterparty(question, companies[0], subject_names),
         chain_policy=ChainPolicy.FULL_CHAIN,
     )
 
@@ -2880,17 +2940,66 @@ def _reject_out_of_scope_period(question: str) -> None:
             )
 
 
+def build_company_resolver(
+    known_companies: Sequence[str] | None = None,
+    *,
+    company_universe: Sequence[Mapping[str, Any]] | None = None,
+) -> CompanyResolver:
+    """
+    인식 후보 목록에서 기업명 해석기를 만든다.
+
+    두 입력을 함께 받는 이유:
+        company_universe는 manifest가 아는 표기 전부(`corp_name` + `listed_name`)이고,
+        known_companies는 '이 질문에서 인식해도 되는 기업명'이다. 지분공시 질문은 보고자
+        (`flr_nm`)를 인식해야 하는데 그 이름은 발행회사 universe에 없을 수 있다.
+
+        universe를 주지 않으면 known_companies만으로 만든다. 그때는 상장명이 없으므로
+        canonical 표기와 alias만으로 인식하며, 기존 호출자의 동작이 그대로다.
+    """
+    names = tuple(known_companies or ())
+
+    if company_universe is None:
+        return CompanyResolver.from_names(names)
+
+    return CompanyResolver.from_universe(company_universe, extra_names=names)
+
+
+def resolve_companies(
+    question: str,
+    known_companies: Sequence[str] | None = None,
+    *,
+    company_universe: Sequence[Mapping[str, Any]] | None = None,
+) -> CompanyResolution:
+    """
+    질문 하나의 기업명 해석 결과를 그대로 돌려준다.
+
+    build_query_plan이 쓰는 것과 같은 규칙이며, 계획을 만들지 않고 해석 근거만 본다.
+    raw 표기 / 정규화 표기 / canonical 기업 / 해석 방법 / 후보가 모두 들어 있어, 어느 표현이
+    어떤 경로로 어느 회사가 되었는지를 QueryPlan을 거치지 않고 확인할 수 있다.
+
+    QueryPlan에 이 값을 싣지는 않는다. Contract를 넓히는 일이라 이번 범위 밖이다.
+    """
+    resolver = build_company_resolver(known_companies, company_universe=company_universe)
+
+    return resolver.resolve_question(question)
+
+
 def build_query_plan(
     question: str,
     known_companies: tuple[str, ...] | list[str] | None = None,
     *,
     fiscal_year_anchors: Mapping[str, int] | None = None,
+    company_universe: Sequence[Mapping[str, Any]] | None = None,
 ) -> QueryPlan:
     """
     질문 문자열에서 Q01 계열 QueryPlan을 만든다.
 
     known_companies에 준 목록 안에서만 기업을 인식한다.
     목록이 없으면 기업명을 추측하지 않고 거절한다.
+
+    company_universe를 함께 주면 manifest의 `listed_name`까지 인식 후보 표기로 쓴다.
+    '현대차'·'삼성화재'·'KT'가 그 자리이며, 무엇으로 인식했든 계획에 담기는 것은 canonical
+    `corp_name` 하나다. 주지 않으면 canonical 표기와 등록된 alias만으로 인식한다.
 
     fiscal_year_anchors는 상대 기간("작년")을 절대연도로 옮길 기준 연도 대응표다. 키는
     normalize_company_name을 거친 기업명이며, 값은 그 기업의 사업보고서가 코퍼스에 존재하는
@@ -2910,17 +3019,28 @@ def build_query_plan(
             detail="질문이 비어 있습니다.",
         )
 
-    company_universe = (
+    recognized_names = (
         tuple(known_companies) if known_companies else DEFAULT_KNOWN_COMPANIES
     )
 
-    if not company_universe:
+    if not recognized_names and not company_universe:
         raise UnsupportedQuestionError(
             reason="missing_company_universe",
             detail="인식할 기업명 목록이 주어지지 않았습니다. manifest에서 읽어 전달해야 합니다.",
         )
 
-    companies = _extract_companies(question, company_universe)
+    resolver = build_company_resolver(
+        recognized_names,
+        company_universe=company_universe,
+    )
+
+    resolution = _resolve_companies(question, resolver)
+
+    companies = resolution.companies
+
+    # 질문에 실제로 적힌 기업 표기. 계획에는 canonical만 담기지만, '이 낱말은 답의 주체이지
+    # 조회 조건이 아니다'를 판정하는 자리들은 사용자가 쓴 표기를 알아야 한다.
+    subject_names = resolution.surfaces
 
     # 의도와 무관한 기간 규칙은 의도 분기보다 먼저 본다.
     #
@@ -2945,11 +3065,19 @@ def build_query_plan(
                 detail="지분공시 질문에서 보고자와 발행회사를 하나씩 확정해야 합니다.",
             )
         normalized_question = normalize_company_name(question)
-        filer_end = normalized_question.find(normalize_company_name(companies[0])) + len(
-            normalize_company_name(companies[0])
-        )
+        # 자리는 canonical 이름이 아니라 질문에 실제로 적힌 표현에서 읽는다. canonical로 찾으면
+        # 상장명·별칭으로 적은 질문에서 그 이름이 문장에 없어 find가 -1을 돌려주고, 보고자와
+        # 발행회사의 순서 판정이 있지도 않은 자리를 기준으로 이뤄진다.
+        filer_mention = resolution.first_mention(companies[0])
+        issuer_mention = resolution.first_mention(companies[1])
+        if filer_mention is None or issuer_mention is None:
+            raise UnsupportedQuestionError(
+                reason="ambiguous_holding_entities",
+                detail="지분공시 질문에서 보고자와 발행회사를 하나씩 확정해야 합니다.",
+            )
+        filer_end = filer_mention.span[1]
         filing_verb = normalized_question.find("낸", filer_end)
-        issuer_start = normalized_question.find(normalize_company_name(companies[1]), filer_end)
+        issuer_start = issuer_mention.span[0]
         if filing_verb < filer_end or issuer_start < filing_verb:
             raise UnsupportedQuestionError(
                 reason="ambiguous_holding_entities",
@@ -2994,7 +3122,7 @@ def build_query_plan(
 
     # 남은 의도를 가른다. 이후 단계는 의도마다 요구하는 것이 다르다.
     if _looks_like_event_history(question):
-        return _build_event_history_plan(question, companies)
+        return _build_event_history_plan(question, companies, subject_names)
 
     # 거래소공시 단건 요약(Q06)은 이력 판정보다 뒤, 정기공시 요약 판정보다 앞이다.
     #
@@ -3009,8 +3137,8 @@ def build_query_plan(
     #   기간 판정보다 앞      이 질문은 회계연도를 밝히지 않는다. 뒤에 두면 _require_years가
     #                        먼저 missing_year로 막고, 막힌 사유가 실제로 일어난 일과
     #                        달라진다.
-    if _looks_like_event_summary(question, companies):
-        return _build_event_summary_plan(question, companies)
+    if _looks_like_event_summary(question, companies, subject_names):
+        return _build_event_summary_plan(question, companies, subject_names)
 
     # 요약 요청은 이력 판정보다 뒤, 기간 판정보다 앞이다.
     #
@@ -3109,7 +3237,7 @@ def build_query_plan(
     #                          막힌 이유가 '계약 조회 미지원'이 아니라 '지표를 모르겠다'로
     #                          바뀐다.
     if _looks_like_contract_fact(question):
-        return _build_contract_fact_plan(question, companies, years)
+        return _build_contract_fact_plan(question, companies, years, subject_names)
 
     _require_years(years)
 

@@ -32,7 +32,8 @@ separately and excluded from the score denominator. Existing contract cases omit
 are validation-only and are not regression-scored.
 
 Active and contract `ANSWERABLE` cases still require a supported semantic gold
-expectation (`fact`, `facts`, `document_summaries`, or `event_history`) and Evidence.
+expectation (`fact`, `facts`, `document_summaries`, `event_history`, `events`, or
+`resolved_event_states`) and Evidence.
 A future regression case may instead use structural gold: at least one specified
 collection count or a positive `min_evidence_count`. Completely empty future gold is
 rejected.
@@ -44,7 +45,16 @@ integrity can also require one selected filing and require all Evidence to belon
 Expected fields that are omitted are not compared. Calculation gold can fix
 operation/unit/value/input/Evidence structure and
 independently recompute `delta`/`delta_pct` or `aggregate` values from their Fact inputs.
-Comparison gold can fix its typed left/right inputs and relation. The generic
+Comparison gold can fix its typed left/right inputs and relation. `GoldAnswer.events`
+and `GoldAnswer.resolved_event_states` each fix a list of partial expectations
+(`ExpectedEvent`, `ExpectedResolvedEventState`) matched distinctly against the
+prediction's `events` and `resolved_event_states`, the same distinct-matching
+contract as Fact and DocumentSummary. An `ExpectedResolvedEventState` may pin a
+`fields` map of per-field `value`/`unit`/`source_doc_id`, so a single-event summary
+(Q06) can require not just how many events or resolved states came back but which
+event, which company, and which source filing's values they hold — a `counts`-only
+gold cannot tell a correctly resolved event apart from a same-shaped result that
+resolved a different disclosure. The generic
 EventHistory evaluator supports exact `document_count` and `change_count`,
 `link_resolution`, and `chain_complete`. Its provenance integrity checks Evidence
 coverage for `history.document_ids`, requires each FieldChange's referenced Evidence
@@ -108,6 +118,28 @@ If the corpus later gains an FY2026 annual report, the same question means FY202
 FY2026. Keep the question text as it is and move the expected fiscal years; Q07 validates
 relative-period resolution itself, not a particular pair of years.
 
+### Q06: which event and which version
+
+`q06` ("LG유플러스 파주 AIDC 투자 공시 내용 요약해줘.") selects one facility-investment
+event by question content (company + subject tokens), not by a document identifier, and
+resolves it under the default `chain_policy=latest_valid`. In the current corpus snapshot
+that event's correction chain is a single root filing, so the latest-valid state and the
+original-filing state are the same values; the gold only fixes the latest state. Its
+`resolved_event_states` gold pins the five fields Q06's answer contract requires
+(`investment_target`, `investment_amount`, `investment_purpose`, `investment_start_date`,
+`investment_end_date`) together with the `company`, `event_type`, and each field's
+`source_doc_id` — not a receipt number in the gold file itself, but the field values that
+only that filing's content produces. `counts` pins every other collection (`facts`,
+`event_links`, `event_histories`, `calculations`, `comparisons`, `narrative_comparisons`,
+`document_summaries`, `conversion_gaps`) to zero and `events`/`resolved_event_states`/
+`evidence`/`warnings` to the sizes actually observed, so an unrelated structured result
+appearing in any of those collections fails the comparison.
+
+If the corpus later gains a correction filing for this event, `chain_policy=latest_valid`
+should surface the corrected values and `event_links`/`event_histories` should become
+non-empty; update the gold's field values, `source_doc_id`, and `counts` together rather
+than leaving stale root-filing values in place.
+
 `as_of_date` and `corpus_snapshot` on `QuestionCase` stay `null`. No explicit as-of
 contract exists yet, and `q07` deliberately exercises the default anchor path.
 
@@ -120,11 +152,10 @@ Live mode executes the active regression cases through the public Agent entry po
 and evaluates the returned `AgentExecutionResult` objects with the same deterministic
 comparator:
 
-The current active regression set contains exactly fifteen representative questions:
-`Q01`, `Q02`, `Q03`, `Q04`, `Q05`, `Q07`, `Q08`, `Q10`,
-`Q11`, `Q12`, `Q13`, `Q15`, `Q16`, `Q17`, and `Q18`. Therefore, a
-reported live-Agent result of `15/15` applies only to those fifteen active cases; it is not a
-result for all 18 representative questions.
+The current active regression set contains exactly sixteen representative questions:
+`Q01`, `Q02`, `Q03`, `Q04`, `Q05`, `Q06`, `Q07`, `Q08`, `Q10`, `Q11`, `Q12`, `Q13`, `Q15`,
+`Q16`, `Q17`, and `Q18`. Therefore, a reported live-Agent result of `16/16` applies only
+to those sixteen active cases; it is not a result for all 18 representative questions.
 
 ```text
 uv run python -m evaluation.runner --run-agent --corpus-root path/to/corpus

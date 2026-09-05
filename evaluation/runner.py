@@ -6,6 +6,7 @@ import argparse
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Any, Literal
@@ -18,13 +19,21 @@ from disclosure_agent.common.enums import (
     AnswerabilityStatus,
     ComparisonRelation,
     EventLinkResolutionStatus,
+    EventType,
     ExecutionStatus,
     FactAccountingScope,
     MetricConcept,
     ResultInputType,
     SectionScope,
 )
-from disclosure_agent.common.schemas import AgentExecutionResult, Fact, ResultInputReference
+from disclosure_agent.common.schemas import (
+    AgentExecutionResult,
+    Event,
+    Fact,
+    ResolvedEventState,
+    ResolvedFieldValue,
+    ResultInputReference,
+)
 
 EVALUATION_DIR = Path(__file__).parent
 DEFAULT_QUESTIONS_PATH = EVALUATION_DIR / "questions.jsonl"
@@ -59,6 +68,41 @@ class ExpectedFact(BaseModel):
     normalized_value: float | str | None = None
     normalized_unit: str | None = None
     evidence_ids: list[str] | None = None
+
+
+class ExpectedEvent(BaseModel):
+    """Fields that one distinct predicted Event must match."""
+
+    event_type: EventType | None = None
+    company: str | None = None
+    source_doc_id: str | None = None
+    is_correction: bool | None = None
+
+
+class ExpectedResolvedField(BaseModel):
+    """Fields that one distinct ResolvedFieldValue must match."""
+
+    value: float | str | None = None
+    unit: str | None = None
+    source_doc_id: str | None = None
+
+
+class ExpectedResolvedEventState(BaseModel):
+    """Fields that one distinct predicted ResolvedEventState must match.
+
+    ``fields`` pins a subset of the state's field-level values, each against its
+    own ``ResolvedFieldValue`` (value/unit/source_doc_id). A count-only check on
+    ``resolved_event_states`` cannot tell a correctly resolved event apart from a
+    same-shaped result that resolved a different disclosure (same collection
+    sizes, different company/subject/amount): the identity lives in the field
+    values and their source document, not in how many states or fields exist.
+    """
+
+    event_type: EventType | None = None
+    company: str | None = None
+    event_id: str | None = None
+    as_of: date | None = None
+    fields: dict[str, ExpectedResolvedField] | None = None
 
 
 class EventHistoryExpectation(BaseModel):
@@ -160,6 +204,8 @@ class GoldAnswer(BaseModel):
     document_summaries: list[ExpectedDocumentSummary] | None = None
     comparisons: list[ExpectedComparison] | None = None
     min_evidence_count: int = Field(ge=0)
+    events: list[ExpectedEvent] | None = None
+    resolved_event_states: list[ExpectedResolvedEventState] | None = None
     event_history: EventHistoryExpectation | None = None
     counts: CollectionCounts | None = None
     answerability_detail_reason: str | None = None
@@ -248,6 +294,8 @@ def _validate_paired_gold(question: QuestionCase, gold: GoldAnswer) -> None:
         bool(gold.expected_facts())
         or gold.event_history is not None
         or bool(gold.document_summaries)
+        or bool(gold.events)
+        or bool(gold.resolved_event_states)
     )
     has_counts = (
         gold.counts is not None
@@ -411,6 +459,21 @@ def _source_fiscal_years(manifest_path: Path) -> dict[str, int]:
     return years
 
 
+def _match_distinctly(candidates: list[list[int]]) -> bool:
+    """Return whether each expectation's candidate indices admit a distinct assignment."""
+
+    def assign(position: int, used: set[int]) -> bool:
+        if position == len(candidates):
+            return True
+        return any(
+            assign(position + 1, used | {index})
+            for index in candidates[position]
+            if index not in used
+        )
+
+    return assign(0, set())
+
+
 def _fact_matches(expected: ExpectedFact, actual: Fact) -> bool:
     expected_fields = expected.model_dump(exclude_none=True)
     return all(getattr(actual, field) == value for field, value in expected_fields.items())
@@ -424,17 +487,7 @@ def _facts_match_distinctly(
         [index for index, fact in enumerate(actual) if _fact_matches(item, fact)]
         for item in expected
     ]
-
-    def assign(position: int, used: set[int]) -> bool:
-        if position == len(candidates):
-            return True
-        return any(
-            assign(position + 1, used | {index})
-            for index in candidates[position]
-            if index not in used
-        )
-
-    return assign(0, set())
+    return _match_distinctly(candidates)
 
 
 def _document_summaries_match_distinctly(
@@ -457,17 +510,52 @@ def _document_summaries_match_distinctly(
         ]
         for item in expected
     ]
+    return _match_distinctly(candidates)
 
-    def assign(position: int, used: set[int]) -> bool:
-        if position == len(candidates):
-            return True
-        return any(
-            assign(position + 1, used | {index})
-            for index in candidates[position]
-            if index not in used
-        )
 
-    return assign(0, set())
+def _event_matches(expected: ExpectedEvent, actual: Event) -> bool:
+    expected_fields = expected.model_dump(exclude_none=True)
+    return all(getattr(actual, field) == value for field, value in expected_fields.items())
+
+
+def _events_match_distinctly(expected: list[ExpectedEvent], actual: list[Event]) -> bool:
+    """Return whether every expectation can match a distinct actual Event."""
+    candidates = [
+        [index for index, event in enumerate(actual) if _event_matches(item, event)]
+        for item in expected
+    ]
+    return _match_distinctly(candidates)
+
+
+def _resolved_field_matches(expected: ExpectedResolvedField, actual: ResolvedFieldValue) -> bool:
+    expected_fields = expected.model_dump(exclude_none=True)
+    return all(getattr(actual, field) == value for field, value in expected_fields.items())
+
+
+def _resolved_event_state_matches(
+    expected: ExpectedResolvedEventState, actual: ResolvedEventState
+) -> bool:
+    expected_fields = expected.model_dump(exclude={"fields"}, exclude_none=True)
+    if not all(getattr(actual, field) == value for field, value in expected_fields.items()):
+        return False
+    if expected.fields is None:
+        return True
+    return all(
+        (resolved := actual.fields.get(field_name)) is not None
+        and _resolved_field_matches(expected_field, resolved)
+        for field_name, expected_field in expected.fields.items()
+    )
+
+
+def _resolved_event_states_match_distinctly(
+    expected: list[ExpectedResolvedEventState], actual: list[ResolvedEventState]
+) -> bool:
+    """Return whether every expectation can match a distinct actual ResolvedEventState."""
+    candidates = [
+        [index for index, state in enumerate(actual) if _resolved_event_state_matches(item, state)]
+        for item in expected
+    ]
+    return _match_distinctly(candidates)
 
 
 def _document_summary_integrity(result: PredictionCase) -> dict[str, bool]:
@@ -822,6 +910,17 @@ def compare_prediction(gold: GoldAnswer, prediction: PredictionCase) -> list[str
     ):
         failures.append(
             "document_summaries: expected fields did not match distinct predicted summaries"
+        )
+
+    if gold.events is not None and not _events_match_distinctly(gold.events, prediction.events):
+        failures.append("events: expected fields did not match distinct predicted Events")
+
+    if gold.resolved_event_states is not None and not _resolved_event_states_match_distinctly(
+        gold.resolved_event_states, prediction.resolved_event_states
+    ):
+        failures.append(
+            "resolved_event_states: expected fields did not match distinct predicted "
+            "ResolvedEventStates"
         )
 
     if gold.calculations is not None:

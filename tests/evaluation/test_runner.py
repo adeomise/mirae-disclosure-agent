@@ -133,6 +133,7 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q03",
         "q04",
         "q05",
+        "q06",
         "q07",
         "q08",
         "q10",
@@ -144,7 +145,7 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q17",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 3
+    assert sum(question.lifecycle == "future" for question in representative) == 2
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -363,6 +364,219 @@ def test_active_q08_gold_pins_actual_operating_margin_inputs() -> None:
             "normalized_unit": "원",
         },
     ]
+
+
+Q06_SOURCE_DOC_ID = "exchange_20250429800933"
+Q06_EVENT_ID = f"event_facility_investment_{Q06_SOURCE_DOC_ID}"
+
+# All eleven fields the production handler resolves for this event, mirroring the
+# actual runtime output. Only five are Q06's required summary fields; the rest are
+# carried so the prediction shape (and its evidence count) matches the real Agent.
+Q06_ALL_FIELDS: dict[str, dict[str, object]] = {
+    "investment_type": {"value": "신규시설투자", "unit": None},
+    "investment_target": {"value": "파주 AIDC 신규 구축", "unit": None},
+    "investment_amount": {"value": 615600000000.0, "unit": "KRW"},
+    "equity": {"value": 8768379152088.0, "unit": "KRW"},
+    "equity_ratio": {"value": 7.02, "unit": "%"},
+    "large_corporation": {"value": "해당", "unit": None},
+    "investment_purpose": {"value": "고객 수요 증가에 따른 AIDC 신규 구축", "unit": None},
+    "investment_start_date": {"value": "2025-05-07", "unit": None},
+    "investment_end_date": {"value": "2027-05-25", "unit": None},
+    "board_resolution_date": {"value": "2025-04-29", "unit": None},
+    "notes": {"value": "예정일로서 향후 변동될 수 있습니다.", "unit": None},
+}
+
+
+def q06_prediction() -> PredictionCase:
+    """Actual-corpus Q06 shape, with values observed from the production runtime."""
+    return PredictionCase.model_validate(
+        {
+            "case_id": "q06",
+            "execution_status": "COMPLETED",
+            "answerability_status": "ANSWERABLE",
+            "events": [
+                {
+                    "event_id": f"event_{Q06_SOURCE_DOC_ID}",
+                    "event_type": "facility_investment",
+                    "company": "LG유플러스",
+                    "source_doc_id": Q06_SOURCE_DOC_ID,
+                    "is_correction": False,
+                }
+            ],
+            "resolved_event_states": [
+                {
+                    "event_id": Q06_EVENT_ID,
+                    "event_type": "facility_investment",
+                    "company": "LG유플러스",
+                    "as_of": "2025-04-29",
+                    "fields": {
+                        field_name: {
+                            "value": field["value"],
+                            "unit": field["unit"],
+                            "source_doc_id": Q06_SOURCE_DOC_ID,
+                            "evidence_ids": [f"evidence_{Q06_SOURCE_DOC_ID}_{field_name}"],
+                        }
+                        for field_name, field in Q06_ALL_FIELDS.items()
+                    },
+                }
+            ],
+            "evidence": [
+                {
+                    "evidence_id": f"evidence_{Q06_SOURCE_DOC_ID}_{field_name}",
+                    "doc_id": Q06_SOURCE_DOC_ID,
+                    "location_type": "event_field",
+                    "field_name": field_name,
+                }
+                for field_name in Q06_ALL_FIELDS
+            ],
+            "warnings": [
+                "공시 판본은 질문이 정한 기준을 따랐습니다: chain_policy=latest_valid."
+            ],
+        }
+    )
+
+
+def test_active_q06_gold_pins_actual_event_summary_structure() -> None:
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    q06 = {gold.case_id: gold for gold in loaded.gold_answers}["q06"]
+
+    assert questions["q06"].lifecycle == "active"
+    assert q06.counts.model_dump(exclude_none=True) == {
+        "facts": 0,
+        "evidence": 11,
+        "events": 1,
+        "event_links": 0,
+        "event_histories": 0,
+        "resolved_event_states": 1,
+        "calculations": 0,
+        "comparisons": 0,
+        "narrative_comparisons": 0,
+        "document_summaries": 0,
+        "warnings": 1,
+        "conversion_gaps": 0,
+    }
+    assert compare_prediction(q06, q06_prediction()) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("company", "무관한기업"),
+        ("event_type", "supply_contract"),
+        ("source_doc_id", "exchange_unrelated"),
+    ],
+)
+def test_q06_rejects_wrong_event_identity(field: str, wrong_value: object) -> None:
+    """A different event's identity must fail even though every count still matches."""
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q06"]
+    actual = q06_prediction().model_dump(mode="python")
+    actual["events"][0][field] = wrong_value
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("events:") for item in failures)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field", "wrong_value"),
+    [
+        ("investment_target", "value", "물류센터 증설"),
+        ("investment_amount", "value", 1.0),
+        ("investment_amount", "unit", "USD"),
+        ("investment_purpose", "value", "무관한 목적"),
+        ("investment_start_date", "value", "1999-01-01"),
+        ("investment_end_date", "value", "1999-01-01"),
+    ],
+)
+def test_q06_rejects_wrong_resolved_state_value(
+    field_name: str, field: str, wrong_value: object
+) -> None:
+    """A same-shaped state that resolved a different disclosure's values must fail.
+
+    Counts alone (events=1, resolved_event_states=1, evidence=11) do not change when
+    only the field values differ, so this is the case count-only gold would let
+    through as a false positive.
+    """
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q06"]
+    actual = q06_prediction().model_dump(mode="python")
+    actual["resolved_event_states"][0]["fields"][field_name][field] = wrong_value
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("resolved_event_states:") for item in failures)
+
+
+def test_q06_rejects_wrong_resolved_state_source_doc() -> None:
+    """The latest-state source document identity is pinned, not just its value."""
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q06"]
+    actual = q06_prediction().model_dump(mode="python")
+    actual["resolved_event_states"][0]["fields"]["investment_amount"][
+        "source_doc_id"
+    ] = "exchange_unrelated"
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("resolved_event_states:") for item in failures)
+
+
+def test_q06_rejects_a_same_count_different_event_prediction() -> None:
+    """The core false-positive this gold must not let through.
+
+    Swapping company, event_type, and every field value to a different disclosure's
+    content leaves every collection count identical (events=1, resolved_event_states=1,
+    evidence=11, all else 0) but must still fail on identity/reference semantics.
+    """
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q06"]
+    actual = q06_prediction().model_dump(mode="python")
+
+    unrelated_doc_id = "exchange_unrelated900001"
+    actual["events"][0]["company"] = "무관한기업"
+    actual["events"][0]["event_type"] = "supply_contract"
+    actual["events"][0]["source_doc_id"] = unrelated_doc_id
+    actual["resolved_event_states"][0]["company"] = "무관한기업"
+    actual["resolved_event_states"][0]["event_type"] = "supply_contract"
+    for field_name, resolved in actual["resolved_event_states"][0]["fields"].items():
+        resolved["value"] = f"무관한 값 {field_name}"
+        resolved["source_doc_id"] = unrelated_doc_id
+        resolved["evidence_ids"] = [f"evidence_{unrelated_doc_id}_{field_name}"]
+    for evidence in actual["evidence"]:
+        evidence["doc_id"] = unrelated_doc_id
+        evidence["evidence_id"] = f"evidence_{unrelated_doc_id}_{evidence['field_name']}"
+
+    prediction = PredictionCase.model_validate(actual)
+    failures = compare_prediction(gold, prediction)
+
+    assert any(item.startswith("events:") for item in failures)
+    assert any(item.startswith("resolved_event_states:") for item in failures)
+
+
+@pytest.mark.parametrize(
+    ("collection", "item"),
+    [
+        (
+            "event_links",
+            {
+                "link_id": "unrelated-link",
+                "source_doc_id": "unrelated-doc",
+                "relation": "correction_of",
+                "raw_reference": {},
+                "resolution_status": "resolved",
+            },
+        ),
+        ("warnings", "unrelated warning"),
+    ],
+)
+def test_q06_rejects_unrelated_structured_collections(
+    collection: str, item: object
+) -> None:
+    gold = {entry.case_id: entry for entry in load_dataset().gold_answers}["q06"]
+    actual = q06_prediction().model_dump(mode="python")
+    actual[collection] = [*actual[collection], item]
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(failure.startswith("counts.") for failure in failures)
 
 
 def q10_prediction() -> PredictionCase:
@@ -891,9 +1105,14 @@ def test_representative_calculation_counts_match_final_targets() -> None:
 
 
 def test_narrative_future_gold_does_not_require_zero_facts() -> None:
+    """q09 remains an unresolved future placeholder; q06 no longer belongs here.
+
+    Q06 is active now, with an actual corpus-verified structure-first gold (like
+    Q10/Q12/Q15) that explicitly pins facts=0 alongside every other collection.
+    """
     gold_by_id = {gold.case_id: gold for gold in load_dataset().gold_answers}
 
-    for case_id in ("q06", "q09"):
+    for case_id in ("q09",):
         counts = gold_by_id[case_id].counts
         assert counts is None or counts.facts is None
 

@@ -161,6 +161,35 @@ def test_plain_revenue_question_still_reaches_the_fact_path() -> None:
     assert actual.evidence
 
 
+# Q16 실측: 위의 test_pattern_f_rejects_before_corpus_access(id=q16-out-of-data-range)는
+# 존재하지 않는 corpus_root로 Gate가 retrieval 이전에 판정됨을 고정한다. 아래는 같은 질문을
+# 실제 코퍼스로 물어, 실제 코퍼스가 있어도 판정이 달라지지 않는다는 것까지 고정한다 — F1
+# Gate는 코퍼스를 읽지 않고 판정하므로(safety.py 모듈 docstring), 두 경로가 같은 결과를
+# 내는 것 자체가 "코퍼스 접근 이전"이라는 설계 불변식의 증거다.
+@pytest.mark.corpus
+def test_q16_out_of_data_range_holds_against_the_actual_corpus() -> None:
+    _require_actual_corpus()
+    assert get_ask_service not in app.dependency_overrides
+
+    response = client.post(
+        "/api/ask", json={"question": "삼성전자 2026년 상반기 실적 좀 알려줘."}
+    )
+
+    assert response.status_code == 200
+    actual = AnswerResponse.model_validate(response.json())
+    assert actual.status is AnswerabilityStatus.UNANSWERABLE
+    assert actual.reason.value == "out_of_data_range"
+    assert actual.facts == []
+    assert actual.evidence == []
+    assert actual.events == []
+    assert actual.event_links == []
+    assert actual.event_histories == []
+    assert actual.resolved_event_states == []
+    payload = response.json()
+    assert "execution_status" not in payload
+    assert "error" not in payload
+
+
 @pytest.mark.corpus
 def test_plain_company_comparison_still_reaches_the_comparison_path() -> None:
     _require_actual_corpus()

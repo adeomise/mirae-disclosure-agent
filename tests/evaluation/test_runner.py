@@ -140,10 +140,11 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q12",
         "q13",
         "q15",
+        "q16",
         "q17",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 4
+    assert sum(question.lifecycle == "future" for question in representative) == 3
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -789,6 +790,36 @@ def test_active_q13_gold_pins_corpus_verified_chain_structure() -> None:
     # The actual chain has three documents and document-level Evidence for each.
     # Do not freeze the producer's current exact Evidence count (9).
     assert q13.min_evidence_count == 3
+
+
+def test_active_q16_gold_pins_actual_safety_gate_contract() -> None:
+    """
+    Q16 실측: F1 Gate가 코퍼스 접근 전에 판정한다(2026년 상반기 = 수집 상한 2026-03 밖).
+
+    구조화 계층 9종 전부가 count=0으로 고정된다 — Gate가 retrieval 이전에 거부하므로
+    fail-close 상태에서는 어떤 컬렉션도 채워지지 않는다. Q18과 같은 모양이나 사유는
+    다르다(out_of_data_range/out_of_corpus_period vs out_of_scope_policy/investment_advice).
+    """
+    q16 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q16"]
+    questions = {question.case_id: question for question in load_dataset().questions}
+
+    assert questions["q16"].lifecycle == "active"
+    assert q16.execution_status.value == "COMPLETED"
+    assert q16.status.value == "UNANSWERABLE"
+    assert q16.reason.value == "out_of_data_range"
+    assert q16.answerability_detail_reason == "out_of_corpus_period"
+    assert q16.counts.model_dump(exclude_none=True) == {
+        "facts": 0,
+        "evidence": 0,
+        "events": 0,
+        "event_links": 0,
+        "event_histories": 0,
+        "resolved_event_states": 0,
+        "calculations": 0,
+        "comparisons": 0,
+        "document_summaries": 0,
+    }
+    assert q16.min_evidence_count == 0
 
 
 def test_active_q18_gold_pins_actual_safety_gate_contract() -> None:

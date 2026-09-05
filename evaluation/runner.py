@@ -81,7 +81,10 @@ class CollectionCounts(BaseModel):
     resolved_event_states: int | None = Field(default=None, ge=0)
     calculations: int | None = Field(default=None, ge=0)
     comparisons: int | None = Field(default=None, ge=0)
+    narrative_comparisons: int | None = Field(default=None, ge=0)
     document_summaries: int | None = Field(default=None, ge=0)
+    warnings: int | None = Field(default=None, ge=0)
+    conversion_gaps: int | None = Field(default=None, ge=0)
 
 
 class SemanticCountExpectation(BaseModel):

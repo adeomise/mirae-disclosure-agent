@@ -120,9 +120,9 @@ Live mode executes the active regression cases through the public Agent entry po
 and evaluates the returned `AgentExecutionResult` objects with the same deterministic
 comparator:
 
-The current active regression set contains exactly twelve representative questions:
-`Q01`, `Q02`, `Q03`, `Q04`, `Q05`, `Q07`, `Q08`, `Q12`, `Q13`, `Q15`, `Q17`, and `Q18`.
-Therefore, a reported live-Agent result of `12/12` applies only to those twelve active
+The current active regression set contains exactly thirteen representative questions:
+`Q01`, `Q02`, `Q03`, `Q04`, `Q05`, `Q07`, `Q08`, `Q10`, `Q12`, `Q13`, `Q15`, `Q17`, and `Q18`.
+Therefore, a reported live-Agent result of `13/13` applies only to those thirteen active
 cases; it is not a result for all 18 representative questions.
 
 ```text

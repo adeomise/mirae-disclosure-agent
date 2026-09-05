@@ -135,13 +135,14 @@ def test_default_dataset_registers_q01_through_q18_once() -> None:
         "q05",
         "q07",
         "q08",
+        "q10",
         "q12",
         "q13",
         "q15",
         "q17",
         "q18",
     }
-    assert sum(question.lifecycle == "future" for question in representative) == 6
+    assert sum(question.lifecycle == "future" for question in representative) == 5
 
 
 def test_default_dataset_preserves_synthetic_contract_cases() -> None:
@@ -360,6 +361,176 @@ def test_active_q08_gold_pins_actual_operating_margin_inputs() -> None:
             "normalized_unit": "원",
         },
     ]
+
+
+def q10_prediction() -> PredictionCase:
+    """Actual-corpus Q10 shape, with values observed from the production runtime."""
+    return PredictionCase.model_validate(
+        {
+            "case_id": "q10",
+            "execution_status": "COMPLETED",
+            "answerability_status": "ANSWERABLE",
+            "facts": [
+                {
+                    "fact_id": "fact_periodic_20260320000859_revenue_table_0127_r1_c1",
+                    "company": "에이치디현대중공업(주)",
+                    "metric": "revenue",
+                    "fiscal_year": 2025,
+                    "accounting_scope": "consolidated",
+                    "raw_value": "17,580,633,257",
+                    "raw_unit": "천원",
+                    "normalized_value": "17580633257000",
+                    "normalized_unit": "원",
+                    "evidence_ids": [
+                        "evidence_periodic_20260320000859_table_0127_r1_c1"
+                    ],
+                },
+                {
+                    "fact_id": "fact_periodic_20260312001037_revenue_table_0102_r1_c1",
+                    "company": "삼성중공업(주)",
+                    "metric": "revenue",
+                    "fiscal_year": 2025,
+                    "accounting_scope": "consolidated",
+                    "raw_value": "10,650,010,702,818",
+                    "raw_unit": "원",
+                    "normalized_value": "10650010702818",
+                    "normalized_unit": "원",
+                    "evidence_ids": [
+                        "evidence_periodic_20260312001037_table_0102_r1_c1"
+                    ],
+                },
+            ],
+            "evidence": [
+                {
+                    "evidence_id": "evidence_periodic_20260320000859_table_0127_r1_c1",
+                    "doc_id": "periodic_20260320000859",
+                    "location_type": "table",
+                },
+                {
+                    "evidence_id": "evidence_periodic_20260312001037_table_0102_r1_c1",
+                    "doc_id": "periodic_20260312001037",
+                    "location_type": "table",
+                },
+            ],
+            "comparisons": [
+                {
+                    "comparison_id": "comparison_revenue_2025_HD현대중공업_vs_삼성중공업",
+                    "left": {
+                        "input_type": "fact",
+                        "input_id": (
+                            "fact_periodic_20260320000859_revenue_table_0127_r1_c1"
+                        ),
+                    },
+                    "right": {
+                        "input_type": "fact",
+                        "input_id": (
+                            "fact_periodic_20260312001037_revenue_table_0102_r1_c1"
+                        ),
+                    },
+                    "relation": "left_greater",
+                }
+            ],
+        }
+    )
+
+
+def test_active_q10_gold_pins_actual_source_comparison_structure() -> None:
+    loaded = load_dataset()
+    questions = {question.case_id: question for question in loaded.questions}
+    q10 = {gold.case_id: gold for gold in loaded.gold_answers}["q10"]
+
+    assert questions["q10"].lifecycle == "active"
+    assert q10.counts.model_dump(exclude_none=True) == {
+        "facts": 2,
+        "evidence": 2,
+        "events": 0,
+        "event_links": 0,
+        "event_histories": 0,
+        "resolved_event_states": 0,
+        "calculations": 0,
+        "comparisons": 1,
+        "narrative_comparisons": 0,
+        "document_summaries": 0,
+        "warnings": 0,
+        "conversion_gaps": 0,
+    }
+    assert compare_prediction(q10, q10_prediction()) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("company", "다른조선사(주)"),
+        ("normalized_value", "1"),
+        ("evidence_ids", ["evidence-unrelated"]),
+    ],
+)
+def test_q10_rejects_wrong_fact_identity_value_or_source(
+    field: str, wrong_value: object
+) -> None:
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q10"]
+    actual = q10_prediction().model_dump(mode="python")
+    actual["facts"][0][field] = wrong_value
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("facts:") for item in failures)
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("relation", "right_greater"),
+        (
+            "right",
+            {
+                "input_type": "fact",
+                "input_id": "fact_periodic_20260320000859_revenue_table_0127_r1_c1",
+            },
+        ),
+    ],
+)
+def test_q10_rejects_wrong_comparison_semantics(
+    field: str, wrong_value: object
+) -> None:
+    gold = {item.case_id: item for item in load_dataset().gold_answers}["q10"]
+    actual = q10_prediction().model_dump(mode="python")
+    actual["comparisons"][0][field] = wrong_value
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert any(item.startswith("comparisons:") for item in failures)
+
+
+@pytest.mark.parametrize(
+    ("collection", "item"),
+    [
+        (
+            "events",
+            {
+                "event_id": "unrelated-event",
+                "event_type": "supply_contract",
+                "company": "무관한 기업",
+                "source_doc_id": "unrelated-doc",
+            },
+        ),
+        ("warnings", "unrelated warning"),
+        (
+            "conversion_gaps",
+            {"kind": "unrelated", "subject": "unrelated"},
+        ),
+    ],
+)
+def test_q10_rejects_unrelated_structured_collections(
+    collection: str, item: object
+) -> None:
+    gold = {entry.case_id: entry for entry in load_dataset().gold_answers}["q10"]
+    actual = q10_prediction().model_dump(mode="python")
+    actual[collection] = [item]
+
+    failures = compare_prediction(gold, PredictionCase.model_validate(actual))
+
+    assert f"counts.{collection}: expected 0, got 1" in failures
 
 
 def test_active_q12_gold_pins_actual_aggregate_comparison_structure() -> None:

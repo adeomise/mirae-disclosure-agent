@@ -24,6 +24,7 @@ RUNNER_SPEC.loader.exec_module(runner)
 
 EvaluationDataset = runner.EvaluationDataset
 GoldAnswer = runner.GoldAnswer
+AcceptableOutcome = runner.AcceptableOutcome
 AgentExecutionResult = runner.AgentExecutionResult
 PredictionCase = runner.PredictionCase
 QuestionCase = runner.QuestionCase
@@ -1831,6 +1832,339 @@ def prediction(case_id: str, **overrides) -> PredictionCase:
     }
     values.update(overrides)
     return PredictionCase.model_validate(values)
+
+
+def blocked_gold() -> GoldAnswer:
+    return GoldAnswer.model_validate(
+        {
+            "case_id": "blocked",
+            "execution_status": "BLOCKED",
+            "status": None,
+            "reason": None,
+            "execution_issue": {
+                "stage": "query_plan",
+                "reason": "missing_year",
+            },
+            "min_evidence_count": 0,
+        }
+    )
+
+
+def blocked_prediction(
+    *,
+    status: str | None = None,
+    reason: str | None = None,
+    stage: str = "query_plan",
+    issue_reason: str = "missing_year",
+) -> PredictionCase:
+    return prediction(
+        "blocked",
+        execution_status="BLOCKED",
+        answerability_status=status,
+        answerability_reason=reason,
+        execution_issue={
+            "stage": stage,
+            "reason": issue_reason,
+            "detail": "synthetic blocked execution",
+        },
+        facts=[],
+        evidence=[],
+    )
+
+
+def acceptable_outcomes_gold(*, fact_count: int = 0) -> GoldAnswer:
+    return GoldAnswer.model_validate(
+        {
+            "case_id": "case",
+            "acceptable_outcomes": [
+                {
+                    "execution_status": "COMPLETED",
+                    "status": "UNRESOLVED",
+                    "reason": "ambiguous_match",
+                },
+                {
+                    "execution_status": "BLOCKED",
+                    "status": None,
+                    "reason": None,
+                    "execution_issue": {
+                        "stage": "query_plan",
+                        "reason": "missing_year",
+                    },
+                },
+            ],
+            "counts": {"facts": fact_count},
+            "min_evidence_count": 0,
+        }
+    )
+
+
+def test_blocked_null_status_and_matching_execution_issue_pass() -> None:
+    assert compare_prediction(blocked_gold(), blocked_prediction()) == []
+
+
+def test_blocked_null_status_gold_loads_from_jsonl(tmp_path: Path) -> None:
+    questions_path = tmp_path / "questions.jsonl"
+    gold_path = tmp_path / "gold.jsonl"
+    questions_path.write_text(
+        json.dumps(
+            regression_question("blocked").model_dump(mode="json"),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    gold_path.write_text(
+        json.dumps(blocked_gold().model_dump(mode="json"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    loaded = load_dataset(questions_path, gold_path)
+
+    assert loaded.gold_answers[0].status is None
+    assert loaded.gold_answers[0].execution_issue.stage == "query_plan"
+    assert loaded.gold_answers[0].execution_issue.reason == "missing_year"
+
+
+def test_blocked_gold_with_non_null_status_is_rejected() -> None:
+    values = blocked_gold().model_dump(mode="python")
+    values.update(status="UNRESOLVED", reason="ambiguous_match")
+
+    with pytest.raises(ValueError, match="BLOCKED outcomes require status=None"):
+        GoldAnswer.model_validate(values)
+
+
+def test_blocked_gold_with_reason_is_rejected() -> None:
+    values = blocked_gold().model_dump(mode="python")
+    values["reason"] = "not_found"
+
+    with pytest.raises(ValueError, match="BLOCKED outcomes require reason=None"):
+        GoldAnswer.model_validate(values)
+
+
+def test_blocked_gold_without_execution_issue_is_rejected() -> None:
+    values = blocked_gold().model_dump(mode="python")
+    values["execution_issue"] = None
+
+    with pytest.raises(ValueError, match="BLOCKED outcomes require execution_issue"):
+        GoldAnswer.model_validate(values)
+
+
+def test_completed_gold_with_null_status_is_rejected() -> None:
+    with pytest.raises(ValueError, match="COMPLETED outcomes require a non-null status"):
+        GoldAnswer(
+            case_id="completed",
+            execution_status="COMPLETED",
+            status=None,
+            reason=None,
+            min_evidence_count=0,
+        )
+
+
+def test_completed_gold_with_execution_issue_is_rejected() -> None:
+    with pytest.raises(ValueError, match="must not define execution_issue"):
+        GoldAnswer(
+            case_id="completed",
+            execution_status="COMPLETED",
+            status="ANSWERABLE",
+            reason=None,
+            execution_issue={"stage": "query_plan", "reason": "missing_year"},
+            min_evidence_count=1,
+            facts=[{"metric": "revenue"}],
+        )
+
+
+def test_completed_unresolved_gold_without_execution_issue_is_valid() -> None:
+    gold = GoldAnswer(
+        case_id="completed",
+        execution_status="COMPLETED",
+        status="UNRESOLVED",
+        reason="ambiguous_match",
+        min_evidence_count=0,
+    )
+
+    assert gold.status is AnswerabilityStatus.UNRESOLVED
+    assert gold.execution_issue is None
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        (
+            {"status": "UNRESOLVED", "reason": "ambiguous_match"},
+            "BLOCKED outcomes require status=None",
+        ),
+        (
+            {"reason": "not_found"},
+            "BLOCKED outcomes require reason=None",
+        ),
+        (
+            {"execution_issue": None},
+            "BLOCKED outcomes require execution_issue",
+        ),
+    ],
+)
+def test_acceptable_outcome_rejects_invalid_blocked_combinations(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    values = {
+        "execution_status": "BLOCKED",
+        "status": None,
+        "reason": None,
+        "execution_issue": {"stage": "query_plan", "reason": "missing_year"},
+        **overrides,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        AcceptableOutcome.model_validate(values)
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        (
+            {"status": None, "reason": None},
+            "COMPLETED outcomes require a non-null status",
+        ),
+        (
+            {
+                "execution_issue": {
+                    "stage": "query_plan",
+                    "reason": "missing_year",
+                }
+            },
+            "COMPLETED outcomes must not define execution_issue",
+        ),
+    ],
+)
+def test_acceptable_outcome_rejects_invalid_completed_combinations(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    values = {
+        "execution_status": "COMPLETED",
+        "status": "UNRESOLVED",
+        "reason": "ambiguous_match",
+        **overrides,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        AcceptableOutcome.model_validate(values)
+
+
+def test_acceptable_outcome_rejects_failed() -> None:
+    with pytest.raises(ValueError, match="FAILED is not supported"):
+        AcceptableOutcome(
+            execution_status="FAILED",
+            status=None,
+            reason=None,
+            execution_issue={"stage": "runtime", "reason": "unexpected_error"},
+        )
+
+
+def test_top_level_gold_keeps_legacy_failed_support() -> None:
+    gold = GoldAnswer(
+        case_id="failed",
+        execution_status="FAILED",
+        status=None,
+        reason=None,
+        min_evidence_count=0,
+    )
+
+    assert gold.execution_status is ExecutionStatus.FAILED
+
+
+def test_blocked_prediction_with_answerability_status_fails_null_expectation() -> None:
+    failures = compare_prediction(
+        blocked_gold(),
+        blocked_prediction(status="UNANSWERABLE", reason="not_found"),
+    )
+
+    assert any(item.startswith("answerability_status:") for item in failures)
+
+
+def test_execution_issue_stage_mismatch_fails() -> None:
+    failures = compare_prediction(
+        blocked_gold(),
+        blocked_prediction(stage="filing_discovery"),
+    )
+
+    assert any(item.startswith("execution_issue.stage:") for item in failures)
+
+
+def test_execution_issue_reason_mismatch_fails() -> None:
+    failures = compare_prediction(
+        blocked_gold(),
+        blocked_prediction(issue_reason="unsupported_metric"),
+    )
+
+    assert any(item.startswith("execution_issue.reason:") for item in failures)
+
+
+def test_existing_completed_answerable_gold_still_passes() -> None:
+    assert compare_prediction(answerable_gold("case"), prediction("case")) == []
+
+
+def test_existing_gold_without_execution_issue_does_not_compare_it() -> None:
+    actual = prediction(
+        "case",
+        execution_issue={
+            "stage": "unused",
+            "reason": "unused",
+            "detail": "not part of the existing Gold expectation",
+        },
+    )
+
+    assert compare_prediction(answerable_gold("case"), actual) == []
+
+
+def test_first_acceptable_outcome_passes() -> None:
+    actual = prediction(
+        "case",
+        answerability_status="UNRESOLVED",
+        answerability_reason="ambiguous_match",
+        facts=[],
+        evidence=[],
+    )
+
+    assert compare_prediction(acceptable_outcomes_gold(), actual) == []
+
+
+def test_second_acceptable_outcome_passes() -> None:
+    actual = blocked_prediction().model_copy(update={"case_id": "case"})
+
+    assert compare_prediction(acceptable_outcomes_gold(), actual) == []
+
+
+def test_prediction_outside_acceptable_outcomes_fails() -> None:
+    actual = prediction(
+        "case",
+        answerability_status="UNANSWERABLE",
+        answerability_reason="not_found",
+        facts=[],
+        evidence=[],
+    )
+
+    failures = compare_prediction(acceptable_outcomes_gold(), actual)
+
+    assert any(item.startswith("acceptable_outcomes:") for item in failures)
+
+
+def test_matching_acceptable_outcome_does_not_relax_structural_expectations() -> None:
+    actual = blocked_prediction().model_copy(update={"case_id": "case"})
+
+    failures = compare_prediction(acceptable_outcomes_gold(fact_count=1), actual)
+
+    assert failures == ["counts.facts: expected 1, got 0"]
+
+
+def test_existing_gold_loading_and_serialization_remain_backward_compatible() -> None:
+    q01 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q01"]
+    serialized = q01.model_dump(mode="json", exclude_none=True)
+
+    assert serialized["status"] == "ANSWERABLE"
+    assert serialized["execution_status"] == "COMPLETED"
+    assert "execution_issue" not in serialized
+    assert "acceptable_outcomes" not in serialized
 
 
 def dataset(*pairs: tuple[QuestionCase, GoldAnswer]) -> EvaluationDataset:

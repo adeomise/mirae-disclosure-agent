@@ -67,6 +67,22 @@ from disclosure_agent.agent.company_resolution import (
     CompanyResolver,
 )
 from disclosure_agent.agent.derived_metrics import DerivedMetric
+
+# 같은 것을 다르게 쓴 표현을 정본 값으로 옮기는 규칙은 agent.query_vocabulary가 갖는다.
+#
+# 나눠 두는 이유:
+#     이 모듈이 정하는 것은 "무엇을 요구하고 무엇을 막는가"이고, 그 앞에 "질문에 적힌 말이
+#     무엇을 가리키는가"가 있다. 둘을 한 파일에 두면 어휘를 넓히는 변경이 판정 순서를 함께
+#     건드리게 되고, 표현 하나를 받아들이는 변경과 지원 범위를 넓히는 변경이 구분되지 않는다.
+from disclosure_agent.agent.query_vocabulary import (
+    OPERATION_AGGREGATE,
+    PRODUCT_TOKENS,
+    YEAR_PATTERN,
+    find_contract_fields,
+    find_years,
+    matches_product_phrase,
+    normalize_aggregate_request,
+)
 from disclosure_agent.common.enums import (
     ChainPolicy,
     Intent,
@@ -210,19 +226,17 @@ DEFAULT_KNOWN_COMPANIES: tuple[str, ...] = ()
 # 그쪽은 해석 방법(method)의 이름이고, 이쪽은 Router가 결과에 싣는 거절 사유의 이름이다.
 AMBIGUOUS_COMPANY_REASON = "ambiguous_company_match"
 
-# 절대연도. '년'이 붙은 표기만 연도로 읽는다.
+# 절대연도 어휘(YEAR_PATTERN, REPORT_CONTEXT_YEAR_PATTERN)는 agent.query_vocabulary가
+# 갖는다. 위 import가 이 모듈의 이름으로 그대로 잇는다.
 #
-# 네 자리 숫자를 그대로 연도로 보면 금액이 연도가 된다. "2024년 매출이 2025억원 맞아?"의
-# 2025는 기간이 아닌데, 그것을 두 번째 연도로 세면 답할 수 있는 질문이 시계열 비교로
-# 오분류되어 막힌다. 막는 쪽으로 틀리는 것도 틀리는 것이다.
+# 옮긴 이유:
+#     '년'이 붙은 표기와 보고서 종류가 붙은 표기를 함께 읽어야 하고, 두 규칙이 한자리에
+#     있어야 어느 쪽을 넓혔는지가 코드에 남는다.
 #
-# '년'을 요구해도 기존 입력을 깨지 않는다. 대표 질문 18문항과 테스트·회귀 케이스의 질문
-# 문자열은 전부 'YYYY년' 표기이며, '년' 없는 네 자리 숫자는 보고서명("사업보고서 (2025.12)")
-# 이나 공시일처럼 질문이 아닌 자리에만 나온다.
-#
-# 앞자리 숫자를 배제해 더 긴 숫자의 일부를 연도로 읽지 않는다. 뒤에 오는 조사는 보지 않는다
-# ("2024년이랑", "2024년과", "2024년에").
-YEAR_PATTERN = re.compile(r"(?<!\d)(?:19|20)\d{2}(?=\s*년)")
+# 이름을 이 모듈에서도 읽을 수 있게 두는 이유:
+#     Pattern F Gate가 query_analyzer.YEAR_PATTERN을 import해 자기 패턴과 갈라지지
+#     않았는지 확인한다(tests/unit/test_pattern_f_safety_gate.py). Gate는 질의 해석보다
+#     앞 계층이라 같은 값을 따로 두고 있으며, 그 대조가 계속 성립해야 한다.
 
 # 기준 연도(anchor)에서 한 해 앞을 가리키는 상대 기간 표현.
 #
@@ -471,10 +485,15 @@ EVENT_SUBTYPE_FACILITY_INVESTMENT = "신규시설투자등"
 # Pattern D Q12의 결정적 후처리. Common Contract의 QueryPlan을 늘리지 않고
 # agent 내부 실행 계획에만 남긴다. 두 신호가 모두 있어야 시설투자 집계 경로가
 # 열리며, 하나라도 비면 유사한 이벤트 질문을 집계로 추측하지 않는다.
-OPERATION_AGGREGATE = "aggregate"
+#
+# OPERATION_AGGREGATE와 그 표현 어휘는 agent.query_vocabulary가 갖는다. "합치다"·"합쳐"·
+# "합산"·"총합"·"전부 더해"가 모두 같은 요청이며, 그 대응을 이 판정 자리에 늘어놓으면
+# 어휘가 늘 때마다 여기가 함께 늘어난다.
+#
+# OPERATION_COMPARE는 옮기지 않는다. 비교 표현에는 아직 정규화할 다른 표기가 없고, 옮겨
+# 두면 어휘 모듈이 "정규화가 있는 개념"과 "이름만 있는 개념"을 함께 담게 된다.
 OPERATION_COMPARE = "compare"
 
-AGGREGATE_REQUEST_TOKENS = ("합치", "합산", "합계")
 COMPARISON_REQUEST_TOKENS = ("더 커", "더 큰", "비교")
 
 
@@ -633,8 +652,12 @@ SECTION_SCOPE_TOKENS: tuple[tuple[SectionScope, tuple[str, ...]], ...] = (
 # 사업 서술 표기는 조사까지 요구한다("무슨 사업을", "어떤 사업을", "어떤 사업인지"). '무슨
 # 사업'만으로 보면 "무슨 사업부의 주요 제품이야?"처럼 사업부를 묻는 질문이 함께 걸리고, 그
 # 질문은 기업 소개가 아니다. 조사를 붙이면 '사업부'는 걸리지 않는다.
+#
+# 제품 표현은 어휘 모듈이 갖는다(query_vocabulary.PRODUCT_PHRASE_PATTERNS). 같은 것을
+# 묻는 어순이 여럿이고("주력 제품", "어떤 제품이 주력이야", "무슨 제품을 만들어"),
+# 그것을 여기에 낱말로 늘어놓으면 어순 하나를 넓힐 때마다 이 자리가 함께 늘어난다.
+# PRODUCT_TOKENS는 그 개념의 정본 표기이며 판정은 matches_product_phrase가 한다.
 BUSINESS_DESCRIPTION_TOKENS = ("무슨사업을", "어떤사업을", "어떤사업인지")
-PRODUCT_TOKENS = ("주력제품", "주요제품")
 
 # 이 질문 모양이 요약하는 범위. 순서는 사업보고서 서식의 Section 순서이며, 결과의
 # DocumentSummary도 이 순서로 실린다.
@@ -709,18 +732,12 @@ EVENT_SUBJECT_TRIM_CHARS = " \t\n.,!?·ㆍ、'\"“”‘’()[]{}<>《》「」
 # 거래소공시 단건 사실 조회(Q02)의 어휘
 # --------------------------------------------------------------------------
 
-# 계약 사실 조회(Q02)가 요구하는 문서 필드 표기.
+# 계약 문서 필드 어휘(CONTRACT_FIELD_VOCABULARY)는 agent.query_vocabulary가 갖는다.
 #
-# 값이 MetricConcept인 이유:
-#     event.adapter의 CONTRACT_FIELD_BY_METRIC이 같은 어휘로 문서 필드를 찾는다. 여기서
-#     문자열을 따로 쓰면 같은 개념에 두 벌의 이름이 생기고, 한쪽이 바뀔 때 조용히 끊어진다.
-#
-# 맨 낱말("금액", "기간")을 함께 두는 이유:
-#     "계약 금액과 기간은?"처럼 앞의 '계약'을 한 번만 쓰는 표현이 실제로 온다. 다만 이
-#     낱말들만으로는 판정하지 않는다. _looks_like_contract_fact가 질문에 '계약'이 있는지를
-#     먼저 보므로, 매출 질문의 '금액'이 이 경로로 끌려오지 않는다.
-CONTRACT_AMOUNT_TOKENS = ("계약금액", "계약 금액", "금액")
-CONTRACT_PERIOD_TOKENS = ("계약기간", "계약 기간", "기간")
+# 옮긴 이유:
+#     "계약 시작일"·"시작 날짜"처럼 같은 필드를 가리키는 표기가 여럿이고, 그것을 판정
+#     자리마다 부분문자열로 늘어놓으면 표기가 늘 때 어느 자리를 함께 늘려야 하는지가
+#     코드에 남지 않는다.
 
 # 기업 소개 요약(Q05)이 요약 요청으로 받지 않는 값 조회 표기.
 #
@@ -737,7 +754,9 @@ CONTRACT_PERIOD_TOKENS = ("계약기간", "계약 기간", "기간")
 BUSINESS_PROFILE_EXCLUDED_TOKENS: tuple[str, ...] = (
     *REVENUE_TOKENS,
     *(token for token, _ in DERIVED_METRIC_TOKENS),
-    *CONTRACT_AMOUNT_TOKENS,
+    # 계약 금액 조회. 판정이 공백을 걷어낸 질문에 대해 이뤄지므로 "계약 금액"·"계약금액"이
+    # 모두 이 한 낱말에 걸린다.
+    "금액",
     "영업이익",
     "얼마",
     "비중",
@@ -1316,14 +1335,12 @@ def _extract_years(question: str) -> tuple[int, ...]:
     상대기간 표현("작년")은 여기서 읽지 않는다. 해석하려면 기준 시점을 정해야 하고 그것은
     이번 범위 밖이다. 탐지는 _has_relative_period가 따로 맡는다.
 
-    '년'이 붙지 않은 네 자리 숫자는 연도로 보지 않는다(YEAR_PATTERN 주석 참조).
+    무엇을 연도로 볼지는 agent.query_vocabulary.find_years가 정한다. 여기서 다시 세면 같은
+    질문에 두 벌의 규칙이 생기고, 한쪽만 넓어지는 날이 온다. 지금 읽는 표기는 '년'이 붙은
+    네 자리 숫자와, 보고서 종류가 바로 뒤에 붙은 네 자리 숫자("2025 사업보고서") 둘이다.
+    그 밖의 네 자리 숫자("2025억원", "계약번호 2025-0001")는 연도로 보지 않는다.
     """
-    seen: dict[int, None] = {}
-
-    for match in YEAR_PATTERN.finditer(question):
-        seen.setdefault(int(match.group(0)), None)
-
-    return tuple(seen)
+    return find_years(question)
 
 
 def _match_previous_year_expression(question: str) -> str | None:
@@ -1828,7 +1845,7 @@ def _looks_like_facility_investment_aggregate(question: str) -> bool:
     return (
         len(matched) == 1
         and matched[0].subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
-        and any(token in question for token in AGGREGATE_REQUEST_TOKENS)
+        and normalize_aggregate_request(question) == OPERATION_AGGREGATE
         and any(token in question for token in COMPARISON_REQUEST_TOKENS)
     )
 
@@ -1851,14 +1868,14 @@ def _looks_like_business_profile(question: str) -> bool:
         경로로 내려가 missing_year로 막힌다. 그 사유는 실제로 일어난 일(기업 소개를 물었다)과
         다르다.
     """
-    compact = "".join(question.split())
+    compacted = "".join(question.split())
 
-    if any(token in compact for token in BUSINESS_PROFILE_EXCLUDED_TOKENS):
+    if any(token in compacted for token in BUSINESS_PROFILE_EXCLUDED_TOKENS):
         return False
 
-    return any(token in compact for token in BUSINESS_DESCRIPTION_TOKENS) and any(
-        token in compact for token in PRODUCT_TOKENS
-    )
+    return any(
+        token in compacted for token in BUSINESS_DESCRIPTION_TOKENS
+    ) and matches_product_phrase(question)
 
 
 def _build_business_profile_plan(
@@ -2370,23 +2387,10 @@ def _find_contract_fields(question: str) -> tuple[MetricConcept, ...]:
     """
     질문이 요구한 계약 문서 필드를 읽는다. 없으면 빈 튜플이며 추측하지 않는다.
 
-    계약기간이 두 필드가 되는 이유:
-        기간은 시작일과 종료일이 함께 있어야 서술된다. 한쪽만 담으면 "2025-09-16부터"까지만
-        답하고 언제 끝나는지를 물었다는 사실이 결과 어디에도 남지 않는다.
-
-    돌아오는 차례는 이 함수가 고정한다. 질문에 적힌 차례를 따르지 않는 이유는, 같은 질문을
-    다르게 쓴 두 표현이 서로 다른 계획을 만들면 그 차이가 답의 차이로 새어 나가기 때문이다.
+    표기와 필드의 대응은 agent.query_vocabulary.find_contract_fields가 갖는다. "계약금액과
+    계약기간", "계약 시작일과 종료일, 금액"은 같은 세 필드를 요구하며 같은 차례로 돌아온다.
     """
-    fields: list[MetricConcept] = []
-
-    if any(token in question for token in CONTRACT_AMOUNT_TOKENS):
-        fields.append(MetricConcept.CONTRACT_AMOUNT)
-
-    if any(token in question for token in CONTRACT_PERIOD_TOKENS):
-        fields.append(MetricConcept.CONTRACT_START_DATE)
-        fields.append(MetricConcept.CONTRACT_END_DATE)
-
-    return tuple(fields)
+    return find_contract_fields(question)
 
 
 def _names_the_subject(

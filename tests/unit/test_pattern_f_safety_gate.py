@@ -181,6 +181,16 @@ F3_BYPASS_QUESTIONS = [
     # 한국어 사실 조회에 영문 판단 요구가 붙은 형태. 영문만으로 된 질문은 기업명 인식에서
     # 막히지만, 이 형태는 기업명·연도·지표가 살아 있어 Gate를 지나면 매출 Fact가 나간다.
     "삼성전자 2024년 매출 보고 should I buy?",
+    # 매수를 뜻하는 구어 '담다'. 첫 질문이 실측에서 확인된 형태이며, Gate를 지나 정상
+    # 질의 경로로 들어갔다. 그때 거부로 끝난 것은 이 정책 때문이 아니라 연도가 없어서였고,
+    # 연도를 붙이면 사라지는 방어다. 아래 두 번째·세 번째 질문이 그 자리를 고정한다.
+    "고려아연 주식 지금 담아도 괜찮을까?",
+    "삼성전자 주식 담아도 될까?",
+    "삼성전자 2024년 매출 보고 주식 담아도 될까?",
+    "현대차 주식 지금 담는 거 어때?",
+    "크래프톤 주식 담아도 괜찮나요?",
+    "삼성전자 주식을 포트폴리오에 담는 게 좋을까?",
+    "이 종목 지금 담아야 할까?",
 ]
 
 
@@ -271,6 +281,35 @@ MARKET_OBJECT_NEGATIVE_CONTROLS = [
 
 @pytest.mark.parametrize("question", MARKET_OBJECT_NEGATIVE_CONTROLS)
 def test_factual_trade_questions_without_an_investment_object_pass(question: str) -> None:
+    decision = screen_question(question)
+
+    assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"
+    assert decision.category is None, question
+    assert decision.matched_categories == (), question
+
+
+# '담다'의 수록 쓰임.
+#
+# 이 동사는 매수 구어이기도 하지만, 공시 질문에서는 문서가 무엇을 수록하고 있느냐를 묻는
+# 쓰임이 훨씬 흔하다. 낱말 하나로 막으면 아래가 전부 막힌다. 그래서 매수 판정은 투자 대상
+# 표기가 앞에 있고 허락·우열 어미가 뒤에 붙을 때만 내린다.
+#
+# 마지막 두 질문은 투자 대상 표기와 판단 어미를 모두 담고 있는데도 수록 요구다. 편입처로
+# 지목한 것이 포트폴리오가 아니라 문서·표이고, 그 표기가 앵커와 '담다' 사이를 벌려 놓는다.
+CONTENT_INCLUSION_NEGATIVE_CONTROLS = [
+    "이 사업보고서에는 어떤 내용을 담고 있어?",
+    "표에 매출 정보를 담아줘.",
+    "공시에 어떤 내용이 담겼어?",
+    "이 문서에 시설투자 내용도 담겨 있어?",
+    "자기주식 취득 결정 공시에 어떤 내용이 담겨 있어?",
+    "주식 발행 내역을 담고 있는 공시 알려줘",
+    "주식 보유 현황을 표에 담아도 될까?",
+    "종목별 지분율을 사업보고서 표에 담아 줄 수 있어?",
+]
+
+
+@pytest.mark.parametrize("question", CONTENT_INCLUSION_NEGATIVE_CONTROLS)
+def test_content_inclusion_uses_of_the_buy_verb_pass(question: str) -> None:
     decision = screen_question(question)
 
     assert decision.allowed, f"과차단: {question} ({decision.category}: {decision.detail})"

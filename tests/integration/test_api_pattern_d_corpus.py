@@ -103,6 +103,36 @@ def test_pattern_d_questions_run_through_actual_corpus_http_api(
 
 
 @pytest.mark.corpus
+def test_exact_q10_http_response_keeps_the_public_comparison_shape() -> None:
+    """The public contract carries sources and verdict text, not internal ComparisonResult."""
+    _require_actual_corpus()
+    assert get_ask_service not in app.dependency_overrides
+
+    response = client.post("/api/ask", json={"question": Q10})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == set(AnswerResponse.model_fields)
+    actual = AnswerResponse.model_validate(payload)
+    assert actual.status is AnswerabilityStatus.ANSWERABLE
+    assert actual.reason is None
+    assert len(actual.facts) == 2
+    assert len(actual.evidence) == 2
+    assert actual.events == []
+    assert actual.event_links == []
+    assert actual.event_histories == []
+    assert actual.resolved_event_states == []
+
+    by_company = {fact.company: fact for fact in actual.facts}
+    assert by_company["에이치디현대중공업(주)"].normalized_value == "17580633257000"
+    assert by_company["삼성중공업(주)"].normalized_value == "10650010702818"
+    assert all(fact.normalized_unit == "원" for fact in actual.facts)
+    assert "에이치디현대중공업(주) 쪽이 더 큽니다" in actual.answer
+    assert "calculations" not in payload
+    assert "comparisons" not in payload
+
+
+@pytest.mark.corpus
 def test_exact_q12_runs_through_actual_corpus_http_api() -> None:
     _require_actual_corpus()
     assert get_ask_service not in app.dependency_overrides

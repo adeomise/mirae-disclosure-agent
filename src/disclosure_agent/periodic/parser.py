@@ -35,6 +35,9 @@ PROTECTED_XML_PATTERN = re.compile(
     r"<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>",
     re.DOTALL,
 )
+MALFORMED_PERCENT_COMPARISON_PATTERN = re.compile(
+    r"<(?=[ \t](?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?[ \t]*%)"
+)
 
 # 제공된 dart3/dart4 XML의 실제 구조 tag vocabulary다. 이 목록 밖의
 # ``<프로젝트>``/``<Connected Work>`` 같은 token은 원문 본문으로 보존한다.
@@ -74,11 +77,62 @@ DART_STRUCTURAL_TAGS = {
 }
 
 
+def _repair_malformed_percent_comparisons_in_text(fragment: str) -> str:
+    """Element text의 malformed percent 비교 연산자만 escape한다.
+
+    호출자는 CDATA/comment/processing instruction을 제외한 fragment를 전달한다.
+    start/end tag와 quoted attribute 안의 동일 문자열은 strict parser가 계속
+    검증하도록 그대로 둔다.
+    """
+    parts: list[str] = []
+    unchanged_start = 0
+    position = 0
+    in_markup = False
+    quote: str | None = None
+
+    while position < len(fragment):
+        if not in_markup:
+            next_markup = fragment.find("<", position)
+            if next_markup == -1:
+                break
+            position = next_markup
+            comparison = MALFORMED_PERCENT_COMPARISON_PATTERN.match(
+                fragment,
+                position,
+            )
+            if comparison is not None:
+                parts.append(fragment[unchanged_start:position])
+                parts.append("&lt;")
+                position = comparison.end()
+                unchanged_start = position
+                continue
+
+            in_markup = True
+            position += 1
+            continue
+
+        character = fragment[position]
+        if quote is not None:
+            if character == quote:
+                quote = None
+        elif character in {'"', "'"}:
+            quote = character
+        elif character == ">":
+            in_markup = False
+        position += 1
+
+    if not parts:
+        return fragment
+    parts.append(fragment[unchanged_start:])
+    return "".join(parts)
+
+
 def sanitize_dart_xml_text(xml_text: str) -> str:
-    """DART 본문에 섞인 XML entity/pseudo-tag 오류만 보수적으로 교정한다.
+    """DART 본문의 entity/pseudo-tag/percent 비교식 오류만 보수적으로 교정한다.
 
     정상 entity는 그대로 두며, 구조 tag allowlist 밖의 ``<...>``는 text로
-    escape한다. XML 선언, comment, CDATA, processing instruction은 변경하지 않는다.
+    escape한다. 숫자 percent 앞의 raw ``<``만 비교 연산자로 escape한다.
+    XML 선언, comment, CDATA, processing instruction은 변경하지 않는다.
     """
 
     def sanitize_fragment(fragment: str) -> str:
@@ -93,7 +147,13 @@ def sanitize_dart_xml_text(xml_text: str) -> str:
 
             return f"&lt;{inner}&gt;"
 
-        escaped_tags = TAG_LIKE_PATTERN.sub(escape_pseudo_tag, fragment)
+        escaped_comparisons = _repair_malformed_percent_comparisons_in_text(
+            fragment,
+        )
+        escaped_tags = TAG_LIKE_PATTERN.sub(
+            escape_pseudo_tag,
+            escaped_comparisons,
+        )
         return VALID_XML_ENTITY_PATTERN.sub("&amp;", escaped_tags)
 
     parts: list[str] = []

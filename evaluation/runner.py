@@ -222,6 +222,35 @@ class ExpectedDocumentSummary(BaseModel):
     fiscal_year: int | None = None
 
 
+def _validate_execution_outcome(
+    *,
+    execution_status: ExecutionStatus | None,
+    status: AnswerabilityStatus | None,
+    reason: AnswerabilityReason | None,
+    execution_issue: object | None,
+    allow_failed: bool,
+) -> None:
+    """Reject Gold combinations that the Agent execution contract cannot emit."""
+    if execution_status is None:
+        return
+    if execution_status is ExecutionStatus.FAILED:
+        if allow_failed:
+            return
+        raise ValueError("FAILED is not supported in acceptable_outcomes")
+    if execution_status is ExecutionStatus.BLOCKED:
+        if status is not None:
+            raise ValueError("BLOCKED outcomes require status=None")
+        if reason is not None:
+            raise ValueError("BLOCKED outcomes require reason=None")
+        if execution_issue is None:
+            raise ValueError("BLOCKED outcomes require execution_issue")
+        return
+    if status is None:
+        raise ValueError("COMPLETED outcomes require a non-null status")
+    if execution_issue is not None:
+        raise ValueError("COMPLETED outcomes must not define execution_issue")
+
+
 class ExecutionIssueExpectation(BaseModel):
     """Stable execution-boundary fields for one blocked or failed result."""
 
@@ -239,6 +268,13 @@ class AcceptableOutcome(BaseModel):
 
     @model_validator(mode="after")
     def validate_answerability(self) -> AcceptableOutcome:
+        _validate_execution_outcome(
+            execution_status=self.execution_status,
+            status=self.status,
+            reason=self.reason,
+            execution_issue=self.execution_issue,
+            allow_failed=False,
+        )
         if self.status in {
             AnswerabilityStatus.ANSWERABLE,
             AnswerabilityStatus.PARTIALLY_ANSWERABLE,
@@ -298,6 +334,13 @@ class GoldAnswer(BaseModel):
                     "acceptable_outcomes cannot be combined with top-level boundary "
                     f"fields: {sorted(duplicated)}"
                 )
+        _validate_execution_outcome(
+            execution_status=self.execution_status,
+            status=self.status,
+            reason=self.reason,
+            execution_issue=self.execution_issue,
+            allow_failed=True,
+        )
         if self.status is AnswerabilityStatus.ANSWERABLE and self.reason is not None:
             raise ValueError("ANSWERABLE cases must not define a failure reason")
         if self.status is None and self.reason is not None:

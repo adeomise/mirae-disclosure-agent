@@ -24,6 +24,7 @@ RUNNER_SPEC.loader.exec_module(runner)
 
 EvaluationDataset = runner.EvaluationDataset
 GoldAnswer = runner.GoldAnswer
+AcceptableOutcome = runner.AcceptableOutcome
 AgentExecutionResult = runner.AgentExecutionResult
 PredictionCase = runner.PredictionCase
 QuestionCase = runner.QuestionCase
@@ -1921,6 +1922,155 @@ def test_blocked_null_status_gold_loads_from_jsonl(tmp_path: Path) -> None:
     assert loaded.gold_answers[0].status is None
     assert loaded.gold_answers[0].execution_issue.stage == "query_plan"
     assert loaded.gold_answers[0].execution_issue.reason == "missing_year"
+
+
+def test_blocked_gold_with_non_null_status_is_rejected() -> None:
+    values = blocked_gold().model_dump(mode="python")
+    values.update(status="UNRESOLVED", reason="ambiguous_match")
+
+    with pytest.raises(ValueError, match="BLOCKED outcomes require status=None"):
+        GoldAnswer.model_validate(values)
+
+
+def test_blocked_gold_with_reason_is_rejected() -> None:
+    values = blocked_gold().model_dump(mode="python")
+    values["reason"] = "not_found"
+
+    with pytest.raises(ValueError, match="BLOCKED outcomes require reason=None"):
+        GoldAnswer.model_validate(values)
+
+
+def test_blocked_gold_without_execution_issue_is_rejected() -> None:
+    values = blocked_gold().model_dump(mode="python")
+    values["execution_issue"] = None
+
+    with pytest.raises(ValueError, match="BLOCKED outcomes require execution_issue"):
+        GoldAnswer.model_validate(values)
+
+
+def test_completed_gold_with_null_status_is_rejected() -> None:
+    with pytest.raises(ValueError, match="COMPLETED outcomes require a non-null status"):
+        GoldAnswer(
+            case_id="completed",
+            execution_status="COMPLETED",
+            status=None,
+            reason=None,
+            min_evidence_count=0,
+        )
+
+
+def test_completed_gold_with_execution_issue_is_rejected() -> None:
+    with pytest.raises(ValueError, match="must not define execution_issue"):
+        GoldAnswer(
+            case_id="completed",
+            execution_status="COMPLETED",
+            status="ANSWERABLE",
+            reason=None,
+            execution_issue={"stage": "query_plan", "reason": "missing_year"},
+            min_evidence_count=1,
+            facts=[{"metric": "revenue"}],
+        )
+
+
+def test_completed_unresolved_gold_without_execution_issue_is_valid() -> None:
+    gold = GoldAnswer(
+        case_id="completed",
+        execution_status="COMPLETED",
+        status="UNRESOLVED",
+        reason="ambiguous_match",
+        min_evidence_count=0,
+    )
+
+    assert gold.status is AnswerabilityStatus.UNRESOLVED
+    assert gold.execution_issue is None
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        (
+            {"status": "UNRESOLVED", "reason": "ambiguous_match"},
+            "BLOCKED outcomes require status=None",
+        ),
+        (
+            {"reason": "not_found"},
+            "BLOCKED outcomes require reason=None",
+        ),
+        (
+            {"execution_issue": None},
+            "BLOCKED outcomes require execution_issue",
+        ),
+    ],
+)
+def test_acceptable_outcome_rejects_invalid_blocked_combinations(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    values = {
+        "execution_status": "BLOCKED",
+        "status": None,
+        "reason": None,
+        "execution_issue": {"stage": "query_plan", "reason": "missing_year"},
+        **overrides,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        AcceptableOutcome.model_validate(values)
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        (
+            {"status": None, "reason": None},
+            "COMPLETED outcomes require a non-null status",
+        ),
+        (
+            {
+                "execution_issue": {
+                    "stage": "query_plan",
+                    "reason": "missing_year",
+                }
+            },
+            "COMPLETED outcomes must not define execution_issue",
+        ),
+    ],
+)
+def test_acceptable_outcome_rejects_invalid_completed_combinations(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    values = {
+        "execution_status": "COMPLETED",
+        "status": "UNRESOLVED",
+        "reason": "ambiguous_match",
+        **overrides,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        AcceptableOutcome.model_validate(values)
+
+
+def test_acceptable_outcome_rejects_failed() -> None:
+    with pytest.raises(ValueError, match="FAILED is not supported"):
+        AcceptableOutcome(
+            execution_status="FAILED",
+            status=None,
+            reason=None,
+            execution_issue={"stage": "runtime", "reason": "unexpected_error"},
+        )
+
+
+def test_top_level_gold_keeps_legacy_failed_support() -> None:
+    gold = GoldAnswer(
+        case_id="failed",
+        execution_status="FAILED",
+        status=None,
+        reason=None,
+        min_evidence_count=0,
+    )
+
+    assert gold.execution_status is ExecutionStatus.FAILED
 
 
 def test_blocked_prediction_with_answerability_status_fails_null_expectation() -> None:

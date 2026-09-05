@@ -5,7 +5,7 @@ from lxml import etree
 
 from disclosure_agent.periodic.parser import (
     _repair_malformed_attribute_syntax,
-    _repair_malformed_percent_comparisons_in_text,
+    _repair_malformed_literal_lt_in_text,
     parse_periodic_xml,
     sanitize_dart_xml_text,
 )
@@ -285,7 +285,7 @@ def test_malformed_percent_comparison_in_attribute_remains_fail_closed(
         cell_text="값",
     )
 
-    assert _repair_malformed_percent_comparisons_in_text(malformed) == malformed
+    assert _repair_malformed_literal_lt_in_text(malformed) == malformed
     assert 'ATEST="&lt; 10%">' not in sanitize_dart_xml_text(malformed)
 
     source = tmp_path / "MALFORMED_ATTRIBUTE.xml"
@@ -310,7 +310,7 @@ def test_quoted_gt_does_not_end_attribute_context_early(tmp_path: Path) -> None:
         attribute_value="synthetic > < 10%",
         cell_text="value < 10%",
     )
-    repaired_probe = _repair_malformed_percent_comparisons_in_text(boundary_probe)
+    repaired_probe = _repair_malformed_literal_lt_in_text(boundary_probe)
     assert 'ATEST="synthetic > < 10%"' in repaired_probe
     assert ">value &lt; 10%" in repaired_probe
 
@@ -563,3 +563,93 @@ def test_unrelated_or_ambiguous_malformed_xml_still_fails_closed(
 ) -> None:
     with pytest.raises(ValueError, match="XML 파싱에 실패했습니다"):
         parse_xml(tmp_path, body)
+
+
+def test_bare_lt_in_text_node_is_preserved_as_text(tmp_path: Path) -> None:
+    body = (
+        '<SECTION-1><P><SPAN USERMARK="SAMPLE"><</SPAN></P></SECTION-1>'
+        "<SECTION-1><TITLE>후속</TITLE><TABLE><TR><TD>값</TD></TR></TABLE></SECTION-1>"
+    )
+    assert sanitize_dart_xml_text(body) == body.replace("><</SPAN>", ">&lt;</SPAN>")
+    parsed = parse_xml(tmp_path, body)
+    assert parsed["sections"][0]["text"] == "<"
+    assert parsed["sections"][1]["title"] == "후속"
+    assert parsed["tables"][0]["rows"][0][0]["text"] == "값"
+
+
+@pytest.mark.parametrize("suffix", [' HEIGHT="23">text</TH>', ">text</TH>", "/>"])
+def test_duplicate_attribute_closing_quote_is_repaired(suffix: str) -> None:
+    raw = '<TH ENG="Synthetic value""' + suffix
+    expected = '<TH ENG="Synthetic value"' + suffix
+    assert sanitize_dart_xml_text(raw) == expected
+    root = etree.fromstring(sanitize_dart_xml_text(raw).encode(), etree.XMLParser(recover=False))
+    assert root.tag == "TH"
+    assert root.get("ENG") == "Synthetic value"
+    assert sanitize_dart_xml_text(expected) == expected
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        'ENG=""',
+        "ENG=''",
+        'ENG="ordinary"',
+        "ENG='ordinary'",
+        "ENG='double \"\" quotes'",
+        'ENG="&quot;quoted&quot;"',
+    ],
+)
+def test_valid_quoted_attribute_is_not_modified(attribute: str) -> None:
+    raw = f'<TH {attribute} WIDTH="123">value</TH>'
+    assert sanitize_dart_xml_text(raw) == raw
+
+
+def test_valid_empty_attribute_is_not_modified() -> None:
+    raw = '<SPAN NOTE="" OTHER=""/>'
+    assert sanitize_dart_xml_text(raw) == raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '<TH ENG="value""" WIDTH="23"/>',
+        '<TH ENG="value"" broken/>',
+        '<TH ENG="""/>',
+        "<TH ENG='value''/>",
+    ],
+)
+def test_ambiguous_closing_quotes_remain_fail_closed(raw: str) -> None:
+    assert sanitize_dart_xml_text(raw) == raw
+    with pytest.raises(etree.XMLSyntaxError):
+        etree.fromstring(raw.encode(), etree.XMLParser(recover=False))
+
+
+def test_new_repairs_preserve_protected_regions_and_attribute_context() -> None:
+    raw = """<DOCUMENT><?audit <SPAN><</SPAN> ENG="value"" ?>
+    <!-- <SPAN><</SPAN> ENG="value"" -->
+    <P><![CDATA[<SPAN><</SPAN> ENG="value""]]></P></DOCUMENT>"""
+    assert sanitize_dart_xml_text(raw) == raw
+    attribute_probe = '<P NOTE="synthetic > <</SPAN>">text</P>'
+    assert _repair_malformed_literal_lt_in_text(attribute_probe) == attribute_probe
+
+
+def test_structural_tags_are_not_escaped_by_new_repairs() -> None:
+    from disclosure_agent.periodic.parser import DART_STRUCTURAL_TAGS
+
+    raw = "<DOCUMENT>" + "".join(f"<{tag}/>" for tag in sorted(DART_STRUCTURAL_TAGS))
+    raw += "<SECTION-9/></DOCUMENT>"
+    assert sanitize_dart_xml_text(raw) == raw
+    root = etree.fromstring(raw.encode(), etree.XMLParser(recover=False))
+    assert len(root) == len(DART_STRUCTURAL_TAGS) + 1
+
+
+def test_closing_quote_repair_preserves_following_sections_and_tables(tmp_path: Path) -> None:
+    malformed = """<SECTION-1><TABLE><TR>
+    <TE ACODE="SAMPLE"" AUNIT="KRW">123</TE>
+    </TR></TABLE></SECTION-1><SECTION-1><P>후속 본문</P></SECTION-1>"""
+    repaired = malformed.replace('ACODE="SAMPLE""', 'ACODE="SAMPLE"')
+    parsed = parse_xml(tmp_path, malformed)
+    valid = parse_xml(tmp_path, repaired)
+    assert parsed == valid
+    assert parsed["tables"][0]["rows"][0][0]["acode"] == "SAMPLE"
+    assert parsed["sections"][1]["text"] == "후속 본문"

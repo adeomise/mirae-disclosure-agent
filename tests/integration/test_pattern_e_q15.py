@@ -62,6 +62,7 @@ from disclosure_agent.agent.answer_builder import (
 from disclosure_agent.agent.handlers.event_history import (
     EVENT_TYPE_BY_DOCUMENT_SUBTYPE,
     build_event_history_result,
+    handle_event_history,
     resolve_event_type,
     root_filing_window,
 )
@@ -1414,3 +1415,206 @@ def test_q15_answer_is_unchanged_by_the_bb17_fix() -> None:
     answer = build_answer_response(result).answer
 
     assert "이력을 확인했습니다" in answer
+
+
+# --------------------------------------------------------------------------
+# 질의가 고른 루트가 '가능한 대상' 여럿 중 하나인 경우
+#
+# 리뷰어 사례를 production 조건 그대로 재현한다. 질문의 기간이 원공시를 B 하나로 좁히지만,
+# 체인 후보에는 A·B·C가 모두 들어 있다.
+# --------------------------------------------------------------------------
+
+# A 원공시 2023-03-01, B 원공시 2025-08-30, C 정정 2025-09-15(자기참조).
+#
+# 질문이 2025년을 지목하므로 원공시 후보는 B 하나다. C는 A와 B 둘 다 시간상 가능하며,
+# 어느 쪽인지 원문이 밝히지 않는다.
+PLAUSIBLE_EARLIER_ROOT = "SYNTHETIC0201"
+
+PLAUSIBLE_SELECTED_ROOT = "SYNTHETIC0202"
+
+PLAUSIBLE_CORRECTION = "SYNTHETIC0203"
+
+PLAUSIBLE_RECORDS: list[dict[str, Any]] = [
+    _record(
+        PLAUSIBLE_EARLIER_ROOT,
+        "20230301",
+        subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+        is_correction=False,
+    ),
+    _record(
+        PLAUSIBLE_SELECTED_ROOT,
+        "20250830",
+        subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+        is_correction=False,
+    ),
+    _record(
+        PLAUSIBLE_CORRECTION,
+        "20250915",
+        subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+        is_correction=True,
+    ),
+]
+
+PLAUSIBLE_QUESTION = (
+    f"{COMPANY}가 2025년에 낸 신규 시설투자 공시, 그 뒤에 수정된 부분이 있어?"
+)
+
+
+def _plausible_document(record: dict[str, Any]) -> dict[str, Any]:
+    """정정본은 원공시 제출일로 자기 접수일을 적는다. 대상을 가리키지 못하는 값이다."""
+    if not record["is_correction"]:
+        return {
+            "metadata": {"doc_id": record["doc_id"], "document_type": "exchange"},
+            "title": record["report_nm"],
+            "rows": [],
+            "correction": None,
+        }
+
+    return {
+        "metadata": {"doc_id": record["doc_id"], "document_type": "exchange"},
+        "title": record["report_nm"],
+        "rows": [],
+        "correction": {
+            "correction_date": "2025-09-15",
+            "original_filing_date": "2025-09-15",
+            "reason": "투자금액 변경",
+            "changes": [
+                {
+                    "raw_field": "2. 투자내역-투자금액",
+                    "field": "2. 투자내역-투자금액",
+                    "before": "1,000,000,000",
+                    "after": "1,500,000,000",
+                }
+            ],
+        },
+    }
+
+
+@pytest.fixture
+def plausible_manifest_path(tmp_path: Path) -> Path:
+    path = tmp_path / "plausible-manifest.jsonl"
+
+    with path.open("w", encoding="utf-8") as file:
+        for record in PLAUSIBLE_RECORDS:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    return path
+
+
+@pytest.fixture
+def plausible_corpus_root(tmp_path: Path) -> Path:
+    root = tmp_path / "plausible-corpus"
+
+    for record in PLAUSIBLE_RECORDS:
+        directory = root / unicodedata.normalize("NFD", record["file_path"])
+
+        directory.mkdir(parents=True, exist_ok=True)
+
+        (directory / f"{record['rcept_no']}.xml").write_text("<html/>", encoding="utf-8")
+
+    return root
+
+
+@pytest.fixture
+def plausible_documents(monkeypatch: pytest.MonkeyPatch) -> None:
+    by_receipt_no = {
+        record["rcept_no"]: _plausible_document(record) for record in PLAUSIBLE_RECORDS
+    }
+
+    def _parse(path: Path | str) -> dict[str, Any]:
+        return by_receipt_no[Path(path).stem]
+
+    monkeypatch.setattr(
+        "disclosure_agent.agent.handlers.event_history.parse_exchange_document", _parse
+    )
+
+
+def test_selected_root_among_several_plausible_roots_is_not_certified_complete(
+    plausible_manifest_path: Path,
+    plausible_corpus_root: Path,
+    plausible_documents: None,
+) -> None:
+    """
+    질의가 고른 루트가 '가능한 대상' 여럿 중 하나여도 완결이라 말하지 않는다.
+
+    질문의 기간이 원공시를 B 하나로 좁힌다. 그러나 C가 정정한 대상은 A일 수도 B일 수도
+    있고 원문은 밝히지 않는다. 그러면 "B 뒤에 변경이 없다"는 증명되지 않은 진술이 된다.
+
+    귀속은 정하지 않는다. EventLink는 만들어지지 않는다. 막는 것은 완결 선언뿐이다.
+    """
+    plan = build_query_plan(PLAUSIBLE_QUESTION, known_companies=KNOWN_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+    assert plan.years == (2025,)
+
+    internal = build_event_history_result(
+        plan,
+        corpus_root=plausible_corpus_root,
+        manifest_path=plausible_manifest_path,
+    )
+
+    # 질의가 고른 원공시는 B 하나다. A는 기간 밖이라 루트 후보가 아니다.
+    assert internal.blocked is None
+    assert internal.root_candidate_doc_ids == (f"exchange_{PLAUSIBLE_SELECTED_ROOT}",)
+
+    assert internal.history is not None
+    assert internal.history.chain_complete is False
+    assert internal.status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+
+    # 소유를 만들지 않았다. 체인에 들어간 문서는 루트뿐이고 EventLink도 없다.
+    assert internal.history.document_ids == [f"exchange_{PLAUSIBLE_SELECTED_ROOT}"]
+    assert internal.links == ()
+
+    result = handle_event_history(
+        plan,
+        corpus_root=plausible_corpus_root,
+        manifest_path=plausible_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.INCOMPLETE_CHAIN
+    assert result.event_links == []
+
+    # 미해결 정정의 접수번호가 남는다.
+    assert [
+        receipt_no
+        for gap in result.conversion_gaps
+        for receipt_no in gap.dropped.get("unresolved_correction_receipt_nos", [])
+    ] == [PLAUSIBLE_CORRECTION]
+
+    answer = build_answer_response(result).answer
+
+    assert NO_LATER_CHANGE_SENTENCE not in answer
+
+
+def test_earlier_root_of_the_same_group_is_also_not_certified_complete(
+    plausible_manifest_path: Path,
+    plausible_corpus_root: Path,
+    plausible_documents: None,
+) -> None:
+    """
+    같은 정정이 A의 완결도 막는다. 그것은 '양쪽 모두의 정정'이라는 뜻이 아니다.
+
+    A와 B 어느 쪽도 "뒤에 변경이 없다"를 증명하지 못한다는 뜻이며, 어느 쪽에도 EventLink는
+    생기지 않는다. 하나를 골라 붙이는 것이 귀속이고, 이 PR은 귀속을 하지 않는다.
+    """
+    plan = build_query_plan(
+        f"{COMPANY}가 2023년에 낸 신규 시설투자 공시, 그 뒤에 수정된 부분이 있어?",
+        known_companies=KNOWN_COMPANIES,
+    )
+
+    assert plan.years == (2023,)
+
+    internal = build_event_history_result(
+        plan,
+        corpus_root=plausible_corpus_root,
+        manifest_path=plausible_manifest_path,
+    )
+
+    assert internal.root_candidate_doc_ids == (f"exchange_{PLAUSIBLE_EARLIER_ROOT}",)
+    assert internal.history is not None
+    assert internal.history.chain_complete is False
+    assert internal.history.document_ids == [f"exchange_{PLAUSIBLE_EARLIER_ROOT}"]
+    assert internal.links == ()

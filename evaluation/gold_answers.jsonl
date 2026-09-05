@@ -17,5 +17,5 @@
 {"case_id":"q14","execution_status":"COMPLETED","status":"UNRESOLVED","reason":"ambiguous_match","counts":{"event_histories":0},"min_evidence_count":0}
 {"case_id":"q15","execution_status":"COMPLETED","status":"ANSWERABLE","reason":null,"counts":{"event_histories":1},"min_evidence_count":2,"event_history":{"link_resolution":"resolved","chain_complete":true}}
 {"case_id":"q16","execution_status":"COMPLETED","status":"UNANSWERABLE","reason":"out_of_data_range","counts":{"facts":0,"evidence":0},"min_evidence_count":0}
-{"case_id":"q17","execution_status":"COMPLETED","status":"UNANSWERABLE","reason":"out_of_scope_data","counts":{"facts":0,"evidence":0},"min_evidence_count":0}
+{"case_id":"q17","execution_status":"COMPLETED","status":"UNANSWERABLE","reason":"out_of_scope_data","answerability_detail_reason":"external_information","counts":{"facts":0,"evidence":0,"events":0,"event_links":0,"event_histories":0,"resolved_event_states":0,"calculations":0,"comparisons":0,"document_summaries":0},"min_evidence_count":0}
 {"case_id":"q18","execution_status":"COMPLETED","status":"UNANSWERABLE","reason":"out_of_scope_policy","answerability_detail_reason":"investment_advice","counts":{"facts":0,"evidence":0},"min_evidence_count":0}

@@ -15,6 +15,7 @@ CORPUS_ROOT_ENV = "DISCLOSURE_CORPUS_ROOT"
 CORPUS_MANIFEST_ENV = "DISCLOSURE_CORPUS_MANIFEST"
 
 client = TestClient(app)
+Q17 = "이번 수주 공시 나오고 나서 시장 반응은 어땠어?"
 
 
 def _require_actual_corpus() -> None:
@@ -73,6 +74,25 @@ def test_pattern_f_rejects_before_corpus_access(
     assert payload["evidence"] == []
     assert "execution_status" not in payload
     assert "error" not in payload
+
+
+@pytest.mark.corpus
+def test_q17_runs_through_actual_corpus_http_api() -> None:
+    _require_actual_corpus()
+    assert get_ask_service not in app.dependency_overrides
+
+    response = client.post("/api/ask", json={"question": Q17})
+
+    assert response.status_code == 200
+    actual = AnswerResponse.model_validate(response.json())
+    assert actual.status is AnswerabilityStatus.UNANSWERABLE
+    assert actual.reason == "out_of_scope_data"
+    assert actual.facts == []
+    assert actual.events == []
+    assert actual.event_links == []
+    assert actual.event_histories == []
+    assert actual.resolved_event_states == []
+    assert actual.evidence == []
 
 
 # 실측 코퍼스의 /api/ask에서 매출 Fact를 붙여 ANSWERABLE로 돌아온 F3 우회 질문.

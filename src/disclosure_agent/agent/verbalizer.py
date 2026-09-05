@@ -161,6 +161,16 @@ INVERTING_PARTICLE = "보다"
 # 절의 경계. 우열 표현이 어느 이름에 걸리는지 볼 범위를 한 문장으로 자른다.
 CLAUSE_BOUNDARIES = ".!?\n"
 
+# 구절의 경계. 기간별 값이 어느 연도에 걸렸는지 볼 범위를 자른다.
+#
+# 절보다 좁다. 기간별 값은 한 문장에 나란히 적히므로(Q08의 결정론 문장) 문장 단위로 자르면 두
+# 해가 한 범위에 들어오고, 그때는 어느 값이 어느 해의 것인지 갈리지 않는다. 쉼표를 경계에
+# 넣는 이유가 그것이다.
+#
+# 소수점이 함께 경계가 되는 것은 부작용이 아니다. 쉼표 없이 이어 붙인 문장에서도 앞 값의
+# 소수점이 경계가 되어 앞 구절의 연도가 다음 값의 범위로 넘어오지 않는다.
+PERIOD_BOUNDARIES = CLAUSE_BOUNDARIES + ","
+
 # 변경이 없었다는 진술.
 #
 # answer_builder._event_history_sentence가 실제로 쓰는 두 표현("확인된 변경 항목은 없습니다",
@@ -328,6 +338,7 @@ def validate_answer(answer: ModelAnswer, payload: GroundedPayload) -> None:
     _require_no_english_vocabulary(answer.answer)
     _require_grounded_numbers(answer.answer, payload)
     _require_every_value_is_stated(answer.answer, payload)
+    _require_bound_period_values(answer.answer, payload)
     _require_known_entities(answer.answer, payload)
     _require_consistent_accounting_scope(answer.answer, payload)
     _require_limitation_when_partial(answer.answer, payload)
@@ -527,6 +538,91 @@ def _facts_consumed_by_calculations(payload: GroundedPayload) -> frozenset[str]:
         for input_id in calculation.input_ids
         if input_id in known
     )
+
+
+def _require_bound_period_values(text: str, payload: GroundedPayload) -> None:
+    """
+    기간별 값이 자기 연도에 붙어 있는지 본다.
+
+    수치 검증은 값의 집합만 본다. 어느 값이 어느 해의 것인지는 보지 않으므로, 두 해의 값을
+    맞바꿔 적은 문장이 _require_grounded_numbers와 _require_every_value_is_stated를 모두
+    통과한다. payload가 2024년 10.0000%, 2025년 9.0000%를 실은 채로 "2024년 9.0000%,
+    2025년 10.0000%"라고 적은 문장이 그렇다. 값은 둘 다 근거 안에 있고 하나도 빠지지 않았다.
+    틀렸다는 사실은 값 하나하나가 아니라 값과 해의 짝에만 남는다.
+
+    연도가 두 개 이상 갈릴 때만 본다:
+        기간별 값을 담은 Calculation이 한 해만 가리키면 맞바꿀 상대가 없다. 같은 해의 두 기업을
+        견준 결과(Q11)가 그 자리다. 그 문장에서 값을 가르는 축은 연도가 아니라 기업명이고, 그
+        축은 _require_preserved_relation이 이미 본다. 연도로 묶으라고 요구하면 두 값이 같은
+        해에 걸려 어느 쪽도 확인되지 않는다.
+
+        두 기간 사이의 값은 회계연도 자리가 비어 있어 여기에 들어오지 않는다
+        (grounded_payload._ground_temporal_calculation). Q07의 증감액·증감률과 Q08의 차이가
+        그것이다. 한 해의 값이 아닌 것을 한 해에 묶으면 그것이 그 해의 값으로 읽힌다.
+
+    연도를 "N년"으로 찾는다:
+        맨 숫자로 찾으면 금액 안의 자릿수와 부딪친다. 20240원 같은 값이 2024년을 부른 것으로
+        읽히고, 그때 이 검증은 확인한 적 없는 짝을 확인했다고 말한다. 결정론 문장이 쓰는 표기가
+        "N년"이며(answer_builder._period_phrase), 모델은 그 표기를 옮긴다.
+
+    값 앞만 본다:
+        구절의 시작부터 값까지가 그 값을 부른 자리다. 뒤까지 보면 다음 구절의 연도가 함께 잡혀
+        두 해가 모두 이름을 대게 되고, 그러면 어느 쪽에 걸린 값인지 알 수 없다. 우열 표현이 어느
+        이름에 걸리는지 보는 방식과 같다(_require_ranking_matches).
+
+    한 번이라도 제대로 묶였으면 통과시킨다:
+        같은 문자열이 다른 값 안에 들어 있을 수 있다. 비율이 1.0000%이고 차이가 -1.0000%p이면
+        차이를 적은 자리에서도 비율의 문자열이 잡힌다. 그 자리는 연도를 부르지 않으므로 짝을
+        세우지도 무너뜨리지도 않는다.
+
+    값을 다시 계산하지 않는다. 여기서 보는 것은 payload가 이미 확정한 (연도, 표기) 짝이 문장에
+    그대로 남아 있는지뿐이다.
+    """
+    bound = [item for item in payload.calculations if item.fiscal_year is not None]
+
+    tokens = {item.fiscal_year: _period_token(item.fiscal_year) for item in bound}
+
+    if len(tokens) < 2:
+        return
+
+    for calculation in bound:
+        own = tokens[calculation.fiscal_year]
+
+        others = [token for year, token in tokens.items() if year != calculation.fiscal_year]
+
+        contradicted = False
+
+        for index in _find_all(text, calculation.display_value):
+            clause = _period_clause(text, index)
+
+            names_own = own in clause
+
+            names_other = any(token in clause for token in others)
+
+            if names_own and not names_other:
+                break
+
+            if names_other and not names_own:
+                contradicted = True
+
+        else:
+            if contradicted:
+                raise AnswerRejectedError(
+                    "period_contradiction",
+                    f"Calculation {calculation.calculation_id!r}의 값이 {own}이 아닌 다른 "
+                    "연도에 붙어 있습니다",
+                )
+
+            raise AnswerRejectedError(
+                "unverifiable_period",
+                f"Calculation {calculation.calculation_id!r}의 값이 {own}에 붙어 있는지 "
+                "문장에서 확인할 수 없습니다",
+            )
+
+
+def _period_token(fiscal_year: int) -> str:
+    """연도가 문장에서 불리는 표기."""
+    return f"{fiscal_year}년"
 
 
 def _require_known_entities(text: str, payload: GroundedPayload) -> None:
@@ -857,6 +953,13 @@ def _clause_start(text: str, index: int) -> int:
     boundaries = [text.rfind(marker, 0, index) for marker in CLAUSE_BOUNDARIES]
 
     return max(boundaries) + 1
+
+
+def _period_clause(text: str, index: int) -> str:
+    """index 앞의 가장 가까운 구절 경계부터 index까지. 그 값을 부른 자리다."""
+    boundaries = [text.rfind(marker, 0, index) for marker in PERIOD_BOUNDARIES]
+
+    return text[max(boundaries) + 1 : index]
 
 
 def _require_no_advisory_wording(text: str) -> None:

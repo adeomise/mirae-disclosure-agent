@@ -913,6 +913,175 @@ def test_calculation_ids_never_become_supporting_facts() -> None:
 
 
 # --------------------------------------------------------------------------
+# 기간과 값의 짝
+#
+# 수치 검증은 값의 집합만 본다. 두 해의 값을 맞바꿔 적어도 쓰인 수치는 모두 payload 안에 있고
+# 빠진 값도 없으므로, 짝을 보지 않으면 걸리는 자리가 없다. 아래는 그 짝이 문장에 남아 있는지를
+# 고정한다.
+# --------------------------------------------------------------------------
+
+
+def q08_payload_and_ids() -> tuple[GroundedPayload, AgentExecutionResult]:
+    result = derived_delta_result()
+
+    return build_grounded_payload(result, question=Q08_QUESTION), result
+
+
+def q08_verdict(answer: str) -> str | None:
+    """Q08 payload에 대해 문장을 검증하고 거절 코드를 돌려준다. 통과면 None."""
+    payload, _ = q08_payload_and_ids()
+
+    try:
+        validate_answer(parse_model_answer(reply_declaring(payload, answer)), payload)
+    except AnswerRejectedError as error:
+        return error.code
+
+    return None
+
+
+def test_q08_deterministic_sentence_keeps_each_year_with_its_value() -> None:
+    """대조군. 결정론 문장은 연도 바로 뒤에 그 해의 값을 적는다."""
+    payload, result = q08_payload_and_ids()
+
+    sentence = build_answer_response(result).answer
+
+    # 이 고정이 무엇을 보고 있는지 문장으로 남긴다. payload가 정한 짝이 아래 그대로 나온다.
+    bound = {item.fiscal_year: item.display_value for item in payload.calculations}
+
+    assert bound == {2024: "10.0000%", 2025: "9.0000%", None: "-1.0000%p"}
+
+    assert "2024년 10.0000%" in sentence
+    assert "2025년 9.0000%" in sentence
+
+    assert q08_verdict(sentence) is None
+
+
+def test_q08_answer_swapping_the_two_years_is_rejected() -> None:
+    """
+    맞바꾼 문장이 이 규칙 전에는 통과했다.
+
+    쓰인 수치는 10.0000%·9.0000%·-1.0000%p로 payload와 같고 빠진 값도 없다. 틀렸다는 사실은
+    값이 아니라 값과 해의 짝에만 남으며, 그것을 보는 자리가 여기 말고는 없다.
+    """
+    assert (
+        q08_verdict(
+            "한미반도체의 연결 기준 영업이익률은 2024년 9.0000%, 2025년 10.0000%이며, "
+            "두 연도의 차이는 -1.0000%p입니다."
+        )
+        == "period_contradiction"
+    )
+
+
+def test_q08_answer_naming_both_years_before_both_values_is_rejected() -> None:
+    """
+    두 값이 다 있어도 어느 해의 것인지 갈리지 않으면 통과시키지 않는다.
+
+    "2024년과 2025년에 각각 A와 B"는 읽는 사람이 순서를 맞춰 읽어야 짝이 선다. 그 순간 짝을
+    세우는 것은 시스템이 아니라 사용자이고, 확정된 (연도, 값)은 답변 어디에도 남지 않는다.
+    """
+    assert (
+        q08_verdict(
+            "한미반도체의 연결 기준 영업이익률은 2024년과 2025년에 각각 10.0000%와 "
+            "9.0000%였습니다. 두 연도의 차이는 -1.0000%p입니다."
+        )
+        == "unverifiable_period"
+    )
+
+
+def test_q08_answer_dropping_the_years_is_rejected() -> None:
+    """연도를 떼면 값만 남는다. 그 문장은 어느 해의 값인지 말하지 않는다."""
+    assert (
+        q08_verdict(
+            "한미반도체의 연결 기준 영업이익률은 10.0000%, 9.0000%이며, "
+            "두 연도의 차이는 -1.0000%p입니다."
+        )
+        == "unverifiable_period"
+    )
+
+
+def test_q08_answer_without_a_comma_between_the_periods_passes() -> None:
+    """
+    구절을 쉼표로 나누지 않아도 짝이 서면 통과한다.
+
+    앞 값의 소수점이 경계가 되어 앞 구절의 연도가 다음 값의 범위로 넘어오지 않는다. 결정론
+    문장의 어순만 통과시키는 규칙이 아니다.
+    """
+    assert (
+        q08_verdict(
+            "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%이며 2025년 9.0000%입니다. "
+            "두 연도의 차이는 -1.0000%p입니다."
+        )
+        is None
+    )
+
+
+def test_q08_value_appearing_inside_another_value_does_not_break_the_binding() -> None:
+    """
+    같은 문자열이 다른 값 안에 들어 있어도 짝이 서면 통과한다.
+
+    비율이 1.0000%이고 차이가 -1.0000%p이면 차이를 적은 자리에서도 비율의 문자열이 잡힌다.
+    그 자리는 연도를 부르지 않으므로 짝을 세우지도 무너뜨리지도 않는다. 여기서는 그 자리가
+    제대로 묶인 자리보다 문장 앞에 오게 두어, 먼저 잡힌 자리 하나로 판정하지 않는지 본다.
+    """
+    result = derived_delta_result()
+
+    result.calculations[0].value = "1.0000"
+
+    payload = build_grounded_payload(result, question=Q08_QUESTION)
+
+    assert payload.calculations[0].display_value == "1.0000%"
+    assert payload.calculations[2].display_value == "-1.0000%p"
+
+    answer = (
+        "한미반도체의 연결 기준 영업이익률은 두 연도의 차이가 -1.0000%p이며, "
+        "2024년 1.0000%, 2025년 9.0000%입니다."
+    )
+
+    validate_answer(parse_model_answer(reply_declaring(payload, answer)), payload)
+
+
+def test_q11_same_year_comparison_is_not_bound_by_period() -> None:
+    """
+    같은 해의 두 기업을 견준 결과에는 연도 짝을 요구하지 않는다.
+
+    그 문장에서 값을 가르는 축은 연도가 아니라 기업명이다. 두 비율이 같은 해에 걸려 있으므로
+    연도로는 어느 쪽도 특정되지 않으며, 그 축은 _require_preserved_relation이 이미 본다.
+    """
+    result = margin_comparison_result()
+
+    payload = build_grounded_payload(result, question=Q11_QUESTION)
+
+    # 규칙이 켜지지 않는 이유를 payload에서 확인한다. 연도가 하나뿐이다.
+    assert {item.fiscal_year for item in payload.calculations} == {2025}
+
+    validate_answer(
+        parse_model_answer(reply_declaring(payload, build_answer_response(result).answer)),
+        payload,
+    )
+
+
+def test_q07_between_period_values_are_not_bound_to_a_year() -> None:
+    """
+    두 기간 사이의 값은 회계연도 자리가 비어 있어 짝을 요구받지 않는다.
+
+    증감액을 한쪽 해에 묶으면 그것이 그 해의 값으로 읽힌다. Q07의 두 Calculation이 모두 그
+    자리이며, 원천 값은 Fact가 들고 있다.
+    """
+    result = temporal_delta_result()
+
+    payload = build_grounded_payload(
+        result, question="한미반도체 매출이 작년보다 얼마나 늘었어?"
+    )
+
+    assert {item.fiscal_year for item in payload.calculations} == {None}
+
+    validate_answer(
+        parse_model_answer(reply_declaring(payload, build_answer_response(result).answer)),
+        payload,
+    )
+
+
+# --------------------------------------------------------------------------
 # 근거 밖으로 나간 문장
 # --------------------------------------------------------------------------
 

@@ -2744,7 +2744,7 @@ def test_temporal_delta_result_becomes_a_sentence() -> None:
     assert SYNTHETIC_COMPANY in answer
     assert "2024년" in answer
     assert "2025년" in answer
-    assert "200000000.0000원" in answer
+    assert "200,000,000원" in answer
     assert "20.0000%" in answer
 
 
@@ -2759,7 +2759,7 @@ def test_temporal_delta_wording_is_unchanged_by_the_derived_metric_path() -> Non
     """
     assert build_answer_response(temporal_delta_result()).answer == (
         f"{SYNTHETIC_COMPANY}의 연결 기준 매출액은 2024년 1,000백만원, 2025년 1,200백만원입니다. "
-        "증감액은 200000000.0000원, 증감률은 20.0000%입니다."
+        "증감액은 200,000,000원, 증감률은 20.0000%입니다."
     )
 
 
@@ -2816,6 +2816,82 @@ def test_delta_calculations_pointing_elsewhere_still_stop() -> None:
     result = temporal_delta_result(
         calculations=[
             _delta_calculation(input_ids=("fact_2024", "fact_9999")),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+            ),
+        ]
+    )
+
+    with pytest.raises(UnsupportedResultShapeError):
+        build_answer_response(result)
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        # quantize가 만든 뜻 없는 소수 네 자리는 지운다. 값이 아니라 자리다.
+        ("200000000.0000", "200,000,000원"),
+        # 부호는 값에서 읽어 그대로 둔다. 지우면 감소가 증가로 읽힌다.
+        ("-200000000.0000", "-200,000,000원"),
+        # 0이 아닌 소수부는 남긴다. 반올림하면 응답에 실린 Calculation.value와 어긋난다.
+        ("200000000.5000", "200,000,000.5원"),
+        ("200000000.0001", "200,000,000.0001원"),
+        # 세 자리 미만은 구분할 것이 없다.
+        ("999.0000", "999원"),
+        # 0으로 정리되는 값에 -를 붙이지 않는다.
+        ("-0.0000", "0원"),
+    ],
+)
+def test_delta_amount_groups_digits_and_drops_insignificant_zeroes(
+    stored: str,
+    expected: str,
+) -> None:
+    """
+    증감액 표기 규칙.
+
+    같은 문장의 원천 Fact 값이 공시 원문 표기(1,000백만원)라 쉼표를 쓰므로, 증감액만 쉼표 없이
+    적으면 한 문장에 같은 축의 금액이 두 방식으로 실린다. 그 불일치가 외부 모델 경로에서
+    실패로 나타났다(_grouped_amount docstring).
+
+    값을 바꾸지 않는다. 지우는 것은 소수점 이하의 뜻 없는 0뿐이고, 0이 아닌 자리와 부호는
+    그대로 둔다.
+    """
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(value=stored),
+            _delta_calculation(
+                calculation_id="calculation_revenue_delta_pct_2024_2025",
+                operation=OPERATION_DELTA_PCT,
+                value="20.0000",
+                unit="percent",
+            ),
+        ]
+    )
+
+    assert expected in build_answer_response(result).answer
+
+
+def test_delta_amount_does_not_change_the_stored_calculation() -> None:
+    """표기를 정하는 일이 계산 결과를 고치는 일이 되지 않는다."""
+    result = temporal_delta_result()
+
+    stored = result.calculations[0].model_dump(mode="json")
+
+    build_answer_response(result)
+
+    assert result.calculations[0].model_dump(mode="json") == stored
+    assert result.calculations[0].value == "200000000.0000"
+    assert result.calculations[0].unit == "원"
+
+
+def test_delta_amount_that_is_not_a_number_stops() -> None:
+    """규칙을 지나지 못한 값을 그대로 흘리면 표기가 갈린 채 문장에 실린다."""
+    result = temporal_delta_result(
+        calculations=[
+            _delta_calculation(value="약 이백억"),
             _delta_calculation(
                 calculation_id="calculation_revenue_delta_pct_2024_2025",
                 operation=OPERATION_DELTA_PCT,
@@ -2889,7 +2965,7 @@ def test_delta_and_delta_pct_in_the_same_order_are_accepted() -> None:
 
     answer = build_answer_response(result).answer
 
-    assert "200000000.0000원" in answer
+    assert "200,000,000원" in answer
     assert "20.0000%" in answer
 
 

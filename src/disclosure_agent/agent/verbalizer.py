@@ -199,14 +199,45 @@ CHAIN_INCOMPLETE_CLAIMS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(전체|모든)\s*이력[을은는이가]?\s*확인하지\s*못"),
 )
 
+# 수치 규칙(1번)이 고치지 말아야 할 편집을 하나씩 세는 이유:
+#
+#     "그대로 옮기십시오"만으로는 지켜지지 않는다. HCX-007은 payload가 17767427980.0000원이라고
+#     적은 증감액을 문장에서 17,767,427,980원으로 다시 적었고, 그 응답은 ungrounded_number로
+#     거절됐다. 모델이 한 일은 반올림이 아니라 표기 정규화다. 천단위 쉼표를 넣고 끝자리 0을
+#     지운 것이며, 본인 기준으로는 같은 수를 더 읽기 좋게 쓴 것이다.
+#
+#     그래서 "바꾸지 말라"가 아니라 "쉼표를 넣지 말라, 끝자리 0을 지우지 말라"처럼 편집의
+#     종류를 적는다. 검증기가 보는 것은 수의 크기가 아니라 문자열이므로(_canonical_number는
+#     천단위 쉼표만 지운다), 모델에게도 문자열을 복사하라고 말해야 두 쪽이 같은 것을 본다.
+#
+#     같은 payload 안에서 표기가 갈리는 것이 이 실패를 부른다. 둘을 한 문장에 적으면 모델이
+#     뒤쪽을 앞쪽에 맞춘다. 그 맞춤을 막는 문장이 규칙 끝의 "값마다 표기가 달라 보여도 맞추지
+#     마십시오"이다.
+#
+#     금액 증감에서는 그 불일치를 표기 쪽에서 없앴다. 결정론 문장과 payload가 같은 규칙으로
+#     적으므로(answer_builder._grouped_amount) 모델이 맞출 대상이 없다. 표기를 여기서 만들어
+#     해결하지는 않는다. 그 문자열의 정본은 answer_builder이며, 이 모듈이 다시 만들면 두 경로가
+#     같은 값을 다르게 부르게 된다.
+#
+#     규칙을 그대로 두는 이유는 성향이 사라진 것이 아니기 때문이다. 백분율과 percentage point는
+#     자릿수 구분이 필요 없어 같은 정리를 하지 않으며, 그 자리에서는 이 규칙만이 막는다.
 SYSTEM_PROMPT = """당신은 한국 공시 데이터 질의응답 시스템의 '표현' 단계입니다.
 
 당신의 유일한 임무는 아래 JSON에 이미 확정되어 있는 사실을 한국어 문장으로 옮기는 것입니다.
 당신은 판단하지 않고, 계산하지 않고, 조회하지 않습니다.
 
 반드시 지킬 것:
-1. JSON에 없는 숫자를 쓰지 마십시오. 반올림·단위 변환·자릿수 변경도 금지입니다.
-   숫자와 단위는 value 필드에 적힌 문자열 그대로 옮기십시오.
+1. 문장에 쓰는 모든 수치는 JSON의 value 필드에 적힌 문자열을 글자 그대로 복사하십시오.
+   한 글자도 달라서는 안 됩니다. 특히 다음을 하지 마십시오.
+   - 천단위 쉼표를 넣거나 빼는 것
+   - 소수점 이하 자릿수를 늘리거나 줄이는 것. 끝자리가 0이어도 지우지 마십시오.
+   - 반올림·올림·버림, 억·조 같은 단위 환산
+   - 부호를 떼어 내는 것. 앞에 붙은 -를 지우고 "감소" 같은 말로 바꾸지 마십시오.
+   - 단위 표기를 바꾸는 것. 원·%·%p는 적힌 그대로 쓰고 %와 %p를 서로 바꾸지 마십시오.
+   같은 JSON 안에서 값마다 표기가 달라 보여도 서로 맞추지 마십시오. 각 값의 표기는 이미
+   확정된 것입니다. 쉼표가 없는 금액도, 소수점 아래가 0으로 끝나는 금액도 그대로가 맞습니다.
+   어색해 보여도 다듬지 마십시오. 한 글자라도 다르게 적으면 그 수치는 근거 밖의 값이 되어
+   답변 전체가 버려집니다. JSON에 없는 숫자는 쓰지 마십시오.
 2. JSON에 없는 회사명·연도·회계기준(연결/별도)·지표명을 쓰지 마십시오.
 3. facts와 calculations에 있는 값은 하나도 빠뜨리지 말고 모두 문장에 담으십시오.
 4. comparisons의 relation은 이미 확정된 판정입니다. 값을 다시 비교하지 말고 그 판정을
@@ -434,13 +465,56 @@ def _require_grounded_numbers(text: str, payload: GroundedPayload) -> None:
 
 def _require_every_value_is_stated(text: str, payload: GroundedPayload) -> None:
     """
-    확보한 값이 문장에서 빠지지 않았는지 본다.
+    답에 실려야 하는 값이 문장에서 빠지지 않았는지 본다.
 
     빠뜨리는 쪽은 틀린 숫자를 쓰는 것보다 잡기 어렵다. 형식은 완전한 답변이고, 무엇이
     사라졌는지는 문장 어디에도 남지 않는다. 여러 값을 물은 질문에 한 값만 답하는 실패
     모드이며, answer_builder._single_fact_sentence가 다중 Fact를 거부하는 이유와 같다.
+
+    '전부'가 아니라 '답에 실리는 값'을 보는 이유:
+        payload에 실린 Fact가 모두 답의 일부인 것은 아니다. 파생값을 만든 원천 Fact는 그
+        파생값이 무엇에서 나왔는지를 붙들어 두려고 함께 실린다. 계산의 입력을 id로만 가리키는
+        구조가 성립하려면 그 Fact가 payload 안에 있어야 하고(grounded_payload._ground_calculation),
+        근거 문서로 되짚는 경로도 그 Fact를 지난다.
+
+        그것을 문장에까지 요구하면 결정론 경로가 자기 검증기에 걸린다. 실제로 걸렸다.
+        build_answer_response가 만든 Q08(기간별 영업이익률 변화)과 Q11(기업 간 영업이익률 비교)의
+        문장은 원천 Fact의 값을 적지 않으며, 그 문장을 이 함수에 넣으면 value_dropped가 된다.
+        두 문항은 비율을 물었고 답은 비율이다. 분자와 분모를 함께 적어야 답이 되는 것이 아니다.
+
+        그래서 완결성의 기준을 payload의 적재 여부가 아니라 참조 위상에서 읽는다. 어떤 계산의
+        입력으로 쓰인 Fact는 그 계산이 대신 답하고 있으므로 보조 값으로 본다. 그 계산 자체는
+        아래에서 빠짐없이 요구하므로, 보조로 내려간 Fact가 대변되지 않은 채 사라지는 일은 없다.
+
+    계산 결과는 깊이와 무관하게 전부 요구한다:
+        다른 계산의 입력으로 쓰인 계산도 마찬가지다(Q08의 기간별 비율 2건). 계산 결과는 원문에
+        적힌 값이 아니라 이 시스템이 만들어 실은 진술이며, 빠지면 그것을 대신할 것이 없다.
+        원천 Fact가 파생값에 대변되는 것과 다른 자리다.
+
+    우열 판정의 피연산자는 보조로 내리지 않는다:
+        GroundedComparison.left_id/right_id는 아래 집합에 넣지 않는다. 넣으면 Q10처럼 Fact 2건을
+        견준 결과에서 두 값이 모두 보조가 되어, 값을 하나도 적지 않고 "A 쪽이 더 큽니다"만 쓴
+        문장이 통과한다. 판정은 값을 대신 말해 주지 않는다.
+
+    이 완화가 근거 밖의 수치를 열지는 않는다:
+        여기서 정하는 것은 '무엇이 반드시 있어야 하는가'(하한)뿐이다. '무엇이 있어도 되는가'
+        (상한)는 _require_grounded_numbers가 _allowed_numbers로 따로 정하며 그 목록은 바뀌지
+        않았다. 보조로 내려간 Fact의 값도 여전히 화이트리스트에 있으므로 문장에 적어도 되고,
+        자릿수를 바꿔 적으면 그때는 ungrounded_number로 걸린다.
+
+    TODO:
+        사용자가 원천 값 자체를 함께 요청한 경우(예: "원래 값도 알려주고 증감도 알려줘")에는 그
+        Fact가 계산의 입력이더라도 답에 실려야 한다. 지금은 그 요청을 구별할 구조적 신호가
+        payload에도 AgentExecutionResult에도 없다. query_analyzer.QueryPlan의 metric/derived_metric
+        만으로는 갈리지 않으며(그 두 질문은 같은 계획을 만든다), 계획 자체가 grounding 경계를
+        넘어오지 않는다. 신호가 생기기 전까지 그 모양은 이 함수가 구별하지 못한다.
     """
+    supporting = _facts_consumed_by_calculations(payload)
+
     for fact in payload.facts:
+        if fact.fact_id in supporting:
+            continue
+
         renderings = [fact.display_value]
 
         if fact.normalized_display:
@@ -463,6 +537,27 @@ def _require_every_value_is_stated(text: str, payload: GroundedPayload) -> None:
             raise AnswerRejectedError(
                 "value_dropped", f"이력 {history.event_id!r}의 공시 건수가 문장에 없습니다"
             )
+
+
+def _facts_consumed_by_calculations(payload: GroundedPayload) -> frozenset[str]:
+    """
+    어떤 계산의 입력으로 쓰인 Fact의 id.
+
+    input_ids에는 Fact와 Calculation의 id가 함께 올 수 있다(Q08의 변화량은 비율 2건을
+    가리킨다). 그래서 payload의 Fact id 집합과 교집합을 취한다. 종류를 문자열 모양으로
+    짐작하지 않으며, 계산 id가 이 집합에 섞여 계산을 보조로 내리는 일도 없다.
+
+    계산이 하나도 없으면 빈 집합이다. 그때는 어떤 Fact도 보조가 되지 않으므로 단일 Fact
+    답변(Q01)과 Fact 비교(Q10)의 완결성 기준은 이 변경 전과 같다.
+    """
+    known = {fact.fact_id for fact in payload.facts}
+
+    return frozenset(
+        input_id
+        for calculation in payload.calculations
+        for input_id in calculation.input_ids
+        if input_id in known
+    )
 
 
 def _require_known_entities(text: str, payload: GroundedPayload) -> None:

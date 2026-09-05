@@ -462,6 +462,116 @@ _ACCUSATIVE_THEME = re.compile(rf"(?P<head>[가-힣A-Za-z0-9]+?)(?:을|를){_WOR
 # 함께 움직일 이유가 없다.
 _INVESTMENT_OBJECT_ANCHOR = re.compile(rf"(?:주식|종목){_PARTICLE_TAIL}{_WORD_END}")
 
+
+# --------------------------------------------------------------------------
+# 서술어 경계
+#
+# 명사구가 '담다' 앞에 있다는 것과 그것이 '담다'의 논항이라는 것은 다르다. 앞 리비전은 둘을
+# 같게 보아, 다른 서술어가 데려간 명사구를 '담다'의 것으로 읽었다(PR #129 5차 리뷰).
+#
+#     "표에 나온 삼성전자 주식을 담아도 될까?"    '표에'는 '나온'의 논항이다
+#     "주식은 실적을 보고 담아도 될까?"           '실적을'은 '보다'의 목적어다
+#
+# 두 문장 모두 '담다'가 데려가는 것은 주식뿐이므로 투자 판단 요구다. 그것을 가리려면 '담다'
+# 바로 앞의 서술어가 어디인지 알아야 한다.
+#
+# 서술어를 동사 목록으로 찾지 않는다. 동사는 열린 부류여서 목록은 반드시 빠뜨린다. 대신
+# **어미**로 찾는다. 관형형 어미와 연결어미는 한국어의 닫힌 문법 부류이고, 처음 보는 동사도
+# 이 어미로 끝난다. '나온'을 몰라도 종성 ㄴ으로 알고, '살펴보고'를 몰라도 '-고'로 안다.
+# --------------------------------------------------------------------------
+
+# 연결어미. 앞 절을 닫고 다음 절로 넘긴다.
+#
+# 낱말 끝에서만 본다. 그러지 않으면 '보고서'가 '보고'로 읽힌다.
+_CONNECTIVE_ENDING = re.compile(
+    rf"(?:고|아서|어서|여서|해서|며|면서|다가|지만|는데|니까|려고|도록|자마자|든지){_WORD_END}"
+)
+
+# 관형형 어미가 남기는 종성. ㄴ(-은/-ㄴ)과 ㄹ(-을/-ㄹ)이다.
+#
+# 한글 음절은 (초성, 중성, 종성)으로 합성되므로 종성은 코드값에서 바로 나온다. 어미가 앞
+# 음절에 녹아든다는 사실 자체가 판별 근거이며, 그래서 동사를 몰라도 관형형인지 알 수 있다.
+#
+#     나온 = 나오 + ㄴ      적힌 = 적히 + ㄴ      만든 = 만들 + ㄴ      찾아본 = 찾아보 + ㄴ
+_HANGUL_SYLLABLE_BASE = 0xAC00
+_HANGUL_FINAL_COUNT = 28
+_ADNOMINAL_FINALS = frozenset({4, 8})  # ㄴ, ㄹ
+
+# 조사로만 쓰이는 음절. 종성은 관형형과 같지만 어미가 아니다.
+#
+# '주식은'·'내용을'·'수치를'이 서술어로 읽히면 정작 봐야 할 테마가 잘려 나간다.
+_PARTICLE_ONLY_SYLLABLES = frozenset({"은", "을", "를"})
+
+
+def _final_consonant(syllable: str) -> int | None:
+    """한글 음절의 종성 index. 한글이 아니면 None."""
+    offset = ord(syllable) - _HANGUL_SYLLABLE_BASE
+
+    if not 0 <= offset < 11172:
+        return None
+
+    return offset % _HANGUL_FINAL_COUNT
+
+
+def _is_predicate(token: str) -> bool:
+    """
+    이 어절이 서술어인가. '담다'의 논항 구간을 여는 자리를 찾는 데 쓴다.
+
+    인식된 역할 표기는 먼저 걸러 낸다. '계좌에는'·'표에는'은 종성이 ㄴ이지만 편입처이고,
+    여기서 서술어로 읽으면 정작 봐야 할 편입처가 구간 밖으로 밀려난다.
+
+    '는'은 관형형 어미이기도 하고 주제 조사이기도 하다("있는" 대 "문서는"). 위 걸러 내기가
+    그 갈림을 대신한다. 인식된 편입처·매매 대상이면 조사고, 아니면 관형형으로 본다.
+
+    경계를 실제보다 앞에서 잡는 쪽은 안전하다. 구간이 좁아지면 편입처와 테마를 덜 찾고,
+    덜 찾으면 판정은 F3 쪽으로 기운다. 반대로 놓치면 수록 요구가 투자 판단으로 새므로,
+    애매하면 서술어로 본다.
+    """
+    stripped = token.strip()
+
+    if not stripped:
+        return False
+
+    if (
+        _CONTENT_DESTINATION.search(stripped)
+        or _INVESTMENT_DESTINATION.search(stripped)
+        or _INVESTMENT_OBJECT_ANCHOR.search(stripped)
+    ):
+        return False
+
+    if _CONNECTIVE_ENDING.search(stripped):
+        return True
+
+    last = stripped[-1]
+
+    if last in _PARTICLE_ONLY_SYLLABLES:
+        return False
+
+    return _final_consonant(last) in _ADNOMINAL_FINALS
+
+
+def _local_argument_region(clause: str) -> str:
+    """
+    '담다'가 논항을 데려올 수 있는 구간.
+
+    마지막 서술어 뒤부터다. 그 앞의 명사구는 이미 다른 서술어가 데려갔다.
+
+        "표에 나온 삼성전자 주식을"        -> "삼성전자 주식을"    '표에'는 '나온'의 것
+        "주식은 실적을 보고"               -> ""                  '실적을'은 '보다'의 것
+        "주식을 표에"                      -> "주식을 표에"        서술어가 없다
+        "주식을 보기 쉽게 정리해서 표에"   -> "표에"              편입처는 서술어 뒤에 있다
+
+    매매 대상 앵커는 이 구간에서 찾지 않는다. 주제 표지가 앵커를 서술어 너머로 밀어내기
+    때문이다("주식은 실적을 보고 담아도 될까?"). 앵커는 절 전체에서 본다.
+    """
+    region_start = 0
+
+    for match in re.finditer(r"\S+", clause):
+        if _is_predicate(match.group(0)):
+            region_start = match.end()
+
+    return clause[region_start:]
+
 # 편입 요구 하나가 걸쳐 있는 범위.
 #
 # 쉼표는 경계가 아니다. 한국어 쉼표는 요청을 나누기도 하지만 한 요청 안에서 운율로 끊기도
@@ -525,27 +635,32 @@ def _first_inclusion_request(question: str) -> tuple[str, str] | None:
 
         clause = question[clause_start : verb.start()]
 
+        # 앵커는 절 전체에서, 편입처와 테마는 '담다'의 논항 구간에서 찾는다. 범위가 다른
+        # 것이 이 판정의 요점이다. 주제 표지가 앵커를 서술어 너머로 밀어내는 반면
+        # ("주식은 실적을 보고 담아도 될까?"), 편입처와 테마는 '담다'에 매여 있어야 한다.
         anchor = _last(_INVESTMENT_OBJECT_ANCHOR, clause)
 
         if anchor is None:
             # 매매 대상이 없다. 무엇을 담든 매매가 아니다.
             continue
 
-        content = _last(_CONTENT_DESTINATION, clause)
-        investment = _last(_INVESTMENT_DESTINATION, clause)
+        region = _local_argument_region(clause)
+
+        content = _last(_CONTENT_DESTINATION, region)
+        investment = _last(_INVESTMENT_DESTINATION, region)
 
         if content is not None and (investment is None or content.start() > investment.start()):
             # 담는 곳이 문서·표다. 수록 요구이므로 사실 조회로 보낸다.
             continue
 
-        theme = _last(_ACCUSATIVE_THEME, clause)
+        theme = _last(_ACCUSATIVE_THEME, region)
 
-        if (
-            theme is not None
-            and not theme.group("head").endswith(("주식", "종목"))
-            and anchor.start() < theme.start()
-        ):
+        if theme is not None and not theme.group("head").endswith(("주식", "종목")):
             # 담기는 것이 매매 대상이 아니다.
+            #
+            # 위치 비교는 두지 않는다. 앞 서술어의 목적어는 이미 구간 밖이므로
+            # ("실적을 보고 주식 담아도 될까?"의 '실적을'), 구간 안의 목적격은 '담다'의
+            # 테마다. 앞 리비전의 위치 비교는 이 결합을 흉내 낸 것이었다.
             continue
 
         return "편입 판단 요구", question[clause_start + anchor.start() : verb.end()].strip()

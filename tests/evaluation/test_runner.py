@@ -191,7 +191,7 @@ def test_active_q01_gold_pins_corpus_verified_fact() -> None:
     assert q01.counts.model_dump(exclude_none=True) == {"facts": 1, "evidence": 1}
     assert [fact.model_dump(exclude_none=True, mode="json") for fact in q01.expected_facts()] == [
         {
-            "company": "한미반도체(주)",
+            "company": "한미반도체",
             "metric": "revenue",
             "fiscal_year": 2025,
             "accounting_scope": "consolidated",
@@ -334,7 +334,7 @@ def test_active_q08_gold_pins_actual_operating_margin_inputs() -> None:
         for fact in q08.expected_facts()
     ] == [
         {
-            "company": "한미반도체(주)",
+            "company": "한미반도체",
             "metric": "revenue",
             "fiscal_year": 2024,
             "accounting_scope": "consolidated",
@@ -342,7 +342,7 @@ def test_active_q08_gold_pins_actual_operating_margin_inputs() -> None:
             "normalized_unit": "원",
         },
         {
-            "company": "한미반도체(주)",
+            "company": "한미반도체",
             "metric": "operating_income",
             "fiscal_year": 2024,
             "accounting_scope": "consolidated",
@@ -350,7 +350,7 @@ def test_active_q08_gold_pins_actual_operating_margin_inputs() -> None:
             "normalized_unit": "원",
         },
         {
-            "company": "한미반도체(주)",
+            "company": "한미반도체",
             "metric": "revenue",
             "fiscal_year": 2025,
             "accounting_scope": "consolidated",
@@ -358,7 +358,7 @@ def test_active_q08_gold_pins_actual_operating_margin_inputs() -> None:
             "normalized_unit": "원",
         },
         {
-            "company": "한미반도체(주)",
+            "company": "한미반도체",
             "metric": "operating_income",
             "fiscal_year": 2025,
             "accounting_scope": "consolidated",
@@ -591,7 +591,7 @@ def q10_prediction() -> PredictionCase:
             "facts": [
                 {
                     "fact_id": "fact_periodic_20260320000859_revenue_table_0127_r1_c1",
-                    "company": "에이치디현대중공업(주)",
+                    "company": "HD현대중공업",
                     "metric": "revenue",
                     "fiscal_year": 2025,
                     "accounting_scope": "consolidated",
@@ -605,7 +605,7 @@ def q10_prediction() -> PredictionCase:
                 },
                 {
                     "fact_id": "fact_periodic_20260312001037_revenue_table_0102_r1_c1",
-                    "company": "삼성중공업(주)",
+                    "company": "삼성중공업",
                     "metric": "revenue",
                     "fiscal_year": 2025,
                     "accounting_scope": "consolidated",
@@ -855,7 +855,7 @@ def test_active_q11_gold_pins_actual_operating_margin_comparison() -> None:
         for fact in q11.expected_facts()
     ] == [
         {
-            "company": "에이치디현대중공업(주)",
+            "company": "HD현대중공업",
             "metric": "revenue",
             "fiscal_year": 2025,
             "accounting_scope": "consolidated",
@@ -863,7 +863,7 @@ def test_active_q11_gold_pins_actual_operating_margin_comparison() -> None:
             "normalized_unit": "원",
         },
         {
-            "company": "에이치디현대중공업(주)",
+            "company": "HD현대중공업",
             "metric": "operating_income",
             "fiscal_year": 2025,
             "accounting_scope": "consolidated",
@@ -871,7 +871,7 @@ def test_active_q11_gold_pins_actual_operating_margin_comparison() -> None:
             "normalized_unit": "원",
         },
         {
-            "company": "삼성중공업(주)",
+            "company": "삼성중공업",
             "metric": "revenue",
             "fiscal_year": 2025,
             "accounting_scope": "consolidated",
@@ -879,7 +879,7 @@ def test_active_q11_gold_pins_actual_operating_margin_comparison() -> None:
             "normalized_unit": "원",
         },
         {
-            "company": "삼성중공업(주)",
+            "company": "삼성중공업",
             "metric": "operating_income",
             "fiscal_year": 2025,
             "accounting_scope": "consolidated",
@@ -3127,7 +3127,7 @@ def test_q08_rejects_wrong_source_fact_with_internally_consistent_calculations()
         (2025, "operating_income"): "251390142143",
     }
     for fact in actual["facts"]:
-        fact["company"] = "한미반도체(주)"
+        fact["company"] = "한미반도체"
         fact["normalized_value"] = values[(fact["fiscal_year"], fact["metric"])]
     actual["calculations"][0]["value"] = "45.6940"
     actual["calculations"][1]["value"] = "43.5923"
@@ -3142,7 +3142,7 @@ def q11_prediction(**overrides) -> PredictionCase:
     facts = [
         {
             "fact_id": "fact_periodic_20260320000859_revenue_table_0127_r1_c1",
-            "company": "에이치디현대중공업(주)",
+            "company": "HD현대중공업",
             "metric": "revenue",
             "fiscal_year": 2025,
             "accounting_scope": "consolidated",
@@ -3152,7 +3152,7 @@ def q11_prediction(**overrides) -> PredictionCase:
         },
         {
             "fact_id": "fact_periodic_20260320000859_operating_income_table_0127_r5_c1",
-            "company": "에이치디현대중공업(주)",
+            "company": "HD현대중공업",
             "metric": "operating_income",
             "fiscal_year": 2025,
             "accounting_scope": "consolidated",
@@ -3162,7 +3162,7 @@ def q11_prediction(**overrides) -> PredictionCase:
         },
         {
             "fact_id": "fact_periodic_20260312001037_revenue_table_0102_r1_c1",
-            "company": "삼성중공업(주)",
+            "company": "삼성중공업",
             "metric": "revenue",
             "fiscal_year": 2025,
             "accounting_scope": "consolidated",
@@ -3172,7 +3172,7 @@ def q11_prediction(**overrides) -> PredictionCase:
         },
         {
             "fact_id": "fact_periodic_20260312001037_operating_income_table_0102_r5_c1",
-            "company": "삼성중공업(주)",
+            "company": "삼성중공업",
             "metric": "operating_income",
             "fiscal_year": 2025,
             "accounting_scope": "consolidated",
@@ -3291,7 +3291,7 @@ def test_q11_rejects_wrong_source_fact_with_internally_consistent_calculation() 
     q11 = {gold.case_id: gold for gold in load_dataset().gold_answers}["q11"]
     actual = q11_prediction().model_dump(mode="python")
     for fact in actual["facts"]:
-        if fact["company"] == "삼성중공업(주)" and fact["metric"] == "operating_income":
+        if fact["company"] == "삼성중공업" and fact["metric"] == "operating_income":
             # Deliberately wrong by one won while preserving every reference.
             fact["normalized_value"] = "862210880030"
     # Calculation value is unchanged: rounded to 4dp, off-by-one-won does not move it.

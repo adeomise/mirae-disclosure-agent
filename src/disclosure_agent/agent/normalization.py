@@ -622,7 +622,11 @@ def normalize_single_fact_result(result: SingleFactResult) -> AgentExecutionResu
         return _stopped_execution(result.blocked, warnings=warnings)
 
     try:
-        fact, evidence = adapt_financial_fact(result.fact, result.document or {})
+        fact, evidence = adapt_financial_fact(
+            result.fact,
+            result.document or {},
+            canonical_company=result.plan.company,
+        )
 
     except ValueError as error:
         # 값은 확정했지만 공통 타입으로 옮기지 못했다. 추측해 채우지 않고 멈춘 지점을 남긴다.
@@ -684,6 +688,7 @@ def normalize_document_summary_result(
     try:
         summary, evidence = adapt_section_summary(
             result.document or {},
+            canonical_company=result.plan.company,
             section_scope=result.selection.scope,
             selection=result.selection,
             items=list(result.items),

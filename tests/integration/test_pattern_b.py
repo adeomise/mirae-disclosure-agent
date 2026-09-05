@@ -103,6 +103,8 @@ def test_handle_document_summary_returns_answerable_with_evidence(
     summary = result.document_summaries[0]
 
     assert summary.doc_id == "periodic_SYNTHETIC0001"
+    assert summary.company == plan.company == "테스트반도체"
+    assert summary_document["metadata"]["corp_name"] == "테스트반도체(주)"
     assert summary.section_scope is SectionScope.FACILITY_INVESTMENT
     assert summary.section_path == ["II. 사업의 내용", "3. 원재료 및 생산설비"]
 

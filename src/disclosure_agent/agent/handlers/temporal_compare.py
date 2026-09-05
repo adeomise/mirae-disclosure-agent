@@ -718,6 +718,7 @@ def _collect_narrative_side(
     # answer_builder의 단일 문서 요약 경로가 두 건을 받아 멈춘다.
     _, evidence = adapt_section_summary(
         document,
+        canonical_company=plan.company,
         section_scope=NARRATIVE_SECTION_SCOPE,
         selection=selection,
         items=list(items),

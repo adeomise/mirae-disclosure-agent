@@ -110,11 +110,19 @@ from disclosure_agent.retrieval.metadata_filter import (
 
 __all__ = [
     "AMBIGUOUS_COMPANY_REASON",
+    "AMBIGUOUS_PERIOD_REASON",
     "ANCHOR_SOURCE_LATEST_ANNUAL_FILING",
     "BUSINESS_DESCRIPTION_PATTERNS",
     "BUSINESS_PROFILE_SECTION_SCOPES",
+    "CONFLICTING_PERIOD_REASON",
     "DOCUMENT_CLASS_PERIODIC",
     "DOCUMENT_SUBTYPE_ANNUAL",
+    "DOCUMENT_SUBTYPE_HALF",
+    "DOCUMENT_SUBTYPE_QUARTER",
+    "FISCAL_BASE_MONTH_ANNUAL",
+    "FISCAL_BASE_MONTH_FIRST_QUARTER",
+    "FISCAL_BASE_MONTH_HALF",
+    "FISCAL_BASE_MONTH_THIRD_QUARTER",
     "INTENT_CONTRACT_FACT",
     "INTENT_CROSS_ENTITY_COMPARE",
     "INTENT_DOCUMENT_SUMMARY",
@@ -133,6 +141,8 @@ __all__ = [
     "SECTION_SCOPE_TOKENS",
     "SUMMARY_REQUEST_TOKENS",
     "SUPPORTED_CONTRACT_FIELDS",
+    "SUPPORTED_PERIODIC_REPORT_CHOICES",
+    "PeriodicReportPeriod",
     "QueryPlan",
     "RelativePeriod",
     "UnsupportedQuestionError",
@@ -145,6 +155,37 @@ __all__ = [
 # 이번 슬라이스가 다루는 고정 값. common/enums.py는 팀 합의 전이므로 여기서 국소 정의한다.
 # doc_subtype은 manifest 표기와 값이 같아 대응표가 필요 없다.
 DOCUMENT_SUBTYPE_ANNUAL = "annual"
+
+# 정기공시의 나머지 두 세부유형. 값의 출처는 annual과 같은 manifest의 doc_subtype 표기다.
+# 새 어휘를 만들지 않는다 — 이 값들은 이미 코퍼스에 있고(annual 291건 / half 234건 /
+# quarter 529건), 다른 이름을 붙이면 retrieval이 manifest와 대조하지 못한다.
+DOCUMENT_SUBTYPE_HALF = "half"
+DOCUMENT_SUBTYPE_QUARTER = "quarter"
+
+# 보고 기간이 끝나는 달. manifest의 base_month와 같은 값이다.
+#
+# 왜 세부유형과 함께 담는가:
+#     manifest는 1분기와 3분기를 doc_subtype으로 가르지 않는다. 분기보고서는 전부 "quarter"
+#     이고, 1분기인지 3분기인지는 base_month(3 / 9)에만 남아 있다. 세부유형만으로 담으면
+#     "2025년 1분기보고서"와 "2025년 3분기보고서"가 같은 계획이 되고, 질문이 지목한 분기가
+#     계획에서 사라진다.
+#
+# 새 세부유형 이름("q1"·"q3")을 만들지 않는 이유:
+#     그 값은 manifest에 없다. 계획에 담으면 retrieval이 doc_subtype과 대조할 때 한 건도
+#     맞지 않고, 조회 실패가 '그 분기 보고서가 없다'로 보고된다. 실제로는 이름을 잘못 지은
+#     것이다. 세부유형은 manifest 표기를 그대로 쓰고, 가르는 값은 manifest가 가르는 필드로
+#     가른다.
+#
+# 네 값 모두를 두는 이유:
+#     half와 annual은 세부유형만으로도 한 회계연도에 한 건으로 좁혀진다. 그래도 비워 두지
+#     않는다. 비워 두면 같은 문서를 가리키는 계획이 '월 조건 있음'과 '월 조건 없음' 두 모양을
+#     갖게 되고, 조회하는 쪽이 세부유형마다 다른 분기를 써야 한다. 이 코퍼스의 정기공시는
+#     네 조합이 전부이며 예외가 없다(annual/12 291건, half/6 234건, quarter/3 303건,
+#     quarter/9 226건).
+FISCAL_BASE_MONTH_FIRST_QUARTER = 3
+FISCAL_BASE_MONTH_HALF = 6
+FISCAL_BASE_MONTH_THIRD_QUARTER = 9
+FISCAL_BASE_MONTH_ANNUAL = 12
 
 # 실행 Pattern을 가르는 질의 의도.
 #
@@ -307,8 +348,91 @@ _UNSUPPORTED_RELATIVE_PERIOD_PATTERN = re.compile(
 # 있다는 이유로 막힌다.
 RELATIVE_PERIOD_TOKENS = PREVIOUS_YEAR_EXPRESSIONS
 
-# 분기/반기 표현이 보이면 이번 슬라이스 범위 밖이다.
+# 알아본 정기공시 기간 표기를 걷어낸 뒤에도 남아 있는 분기/반기 표현은 범위 밖이다.
+#
+# 이 목록의 뜻이 바뀌었다. 예전에는 여기 걸리는 낱말이 하나라도 보이면 곧바로 거절했고,
+# 그래서 "1분기보고서"·"반기보고서"·"상반기"가 전부 unsupported_period였다. 지금은
+# PERIODIC_REPORT_NAME_RULES·CONVENIENCE_PERIOD_RULES가 알아본 표기를 먼저 걷어낸
+# 나머지에만 적용한다
+# (_resolve_periodic_report_period 참조).
+#
+# 목록 자체는 그대로 둔다. 걷어내기가 끝난 뒤의 잔여에만 쓰이므로 '상반기'·'하반기'가 남아
+# 있어도 도달하지 않으며, 값을 빼면 "2025년 2분기"처럼 아직 지원하지 않는 표기가 조용히
+# 통과한다. 지원 범위를 넓히는 것은 규칙 표에 줄을 더하는 일이지 이 목록을 줄이는 일이 아니다.
 QUARTER_TOKENS = ("분기", "반기", "상반기", "하반기", "q1", "q2", "q3", "q4")
+
+# 질문이 정기공시를 보고서 이름으로 지목한 표기 -> (세부유형, base_month).
+#
+# 여기 적힌 넷만 알아본다. "2분기"·"4분기"·"q1"처럼 자연스러워 보이는 표기를 함께 넣지
+# 않는다. 지금 답할 수 있는 것은 코퍼스에 실제로 있는 보고서(1분기·반기·3분기·사업)뿐이고,
+# 표기를 먼저 넓히면 대응하는 문서가 없는 계획이 만들어진다. 그 계획은 조회 단계에서
+# '문서가 없다'로 막히며, 사용자에게는 지원하지 않는다는 사실이 아니라 자료가 없다는
+# 사실로 잘못 보고된다.
+#
+# 보고서 종류 앞뒤의 공백을 허용하는 이유:
+#     이 모듈이 이미 쓰는 어휘 규칙(query_vocabulary.REPORT_CONTEXT_YEAR_PATTERN)이
+#     "(?:사업|반기|분기)\s*보고서"로 같은 자리를 읽는다. 한쪽만 공백을 허용하면 같은 질문이
+#     연도는 읽히고 기간은 읽히지 않는다.
+PERIODIC_REPORT_NAME_RULES: tuple[tuple[str, str, str, int], ...] = (
+    (
+        "1분기보고서",
+        r"1\s*분기\s*보고서",
+        DOCUMENT_SUBTYPE_QUARTER,
+        FISCAL_BASE_MONTH_FIRST_QUARTER,
+    ),
+    (
+        "3분기보고서",
+        r"3\s*분기\s*보고서",
+        DOCUMENT_SUBTYPE_QUARTER,
+        FISCAL_BASE_MONTH_THIRD_QUARTER,
+    ),
+    ("반기보고서", r"반기\s*보고서", DOCUMENT_SUBTYPE_HALF, FISCAL_BASE_MONTH_HALF),
+    ("사업보고서", r"사업\s*보고서", DOCUMENT_SUBTYPE_ANNUAL, FISCAL_BASE_MONTH_ANNUAL),
+)
+
+# 보고서 이름 대신 쓰는 넓은 기간 표기 -> (세부유형, base_month).
+#
+# 위 표와 나눠 두는 것이 우선순위 정책 그 자체다. 보고서 이름이 함께 있으면 이 표는 기간을
+# 정하지 않는다(_resolve_periodic_report_period 참조). "2025년 상반기 사업보고서"에서
+# 사용자가 문서를 이름으로 지목했으므로 그쪽이 더 분명한 지시다.
+#
+# '상반기'가 반기보고서로 옮겨지는 이유:
+#     반기보고서는 그 해 상반기(1~6월)를 보고하는 정기공시 하나뿐이다. 옮길 곳이 하나이므로
+#     추측이 아니라 별칭이다. '하반기'에는 그런 대응이 없어 이 표에 없다
+#     (LOWER_HALF_EXPRESSION 참조).
+CONVENIENCE_PERIOD_RULES: tuple[tuple[str, str, str, int], ...] = (
+    ("상반기", r"상반기", DOCUMENT_SUBTYPE_HALF, FISCAL_BASE_MONTH_HALF),
+)
+
+# 하나의 공시 기간으로 옮길 수 없는 표기.
+#
+# '하반기'가 여기 있는 이유:
+#     정기공시에는 하반기를 보고하는 서식이 없다. 3분기보고서는 7~9월이고 사업보고서는 한 해
+#     전체다. 어느 쪽으로 옮겨도 사용자가 말하지 않은 기간을 대신 고른 것이 되고, 그 답은
+#     근거를 갖춘 채로 질문과 다른 기간을 말한다. 옮기지 않고 되묻는다.
+#
+# 보고서 이름이 함께 있으면 되묻지 않는다. 그때는 사용자가 어느 문서인지 이미 말했고,
+# 되물을 것이 남아 있지 않다. 이 표기가 넓은 기간 표기와 같은 우선순위 규칙을 따르는
+# 자리이며, 다른 것은 혼자 남았을 때 기간을 정하지 못한다는 것뿐이다.
+LOWER_HALF_EXPRESSION = "하반기"
+
+# 되묻을 때 제시하는 보고 기간. PERIODIC_REPORT_NAME_RULES가 알아보는 표기이며, 순서는
+# 회계기간 순이다.
+SUPPORTED_PERIODIC_REPORT_CHOICES = (
+    "1분기보고서",
+    "반기보고서",
+    "3분기보고서",
+    "사업보고서",
+)
+
+# 질문이 서로 다른 보고 기간을 함께 지목한 경우의 사유.
+#
+# unsupported_period와 나누는 이유:
+#     그쪽은 '이 표기를 아직 지원하지 않는다'이고, 이쪽은 '표기는 둘 다 알아봤는데 서로
+#     다른 기간을 가리킨다'이다. 한 사유로 묶으면 "2025년 상반기 사업보고서"를 물은 사용자에게
+#     지원하지 않는다고 답하게 되는데, 실제로는 둘 다 지원하며 어느 쪽인지만 정해지지 않았다.
+AMBIGUOUS_PERIOD_REASON = "ambiguous_period"
+CONFLICTING_PERIOD_REASON = "conflicting_period"
 
 CONSOLIDATED_TOKENS = ("연결",)
 SEPARATE_TOKENS = ("별도", "개별")
@@ -702,8 +826,13 @@ def _requests_a_summary(question: str) -> bool:
 
 # 요약 대상이 정기공시임을 밝히는 표기.
 #
-# 사업보고서 하나만 둔다. 반기·분기보고서 표기는 QUARTER_TOKENS가 의도 분기보다 앞에서
-# 거절하므로 여기까지 오지 않는다.
+# 사업보고서 하나만 둔다.
+#
+# 질의 해석은 이제 반기·분기보고서 표기도 읽지만(PERIODIC_REPORT_NAME_RULES), 그 표기를
+# 이 목록에 함께 넣지 않는다. 이 목록이 가르는 것은 '어느 문서를 요약할 것인가'이고,
+# 단일 문서 요약(Pattern B) handler는 사업보고서만 실행한다
+# (handlers/document_summary.py의 DOCUMENT_SUBTYPE_ANNUAL 검사). 표기만 먼저 넓히면 handler가
+# 막을 계획이 만들어지고, 막히는 자리가 뒤로 밀릴 뿐 요약하지 못하는 것은 같다.
 PERIODIC_REPORT_TOKENS = ("사업보고서",)
 
 # 문서 내 범위(section_scope) 표기.
@@ -1255,6 +1384,33 @@ class UnsupportedQuestionError(ValueError):
 
 
 @dataclass(frozen=True)
+class PeriodicReportPeriod:
+    """
+    질문이 이름으로 지목한 정기공시 보고 기간.
+
+    질문에 실제로 적힌 표기(expression)를 함께 담는다. 계획에 담기는 것은 세부유형과
+    base_month뿐이지만, 서로 다른 기간을 함께 지목했을 때 무엇이 겹쳤는지를 사유에 적으려면
+    사용자가 쓴 말이 있어야 한다. RelativePeriod가 같은 이유로 expression을 갖는다.
+
+    두 값을 함께 담는 이유:
+        세부유형만으로는 1분기와 3분기가 갈리지 않는다. manifest에서 둘은 같은 "quarter"이고
+        base_month(3 / 9)만 다르다. 세부유형 하나로 담으면 질문이 지목한 분기가 사라진다.
+
+        half와 annual도 base_month를 비워 두지 않는다. 세부유형만으로 좁혀지기는 하지만,
+        비워 두면 같은 문서를 가리키는 계획이 두 모양을 갖게 되고 조회하는 쪽이 세부유형마다
+        다른 분기를 써야 한다(FISCAL_BASE_MONTH_* 참조).
+
+    보고 기간의 값 의미는 여기서 정하지 않는다. 1분기=3개월 누적, 반기=6개월 누적,
+    3분기=9개월 누적, 사업보고서=연간이라는 해석은 추출 계층의 규약이며, 이 자리는 어느
+    문서를 가리키는가까지만 담는다.
+    """
+
+    expression: str
+    document_subtype: str
+    fiscal_base_month: int
+
+
+@dataclass(frozen=True)
 class RelativePeriod:
     """
     질문에 쓰인 상대 기간 표현과 그것을 절대연도로 옮긴 결과.
@@ -1362,6 +1518,16 @@ class QueryPlan:
     # 대신 handler가 지원하는 유형 전체를 후보로 두고 본문 주제어로 좁히며, 좁혀지지 않으면
     # 답하지 않는다.
     document_subtype: str | None = DOCUMENT_SUBTYPE_ANNUAL
+    # 정기공시가 보고하는 회계기간의 끝 달. manifest의 base_year 옆에 있는 base_month와 같은
+    # 값이며, 세부유형만으로 갈리지 않는 1분기(3)와 3분기(9)를 가르는 자리다.
+    #
+    # 정기공시 계획에서는 항상 채워진다. None이 남는 것은 정기공시가 아닌 계획(거래소공시·
+    # 지분공시)뿐이며, 그 문서군에는 회계기간이 없다.
+    #
+    # 아래 month와 다른 자리다. month는 거래소공시를 접수일의 월로 지목할 때 쓰고(Q13),
+    # 이 값은 정기공시가 보고하는 회계기간의 끝 달이다. 한 자리에 담으면 같은 숫자가 질문에
+    # 따라 접수일도 되고 회계기간도 되며, 어느 쪽인지는 계획에 남지 않는다.
+    fiscal_base_month: int | None = None
     accounting_scope: str = SCOPE_CONSOLIDATED
     # 거래소공시 질의에는 지표가 없다. 값이 아니라 이력을 묻기 때문이다.
     #
@@ -3540,26 +3706,153 @@ def _build_event_history_plan(
     )
 
 
-def _reject_out_of_scope_period(question: str) -> None:
+def _match_period_rules(
+    residue: str,
+    rules: tuple[tuple[str, str, str, int], ...],
+) -> tuple[list[PeriodicReportPeriod], str]:
     """
-    이번 범위 밖 기간 표현을 거절한다.
+    기간 표기 규칙을 훑어 걸린 것과, 그 자리를 걷어낸 나머지 문자열을 함께 돌려준다.
+
+    나머지를 함께 돌려주는 이유:
+        알아본 표기를 남겨 두면 그 글자가 다시 읽힌다. "1분기보고서"가 '분기'라는 글자 때문에
+        미지원 검사에 걸리는 것이 그 경우다. 걷어낸 자리에 공백을 남기는 것은 앞뒤 낱말이
+        붙어 없던 표기가 생기지 않게 하기 위함이다.
+    """
+    matched: list[PeriodicReportPeriod] = []
+
+    for label, pattern, document_subtype, base_month in rules:
+        found = re.search(pattern, residue)
+
+        if found is None:
+            continue
+
+        matched.append(
+            PeriodicReportPeriod(
+                expression=label,
+                document_subtype=document_subtype,
+                fiscal_base_month=base_month,
+            )
+        )
+        residue = residue[: found.start()] + " " + residue[found.end() :]
+
+    return matched, residue
+
+
+def _resolve_periodic_report_period(question: str) -> PeriodicReportPeriod | None:
+    """
+    질문이 지목한 정기공시 보고 기간을 읽는다. 지목하지 않았으면 None이다.
 
     질문에 쓰인 기간 표현만 보며 어떤 intent인지는 보지 않는다. 그래서 의도 분기보다 앞의
     공통 경로에서 실행한다. 의도별 builder 안에서 부르면 Pattern을 추가할 때마다 같은 검사를
     다시 붙여야 하고, 한 번 빠뜨리면 그 Pattern만 조용히 검사를 건너뛴다.
 
+    None을 돌려주는 것은 '기간을 말하지 않았다'이지 '사업보고서로 보아도 좋다'가 아니다.
+    기본값을 정하는 일은 계획을 만드는 쪽이 이미 하고 있고(연도만 적은 질문은 사업보고서로
+    읽는다), 그 규칙을 여기로 옮기지 않는다.
+
+    우선순위:
+        보고서 이름이 넓은 기간 표기를 이긴다. "2025년 하반기 3분기보고서"는 3분기보고서이고,
+        "2025년 상반기 사업보고서"는 사업보고서다. 사용자가 문서를 이름으로 지목했으면 그것이
+        더 분명한 지시이며, 넓은 표기는 이름을 말하지 않았을 때 쓰라고 둔 편의 표기다.
+
+        그래서 '하반기'도 보고서 이름이 함께 있으면 되묻지 않는다. 되물어야 할 것은 '어느
+        보고서인가'인데, 그 답이 질문에 이미 적혀 있다.
+
+    판정 순서가 규약이다.
+
+        '하반기'를 먼저 걷어낸다      걷어내지 않으면 "하반기보고서"의 '반기보고서'가 보고서
+                                      이름으로 읽힌다. 걷어낸 뒤에는 이름이 남지 않으므로
+                                      되묻기로 떨어진다.
+
+        보고서 이름                   서로 다른 이름이 둘이면 고르지 않는다. 아래 참조.
+
+        넓은 기간 표기                이름이 없을 때만 기간을 정한다. 자리는 어느 경우든
+                                      걷어내어, 남은 글자가 미지원 검사에 걸리지 않게 한다.
+
+        남은 글자의 미지원 검사       걷어내고 남은 것에만 적용한다.
+
     연도 범위는 여기서 보지 않는다. 코퍼스 보유 기간 밖 연도(예: 2022, 2027)는 문서 조회
     단계에서 걸러져 `COMPLETED`/`UNANSWERABLE`로 답한다. 그 판정은 코퍼스를 실제로 본 뒤에야
     할 수 있으므로 질문 해석 단계에서 앞질러 정하지 않는다.
     """
-    lowered = question.casefold()
+    lower_half_present = LOWER_HALF_EXPRESSION in question
+    residue = question.replace(LOWER_HALF_EXPRESSION, " ")
 
+    named, residue = _match_period_rules(residue, PERIODIC_REPORT_NAME_RULES)
+
+    distinct = {(period.document_subtype, period.fiscal_base_month) for period in named}
+
+    if len(distinct) > 1:
+        # 서로 다른 보고서를 이름으로 둘 이상 지목했다. 둘 중 하나를 고르지 않는다.
+        #
+        # 이름끼리의 우선순위는 정해진 바가 없다. 넓은 표기와 이름 사이에는 규칙이 있지만
+        # ("이름이 이긴다"), 그 규칙은 이름이 하나일 때를 말한다. 규칙이 없는 채로 한쪽을
+        # 고르면 그 선택이 코드에만 남고 결정으로 남지 않으므로, 고르는 대신 막고 무엇이
+        # 겹쳤는지를 사유에 적는다.
+        listed = ", ".join(period.expression for period in named)
+
+        raise UnsupportedQuestionError(
+            reason=CONFLICTING_PERIOD_REASON,
+            detail=(
+                f"질문이 서로 다른 보고 기간을 함께 지목했습니다: {listed}. "
+                f"{' / '.join(SUPPORTED_PERIODIC_REPORT_CHOICES)} 중 "
+                "하나만 지정해 주세요."
+            ),
+        )
+
+    # 넓은 표기는 이름이 없을 때만 기간을 정한다. 자리는 어느 경우든 걷어낸다 — 이름이
+    # 이겼더라도 '상반기'의 '반기'가 남아 있으면 아래 미지원 검사에 걸린다.
+    convenience, residue = _match_period_rules(residue, CONVENIENCE_PERIOD_RULES)
+
+    resolved: PeriodicReportPeriod | None = None
+
+    if named:
+        resolved = named[0]
+
+    elif lower_half_present:
+        raise UnsupportedQuestionError(
+            reason=AMBIGUOUS_PERIOD_REASON,
+            detail=(
+                f"'{LOWER_HALF_EXPRESSION}'는 하나의 공시 기간으로 확정할 수 없습니다. "
+                f"{' / '.join(SUPPORTED_PERIODIC_REPORT_CHOICES)} 중 "
+                "하나를 지정해 주세요."
+            ),
+        )
+
+    elif convenience:
+        resolved = convenience[0]
+
+    lowered = residue.casefold()
+
+    # 걷어내고 남은 기간 표기는 보고서 한 건으로 좁혀지지 않는다.
+    #
+    # 여기까지 온 표기는 위 규칙들이 알아보지 못한 것이다. '2분기'·'4분기'는 대응하는 정기공시가
+    # 없고, '분기'·'반기'·'분기보고서'·'q1'은 어느 보고서인지를 가리지 않는다. 어느 쪽이든 하나를
+    # 골라 주면 사용자가 말하지 않은 문서를 대신 고른 것이 되므로 막는다. 사유와 fail-closed는
+    # 그대로다.
+    #
+    # 문구가 기간을 미지원이라고 말하지 않는 이유:
+    #     예전에는 "분기·반기 보고서 조회는 이번 범위에 포함되지 않습니다"라고 적었다. 그때는
+    #     '분기'·'반기'라는 글자가 보이기만 하면 전부 여기서 막혔으므로 참인 문장이었다. 지금은
+    #     "2025년 1분기보고서 매출액"이 답하므로 그 문장은 거짓이다. 답하고 있는 조회를 두고
+    #     지원하지 않는다고 말하면, 사용자는 표기를 고쳐 다시 물으면 된다는 것을 알 수 없다.
+    #
+    #     그래서 말하는 것을 바꾼다 — 막힌 것은 보고서 종류가 아니라 '이 표기로는 한 건으로
+    #     좁혀지지 않는다'이고, 다음에 무엇이라고 말하면 되는지를 함께 준다. 되묻기의 선택지는
+    #     하반기·충돌 판정과 같은 목록을 쓴다. 두 벌로 적으면 지원 보고서가 늘 때 한쪽만 늘어나고,
+    #     같은 질문이 어느 자리에서 막혔느냐에 따라 다른 안내를 받는다.
     for token in QUARTER_TOKENS:
         if token in lowered:
             raise UnsupportedQuestionError(
                 reason="unsupported_period",
-                detail="분기·반기 보고서 조회는 이번 범위에 포함되지 않습니다.",
+                detail=(
+                    "질문에 쓰인 기간 표기만으로는 지원하는 정기공시 한 건을 확정할 수 "
+                    f"없습니다. {' / '.join(SUPPORTED_PERIODIC_REPORT_CHOICES)} 중 "
+                    "하나를 보고서 이름으로 지정해 주세요."
+                ),
             )
+
+    return resolved
 
 
 def build_company_resolver(
@@ -3606,7 +3899,97 @@ def resolve_companies(
     return resolver.resolve_question(question)
 
 
+def _reject_dropped_report_period(plan: QueryPlan) -> None:
+    """
+    질문이 지목한 보고 기간이 계획에서 사라진 채로 나가지 못하게 한다.
+
+    왜 필요한가:
+        보고 기간을 계획에 싣는 경로는 지금 단일 수치 조회(Pattern A) 하나뿐이다. 나머지
+        정기공시 계획은 세부유형을 사업보고서로 두고 만들어지며, 그 기본값은 '기간을 말하지
+        않았다'는 뜻으로 쓰여 왔다.
+
+        기간 표현이 열리기 전에는 그 기본값이 틀릴 수 없었다. 분기·반기 표현이 전부 앞에서
+        거절됐기 때문이다. 지금은 "2025년 상반기 A랑 B 매출 비교해줘"가 해석을 통과하고,
+        그 계획은 사업보고서를 가리킨다. 사용자가 반기를 물었는데 연간을 답하는 형태이며,
+        기간이 바뀌었다는 사실은 결과 어디에도 남지 않는다.
+
+        그래서 계획을 만든 뒤에 한 번 대조한다. 지목한 기간과 계획의 기간이 다르면 답하지
+        않는다. 옮기지 못하는 것은 아직 그 경로가 기간을 나르지 않기 때문이며, 그 사실을
+        추측으로 덮지 않는다.
+
+    질문 문자열을 다시 읽는 것 아닌가:
+        판정은 다시 하지 않는다. 계획을 만들 때 쓴 것과 같은 함수(_resolve_periodic_report_period)
+        하나를 다시 부를 뿐이라, 규칙이 두 벌이 되지 않는다. 이 자리가 하는 일은 해석이 아니라
+        대조다.
+
+    정기공시 계획만 본다. 거래소공시·지분공시에는 회계기간이 없고, 그 계획의 세부유형은
+    보고 기간이 아니라 공시 유형을 담는다.
+    """
+    if plan.document_class != DOCUMENT_CLASS_PERIODIC:
+        return
+
+    named = _resolve_periodic_report_period(plan.question)
+
+    if named is None:
+        return
+
+    # 세부유형이 같으면 기간을 잃지 않았다. base_month는 양쪽이 모두 채운 경우에만 본다.
+    #
+    # 비어 있는 base_month를 불일치로 보지 않는 이유:
+    #     보고 기간을 계획에 싣는 경로는 Pattern A 하나뿐이고, 나머지 정기공시 계획은 이 값을
+    #     채우지 않는다. 그 계획들의 세부유형 annual은 '사업보고서를 가리킨다'는 뜻이며, 질문이
+    #     사업보고서라고 적었다면 가리키는 문서가 같다. 비었다는 이유로 막으면 지금까지
+    #     답하던 사업보고서 요약 질문이 전부 거절된다.
+    #
+    #     한 회계연도에 사업보고서와 반기보고서는 각각 한 건뿐이라, 세부유형만으로도 그 둘은
+    #     이미 확정된다. base_month가 실제로 가르는 것은 1분기와 3분기뿐이고, 그 둘을 담는
+    #     계획을 만드는 것은 이 함수가 대조하는 resolver 하나다.
+    months = (plan.fiscal_base_month, named.fiscal_base_month)
+    same_month = None in months or months[0] == months[1]
+
+    if plan.document_subtype == named.document_subtype and same_month:
+        return
+
+    raise UnsupportedQuestionError(
+        reason="unsupported_period",
+        detail=(
+            f"'{named.expression}'를 이 질문 형태에서는 아직 조회 조건으로 옮기지 못합니다. "
+            "기간을 지목하지 않은 형태로 다시 물어봐 주세요."
+        ),
+    )
+
+
 def build_query_plan(
+    question: str,
+    known_companies: tuple[str, ...] | list[str] | None = None,
+    *,
+    fiscal_year_anchors: Mapping[str, int] | None = None,
+    company_universe: Sequence[Mapping[str, Any]] | None = None,
+) -> QueryPlan:
+    """
+    질문 하나의 QueryPlan을 만들고, 나가기 전에 보고 기간을 한 번 대조한다.
+
+    해석은 _build_query_plan이 전부 한다. 이 자리가 더하는 것은 대조 하나뿐이며, 무엇을
+    대조하고 왜 하는지는 _reject_dropped_report_period에 있다.
+
+    대조를 해석 안에 두지 않는 이유:
+        계획을 만드는 경로는 의도마다 다르고 돌아가는 자리도 여럿이다. 그 자리마다 같은
+        검사를 붙이면 Pattern이 늘 때 한 곳을 빠뜨리게 되고, 빠뜨린 Pattern만 조용히
+        기간을 잃는다. 나가는 문이 하나이므로 그 문에서 본다.
+    """
+    plan = _build_query_plan(
+        question,
+        known_companies,
+        fiscal_year_anchors=fiscal_year_anchors,
+        company_universe=company_universe,
+    )
+
+    _reject_dropped_report_period(plan)
+
+    return plan
+
+
+def _build_query_plan(
     question: str,
     known_companies: tuple[str, ...] | list[str] | None = None,
     *,
@@ -3669,7 +4052,7 @@ def build_query_plan(
     # 의도별 builder 안으로 들여보내면 Pattern이 늘 때마다 같은 검사를 다시 붙여야 하고,
     # 한 번 빠뜨린 Pattern만 조용히 검사를 건너뛴다. 모든 Pattern이 Router에
     # 도달하기 전에 같은 기간 규칙을 통과하게 한다.
-    _reject_out_of_scope_period(question)
+    periodic_report_period = _resolve_periodic_report_period(question)
 
     # 지원하지 않는 상대 기간 표현도 의도 분기보다 먼저 본다. 같은 자리에 두는 이유가 같다.
     #
@@ -3779,6 +4162,53 @@ def build_query_plan(
     if _looks_like_business_profile(question, companies, subject_names):
         return _build_business_profile_plan(question, companies, fiscal_year_anchors)
 
+    # 반기·분기보고서를 대상으로 한 요약은 요약 판정 자리에서 막는다.
+    #
+    # 왜 이 자리가 필요한가:
+    #     _looks_like_document_summary는 요약 대상 표기로 PERIODIC_REPORT_TOKENS(사업보고서)를
+    #     요구한다. 반기·분기보고서 표기는 그 목록에 없으므로(그 목록의 설명을 보라) 요약
+    #     질문이 이 판정에 서지 못하고 아래 단일 수치 조회로 내려가, "지원하는 지표(매출액)를
+    #     찾을 수 없습니다"로 막힌다. 질문에 지표가 아예 없는데 지표를 사유로 답하는 것이며,
+    #     막힌 사유가 실제로 일어난 일과 다르다.
+    #
+    # 왜 사유를 기간으로 적지 않는가:
+    #     여기서 답하지 못하는 것은 기간이 아니라 요약이다. 같은 보고서의 값 조회("2025년
+    #     반기보고서 매출액 얼마야?")는 이 변경 뒤에도 그대로 답하며, 답하지 못하는 것은 그
+    #     문서를 요약하는 일 하나다. 그 제약은 실행하는 쪽에 있다
+    #     (handlers/document_summary.py의 DOCUMENT_SUBTYPE_ANNUAL 검사).
+    #
+    #     기간을 미지원이라고 적으면 지금 답하고 있는 조회까지 지원하지 않는다는 말이 된다.
+    #     그리고 반기·분기 보고서 조회가 실제로 늘어날 때 그 문장만 조용히 틀린 말로 남는다.
+    #     사유는 지금도 앞으로도 참인 것을 적는다.
+    #
+    # 사유를 새로 만들지 않는다:
+    #     _build_document_summary_plan이 요약 대상 문서를 확정하지 못할 때 쓰는 것과 같은
+    #     unsupported_summary_target이다. 그 builder를 직접 부르는 호출자도 반기·분기보고서
+    #     질문에 대해 이미 같은 사유로 막힌다(그 표기가 PERIODIC_REPORT_TOKENS에 없다). 두
+    #     입구가 같은 일에 같은 사유를 낸다.
+    #
+    # 자리가 규약이다:
+    #     이력·거래소공시 요약·기업 소개 판정보다 뒤다. 그 셋이 답하던 질문을 가로채지 않는다.
+    #     지표 판정보다는 앞이되, 앞당기는 것은 이 조건 하나뿐이다 — 이름으로 지목한 반기·분기
+    #     보고서에 요약 요청이 함께 온 경우다. 기간 검사 전체를 지표 검사 앞으로 옮기지 않으며,
+    #     기간만 지목한 질문(값 조회·시계열 비교·기업 간 비교)의 경로는 그대로다. 그 질문들이
+    #     기간을 잃는지는 지금처럼 나가는 문에서 본다(_reject_dropped_report_period).
+    #
+    # 사업보고서는 이 조건에 걸리지 않는다. 연간 요약의 동작은 이 변경이 건드리지 않는다.
+    if (
+        periodic_report_period is not None
+        and periodic_report_period.document_subtype != DOCUMENT_SUBTYPE_ANNUAL
+        and _requests_a_summary(question)
+    ):
+        raise UnsupportedQuestionError(
+            reason="unsupported_summary_target",
+            detail=(
+                f"'{periodic_report_period.expression}'를 대상으로 한 요약은 아직 "
+                "지원하지 않습니다. 단일 문서 요약은 사업보고서를 대상으로 합니다. "
+                "같은 보고서의 값 조회(예: 매출액)는 그대로 지원합니다."
+            ),
+        )
+
     if _looks_like_document_summary(question):
         return _build_document_summary_plan(question, companies)
 
@@ -3880,7 +4310,22 @@ def build_query_plan(
         years=years,
         intent=INTENT_SINGLE_FACT,
         document_class=DOCUMENT_CLASS_PERIODIC,
-        document_subtype=DOCUMENT_SUBTYPE_ANNUAL,
+        # 기간을 이름으로 지목하지 않았으면 지금까지와 같이 사업보고서로 읽는다. 기본값을
+        # 여기서 정하는 것은 이 경로가 이미 하던 일이며, 바뀐 것은 지목했을 때 그 값을
+        # 따른다는 것 하나다.
+        #
+        # 기본값에도 base_month를 채운다. 연도만 적은 질문과 "사업보고서"라고 적은 질문은
+        # 같은 문서를 가리키므로, 계획도 같은 모양이어야 한다.
+        document_subtype=(
+            periodic_report_period.document_subtype
+            if periodic_report_period is not None
+            else DOCUMENT_SUBTYPE_ANNUAL
+        ),
+        fiscal_base_month=(
+            periodic_report_period.fiscal_base_month
+            if periodic_report_period is not None
+            else FISCAL_BASE_MONTH_ANNUAL
+        ),
         accounting_scope=accounting_scope,
         metric=metric,
         accounting_scope_explicit=scope_explicit,

@@ -254,24 +254,38 @@ def test_bare_report_year_reaches_the_single_fact_plan() -> None:
     assert plan.years == (2025,)
 
 
-@pytest.mark.parametrize(
-    "question",
-    [
-        "테스트반도체 2025 반기보고서 매출 얼마야?",
-        "테스트반도체 2025 분기보고서 매출 얼마야?",
-    ],
-)
-def test_half_and_quarter_reports_are_still_out_of_scope(question: str) -> None:
+def test_unnamed_quarter_report_is_still_out_of_scope() -> None:
     """
-    연도를 읽게 되었다고 해서 반기·분기 보고서 조회가 열리지는 않는다.
+    연도를 읽게 되었다고 해서 지원하지 않는 기간 표기가 함께 열리지는 않는다.
 
-    기간 규칙(_reject_out_of_scope_period)이 의도 분기보다 앞에서 그대로 거절한다. 어휘를
-    넓히는 변경이 지원 범위를 함께 넓히지 않는다는 것을 여기서 고정한다.
+    기간 규칙(_resolve_periodic_report_period)이 의도 분기보다 앞에서 그대로 거절한다.
+    어휘를 넓히는 변경이 지원 범위를 함께 넓히지 않는다는 것을 여기서 고정한다.
+
+    "분기보고서"는 몇 분기인지 말하지 않은 표기다. 1분기와 3분기 중 어느 쪽인지 정해지지
+    않으므로 읽지 않는다. 읽는 것은 "1분기보고서"·"3분기보고서"처럼 분기를 밝힌 표기뿐이다.
     """
     with pytest.raises(UnsupportedQuestionError) as error:
-        plan_for(question)
+        plan_for("테스트반도체 2025 분기보고서 매출 얼마야?")
 
     assert error.value.reason == "unsupported_period"
+
+
+def test_half_year_report_year_is_read_without_the_year_suffix() -> None:
+    """
+    "2025 반기보고서"는 연도도 보고 기간도 읽힌다.
+
+    이 어휘 규칙(REPORT_CONTEXT_YEAR_PATTERN)이 '년' 없는 네 자리 숫자를 연도로 읽어 주는
+    자리가 보고서 종류 바로 앞이고, 반기보고서가 그 자리에 있다. 연도만 읽고 기간을 놓치면
+    같은 질문이 사업보고서를 가리키게 되므로 두 값을 함께 고정한다.
+
+    바뀌기 전에는 이 질문이 unsupported_period였다. 반기보고서 조회가 합의된 계약에 들어오면서
+    열린 경로이며, 값을 실제로 읽는 일은 추출 계층이 맡는다.
+    """
+    plan = plan_for("테스트반도체 2025 반기보고서 매출 얼마야?")
+
+    assert plan.years == (2025,)
+    assert plan.document_subtype == "half"
+    assert plan.fiscal_base_month == 6
 
 
 def test_amount_shaped_number_still_fails_closed_at_the_plan() -> None:

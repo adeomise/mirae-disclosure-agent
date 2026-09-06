@@ -1,28 +1,30 @@
-"""유형만 밝힌 거래소공시 조회의 실측 코퍼스 통합 테스트.
+"""공급계약 공시 내용 조회 질문의 실측 코퍼스·HTTP 통합 테스트.
 
 무엇을 고정하는가:
-    질의 해석이 거래소공시 경로를 열었다는 것만으로는 이 변경의 목적이 이뤄지지 않는다.
-    그 계획이 실제 코퍼스에서 문서 조회 단계까지 도달하고, 후보를 하나로 좁히지 못했을 때
-    하나를 고르지 않는 것까지 확인해야 한다. 계획 단계는
-    tests/unit/test_supply_contract_lookup_query_plan.py가 본다.
+    질의 해석이 거절한다는 것만으로는 이 변경의 목적이 이뤄지지 않는다. 그 거절이 HTTP
+    경계까지 같은 사유로 나가고, 코퍼스를 열어 답을 만들어 내지 않는 것까지 확인해야 한다.
+    계획 단계의 세부는 tests/unit/test_supply_contract_lookup_query_plan.py가 본다.
 
-    그래서 여기서 보는 것은 셋이다.
+    그래서 여기서 보는 것은 넷이다.
 
-        1. 막힌 자리가 query_plan이 아니다   실행이 문서 조회까지 갔다는 사실이다. 예전에는
-                                            질의 해석에서 unsupported_metric으로 끝나
-                                            코퍼스를 한 번도 열지 않았다.
-        2. 후보가 여럿이면 고르지 않는다      ambiguous_root로 막고 답을 만들지 않는다.
-        3. 후보가 없으면 없다고 답한다        다른 기간·다른 기업의 공시로 대신하지 않는다.
+        1. 실측 코퍼스에서도 거절한다        원공시가 1건으로 확정되는 기업·연도로 묻는다.
+                                            후보가 없어서 막히는 것이 아니라는 뜻이다.
+        2. Fact도 Evidence도 만들지 않는다   답을 만들다 만 것이 아니라 만들지 않았다.
+        3. HTTP 422로 나간다                실행이 끝나지 못했으므로 200이 아니다.
+        4. 이력 질문은 그대로 실행된다        거절이 Pattern E를 함께 막지 않았다.
+
+    1번의 대조군 성격이 중요하다. 삼성전자는 이 코퍼스의 2025년에 공급계약 원공시가 정확히
+    1건 있고 정정이 1건 붙어 있다. 예전 구현은 그래서 이 질문을 COMPLETED/ANSWERABLE로
+    끝냈고, 돌아온 문장은 계약의 내용이 아니라 "계약상대 변경 전 …, 변경 후 …"였다. 답이
+    나오는 조건을 그대로 두고 답하지 않기로 한 것이므로, 후보가 있는 자리에서 확인해야 한다.
 
 무엇을 고정하지 않는가:
-    자연어 답변을 만들지 않는다. 이 경로의 범위는 AgentExecutionResult까지다.
-
-    상대방으로 후보를 좁히는 능력(C3)은 여전히 없다. 계획이 담는 counterparty는 조회 조건이
-    아니라 fail-close 신호이며, 그 성질이 이 변경으로 바뀌지 않는 것을 아래에서 함께 본다.
+    자연어 답변의 문장을 고정하지 않는다. 거절된 질문에는 답 문장이 없고, 이력 질문의 문장은
+    이 PR이 만들지 않았다.
 
 실제 공시 값에 대하여:
-    접수번호와 수치를 여기에 적지 않는다. 후보 개수처럼 코퍼스가 정하는 값은 이 파일이
-    직접 세어 비교한다. 코퍼스가 없으면 건너뛴다.
+    접수번호와 수치를 여기에 적지 않는다. 후보 개수처럼 코퍼스가 정하는 값은 이 파일이 직접
+    세어 비교한다. 코퍼스가 없으면 건너뛴다.
 """
 
 from __future__ import annotations
@@ -32,18 +34,12 @@ import os
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
-from disclosure_agent.agent.answer_builder import (
-    REASON_AMBIGUOUS_ROOT,
-    STAGE_FILING_DISCOVERY,
-    STAGE_QUERY_PLAN,
-)
+from disclosure_agent.agent.answer_builder import STAGE_QUERY_PLAN
 from disclosure_agent.agent.router import answer_question
-from disclosure_agent.common.enums import (
-    AnswerabilityReason,
-    AnswerabilityStatus,
-    ExecutionStatus,
-)
+from disclosure_agent.api.main import app
+from disclosure_agent.common.enums import AnswerabilityStatus, ExecutionStatus
 from disclosure_agent.common.schemas import AgentExecutionResult
 
 CORPUS_ROOT_ENV = "DISCLOSURE_CORPUS_ROOT"
@@ -54,14 +50,33 @@ DEFAULT_CORPUS_ROOT = (
 
 SUPPLY_CONTRACT_SUBTYPE = "단일판매공급계약체결"
 
-# 이번 변경이 열어야 하는 두 질문.
-TARGET_PLAIN = "삼성전자 2024년 공급계약 알려줘"
-TARGET_WITH_COUNTERPARTY = "삼성전자 2024년 Ford 관련 공급계약 알려줘"
+REASON_UNSUPPORTED_CONTRACT_FIELDS = "unsupported_contract_fields"
 
-# 후보가 여럿인 기업으로 같은 모양을 다시 묻는다. 하나를 고르지 않는 것을 보려면 고를 것이
-# 여럿이어야 하고, 삼성전자는 이 코퍼스의 2024년에 공급계약 공시가 없다.
-AMBIGUOUS_PLAIN = "LG에너지솔루션 2024년 공급계약 알려줘"
-AMBIGUOUS_WITH_COUNTERPARTY = "LG에너지솔루션 2024년 Ford 관련 공급계약 알려줘"
+# #141 리뷰가 지목한 다섯 질문. 삼성전자 2025년은 원공시가 1건으로 확정되는 자리다.
+TYPE_ONLY_REQUEST = "삼성전자 2025년 공급계약 알려줘"
+
+REFUSED_REQUESTS = (
+    TYPE_ONLY_REQUEST,
+    "삼성전자 2025년 공급계약 상대방 알려줘",
+    "삼성전자 2025년 공급계약 계약명 알려줘",
+    "삼성전자 2025년 공급계약 공급지역 알려줘",
+    "삼성전자 2025년 공급계약 주요 내용 알려줘",
+    "삼성전자 2025년 Ford 관련 공급계약 알려줘",
+)
+
+REFUSED_IDS = [
+    "type-only",
+    "counterparty",
+    "contract-name",
+    "supply-region",
+    "main-content",
+    "ford-relation",
+]
+
+# 이력 질문. 이 거절이 Pattern E를 함께 막지 않았음을 보이는 대조군이다.
+HISTORY_REQUEST = "LG에너지솔루션이 포드랑 맺었던 배터리 공급계약, 지금 어떻게 됐어?"
+
+client = TestClient(app)
 
 
 def _resolve_corpus_root() -> Path | None:
@@ -84,16 +99,6 @@ def corpus_root() -> Path:
 
 def _ask(corpus_root: Path, question: str) -> AgentExecutionResult:
     return answer_question(question, corpus_root=corpus_root)
-
-
-def _stage(result: AgentExecutionResult) -> str | None:
-    """실행이 멈춘 자리. 막히지 않았으면 None."""
-    if result.execution_issue is not None:
-        return result.execution_issue.stage
-
-    detail = result.answerability_detail
-
-    return detail.stage if detail is not None else None
 
 
 def _original_filing_count(corpus_root: Path, company: str, year: int) -> int:
@@ -120,145 +125,150 @@ def _original_filing_count(corpus_root: Path, company: str, year: int) -> int:
 
 
 # --------------------------------------------------------------------------
-# 1. 질의 해석에서 끝나지 않는다
+# 0. 대조군이 성립하는지 먼저 확인한다
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.corpus
-@pytest.mark.parametrize(
-    "question",
-    [TARGET_PLAIN, TARGET_WITH_COUNTERPARTY, AMBIGUOUS_PLAIN],
-    ids=["plain", "with-counterparty", "ambiguous"],
-)
-def test_lookup_questions_reach_document_discovery(
-    corpus_root: Path,
-    question: str,
-) -> None:
+def test_the_refused_question_has_exactly_one_original_filing(corpus_root: Path) -> None:
     """
-    막힌 자리가 query_plan이 아니라 filing_discovery인지 본다.
+    거절을 확인할 자리에 실제로 후보가 있는지 먼저 본다.
 
-    이것이 이 변경의 핵심 사실이다. 예전에는 세 질문 모두 query_plan에서
-    unsupported_metric으로 끝났고, 코퍼스를 한 번도 열지 않았다. 사유만 보면 '지표를 모르겠다'
-    였으나 질문은 지표를 묻지 않았다.
-
-    답이 나오는지는 여기서 보지 않는다. 후보 개수가 정할 일이고 그것은 아래에서 따로 본다.
+    후보가 0건이면 아래 테스트들은 '없어서 못 답했다'로도 통과한다. 그러면 이 PR이 무엇을
+    바꿨는지 아무것도 고정하지 못한다. 답이 나올 수 있는 조건에서 답하지 않기로 한 것이므로
+    후보가 정확히 1건인 자리를 쓴다.
     """
-    result = _ask(corpus_root, question)
-
-    assert _stage(result) != STAGE_QUERY_PLAN
-    assert _stage(result) == STAGE_FILING_DISCOVERY
-    # 계획 단계에서 멈춘 것이 아니므로 실행 중단이 아니다.
-    assert result.execution_issue is None
-    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert _original_filing_count(corpus_root, "삼성전자", 2025) == 1
 
 
 # --------------------------------------------------------------------------
-# 2. 후보가 여럿이면 고르지 않는다
+# 1. 실측 코퍼스에서도 거절한다
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.corpus
-@pytest.mark.parametrize(
-    "question",
-    [AMBIGUOUS_PLAIN, AMBIGUOUS_WITH_COUNTERPARTY],
-    ids=["plain", "with-counterparty"],
-)
-def test_multiple_candidates_are_refused_without_choosing_one(
+@pytest.mark.parametrize("question", REFUSED_REQUESTS, ids=REFUSED_IDS)
+def test_content_requests_are_refused_at_query_plan(
     corpus_root: Path,
     question: str,
 ) -> None:
     """
-    후보가 여럿인 질문에서 하나를 고르지 않는지 본다.
+    다섯 질문이 계획 단계에서 멈추고 코퍼스를 열지 않는지 본다.
 
-    상대방을 적은 질문도 같은 판정에 걸린다. 이 구현은 상대방으로 후보를 좁히지 못하므로
-    (C3 미구현), 이름을 적었다는 이유로 후보가 줄어들면 안 된다. 두 질문이 같은 사유로
-    막히는 것이 그 사실을 드러낸다.
-
-    Fact도 Evidence도 만들지 않는다. 대상 문서를 확정하지 못한 채로 값을 담으면, 어느 계약의
-    값인지 모르는 숫자가 근거까지 갖춘 답으로 나간다.
+    막힌 자리가 query_plan이라는 것이 '검색에 이르지 않았다'의 실질이다. 계약 내용을 답할
+    carrier가 없으므로 문서를 여는 것 자체가 의미 없고, 열면 그 문서로 무언가를 답하고 싶어진다.
     """
-    expected = _original_filing_count(corpus_root, "LG에너지솔루션", 2024)
-
-    # 대조군이 성립하는지 먼저 확인한다. 후보가 1건 이하면 이 테스트는 아무것도 보지 못한다.
-    assert expected > 1
-
     result = _ask(corpus_root, question)
 
-    assert result.execution_status is ExecutionStatus.COMPLETED
-    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
-    assert result.answerability_reason is AnswerabilityReason.AMBIGUOUS_MATCH
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue is not None
+    assert result.execution_issue.stage == STAGE_QUERY_PLAN
+    assert result.execution_issue.reason == REASON_UNSUPPORTED_CONTRACT_FIELDS
 
-    detail = result.answerability_detail
 
-    assert detail is not None
-    assert detail.stage == STAGE_FILING_DISCOVERY
-    assert detail.reason == REASON_AMBIGUOUS_ROOT
-    # 몇 건 사이에서 막혔는지가 진단에 남아야 질문을 어떻게 좁힐지 알 수 있다.
-    assert str(expected) in detail.detail
+@pytest.mark.corpus
+@pytest.mark.parametrize("question", REFUSED_REQUESTS, ids=REFUSED_IDS)
+def test_refused_requests_produce_no_answer_payload(
+    corpus_root: Path,
+    question: str,
+) -> None:
+    """
+    거절한 질문에 Fact도 Evidence도 이력도 만들지 않는지 본다.
+
+    예전 구현은 이 자리에서 EventHistory 1건과 Evidence 3건을 만들어 ANSWERABLE로 돌려줬다.
+    그 결과는 형식이 완전해서 물어본 것에 답하지 못했다는 사실이 드러나지 않았다.
+    """
+    result = _ask(corpus_root, question)
 
     assert result.facts == []
     assert result.evidence == []
+    assert result.event_histories == []
+    assert result.event_links == []
+    assert result.answerability_status is not AnswerabilityStatus.ANSWERABLE
+
+
+@pytest.mark.corpus
+def test_refusal_does_not_use_the_metric_vocabulary(corpus_root: Path) -> None:
+    """
+    막힌 사유가 unsupported_metric이 아닌지 실행 결과에서 본다.
+
+    #141 리뷰가 명시적으로 요구한 조건이며, 질의 해석 단위 테스트와 따로 둔다. 사유를 실제로
+    사용자에게 내보내는 것은 이 경로이기 때문이다.
+    """
+    result = _ask(corpus_root, TYPE_ONLY_REQUEST)
+
+    assert result.execution_issue is not None
+    assert result.execution_issue.reason != "unsupported_metric"
 
 
 # --------------------------------------------------------------------------
-# 3. 후보가 없으면 없다고 답한다
+# 2. HTTP 경계
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.corpus
-@pytest.mark.parametrize(
-    "question",
-    [TARGET_PLAIN, TARGET_WITH_COUNTERPARTY],
-    ids=["plain", "with-counterparty"],
-)
-def test_absent_candidates_are_reported_as_not_found(
+def test_refused_request_returns_422_with_the_same_reason() -> None:
+    """
+    거절이 HTTP 경계까지 같은 사유로 나가는지 본다.
+
+    422인 것이 규약이다. 실행이 끝나고 나서 답을 확정하지 못한 것(200/UNRESOLVED)이 아니라
+    실행이 시작되지 못한 것이다. 두 경우를 같은 상태 코드로 내보내면 받는 쪽이 되물어 풀 수
+    있는 질문과 아직 만들지 않은 기능을 구분할 수 없다.
+    """
+    if _resolve_corpus_root() is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    response = client.post("/api/ask", json={"question": TYPE_ONLY_REQUEST})
+
+    assert response.status_code == 422
+
+    body = response.json()
+
+    assert body["execution_status"] == ExecutionStatus.BLOCKED.value
+    assert body["error"]["stage"] == STAGE_QUERY_PLAN
+    assert body["error"]["reason"] == REASON_UNSUPPORTED_CONTRACT_FIELDS
+
+
+@pytest.mark.corpus
+def test_history_question_still_reaches_the_event_carrier() -> None:
+    """
+    이력 질문이 예전 그대로 실행되는지 HTTP 경계에서 본다.
+
+    이 거절이 Pattern E를 함께 막지 않았다는 대조군이다. Q14는 원공시 후보가 여럿이라
+    UNRESOLVED로 끝나며, 그것은 실행이 끝난 뒤의 판정이므로 200이다.
+    """
+    if _resolve_corpus_root() is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    response = client.post("/api/ask", json={"question": HISTORY_REQUEST})
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert body["status"] == AnswerabilityStatus.UNRESOLVED.value
+
+
+# --------------------------------------------------------------------------
+# 3. 이번 범위 밖의 경계
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.corpus
+def test_counterparty_only_question_still_stops_on_the_company_reason(
     corpus_root: Path,
-    question: str,
 ) -> None:
     """
-    그 기간에 그 기업의 공급계약 원공시가 없으면 없다고 답하는지 본다.
+    대상 기업 없이 상대방만 적은 질문은 기업을 읽지 못한 사유로 막힌다.
 
-    삼성전자는 이 코퍼스의 2024년에 공급계약 공시가 없다. 다른 기간이나 다른 기업의 공시로
-    대신하지 않는 것이 여기서 볼 사실이며, 답을 만들지 못한 것과 답이 없다는 것을 구분해
-    보고하는 것이 그 다음이다.
+    "2025년 Ford 관련 공급계약 알려줘"는 코퍼스 전체를 상대방으로 뒤지는 조회이며, 그 경로는
+    어느 계층에도 없다. 기업 판정이 계약 필드 판정보다 훨씬 앞이므로 사유도 그쪽이다.
 
-    UNANSWERABLE은 실행이 끝난 뒤의 판정이다. 코퍼스를 열어 보고 없다는 것을 확인했으므로
-    실행 중단(BLOCKED)이 아니다.
-    """
-    # 대조군이 성립하는지 먼저 확인한다.
-    assert _original_filing_count(corpus_root, "삼성전자", 2024) == 0
-
-    result = _ask(corpus_root, question)
-
-    assert result.execution_status is ExecutionStatus.COMPLETED
-    assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
-    assert result.answerability_reason is AnswerabilityReason.NOT_FOUND
-    assert _stage(result) == STAGE_FILING_DISCOVERY
-
-    assert result.facts == []
-    assert result.evidence == []
-
-
-# --------------------------------------------------------------------------
-# 4. 이번 범위 밖의 경계
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.corpus
-def test_counterparty_only_question_still_stops_at_query_plan(corpus_root: Path) -> None:
-    """
-    대상 기업 없이 상대방만 적은 질문은 그대로 막힌다.
-
-    "2024년 Ford 관련 공급계약 알려줘"는 코퍼스 전체를 상대방으로 뒤지는 조회다. 그 경로는
-    어느 계층에도 없으며(retrieval의 조회 진입점이 전부 company를 필수로 받는다), 이 변경이
-    그 경계를 옮기지 않는다.
-
-    실측 코퍼스로 다시 보는 이유:
+    실측 코퍼스로 보는 이유:
         단위 테스트는 인식 후보 목록을 직접 넘긴다. 실제 manifest에 Ford가 corp_name으로
-        들어와 있었다면 그 목록만으로는 드러나지 않는다. 여기서는 코퍼스가 아는 이름 전체를
-        가지고도 같은 판정이 나오는 것을 본다.
+        들어와 있었다면 그 목록만으로는 드러나지 않는다.
     """
-    result = _ask(corpus_root, "2024년 Ford 관련 공급계약 알려줘")
+    result = _ask(corpus_root, "2025년 Ford 관련 공급계약 알려줘")
 
     assert result.execution_issue is not None
     assert result.execution_issue.stage == STAGE_QUERY_PLAN

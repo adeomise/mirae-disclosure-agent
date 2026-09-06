@@ -1450,9 +1450,16 @@ EVENT_COUNTERPARTY_PATTERN = re.compile(
 #     이유가 그대로 이 결정의 근거다.
 #
 # 조사는 선택이다. "Ford 관련"과 "Ford와 관련된"이 같은 뜻이다.
+#
+# 표기를 상수로 두는 이유:
+#     _event_request_residue가 이 낱말을 얼개로 걷어낸다. 두 곳에 따로 적으면 한쪽을 고친
+#     날 상대방과 함께 읽은 '관련'이 residue로 남아, 이해한 표현이 이해하지 못한 것으로
+#     보고된다.
+RELATION_MARKER = "관련"
+
 EVENT_COUNTERPARTY_RELATION_PATTERN = re.compile(
     r"([A-Za-z][A-Za-z0-9&.\-]*(?:\s+[A-Za-z][A-Za-z0-9&.\-]*)*)"
-    r"\s*(?:과|와)?\s*관련"
+    rf"\s*(?:과|와)?\s*{RELATION_MARKER}"
 )
 
 # 이력 질문에서 상대방을 읽는 표현 전부. 앞의 것이 먼저다.
@@ -2588,51 +2595,217 @@ def _looks_like_event_history(question: str) -> bool:
     )
 
 
-def _looks_like_event_lookup(question: str) -> bool:
+def _asks_for_event_content(question: str) -> bool:
     """
-    이력도 계약 필드도 묻지 않고 거래소공시 자체를 물은 질문인가.
+    거래소공시 유형을 지목하고 그 내용을 말해 달라고 한 질문인가. 유형은 가리지 않는다.
 
-    "삼성전자 2024년 공급계약 알려줘"가 그 자리다. 유형은 밝혔지만 이력 표현이 없어
-    _looks_like_event_history에 걸리지 않고, 계약 필드 표기가 없어
-    _looks_like_contract_fact에도 걸리지 않는다. 그대로 두면 Pattern A의 지표 판정까지
-    흘러 내려가 unsupported_metric으로 막히는데, 그 사유는 실제로 일어난 일과 다르다.
-    질문은 지표를 묻지 않았고, 이 코퍼스가 아는 거래소공시 유형을 이름으로 지목했다.
+    둘을 모두 만족해야 참이다.
 
-    셋을 모두 만족해야 참이다.
+        1. 요청 표기         '알려줘'·'설명해줘'·'정리해줘'.
+        2. 지표를 묻지 않았다  매출액·파생지표를 함께 물었으면 참이 아니다.
 
-        1. 거래소공시 유형 표기   '공급계약'·'시설투자'처럼 이 모듈이 아는 유형을 지목했다.
-        2. 요청 표기             '알려줘'·'설명해줘'·'정리해줘'. 문서에 대해 말해 달라는 말이다.
-        3. 지표를 묻지 않았다     매출액·파생지표를 함께 물었으면 이 경로를 열지 않는다.
-
-    3번이 규약의 핵심이다. 이 조건이 이 판정을 "지금 unsupported_metric으로 끝나는 질문"
+    2번이 규약의 핵심이다. 이 조건이 아래 거절을 "지금 unsupported_metric으로 끝나는 질문"
     안쪽에 가둔다. 지표를 읽을 수 있는 질문은 예전 그대로 Pattern A·C·D로 가므로,
-    "공급계약 관련 매출 알려줘"가 매출 답을 잃지 않는다. 지표를 하나도 읽지 못하는 질문만
-    이 경로로 오고, 그 질문들은 지금 전부 막히고 있다.
-
-    유형이 둘 이상 맞는 질문도 여기서는 통과시킨다. 막는 자리는 계획을 만드는
-    _extract_event_subtype_rule이며, _looks_like_event_history가 같은 이유로 같은 선택을
-    했다. 여기서 걸러 내면 그 질문이 다시 지표 경로로 흘러 '지표를 모르겠다'로 막히고,
-    실제 원인인 유형 모호성이 결과에서 사라진다.
+    "공급계약 관련 매출 알려줘"가 매출 답을 잃지 않는다.
 
     요청 표기 어휘를 Q06과 함께 쓰는 이유:
         EVENT_SUMMARY_REQUEST_TOKENS가 이미 '문서에 대해 말해 달라'는 표현의 정본이다.
-        여기에 같은 뜻의 목록을 따로 만들면 표기가 늘 때 한쪽만 늘어나고, 같은 말로 물은 두
-        질문이 서로 다른 경로로 갈린다. 그쪽이 공시·내용 표기와 함께 요구해 값 조회를
-        걸러 내는 자리에서, 이쪽은 유형 표기와 지표 부재로 같은 것을 걸러 낸다.
+        같은 뜻의 목록을 따로 만들면 표기가 늘 때 한쪽만 늘어나고, 같은 말로 물은 두 질문이
+        서로 다른 경로로 갈린다.
 
     _resolve_requested_metrics가 여기서 예외를 올릴 수 있다:
         지원하는 지표와 지원하지 않는 표기를 함께 물은 질문이 그 경우이며, 그 거절은 이
-        판정이 생기기 전과 같다. 삼키지 않는다. 삼키면 그 질문이 이 경로로 들어와, 한쪽만
-        골라 답하지 않기로 한 판정이 조용히 뒤집힌다. _looks_like_document_summary가
-        _extract_section_scope에 대해 같은 자리에 있다.
+        판정이 생기기 전과 같다. 삼키지 않는다. 삼키면 한쪽만 골라 답하지 않기로 한 판정이
+        조용히 뒤집힌다. _looks_like_document_summary가 _extract_section_scope에 대해 같은
+        자리에 있다.
     """
-    if not _find_event_subtype_rules(question):
-        return False
-
     if not any(token in question for token in EVENT_SUMMARY_REQUEST_TOKENS):
         return False
 
     return _resolve_requested_metrics(question) == (None, None)
+
+
+def _event_request_residue(
+    question: str,
+    companies: tuple[str, ...],
+    subject_names: tuple[str, ...],
+    counterparty: str | None,
+) -> tuple[str, ...]:
+    """
+    알아본 얼개를 걷어내고 남은 낱말. 없으면 빈 튜플.
+
+    걷어내는 것은 이 모듈이 실제로 읽어 계획에 담는 것들뿐이다.
+
+        기업명      companies에 담긴다.
+        연·월       years/month에 담긴다.
+        유형 표기   document_subtype에 담긴다.
+        요청 표기   '무엇을 해 달라'는 말이며 어느 값을 묻는지 가리지 않는다.
+        상대방      counterparty에 담긴다. 그 이름과 함께 읽은 '관련'까지 걷어낸다.
+
+    남은 낱말은 이 모듈이 읽지 못한 요청이다. "공급계약 상대방 알려줘"의 '상대방',
+    "공급계약 주요 내용 알려줘"의 '주요'·'내용'이 그 자리다.
+
+    왜 남기는가:
+        남은 낱말이 있다는 것은 질문이 계약의 특정 값을 지목했는데 이 구현이 그 값을 읽지
+        못했다는 뜻이다. 없는 셈 치고 유형·기간만으로 계획을 만들면 사용자가 물은 항목이
+        계획에도 결과에도 남지 않은 채 다른 답이 나가고, 그 답은 형식이 맞아 틀렸다는 사실이
+        드러나지 않는다.
+
+        그래서 남은 낱말을 거절 detail에 그대로 싣는다. 무엇을 이해하지 못했는지가 보여야
+        질문을 어떻게 고칠지 알 수 있다.
+
+    낱말을 변형하지 않는다. 조사를 떼거나 어간을 뽑으면 그것은 규칙이 만들어 낸 말이고,
+    사용자가 쓰지 않은 표현을 진단에 싣게 된다. _event_summary_subject_tokens가 같은 이유로
+    같은 선택을 했다.
+    """
+    normalized_companies = {
+        normalize_company_name(name)
+        for name in (*companies, *subject_names)
+        if name
+    }
+
+    normalized_companies.discard("")
+
+    subtype_tokens = tuple(
+        token for rule in EVENT_SUBTYPE_RULES for token in rule.tokens
+    )
+
+    # 상대방으로 읽은 이름의 조각들. "Ford Motor Company"는 세 낱말로 적힌다.
+    counterparty_tokens = set(counterparty.split()) if counterparty else set()
+
+    residue: list[str] = []
+
+    for raw_token in question.split():
+        token = raw_token.strip(EVENT_SUBJECT_TRIM_CHARS)
+
+        if not token:
+            continue
+
+        if YEAR_PATTERN.search(token) or MONTH_PATTERN.fullmatch(token):
+            continue
+
+        if any(request in token for request in EVENT_SUMMARY_REQUEST_TOKENS):
+            continue
+
+        if any(subtype in token for subtype in subtype_tokens):
+            continue
+
+        if token in counterparty_tokens:
+            continue
+
+        # '관련'은 상대방을 읽었을 때만 얼개다. 그 이름 없이 홀로 오면 무엇에 대한 요청인지
+        # 가리지 않은 말이므로 남긴다.
+        if counterparty_tokens and token == RELATION_MARKER:
+            continue
+
+        normalized_token = normalize_company_name(token)
+
+        if normalized_token and normalized_token in normalized_companies:
+            continue
+
+        # 기업명이 조사와 붙어 온 경우("삼성전자가")도 얼개다.
+        if normalized_token and any(
+            normalized_token.startswith(company) for company in normalized_companies
+        ):
+            continue
+
+        residue.append(token)
+
+    return tuple(residue)
+
+
+def _reject_unanswerable_supply_contract_request(
+    question: str,
+    companies: tuple[str, ...],
+    subject_names: tuple[str, ...],
+) -> None:
+    """
+    공급계약 공시의 내용을 물었으나 이 구현이 답할 수 없는 질문을 거절한다.
+
+    이 자리에 오는 질문:
+        "삼성전자 2025년 공급계약 알려줘"와 "…공급계약 상대방 알려줘"처럼 공급계약 공시를
+        지목하고 그 내용을 물었는데, 이력을 묻지도 않았고(_looks_like_event_history) 지원하는
+        계약 필드 조합을 밝히지도 않은(_looks_like_contract_fact) 질문이다.
+
+    왜 Pattern E로 보내지 않는가:
+        Pattern E가 답하는 것은 정정 이력이다. 실측으로 확인했다. "삼성전자 2025년 공급계약
+        알려줘"는 원공시가 1건으로 확정되어 COMPLETED/ANSWERABLE로 끝나지만, 돌아오는 문장은
+        "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 1건입니다.
+        계약상대 변경 전 …, 변경 후 …"이다. 계약금액도 계약기간도 계약명도 없다. Fact 0건,
+        Event 0건, ResolvedEventState 0건이며 EventHistory와 EventLink만 나온다.
+
+        질문은 계약이 무엇인지 물었고 답은 그 계약의 어디가 정정되었는지를 말한다. 그것을
+        ANSWERABLE로 돌려주면 물어본 것에 답하지 못했다는 사실이 결과 어디에도 남지 않는다.
+        형식이 맞고 근거까지 갖춘 답이라 받는 쪽에서 드러나지 않으므로, 답하지 않는 쪽이 맞다.
+
+        공급계약 공시의 내용을 서술하는 carrier는 아직 없다. Q06(event_summary)은 그 유형을
+        입구에서 막고 있고(handlers.event_summary의 REQUIRED_SUMMARY_FIELDS_BY_EVENT_TYPE),
+        그 유형의 필수 요약 필드 집합은 정해진 바 없다. 없는 능력을 있는 것처럼 라우팅하지
+        않는다.
+
+    사유로 unsupported_contract_fields를 쓰는 이유:
+        새 어휘를 만들지 않는다. 이 사유는 이미 "공급계약 공시를 물었는데 이 구현이 답할 수
+        있는 값 조합이 아니다"를 뜻하며, _build_contract_fact_plan이 같은 판단을 같은 이름으로
+        하고 있다. 거기서는 필드를 일부만 물은 질문이, 여기서는 아예 밝히지 않았거나 읽지
+        못하는 항목을 물은 질문이 걸린다. 판단의 내용이 같으므로 이름을 나누지 않는다.
+
+        unsupported_event_subtype은 쓸 수 없다. 그것은 유형을 알아보지 못했다는 뜻인데 여기서는
+        알아보았다. unsupported_metric도 쓰지 않는다. 질문은 지표를 묻지 않았다.
+
+    residue를 detail에 싣는 이유는 _event_request_residue에 적어 두었다.
+
+    신규시설투자만 지목한 질문은 여기서 거절하지 않는다:
+        이 사유는 계약 필드 어휘로 말한다. 시설투자 공시에는 그 어휘가 없어 사유가 질문과
+        어긋난다. 그 유형의 조회 질문은 이 PR 이전과 같은 경로로 가며, 그쪽에 맞는 사유를
+        정하는 것은 이 PR의 범위가 아니다.
+    """
+    matched = _find_event_subtype_rules(question)
+
+    if not matched or not _asks_for_event_content(question):
+        return
+
+    # 유형이 둘 이상이면 어느 유형을 물었는지부터 정해지지 않는다. 그 판정이 먼저다.
+    #
+    # 여기서 대신 거절하면 유형 모호성이 결과에서 사라지고, 두 유형을 물었다는 사실이
+    # 계획에도 결과에도 남지 않는다. 판정은 _extract_event_subtype_rule 하나가 갖는다.
+    # 그 함수는 이 자리에서 반드시 ambiguous_event_subtype으로 멈춘다.
+    if len(matched) > 1:
+        _extract_event_subtype_rule(question)
+
+    if matched[0].subtype != EVENT_SUBTYPE_SUPPLY_CONTRACT:
+        return
+
+    # 상대방은 읽었으면 얼개다. 읽지 못했으면 residue로 남아 진단에 나타난다.
+    counterparty = _extract_event_counterparty(
+        question,
+        companies[0] if companies else "",
+        subject_names,
+    )
+
+    residue = _event_request_residue(question, companies, subject_names, counterparty)
+
+    supported = ", ".join(sorted(field.value for field in SUPPORTED_CONTRACT_FIELDS))
+
+    if residue:
+        asked = ", ".join(f"'{token}'" for token in residue)
+
+        detail = (
+            f"공급계약 공시를 가리켰지만 질문이 요구한 항목({asked})을 이 구현이 읽지 "
+            f"못합니다. 답할 수 있는 조합: {supported}. 읽지 못한 항목을 빼고 나머지로 "
+            "답하지 않습니다."
+        )
+
+    else:
+        detail = (
+            "공급계약 공시를 가리켰지만 그 계약의 어떤 값을 묻는지 질문이 밝히지 "
+            f"않았습니다. 답할 수 있는 조합: {supported}. 계약금액과 계약기간을 함께 물어야 "
+            "합니다. 공시 내용을 대신해 정정 이력으로 답하지 않습니다."
+        )
+
+    raise UnsupportedQuestionError(
+        reason="unsupported_contract_fields",
+        detail=detail,
+    )
 
 
 def _looks_like_facility_investment_aggregate(question: str) -> bool:
@@ -4530,38 +4703,29 @@ def _build_query_plan(
     if _looks_like_contract_fact(question):
         return _build_contract_fact_plan(question, companies, years, subject_names)
 
-    # 유형만 밝힌 거래소공시 조회를 가른다.
+    # 공급계약 공시의 내용을 물었으나 답할 수 없는 질문을 거절한다.
     #
     # 위치가 규약이다. 두 경계 사이에 있어야 한다.
     #
     #   계약 단건 조회보다 뒤   "...계약금액이랑 계약기간 알려줘"는 Q02가 답하던 질문이다.
     #                          앞에 두면 요청 표기('알려')가 같아서 그 질문을 가로채고,
     #                          질문이 요구한 필드가 계획에서 사라진다. Q02 판정이 먼저
-    #                          가져가는 것이 맞고, 이 자리에는 필드를 묻지 않은 질문만 남는다.
+    #                          가져가는 것이 맞고, 이 자리에는 지원하는 필드 조합을 밝히지
+    #                          않은 질문만 남는다.
     #
     #   지표 판정보다 앞       바로 아래가 _require_years와 _extract_metric이다. 뒤에 두면
-    #                          "삼성전자 2024년 공급계약 알려줘"가 unsupported_metric으로
+    #                          "삼성전자 2025년 공급계약 알려줘"가 unsupported_metric으로
     #                          막히고, 막힌 이유가 실제로 일어난 일과 달라진다. 질문은 지표를
     #                          묻지 않았다.
     #
     # 이력 질문을 가로채지 않는다. _looks_like_event_history가 훨씬 앞에서 이미 판정했고,
-    # 이 자리에 오는 질문에는 이력 표현이 없다.
+    # 이 자리에 오는 질문에는 이력 표현이 없다. Q13·Q14는 그대로 Pattern E로 간다.
     #
-    # 계획은 _build_event_history_plan이 만든다. 새 intent를 만들지 않는 이유:
-    #     이 질문이 필요로 하는 것 — 기업과 유형으로 원공시 후보를 좁히고, 하나로 좁히지
-    #     못하면 고르지 않고 막는 것 — 을 Pattern E가 이미 그대로 하고 있다. 같은 일을 하는
-    #     handler를 하나 더 만들면 '후보를 고르지 않는다'는 규칙이 두 벌이 되고, 한쪽만
-    #     고쳐질 수 있다.
-    #
-    #     Q06(event_summary)으로 보내지 않는 것은 그쪽이 공급계약 유형을 입구에서 막고 있기
-    #     때문이다. 그 유형의 필수 요약 필드 집합이 정해지지 않았고
-    #     (handlers.event_summary의 REQUIRED_SUMMARY_FIELDS_BY_EVENT_TYPE), 정하지 않은
-    #     것을 여기서 정한 척할 수 없다.
-    #
-    #     계획이 담는 chain_policy는 full_chain이다. 정정이 있으면 그 이력까지 함께 확보하며,
-    #     질문이 묻지 않은 것을 더 확보할 뿐 답을 좁히지는 않는다.
-    if _looks_like_event_lookup(question):
-        return _build_event_history_plan(question, companies, subject_names)
+    # 계획을 만들지 않고 거절하는 이유는 _reject_unanswerable_supply_contract_request에
+    # 적어 두었다. 요약하면, 이 질문을 실행할 수 있는 carrier가 없다. Pattern E로 보내면
+    # 계약의 내용 대신 정정 이력이 ANSWERABLE로 돌아가고, 물어본 것에 답하지 못했다는 사실이
+    # 결과 어디에도 남지 않는다.
+    _reject_unanswerable_supply_contract_request(question, companies, subject_names)
 
     _require_years(years)
 

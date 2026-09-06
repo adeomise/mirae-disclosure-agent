@@ -264,13 +264,18 @@ def test_summary_without_a_section_scope_is_blocked() -> None:
 
 def test_quarterly_summary_is_rejected_before_intent_branching() -> None:
     """
-    분기·반기 표현은 의도 분기보다 앞에서 거절된다.
+    아직 지원하지 않는 기간 표현은 의도 분기보다 앞에서 거절된다.
 
     Pattern이 늘어도 같은 검사를 다시 붙이지 않아야 하므로 공통 경로에 둔 규칙이며,
     요약 경로가 그 규칙을 우회하지 않는지 본다.
+
+    예시가 "반기보고서"에서 "분기보고서"로 바뀐 이유:
+        반기보고서는 이제 질의 해석이 읽는다(query_analyzer.PERIODIC_REPORT_NAME_RULES).
+        읽히는 표기로는 이 순서를 확인할 수 없으므로, 아직 읽지 않는 표기로 바꿨다. 고정하는
+        성질은 그대로다 — 요약 경로가 공통 기간 규칙을 건너뛰지 않는다.
     """
     with pytest.raises(UnsupportedQuestionError) as error:
-        plan_for("테스트바이오 2025년 반기보고서 설비 투자 정리해줘")
+        plan_for("테스트바이오 2025년 분기보고서 설비 투자 정리해줘")
 
     assert error.value.reason == "unsupported_period"
 

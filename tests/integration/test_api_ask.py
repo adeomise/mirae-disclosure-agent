@@ -18,6 +18,8 @@ from disclosure_agent.api.service import (
     BLOCKED_PUBLIC_MESSAGE,
     FAILED_PUBLIC_MESSAGE,
     MISSING_YEAR_PUBLIC_MESSAGE,
+    UNKNOWN_COMPANY_PUBLIC_MESSAGE,
+    UNSUPPORTED_METRIC_PUBLIC_MESSAGE,
     AgentAskService,
     MissingExecutionIssueError,
     Verbalize,
@@ -850,8 +852,85 @@ def test_missing_year_blocked_result_returns_year_guidance_message() -> None:
     assert BLOCKED_PUBLIC_MESSAGE not in response.text
 
 
+def test_unknown_company_blocked_result_returns_company_guidance_message() -> None:
+    """
+    reason == "unknown_company"인 BLOCKED만 전용 기업 확인 안내문을 받는다.
+
+    Query Analyzer가 어떤 이름을 왜 못 풀었는지(계약 상대방 vs 공시 기업명)는 이 계층이
+    판단하지 않는다 — stage/reason/execution_status/HTTP status는 원형 그대로 두고
+    message 하나만 갈아 끼운다.
+    """
+    issue = ExecutionIssue(
+        stage="synthetic-company-resolution-stage",
+        reason="unknown_company",
+        detail="회사명을 dictionary에서 찾지 못했습니다: Ford",
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.BLOCKED,
+        execution_issue=issue,
+    )
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "Ford 계약 내용을 알려줘"})
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["execution_status"] == "BLOCKED"
+    assert payload["error"]["stage"] == "synthetic-company-resolution-stage"
+    assert payload["error"]["reason"] == "unknown_company"
+    assert payload["error"]["message"] == UNKNOWN_COMPANY_PUBLIC_MESSAGE
+    assert payload["error"]["message"] == (
+        "조회할 기업을 확인하지 못했습니다. 공시 기업명을 정확히 입력해 주세요."
+    )
+
+    # generic 문장과 내부 진단(회사명 dictionary lookup 실패 detail)이 새지 않는다.
+    assert BLOCKED_PUBLIC_MESSAGE not in response.text
+    assert issue.detail not in response.text
+    assert "Ford" not in response.text
+
+
+def test_unsupported_metric_blocked_result_returns_metric_guidance_message() -> None:
+    """
+    reason == "unsupported_metric"인 BLOCKED만 전용 지표 안내문을 받는다.
+
+    지원 지표 목록을 여기서 나열하지 않으며, 질문의 실제 의도(투자계획 등)를 재분류하지도
+    않는다 — message 하나만 갈아 끼운다.
+    """
+    issue = ExecutionIssue(
+        stage="synthetic-metric-resolution-stage",
+        reason="unsupported_metric",
+        detail="지원하지 않는 지표 키워드: 투자계획",
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.BLOCKED,
+        execution_issue=issue,
+    )
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "내년 투자계획 알려줘"})
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["execution_status"] == "BLOCKED"
+    assert payload["error"]["stage"] == "synthetic-metric-resolution-stage"
+    assert payload["error"]["reason"] == "unsupported_metric"
+    assert payload["error"]["message"] == UNSUPPORTED_METRIC_PUBLIC_MESSAGE
+    assert payload["error"]["message"] == (
+        "요청하신 항목을 현재 지원하는 공시 지표로 확인하지 못했습니다. "
+        "조회할 항목을 조금 더 구체적으로 입력해 주세요."
+    )
+
+    # generic 문장과 내부 진단(미지원 키워드 detail)이 새지 않는다.
+    assert BLOCKED_PUBLIC_MESSAGE not in response.text
+    assert issue.detail not in response.text
+    assert "투자계획" not in response.text
+
+
 def test_other_blocked_reasons_keep_the_generic_public_message() -> None:
-    """등록되지 않은 BLOCKED reason은 여전히 generic 문장을 받는다(연도 안내문이 새지 않는다)."""
+    """등록되지 않은 BLOCKED reason은 여전히 generic 문장을 받는다.
+
+    다른 reason 전용 안내문(연도/기업/지표)이 여기로 새지 않는다.
+    """
     issue = ExecutionIssue(
         stage="synthetic-stage",
         reason="synthetic-reason",
@@ -870,6 +949,8 @@ def test_other_blocked_reasons_keep_the_generic_public_message() -> None:
     assert payload["error"]["reason"] == "synthetic-reason"
     assert payload["error"]["message"] == BLOCKED_PUBLIC_MESSAGE
     assert MISSING_YEAR_PUBLIC_MESSAGE not in response.text
+    assert UNKNOWN_COMPANY_PUBLIC_MESSAGE not in response.text
+    assert UNSUPPORTED_METRIC_PUBLIC_MESSAGE not in response.text
 
 
 @pytest.mark.parametrize("execution_status", [ExecutionStatus.BLOCKED, ExecutionStatus.FAILED])

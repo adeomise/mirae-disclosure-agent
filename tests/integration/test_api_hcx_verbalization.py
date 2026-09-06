@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from disclosure_agent.agent.answer_builder import UnsupportedResultShapeError
 from disclosure_agent.agent.grounded_payload import GroundedPayload
 from disclosure_agent.api.service import AgentAskService, default_verbalize
 from disclosure_agent.common.config import HyperClovaSettings
@@ -269,6 +270,78 @@ def test_missing_verbalization_returns_the_deterministic_response(outcome: objec
     response = ask(result, RecordingVerbalize(outcome))  # type: ignore[arg-type]
 
     assert response == deterministic(result)
+
+
+# --------------------------------------------------------------------------
+# 누적 기간
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fiscal_period,period_label",
+    [
+        ("3M YTD", "1분기 누적"),
+        ("6M YTD", "반기 누적"),
+        ("9M YTD", "3분기 누적"),
+    ],
+)
+def test_a_cumulative_fact_reaches_the_model_with_its_span(
+    fiscal_period: str, period_label: str
+) -> None:
+    """분기·반기 값은 payload로 나가되 기간을 달고 나간다.
+
+    이전에는 아예 나가지 않았다(연간 외 기간은 넘기지 않음). 그 규칙이 막던 것은 '연도만 실린
+    분기 값'이고, 기간을 함께 실으면 같은 실패가 생기지 않는다.
+    """
+    result = answerable_result()
+    result.facts[0].fiscal_period = fiscal_period
+
+    verbalizer = RecordingVerbalize(None)
+
+    ask(result, verbalizer)
+
+    [payload] = verbalizer.payloads
+
+    assert payload.facts[0].fiscal_year == 2025
+    assert payload.facts[0].period_label == period_label
+    assert period_label in payload.to_json()
+
+
+def test_a_cumulative_result_falls_back_to_a_sentence_that_states_the_span() -> None:
+    """모델이 답하지 못해도 사용자가 받는 문장은 기간을 말한다."""
+    result = answerable_result()
+    result.facts[0].fiscal_period = "6M YTD"
+
+    response = ask(result, RecordingVerbalize(None))
+
+    assert response.status is AnswerabilityStatus.ANSWERABLE
+    assert "2025년 반기 누적" in response.answer
+
+
+def test_a_cumulative_fact_outside_the_single_lookup_shape_never_reaches_the_model() -> None:
+    """
+    누적 기간이 열린 것은 단일 Fact 조회뿐이고, 두 경로가 같은 자리에서 멈춘다.
+
+    한쪽만 열려 있으면 결정론 경로가 답하지 못하는 결과가 연동을 켰다는 이유만으로 답해진다.
+    payload 계층의 규칙이 그것을 금지한다(모듈 docstring).
+    """
+    result = answerable_result()
+
+    second = result.facts[0].model_copy(
+        update={"fact_id": "fact_revenue_rival", "company": "경쟁사"}
+    )
+
+    result.facts.append(second)
+
+    for fact in result.facts:
+        fact.fiscal_period = "6M YTD"
+
+    verbalizer = RecordingVerbalize(HCX_ANSWER)
+
+    with pytest.raises(UnsupportedResultShapeError, match="누적 기간"):
+        ask(result, verbalizer)
+
+    assert verbalizer.payloads == []
 
 
 # --------------------------------------------------------------------------

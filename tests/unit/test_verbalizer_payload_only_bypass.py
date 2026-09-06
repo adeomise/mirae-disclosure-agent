@@ -214,7 +214,9 @@ def test_bypass_evaluative_inference_is_rejected() -> None:
 def test_bypass_fabricated_causal_context_is_rejected() -> None:
     """지어낸 배경·인과 설명을 막아야 한다.
 
-    SYSTEM_PROMPT 9번이 이미 금지하고 있으나 검증 계층에는 대응하는 규칙이 없다.
+    SYSTEM_PROMPT의 "배경 설명, 해석, 추측, 시장 상황, 인과 설명" 금지가 이미 막고 있으나
+    검증 계층에는 대응하는 규칙이 없다. 번호로 가리키지 않는 것은 규칙이 하나 늘면 번호가
+    밀려 이 주석이 다른 규칙을 가리키게 되기 때문이다.
     """
     answer = f"{GROUNDED} 이 수치는 반도체 업황 회복에 따른 결과입니다."
 

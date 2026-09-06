@@ -10,6 +10,10 @@
 
     근거 건수는 못박지 않는다. 그 값은 코퍼스의 해당 문서 구조에 종속되며, 여기서 고정하는
     것은 "두 범위 모두 근거를 갖고, 근거 없이 답하지 않는다"이다.
+
+    source_documents도 같은 방식으로 본다. 값은 manifest 레코드에서 읽어 견주고, 건수는
+    "근거가 가리키는 문서 집합과 정확히 같다"로 고정한다 — 근거가 몇 건이든 문서는 그 집합
+    크기만큼이어야 하며, 화면이 Evidence.doc_id로 join하는 상대가 곧 이 목록이다.
 """
 
 import json
@@ -64,13 +68,18 @@ def _require_actual_corpus() -> Path:
     return manifest_path
 
 
-def _expected_q05_doc_id(manifest_path: Path) -> str:
+def _expected_q05_record(manifest_path: Path) -> dict:
     """
-    Q05가 골라야 하는 문서의 공개 식별자를 manifest에서 읽는다.
+    Q05가 골라야 하는 문서의 manifest 레코드를 읽는다.
 
     기준 연도는 그 기업의 사업보고서가 있는 가장 최신 회계연도이고(정정본 포함), 그 해의
     후보는 정정본을 포함해 정확히 1건이어야 한다. 둘 이상이면 runtime이 ambiguous_filing으로
     멈추므로 이 테스트의 전제가 성립하지 않는다.
+
+    레코드를 통째로 돌려주는 이유:
+        doc_id뿐 아니라 source_documents가 실어야 할 값(보고서 정식 명칭, 회계기간, 접수번호,
+        공시일)도 같은 레코드에서 나온다. 그 값들을 여기 적으면 실제 공시 값을 코드에 남기게
+        되므로(AGENTS.md), manifest에서 읽어 견준다.
     """
     annual_records = []
 
@@ -98,6 +107,10 @@ def _expected_q05_doc_id(manifest_path: Path) -> str:
 
     assert "사업보고서" in str(record.get("report_nm", ""))
 
+    return record
+
+
+def _expected_q05_doc_id(record: dict) -> str:
     return str(record.get("doc_id") or f"periodic_{record['rcept_no']}")
 
 
@@ -134,8 +147,29 @@ def test_q05_runs_through_actual_corpus_http_api() -> None:
     assert all(evidence_ids)
     assert len(evidence_ids) == len(set(evidence_ids))
 
-    expected_doc_id = _expected_q05_doc_id(manifest_path)
+    expected_record = _expected_q05_record(manifest_path)
+    expected_doc_id = _expected_q05_doc_id(expected_record)
     assert {evidence.doc_id for evidence in actual.evidence} == {expected_doc_id}
+
+    # 근거가 가리키는 문서 집합과 source_documents의 문서 집합이 정확히 같다. 두 범위의
+    # 근거가 모두 같은 문서에서 나오므로 문서는 근거 건수와 무관하게 1건으로 접힌다.
+    assert {document.doc_id for document in actual.source_documents} == {
+        evidence.doc_id for evidence in actual.evidence
+    }
+    assert len(actual.source_documents) == 1
+
+    # 값은 manifest 레코드에서 그대로 옮겨 온 것이어야 한다. 질문 문자열이나 Evidence.doc_id
+    # 에서 지어낸 값이면 여기서 어긋난다.
+    source_document = actual.source_documents[0]
+
+    assert source_document.company == EXPECTED_COMPANY
+    assert source_document.report_name == expected_record["report_nm"]
+    assert source_document.fiscal_year == expected_record["base_year"]
+    assert source_document.document_subtype == DOC_SUBTYPE_ANNUAL
+    assert source_document.base_month == expected_record["base_month"]
+    assert source_document.receipt_no == expected_record["rcept_no"]
+    assert source_document.filing_date is not None
+    assert source_document.filing_date.strftime("%Y%m%d") == expected_record["rcept_dt"]
 
     # 두 범위가 서로 다른 Section 경로 하나씩으로 확정되고, 두 경로 모두 근거를 갖는다.
     section_paths = {tuple(evidence.section_path) for evidence in actual.evidence}

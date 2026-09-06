@@ -177,4 +177,6 @@ def test_q06_does_not_disturb_the_yearless_periodic_summary_policy() -> None:
     )
 
     assert response.status_code == 422
-    assert response.json()["error"]["reason"] == "missing_year"
+    payload = response.json()
+    assert payload["error"]["reason"] == "missing_year"
+    assert "연도" in payload["error"]["message"]

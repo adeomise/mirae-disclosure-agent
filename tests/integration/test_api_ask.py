@@ -17,6 +17,7 @@ from disclosure_agent.api.main import app
 from disclosure_agent.api.service import (
     BLOCKED_PUBLIC_MESSAGE,
     FAILED_PUBLIC_MESSAGE,
+    MISSING_YEAR_PUBLIC_MESSAGE,
     AgentAskService,
     MissingExecutionIssueError,
     Verbalize,
@@ -814,6 +815,61 @@ def test_non_completed_agent_result_returns_error_envelope(
         },
     }
     assert issue.detail not in response.text
+
+
+def test_missing_year_blocked_result_returns_year_guidance_message() -> None:
+    """
+    reason == "missing_year"인 BLOCKED만 전용 안내문을 받는다.
+
+    Query Analyzer의 판정(stage="query_plan", reason="missing_year")과 execution_status,
+    HTTP 422는 이전과 같다. 바뀌는 것은 error.message 하나뿐이다.
+    """
+    issue = ExecutionIssue(
+        stage="query_plan",
+        reason="missing_year",
+        detail="질문에서 대상 연도를 찾을 수 없습니다.",
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.BLOCKED,
+        execution_issue=issue,
+    )
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "공급계약 내용을 알려줘"})
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["execution_status"] == "BLOCKED"
+    assert payload["error"]["stage"] == "query_plan"
+    assert payload["error"]["reason"] == "missing_year"
+    assert payload["error"]["message"] == MISSING_YEAR_PUBLIC_MESSAGE
+    assert "연도" in payload["error"]["message"]
+
+    # 내부 진단(detail)이나 다른 사유의 generic 문장이 새지 않는다.
+    assert issue.detail not in response.text
+    assert BLOCKED_PUBLIC_MESSAGE not in response.text
+
+
+def test_other_blocked_reasons_keep_the_generic_public_message() -> None:
+    """등록되지 않은 BLOCKED reason은 여전히 generic 문장을 받는다(연도 안내문이 새지 않는다)."""
+    issue = ExecutionIssue(
+        stage="synthetic-stage",
+        reason="synthetic-reason",
+        detail="synthetic-detail",
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.BLOCKED,
+        execution_issue=issue,
+    )
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "synthetic other blocked reason"})
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["error"]["reason"] == "synthetic-reason"
+    assert payload["error"]["message"] == BLOCKED_PUBLIC_MESSAGE
+    assert MISSING_YEAR_PUBLIC_MESSAGE not in response.text
 
 
 @pytest.mark.parametrize("execution_status", [ExecutionStatus.BLOCKED, ExecutionStatus.FAILED])

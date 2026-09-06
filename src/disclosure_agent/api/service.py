@@ -54,6 +54,23 @@ logger = logging.getLogger(__name__)
 BLOCKED_PUBLIC_MESSAGE = "요청을 처리하는 데 필요한 조건을 충족하지 못했습니다."
 FAILED_PUBLIC_MESSAGE = "요청 처리 중 오류가 발생했습니다."
 
+# reason == "missing_year"(query_analyzer._require_years -> router가 옮기는 query_plan
+# 단계 진단) 전용 안내문. 다음 행동(연도를 채워 다시 물어봄)을 구체적으로 알려준다.
+#
+# BLOCKED_PUBLIC_MESSAGE 자체를 이 문장으로 바꾸지 않는다. 등록되지 않은 다른 BLOCKED
+# reason(예: ambiguous_period)은 여전히 generic 문장을 받아야 하고, 그 사유들의 안내문은
+# 이후 단계(다른 팀 작업)에서 각자 정해진다.
+MISSING_YEAR_PUBLIC_MESSAGE = (
+    "조회 연도를 입력해 주세요. 예: 2025년 한화오션 공급계약 내용을 알려줘."
+)
+
+REASON_MISSING_YEAR = "missing_year"
+
+# BLOCKED reason별 전용 public message. 여기 없는 reason은 BLOCKED_PUBLIC_MESSAGE를 쓴다.
+_BLOCKED_PUBLIC_MESSAGE_BY_REASON: dict[str, str] = {
+    REASON_MISSING_YEAR: MISSING_YEAR_PUBLIC_MESSAGE,
+}
+
 
 class PublicExecutionError(BaseModel):
     """Public-safe projection of an internal execution diagnostic."""
@@ -143,11 +160,10 @@ def agent_execution_error_response(
     reason: str,
 ) -> AgentExecutionErrorResponse:
     """Build a public error without copying the internal diagnostic detail."""
-    message = (
-        BLOCKED_PUBLIC_MESSAGE
-        if execution_status is ExecutionStatus.BLOCKED
-        else FAILED_PUBLIC_MESSAGE
-    )
+    if execution_status is ExecutionStatus.BLOCKED:
+        message = _BLOCKED_PUBLIC_MESSAGE_BY_REASON.get(reason, BLOCKED_PUBLIC_MESSAGE)
+    else:
+        message = FAILED_PUBLIC_MESSAGE
     return AgentExecutionErrorResponse(
         execution_status=execution_status,
         error=PublicExecutionError(stage=stage, reason=reason, message=message),

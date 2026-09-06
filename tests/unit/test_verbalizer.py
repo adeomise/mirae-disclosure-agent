@@ -1977,6 +1977,253 @@ def test_blank_change_value_does_not_become_a_binding_token() -> None:
     assert verdict(payload, answer) is None
 
 
+# --------------------------------------------------------------------------
+# 변경 항목과 값의 짝
+#
+# 자리 검사(변경 전/변경 후)는 값이 설 수 있는 자리를 이력 전체에서 모아 본다. 항목이
+# 하나뿐인 이력에서는 그것으로 충분하지만, 둘 이상이면 한 항목의 값을 다른 항목의 자리에
+# 옮겨 적어도 통과한다. 네 값이 모두 근거 안에 있고 각자 원래 서 있던 자리에 그대로 적혀
+# 있으므로, 값만 모아 보는 검사에는 어긋난 데가 없다.
+#
+# 어긋난 것은 값과 항목의 짝이다. 그 문장은 계약 금액이 날짜라고 말한다.
+# --------------------------------------------------------------------------
+
+
+BOUND_HEAD = (
+    "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 2건입니다. "
+)
+
+
+def two_field_history_result(*changes: FieldChange) -> AgentExecutionResult:
+    """항목 2건이 바뀐 이력 하나."""
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        event_histories=[
+            EventHistory(
+                event_id="evt_contract",
+                document_ids=["doc_a", "doc_b"],
+                changes=list(changes),
+                chain_complete=True,
+            )
+        ],
+        evidence=[evidence()],
+    )
+
+
+def amount_and_date_payload() -> GroundedPayload:
+    """금액과 날짜가 각각 한 번씩 바뀐 이력. 두 항목의 값은 서로 종류가 다르다."""
+    return build_grounded_payload(
+        two_field_history_result(
+            FieldChange(field_name="contract_amount", before="100", after="120"),
+            FieldChange(
+                field_name="contract_end_date",
+                before="2029-02-28",
+                after="2029-09-30",
+            ),
+        ),
+        question=HISTORY_QUESTION,
+    )
+
+
+def test_multi_field_changes_under_their_own_names_pass() -> None:
+    """항목마다 자기 값을 적은 문장은 통과한다."""
+    answer = (
+        BOUND_HEAD
+        + "계약금액 변경 전 100, 변경 후 120. "
+        + "계약기간 종료일 변경 전 2029-02-28, 변경 후 2029-09-30."
+    )
+
+    assert verdict(amount_and_date_payload(), answer) is None
+
+
+def test_deterministic_multi_field_sentence_passes() -> None:
+    """결정론 문장은 항목을 슬래시로 이어 한 문장에 적는다. 그 모양이 걸리면 안 된다."""
+    result = two_field_history_result(
+        FieldChange(field_name="contract_amount", before="100", after="120"),
+        FieldChange(
+            field_name="contract_end_date", before="2029-02-28", after="2029-09-30"
+        ),
+    )
+
+    payload = build_grounded_payload(result, question=HISTORY_QUESTION)
+
+    sentence = build_answer_response(result).answer
+
+    # 항목 사이가 마침표가 아니라는 것을 대조로 고정한다. 구절에서 끊어 이름을 찾으면 뒤쪽
+    # 자리가 이름을 잃는다.
+    assert " / " in sentence
+
+    assert verdict(payload, sentence) is None
+
+
+def test_two_fields_exchanging_their_values_are_rejected() -> None:
+    """두 항목이 값을 통째로 맞바꾼 문장.
+
+    쓰인 값은 넷 다 근거 안에 있고, 각자 원래 서 있던 자리에 적혀 있으며, 빠진 값도 없다.
+    자리만 모아 보는 검사는 이것을 통과시킨다.
+    """
+    answer = (
+        BOUND_HEAD
+        + "계약금액 변경 전 2029-02-28, 변경 후 2029-09-30. "
+        + "계약기간 종료일 변경 전 100, 변경 후 120."
+    )
+
+    assert verdict(amount_and_date_payload(), answer) == "change_field_contradiction"
+
+
+def test_grounded_date_written_under_the_wrong_field_is_rejected() -> None:
+    """한 자리만 다른 항목의 값으로 바꿔 적어도 걸린다. 값 자체는 근거 안에 있다."""
+    answer = (
+        BOUND_HEAD
+        + "계약금액 변경 전 2029-02-28, 변경 후 120. "
+        + "계약기간 종료일 변경 전 100, 변경 후 2029-09-30."
+    )
+
+    assert verdict(amount_and_date_payload(), answer) == "change_field_contradiction"
+
+
+def test_wrong_field_binding_on_the_after_side_alone_is_rejected() -> None:
+    """'변경 후'는 결정론 문장에서 쉼표 뒤에 온다. 그 자리도 이름에 걸려 있어야 한다."""
+    answer = (
+        BOUND_HEAD
+        + "계약금액 변경 전 100, 변경 후 2029-09-30. "
+        + "계약기간 종료일 변경 전 2029-02-28, 변경 후 120."
+    )
+
+    assert verdict(amount_and_date_payload(), answer) == "change_field_contradiction"
+
+
+def test_swapped_sides_across_two_fields_are_rejected() -> None:
+    """항목은 맞고 자리만 뒤집은 문장.
+
+    거절 이유는 항목이 아니라 자리다. 어느 항목에서도 '변경 후'였던 적이 없는 값이 그 자리에
+    있으므로, 항목을 따지기 전에 이미 틀렸다.
+    """
+    answer = (
+        BOUND_HEAD
+        + "계약금액 변경 전 120, 변경 후 100. "
+        + "계약기간 종료일 변경 전 2029-09-30, 변경 후 2029-02-28."
+    )
+
+    assert verdict(amount_and_date_payload(), answer) == "change_side_contradiction"
+
+
+def chained_date_payload() -> GroundedPayload:
+    """한 항목의 '변경 후'가 다른 항목의 '변경 전'인 이력.
+
+    2024-06-30은 시작일의 변경 후이자 종료일의 변경 전이다. 그래서 자리만 모아 보면 이 값은
+    두 자리 모두에 설 수 있고, 두 항목이 값을 맞바꾼 문장이 그 검사를 그대로 지나간다.
+    """
+    return build_grounded_payload(
+        two_field_history_result(
+            FieldChange(
+                field_name="contract_start_date",
+                before="2024-01-01",
+                after="2024-06-30",
+            ),
+            FieldChange(
+                field_name="contract_end_date",
+                before="2024-06-30",
+                after="2029-09-30",
+            ),
+        ),
+        question=HISTORY_QUESTION,
+    )
+
+
+def test_chained_dates_under_their_own_fields_pass() -> None:
+    """가운데 값이 두 항목에 걸쳐 두 자리 모두인 이력도 맞게 적으면 통과한다."""
+    answer = (
+        BOUND_HEAD
+        + "계약기간 시작일 변경 전 2024-01-01, 변경 후 2024-06-30. "
+        + "계약기간 종료일 변경 전 2024-06-30, 변경 후 2029-09-30."
+    )
+
+    assert verdict(chained_date_payload(), answer) is None
+
+
+def test_chained_dates_exchanged_between_fields_are_rejected() -> None:
+    """자리 검사만으로는 잡을 수 없는 문장. 네 자리가 모두 모아 본 집합 안에 있다."""
+    answer = (
+        BOUND_HEAD
+        + "계약기간 시작일 변경 전 2024-06-30, 변경 후 2029-09-30. "
+        + "계약기간 종료일 변경 전 2024-01-01, 변경 후 2024-06-30."
+    )
+
+    assert verdict(chained_date_payload(), answer) == "change_field_contradiction"
+
+
+def test_repeated_value_across_corrections_for_one_field_passes() -> None:
+    """같은 항목이 두 번 바뀐 이력. 항목 안에서는 가운데 값이 두 자리 모두다."""
+    assert verdict(change_payload(), CHAINED_CHANGE_ANSWER) is None
+
+
+def shadowed_label_payload() -> GroundedPayload:
+    """이름이 다른 이름의 앞머리인 이력. '계약기간'은 '계약기간 종료일' 안에 있다."""
+    return build_grounded_payload(
+        two_field_history_result(
+            FieldChange(field_name="contract_period", before="36개월", after="48개월"),
+            FieldChange(
+                field_name="contract_end_date",
+                before="2029-02-28",
+                after="2029-09-30",
+            ),
+        ),
+        question=HISTORY_QUESTION,
+    )
+
+
+def test_shorter_field_name_inside_a_longer_one_does_not_capture_the_slot() -> None:
+    """긴 이름을 적은 자리를 짧은 이름이 불린 자리로 세면 맞게 적은 문장이 걸린다."""
+    answer = (
+        BOUND_HEAD
+        + "계약기간 변경 전 36개월, 변경 후 48개월. "
+        + "계약기간 종료일 변경 전 2029-02-28, 변경 후 2029-09-30."
+    )
+
+    assert verdict(shadowed_label_payload(), answer) is None
+
+
+def test_shadowed_field_names_still_reject_an_exchanged_value() -> None:
+    """이름이 겹쳐도 짝은 그대로 본다."""
+    answer = (
+        BOUND_HEAD
+        + "계약기간 변경 전 2029-02-28, 변경 후 2029-09-30. "
+        + "계약기간 종료일 변경 전 36개월, 변경 후 48개월."
+    )
+
+    assert verdict(shadowed_label_payload(), answer) == "change_field_contradiction"
+
+
+def test_change_side_without_a_field_name_is_not_bound() -> None:
+    """이름을 대지 않은 자리는 어느 항목의 자리인지 문장이 말하지 않은 것이다.
+
+    말하지 않은 것을 틀렸다고 하지 않는다. 그 자리도 값-자리 검사는 계속 본다.
+    """
+    answer = (
+        BOUND_HEAD
+        + "변경 전 100, 변경 후 120. "
+        + "계약기간 종료일 변경 전 2029-02-28, 변경 후 2029-09-30."
+    )
+
+    assert verdict(amount_and_date_payload(), answer) is None
+
+
+def test_prefix_change_values_stay_bound_to_their_field() -> None:
+    """실측 Q13의 모양. 짧은 값이 긴 값의 앞머리다('상품공급'과 '상품공급 415')."""
+    result = two_field_history_result(
+        FieldChange(
+            field_name="contract_detail", before="상품공급", after="상품공급 415"
+        ),
+        FieldChange(field_name="contract_amount", before="100", after="120"),
+    )
+
+    payload = build_grounded_payload(result, question=HISTORY_QUESTION)
+
+    assert verdict(payload, build_answer_response(result).answer) is None
+
+
 def test_unknown_change_field_is_not_grounded() -> None:
     """표기가 정해지지 않은 변경 항목은 지어내지 않고 결정론 경로에 맡긴다."""
     result = q15_change_result()

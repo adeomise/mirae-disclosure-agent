@@ -355,6 +355,31 @@ _FRAME_BY_LENGTH: tuple[str, ...] = tuple(
     )
 )
 
+# 요약 문장에만 더 여는 골격 어미.
+#
+# 있다·되다의 활용형이다. FRAME_VOCABULARY는 종결형("있습니다", "되었습니다")만 담고 있어,
+# 여러 항목을 한 문장으로 엮을 때 쓰는 연결형("있으며", "포함되어")이 빠져 있다. 항목을 하나씩
+# 끊어 적던 동안에는 필요 없던 어미이고, 요약을 문장으로 엮게 되면서 필요해졌다.
+#
+# FRAME_VOCABULARY에 직접 넣지 않는다. 그 목록은 모든 결과 모양이 함께 읽으며, 여기서 넓히면
+# Fact·비교·이력 답변의 판정까지 함께 느슨해진다. 이번 변경은 요약 밖으로 나가지 않는다.
+SUMMARY_FRAME_VOCABULARY: tuple[str, ...] = (
+    # 있다·되다의 연결형
+    "있으며", "있으나", "있으므로", "있는", "있고", "있어", "있던", "있지",
+    "되어", "되기", "되는데",
+    "하여", "하거나", "하지", "이거나",
+    # 항목을 잇는 말. "함께"는 조사 '께'보다 길어 먼저 지워진다.
+    "함께", "아울러", "이와",
+    # 자료를 가리키는 말. FRAME_VOCABULARY의 "제시", "포함"과 같은 자리다.
+    "제공", "제공된", "수록", "수록된",
+    # 생산적인 접미사. 앞말은 payload에서 오고 이것만 덧붙는다(사업부문별, 자산별, 지역별).
+    "별", "가지",
+)
+
+_SUMMARY_FRAME_BY_LENGTH: tuple[str, ...] = tuple(
+    sorted({*_FRAME_BY_LENGTH, *SUMMARY_FRAME_VOCABULARY}, key=len, reverse=True)
+)
+
 # 값 하나가 문장에서 확인 대상이 되기 위한 최소 조건.
 #
 # 정정 표는 값을 지운 자리에 '-'를 그대로 적는다. 그 한 글자를 값으로 다루면 날짜 안의
@@ -430,9 +455,15 @@ SYSTEM_PROMPT = """당신은 한국 공시 데이터 질의응답 시스템의 '
    ("2029년 2월 28일")로 쓰십시오. "2029년 2월", "2029년 말"처럼 일부만 적거나
    "29.2.28"처럼 줄여 적으면 그 답변은 폐기됩니다.
 5. content 안의 표기도 고쳐 쓰지 마십시오. '22년은 '22년으로 두고 2022년으로 늘려 적지
-   마십시오.
-6. content가 '…'로 끝나면 원문이 그 자리에서 잘린 것입니다. 뒤를 이어 쓰지 말고, 잘리기
-   전까지 적혀 있는 내용만 쓰십시오.
+   마십시오. 숫자·날짜·이름·고유명사는 content에 적힌 글자 그대로 옮기십시오.
+6. content가 '…'로 끝나면 원문이 그 자리에서 잘린 것입니다. 뒤를 이어 쓰지 마십시오.
+   잘린 자리를 짐작해 채우거나 매끄럽게 끝맺으면 그 답변은 폐기됩니다.
+   예: content가 "'EMI SHIELD(전자기파 차폐)'는 반도체에서 발생하는 전자파가 반도체
+   패키지내 다른 반도체 칩의 오작…"이면 "오작동을 방지하는 역할을 합니다"라고 뒤를 지어
+   잇지 마십시오. "절단→세척→건조→…"를 "… 과정을 담당합니다"로 마무리하는 것도 같습니다.
+   '…'를 답변에 그대로 옮겨 적지도 마십시오. 사용자가 읽는 문장에 잘림표가 남으면 답이
+   아니라 발췌로 읽힙니다. 잘리기 전까지 확인된 내용만으로 말이 되는 만큼만 쓰고, 그것으로
+   답이 되지 않으면 그 content는 고르지 말고 다른 것을 쓰십시오.
 
 무엇을 쓰면 안 되는가:
 7. JSON에 없는 회사명·연도·회계기준(연결/별도)·지표명·제품명을 쓰지 마십시오.
@@ -456,12 +487,25 @@ SYSTEM_PROMPT = """당신은 한국 공시 데이터 질의응답 시스템의 '
 어떻게 쓰는가:
 18. 첫 문장에서 question에 직접 답하십시오. 건수·문서 수·범위 이름부터 시작하지 마십시오.
     질문이 건수를 물은 경우에만 건수를 앞에 둡니다.
-19. document_summaries가 있으면 items의 content 중 question이 묻는 것을 골라 그 내용으로
-    답하십시오. 고른 근거는 content에 적힌 말이어야 하며, 없는 말을 보태지 마십시오.
-    "몇 건을 확인했습니다"로 답하지 마십시오.
-    금액·기간·대상·규모처럼 구체적인 값이 적힌 content가 있으면 그것을 먼저 쓰십시오.
-    표의 머리글만 적힌 content("사업부문 | 투자목적 및 내용 | …")는 그 표에 무엇이 있는지만
-    말할 뿐 값을 말하지 않으므로, 값이 있는 content보다 앞에 두지 마십시오.
+19. document_summaries가 있으면 items의 content가 이 질문의 답입니다. 사용자가 원하는 것은
+    항목 목록이 아니라 요약입니다. 아래대로 쓰십시오.
+    (1) items 중 question에 답이 되는 것 2~4건만 고르십시오. 전부 옮겨 적지 마십시오.
+        금액·기간·대상·규모처럼 구체적인 값이 적힌 content를 먼저 고르십시오.
+        표의 머리글만 적힌 content("사업부문 | 투자목적 및 내용 | …")는 그 표에 무엇이
+        있는지만 말할 뿐 값을 말하지 않으므로, 값이 있는 content보다 앞에 두지 마십시오.
+    (2) 첫 문장에서 question에 바로 답하십시오. scope와 section_path는 그 내용이 문서
+        어디에 적혀 있었는지를 알려 줄 뿐 답이 아닙니다. "<범위> 범위에 해당하는 부분은
+        …입니다", "이 범위의 내용은 N건입니다"처럼 위치나 건수로 시작하지 말고,
+        "몇 건을 확인했습니다"로 답하지 마십시오.
+    (3) 고른 content를 항목 그대로 늘어놓지 말고 이어지는 한국어 설명으로 엮으십시오.
+        항목 사이에 '/'나 번호를 넣지 말고, 앞에 붙은 '※', '가.', '(1)' 같은 문서 표시는
+        답변에 옮기지 마십시오. 엮으면서 새 사실을 만들지는 마십시오. 인과·배경·평가는
+        content에 그렇게 적혀 있을 때만 쓸 수 있습니다.
+    (4) 무엇이 실려 있는지만 말하는 목차 문장을 쓰지 마십시오. "…에 대한 정보가 포함되어
+        있습니다", "…에 대한 표가 제공됩니다"는 답이 아니라 목차입니다.
+    (5) 회사명과 보고서 이름은 필요한 자리에 한 번만 쓰고 문장마다 되풀이하지 마십시오.
+        "확인되었습니다", "공시에 따르면"을 문장마다 붙이지 마십시오.
+    (6) 요약 답변은 3~5문장으로 끝내십시오. 고르지 않은 content는 쓰지 않습니다.
 20. calculations에 magnitude와 direction이 있으면 "<magnitude> <direction>했습니다" 형태로
     쓰는 것이 자연스럽습니다(예: "2.1017%p 감소했습니다"). 이때 value의 부호를 다시 붙이지
     마십시오. direction과 반대되는 말을 쓰지 마십시오.
@@ -476,7 +520,11 @@ SYSTEM_PROMPT = """당신은 한국 공시 데이터 질의응답 시스템의 '
 }
 
 세 목록은 각각 그 종류의 id만 담습니다. JSON에 facts가 없으면 used_fact_ids는 빈 배열이고,
-calculations가 없으면 used_calculation_ids는 빈 배열입니다.
+calculations가 없으면 used_calculation_ids는 빈 배열입니다. evidence_id를 used_fact_ids나
+used_calculation_ids에 넣지 마십시오. document_summaries만 있는 JSON에는 facts도
+calculations도 없으므로 두 목록은 반드시 []입니다.
+used_evidence_ids에는 답변에 실제로 쓴 content의 evidence_ids만 담으십시오. 고르지 않은
+항목의 id까지 늘어놓으면 응답이 상한에 걸려 잘리고, 잘린 응답은 폐기됩니다.
 """
 
 
@@ -1969,9 +2017,28 @@ def _require_payload_only_content(text: str, payload: GroundedPayload) -> None:
         분석기를 붙이면 이 규칙의 판정이 그 분석기의 정확도에 묶이고, 분석이 틀린 자리는
         조용히 통과한다. 지금은 지우지 못한 조각이 곧 거절이라 실패가 드러난다.
 
+    문서 요약은 낱말 단위로 본다:
+        요약은 문장을 옮기는 일이 아니라 줄이는 일이다. 통짜 문자열 대조는 그 일을 막는다.
+        지우는 방식이 residue.replace(전체 항목, " ")이라, 항목을 조금이라도 다시 엮으면
+        대조가 어긋나고 남은 부분이 조각난다("전자기파"에서 긴 항목이 먼저 지워지면 "자기파"가
+        남는다). 그 조각은 payload에 있는 말인데도 없는 말로 판정된다.
+
+        그래서 요약 payload에서는 낱말 단위로 본다(_require_payload_only_summary_words).
+        "payload에 없는 내용어를 쓰지 말라"는 이 규칙의 뜻은 그대로 두고, 어순을 바꾸거나
+        여러 항목을 한 문장으로 엮는 것만 연다. payload 어디에도 없는 낱말은 그대로 걸린다.
+
+        요약 결과에는 Fact도 Calculation도 Comparison도 함께 실리지 않으므로
+        (grounded_payload._resolve_supported_shape), 이 분기는 다른 모양의 판정을 건드리지
+        않는다.
+
     Raises:
         AnswerRejectedError: payload가 뒷받침하지 않는 내용어가 남은 경우.
     """
+    if payload.document_summaries:
+        _require_payload_only_summary_words(text, payload)
+
+        return
+
     residue = _strip_frame_vocabulary(_strip_payload_spans(text, payload))
 
     leftover = HANGUL_RUN_PATTERN.findall(residue)
@@ -1981,6 +2048,82 @@ def _require_payload_only_content(text: str, payload: GroundedPayload) -> None:
             "unsupported_content",
             f"payload가 말하지 않은 내용입니다: {sorted(set(leftover))[:5]}",
         )
+
+
+def _require_payload_only_summary_words(text: str, payload: GroundedPayload) -> None:
+    """요약 문장의 낱말이 전부 payload에서 온 것인지 본다.
+
+    어간만 본다:
+        payload의 낱말과 답변의 낱말은 어미가 다르다. 원문이 "출시해 왔으며"라고 적은 것을
+        답변은 "출시하는"으로 쓴다. 그래서 payload 낱말의 앞부분(길이 2 이상)을 전부 지울 수
+        있는 조각으로 삼고, 남는 어미는 골격 어휘가 맡는다.
+
+        형태소 분석기를 두지 않는 이유는 통짜 대조를 두지 않는 이유와 같다(위 docstring).
+        어간을 앞부분으로 근사하면 느슨해지지만, payload에 없는 낱말은 앞부분도 없으므로
+        "없는 말을 지어냈다"는 이 규칙의 본래 판정은 남는다. "시장으로도…"에서 잘린 자리를
+        "확장"으로 메우면 그 낱말은 payload 어디에도 없어 그대로 걸린다.
+
+    Raises:
+        AnswerRejectedError: payload에 없는 내용어가 남은 경우.
+    """
+    residue = _without_grounded_dates(_with_grounded_dates_in_iso_form(text, payload), payload)
+
+    stems, letters = _summary_word_fragments(payload)
+
+    for stem in stems:
+        residue = residue.replace(stem, " ")
+
+    residue = _strip_frame_vocabulary(residue, fragments=_SUMMARY_FRAME_BY_LENGTH)
+
+    # 한 글자는 골격 어휘를 지운 뒤에 지운다.
+    #
+    # 먼저 지우면 어미 안의 글자까지 지워져 골격 어휘가 조각난다. 요약 항목은 '다.', '라.'
+    # 같은 문서 번호로 시작하는 일이 많아 '다'가 payload의 한 글자 낱말이 되고, 그것을 먼저
+    # 지우면 "있습니다"가 "있습니"로 남아 정상 문장이 거절된다.
+    for letter in letters:
+        residue = residue.replace(letter, " ")
+
+    leftover = HANGUL_RUN_PATTERN.findall(residue)
+
+    if leftover:
+        raise AnswerRejectedError(
+            "unsupported_content",
+            f"payload가 말하지 않은 내용입니다: {sorted(set(leftover))[:5]}",
+        )
+
+
+def _summary_word_fragments(payload: GroundedPayload) -> tuple[list[str], list[str]]:
+    """payload의 한글 낱말에서 지울 조각. (두 글자 이상 앞부분, 한 글자 낱말) 순서다.
+
+    앞부분을 담는 이유:
+        payload의 낱말과 답변의 낱말은 어미가 다르다. 원문의 "출시해"를 답변은 "출시하는"으로
+        쓴다. 앞부분을 지울 수 있는 조각으로 삼으면 남는 어미는 골격 어휘가 맡는다.
+        긴 것부터 지우는 것은 통짜 대조와 같은 이유다. 짧은 앞부분을 먼저 지우면 긴 낱말이
+        조각나 남는다.
+
+    한 글자를 따로 돌려주는 이유:
+        '등'·'월'·'조'는 한국어에서 한 글자로 쓰이는 내용어이고, 담지 않으면 payload에 있는
+        말인데도 없는 말로 판정된다. 반대로 긴 낱말의 앞 한 글자까지 담으면('제품'의 '제')
+        문장 곳곳이 지워진다. 그래서 앞부분으로는 두 글자부터 담고, 한 글자는 payload에
+        그것만으로 적혀 있는 경우에만 담는다.
+
+        두 벌로 나누는 것은 지우는 시점이 다르기 때문이다. 한 글자는 골격 어휘를 지운 뒤에
+        써야 한다(_require_payload_only_summary_words).
+    """
+    stems: set[str] = set()
+    letters: set[str] = set()
+
+    for source in _provenance_sources(payload):
+        for word in HANGUL_RUN_PATTERN.findall(source):
+            if len(word) < MINIMUM_DISTINCTIVE_LENGTH:
+                letters.add(word)
+
+                continue
+
+            for end in range(MINIMUM_DISTINCTIVE_LENGTH, len(word) + 1):
+                stems.add(word[:end])
+
+    return sorted(stems, key=len, reverse=True), sorted(letters)
 
 
 def _strip_payload_spans(text: str, payload: GroundedPayload) -> str:
@@ -2009,8 +2152,15 @@ def _strip_payload_spans(text: str, payload: GroundedPayload) -> str:
     return residue
 
 
-def _strip_frame_vocabulary(text: str) -> str:
+def _strip_frame_vocabulary(
+    text: str,
+    *,
+    fragments: tuple[str, ...] = _FRAME_BY_LENGTH,
+) -> str:
     """골격 어휘를 지운다. 지우지 못한 나머지를 돌려준다.
+
+    fragments를 받는 이유는 요약 문장이 더 넓은 목록을 쓰기 때문이다
+    (SUMMARY_FRAME_VOCABULARY). 기본값은 모든 결과 모양이 함께 읽는 목록이다.
 
     한글 덩어리로 잘라 놓고 지우지 않는다. 우열·방향 표현에는 띄어쓰기가 들어 있어("더
     큽니다") 덩어리로 자르면 두 조각이 되고, 어느 쪽도 목록과 맞지 않는다.
@@ -2025,7 +2175,7 @@ def _strip_frame_vocabulary(text: str) -> str:
     remaining = text
 
     while remaining:
-        for fragment in _FRAME_BY_LENGTH:
+        for fragment in fragments:
             if fragment in remaining:
                 remaining = remaining.replace(fragment, "")
 

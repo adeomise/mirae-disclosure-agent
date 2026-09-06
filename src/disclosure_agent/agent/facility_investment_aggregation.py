@@ -80,12 +80,20 @@ class FacilityInvestmentFailure:
 
 @dataclass(frozen=True)
 class FacilityInvestmentCollection:
-    """한 기업의 Q12 root 집합을 필드 단위 최신 Fact로 옮긴 결과."""
+    """
+    한 기업의 Q12 root 집합을 필드 단위 최신 Fact로 옮긴 결과.
+
+    source_filings는 facts와 같은 순서로, 각 Fact의 최신 금액이 실제로 나온 문서의
+    FilingRef를 담는다(원공시일 수도, 그 root를 갱신한 정정공시일 수도 있다). Evidence의
+    doc_id와 이 FilingRef.doc_id가 같은 문서를 가리킨다 — source_documents는 이 목록에서만
+    만든다.
+    """
 
     company: str
     root_doc_ids: tuple[str, ...] = field(default_factory=tuple)
     facts: tuple[Fact, ...] = field(default_factory=tuple)
     evidence: tuple[Evidence, ...] = field(default_factory=tuple)
+    source_filings: tuple[FilingRef, ...] = field(default_factory=tuple)
     failures: tuple[FacilityInvestmentFailure, ...] = field(default_factory=tuple)
 
 
@@ -161,12 +169,19 @@ def _fact_from_latest_state(
     state,
     adapted_by_doc_id: dict[str, EventAdapterResult],
     extracted_by_doc_id: dict[str, dict],
-) -> tuple[Fact | None, tuple[Evidence, ...], FacilityInvestmentFailure | None]:
+    filing_by_doc_id: dict[str, FilingRef],
+) -> tuple[Fact | None, tuple[Evidence, ...], FilingRef | None, FacilityInvestmentFailure | None]:
+    """
+    filing_by_doc_id는 chain.entries에서 만든, 이 root와 실제로 연결된 문서만의 지도다
+    (collect_facility_investment_facts). amount.source_doc_id가 그 지도에 있으면 그 문서가
+    최신 금액의 실제 출처이고, source_documents는 그 FilingRef에서만 만든다 — manifest를
+    다시 조회하지 않는다.
+    """
     root_doc_id = _doc_id(root)
     amount = state.fields.get(INVESTMENT_AMOUNT_FIELD)
 
     if amount is None or _exact_numeric_text(amount.value) is None:
-        return None, (), _failure(
+        return None, (), None, _failure(
             company=company,
             root_doc_id=root_doc_id,
             stage=STAGE_EXTRACTION,
@@ -175,7 +190,7 @@ def _fact_from_latest_state(
         )
 
     if amount.unit != INVESTMENT_AMOUNT_UNIT:
-        return None, (), _failure(
+        return None, (), None, _failure(
             company=company,
             root_doc_id=root_doc_id,
             stage=STAGE_COMPARABILITY,
@@ -188,6 +203,7 @@ def _fact_from_latest_state(
 
     source = adapted_by_doc_id.get(amount.source_doc_id)
     extracted_source = extracted_by_doc_id.get(amount.source_doc_id)
+    source_filing = filing_by_doc_id.get(amount.source_doc_id)
     evidence_by_id = {
         item.evidence_id: item
         for result in adapted_by_doc_id.values()
@@ -203,11 +219,12 @@ def _fact_from_latest_state(
         not amount.source_doc_id
         or source is None
         or extracted_source is None
+        or source_filing is None
         or not amount.evidence_ids
         or len(resolved_evidence) != len(amount.evidence_ids)
         or any(item.doc_id != amount.source_doc_id for item in resolved_evidence)
     ):
-        return None, (), _failure(
+        return None, (), None, _failure(
             company=company,
             root_doc_id=root_doc_id,
             stage=STAGE_EVIDENCE,
@@ -243,6 +260,7 @@ def _fact_from_latest_state(
             evidence_ids=list(amount.evidence_ids),
         ),
         resolved_evidence,
+        source_filing,
         None,
     )
 
@@ -302,6 +320,7 @@ def collect_facility_investment_facts(
     parsed_roots: list[FilingRef] = []
     facts: list[Fact] = []
     evidence: list[Evidence] = []
+    source_filings: list[FilingRef] = []
     failures: list[FacilityInvestmentFailure] = []
 
     # Target root 본문은 서로의 해석에 필요하지 않으므로 root별로 읽는다. 한 root의
@@ -373,6 +392,12 @@ def collect_facility_investment_facts(
 
         # Chain을 먼저 확정했으므로 이 root와 실제로 연결된 문서만 extract/adapt한다.
         # 실패 경계도 root 단위여서 다른 정상 root의 Fact/Evidence는 보존된다.
+        #
+        # filing_by_doc_id도 이 chain.entries에서만 만든다. 최신 금액의 source_doc_id가
+        # 가리키는 문서는 반드시 이 root의 chain에 속한 문서 중 하나이며, manifest 전체를
+        # 다시 뒤져 찾지 않는다.
+        filing_by_doc_id = {_doc_id(entry.filing): entry.filing for entry in chain.entries}
+
         try:
             extracted_by_receipt = {
                 entry.filing.receipt_no: _extract_filing_event(
@@ -448,12 +473,13 @@ def collect_facility_investment_facts(
             )
             continue
 
-        fact, event_evidence, failure = _fact_from_latest_state(
+        fact, event_evidence, source_filing, failure = _fact_from_latest_state(
             company=company,
             root=root,
             state=state,
             adapted_by_doc_id=adapted_by_doc_id,
             extracted_by_doc_id=extracted_by_doc_id,
+            filing_by_doc_id=filing_by_doc_id,
         )
 
         if failure is not None:
@@ -462,6 +488,7 @@ def collect_facility_investment_facts(
 
         facts.append(fact)
         evidence.extend(event_evidence)
+        source_filings.append(source_filing)
 
     unique_evidence = tuple(
         {item.evidence_id: item for item in evidence}.values()
@@ -472,5 +499,6 @@ def collect_facility_investment_facts(
         root_doc_ids=root_doc_ids,
         facts=tuple(facts),
         evidence=unique_evidence,
+        source_filings=tuple(source_filings),
         failures=tuple(failures),
     )

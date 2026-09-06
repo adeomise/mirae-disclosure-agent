@@ -300,6 +300,31 @@ def test_target_year_roots_are_independently_resolved_without_double_counting(
     assert result.evidence[0].doc_id == "exchange_CORR_A"
 
 
+def test_source_filing_points_at_the_document_that_actually_supplied_the_latest_amount(
+    synthetic_event_stack,
+) -> None:
+    """
+    ROOT_A는 정정(CORR_A)이 금액을 갱신했고 ROOT_B는 원공시 값이 그대로 최신이다.
+    source_filings는 root의 FilingRef가 아니라 amount.source_doc_id가 실제로 가리키는
+    문서의 FilingRef여야 한다 — 두 root 모두 원공시가 아닌 실제 출처를 따라간다.
+    """
+    result = collect_facility_investment_facts(
+        company=LEFT,
+        target_year=2024,
+        corpus_root="/synthetic",
+    )
+
+    assert [filing.doc_id for filing in result.source_filings] == [
+        "exchange_CORR_A",
+        "exchange_ROOT_B",
+    ]
+
+    # Evidence.doc_id와 source_filings.doc_id가 정확히 join 가능해야 한다.
+    assert {item.doc_id for item in result.evidence} == {
+        filing.doc_id for filing in result.source_filings
+    }
+
+
 @pytest.mark.parametrize("failure_kind", ["parse", "extraction"])
 def test_unrelated_later_root_failure_cannot_block_target_year_roots(
     synthetic_event_stack,
@@ -768,6 +793,213 @@ def test_company_aggregates_and_comparison_preserve_question_order(
     assert comparison.relation is ComparisonRelation.LEFT_GREATER
     assert comparison.left.input_id == result.calculations[0].calculation_id
     assert comparison.right.input_id == result.calculations[1].calculation_id
+
+
+def test_result_carries_a_source_document_for_each_companys_actual_filing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    entity_filings -> source_documents 배선이 실제 doc_id로 join되고, 회사가 둘이어도
+    문서가 중복 없이 각각 한 건씩 실린다(Evidence.doc_id와 join 가능해야 한다).
+    """
+    left_filing = _filing("ROOT_LEFT", "20240110", company=LEFT)
+    right_filing = _filing("ROOT_RIGHT", "20240115", company=RIGHT)
+
+    left_fact = _fact(LEFT, "resolved", "100")
+    right_fact = _fact(RIGHT, "resolved", "50")
+
+    left_collection = FacilityInvestmentCollection(
+        company=LEFT,
+        root_doc_ids=(left_filing.doc_id,),
+        facts=(left_fact,),
+        evidence=(
+            Evidence(
+                evidence_id=left_fact.evidence_ids[0],
+                doc_id=left_filing.doc_id,
+                location_type=EvidenceLocationType.EVENT_FIELD,
+                field_name="investment_amount",
+            ),
+        ),
+        source_filings=(left_filing,),
+    )
+    right_collection = FacilityInvestmentCollection(
+        company=RIGHT,
+        root_doc_ids=(right_filing.doc_id,),
+        facts=(right_fact,),
+        evidence=(
+            Evidence(
+                evidence_id=right_fact.evidence_ids[0],
+                doc_id=right_filing.doc_id,
+                location_type=EvidenceLocationType.EVENT_FIELD,
+                field_name="investment_amount",
+            ),
+        ),
+        source_filings=(right_filing,),
+    )
+    by_company = {LEFT: left_collection, RIGHT: right_collection}
+    monkeypatch.setattr(
+        cross_entity_compare,
+        "collect_facility_investment_facts",
+        lambda **kwargs: by_company[kwargs["company"]],
+    )
+    plan = build_query_plan(Q12, known_companies=(LEFT, RIGHT))
+
+    result = cross_entity_compare.handle_cross_entity_compare(
+        plan,
+        corpus_root="/synthetic",
+    )
+
+    known_doc_ids = {doc.doc_id for doc in result.source_documents}
+
+    assert known_doc_ids == {left_filing.doc_id, right_filing.doc_id}
+    assert all(item.doc_id in known_doc_ids for item in result.evidence)
+
+    by_doc_id = {doc.doc_id: doc for doc in result.source_documents}
+    assert by_doc_id[left_filing.doc_id].company == LEFT
+    assert by_doc_id[right_filing.doc_id].company == RIGHT
+
+
+def test_blocked_facility_aggregate_has_no_source_documents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    실제 선택 FilingRef를 확보하지 못한 결과에는 문서 metadata를 지어내지 않는다.
+
+    _collection 헬퍼는 source_filings를 채우지 않으므로, 여기서 source_documents가 비는 것은
+    PARTIALLY_ANSWERABLE이라는 status 때문이 아니라 실제 FilingRef가 없기 때문이다 — 아래
+    test_partially_answerable_aggregate_still_carries_source_documents가 같은 갈래에서
+    FilingRef가 있으면 채워진다는 것을 대조로 보여준다.
+    """
+    left_fact = _fact(LEFT, "resolved", "100")
+    left = _collection(LEFT, (left_fact,))
+    left = FacilityInvestmentCollection(
+        company=left.company,
+        root_doc_ids=(*left.root_doc_ids, "root_unresolved"),
+        facts=left.facts,
+        evidence=left.evidence,
+        failures=(
+            FacilityInvestmentFailure(
+                company=LEFT,
+                root_doc_id="root_unresolved",
+                stage="latest_state_resolution",
+                reason=REASON_INCOMPLETE_CHAIN,
+                detail="chain incomplete",
+            ),
+        ),
+    )
+    right = _collection(RIGHT, (_fact(RIGHT, "resolved", "50"),))
+    by_company = {LEFT: left, RIGHT: right}
+    monkeypatch.setattr(
+        cross_entity_compare,
+        "collect_facility_investment_facts",
+        lambda **kwargs: by_company[kwargs["company"]],
+    )
+    plan = build_query_plan(Q12, known_companies=(LEFT, RIGHT))
+
+    result = cross_entity_compare.handle_cross_entity_compare(
+        plan,
+        corpus_root="/synthetic",
+    )
+
+    assert result.answerability_status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert result.source_documents == []
+
+
+def _collection_with_source_filing(
+    company: str,
+    fact: Fact,
+    filing: FilingRef,
+) -> FacilityInvestmentCollection:
+    """해소에 성공한 root 하나를, 그 값이 실제로 나온 문서까지 함께 담은 collection."""
+    return FacilityInvestmentCollection(
+        company=company,
+        root_doc_ids=(filing.doc_id,),
+        facts=(fact,),
+        evidence=(
+            Evidence(
+                evidence_id=fact.evidence_ids[0],
+                doc_id=filing.doc_id,
+                location_type=EvidenceLocationType.EVENT_FIELD,
+                field_name="investment_amount",
+            ),
+        ),
+        source_filings=(filing,),
+    )
+
+
+def test_partially_answerable_aggregate_still_carries_source_documents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    한 root의 chain을 완결하지 못해 PARTIALLY_ANSWERABLE이어도, 해소에 성공한 root의 문서는
+    실제 근거이므로 그대로 싣는다.
+
+    status가 ANSWERABLE이 아니라는 사실만으로 문서 metadata를 지우지 않는다. 반대로 실패해
+    집계에서 빠진 root의 문서는 Evidence에도 없으므로 새지 않는다.
+    """
+    left_fact = _fact(LEFT, "resolved", "100")
+    left_filing = _filing("ROOT_LEFT", "20240110", company=LEFT)
+    left = _collection_with_source_filing(LEFT, left_fact, left_filing)
+    left = FacilityInvestmentCollection(
+        company=left.company,
+        root_doc_ids=(*left.root_doc_ids, "exchange_ROOT_UNRESOLVED"),
+        facts=left.facts,
+        evidence=left.evidence,
+        source_filings=left.source_filings,
+        failures=(
+            FacilityInvestmentFailure(
+                company=LEFT,
+                root_doc_id="exchange_ROOT_UNRESOLVED",
+                stage="latest_state_resolution",
+                reason=REASON_INCOMPLETE_CHAIN,
+                detail="chain incomplete",
+            ),
+        ),
+    )
+
+    right_fact = _fact(RIGHT, "resolved", "50")
+    right_filing = _filing("ROOT_RIGHT", "20240115", company=RIGHT)
+    right = _collection_with_source_filing(RIGHT, right_fact, right_filing)
+
+    by_company = {LEFT: left, RIGHT: right}
+    monkeypatch.setattr(
+        cross_entity_compare,
+        "collect_facility_investment_facts",
+        lambda **kwargs: by_company[kwargs["company"]],
+    )
+    plan = build_query_plan(Q12, known_companies=(LEFT, RIGHT))
+
+    result = cross_entity_compare.handle_cross_entity_compare(
+        plan,
+        corpus_root="/synthetic",
+    )
+
+    # 기존 판정과 값은 그대로다.
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.INCOMPLETE_CHAIN
+    assert {fact.fact_id for fact in result.facts} == {
+        left_fact.fact_id,
+        right_fact.fact_id,
+    }
+    assert result.calculations == []
+    assert result.comparisons == []
+
+    evidence_doc_ids = {item.doc_id for item in result.evidence}
+    source_document_ids = {doc.doc_id for doc in result.source_documents}
+    assert evidence_doc_ids == source_document_ids == {
+        left_filing.doc_id,
+        right_filing.doc_id,
+    }
+
+    # 해소하지 못해 집계에서 빠진 root는 문서로 새지 않는다.
+    assert "exchange_ROOT_UNRESOLVED" not in source_document_ids
+
+    by_doc_id = {doc.doc_id: doc for doc in result.source_documents}
+    assert by_doc_id[left_filing.doc_id].company == LEFT
+    assert by_doc_id[left_filing.doc_id].report_name == left_filing.report_name
+    assert by_doc_id[left_filing.doc_id].receipt_no == left_filing.receipt_no
+    assert by_doc_id[left_filing.doc_id].filing_date == date(2024, 1, 10)
 
 
 def test_partial_chain_preserves_supported_facts_and_structured_exclusion(

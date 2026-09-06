@@ -85,7 +85,10 @@ from disclosure_agent.agent.safety import (
     CATEGORY_INVESTMENT_ADVICE,
     CATEGORY_OUT_OF_CORPUS_PERIOD,
 )
-from disclosure_agent.agent.source_documents import collect_source_documents
+from disclosure_agent.agent.source_documents import (
+    collect_source_documents,
+    merge_source_documents,
+)
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
@@ -99,6 +102,7 @@ from disclosure_agent.common.schemas import (
     Evidence,
     ExecutionIssue,
     Fact,
+    SourceDocument,
 )
 from disclosure_agent.periodic.adapter import adapt_financial_fact, adapt_section_summary
 from disclosure_agent.periodic.sections import (
@@ -526,6 +530,7 @@ def _stopped_execution(
     event_links: Sequence[EventLink] = (),
     evidence: Sequence[Evidence] = (),
     conversion_gaps: Sequence[ConversionGap] = (),
+    source_documents: Sequence[SourceDocument] = (),
 ) -> AgentExecutionResult:
     """
     파이프라인이 멈춘 지점 하나를 실행 결과로 옮긴다.
@@ -543,12 +548,20 @@ def _stopped_execution(
 
     calculations는 받지 않는다. 멈춘 결과에 파생값을 실으면 받는 쪽이 그것으로 막힌 계산을
     이어서 할 수 있고, 그러면 guard가 막은 일이 결과를 받는 쪽에서 그대로 일어난다.
+
+    source_documents는 outcome이 있을 때만(=COMPLETED로 나갈 때만) 싣는다. status만으로
+    포함 여부를 정하지 않는다는 원칙(guard가 "답을 낼 수 없다"고 판정한 UNANSWERABLE에도
+    Evidence가 실제로 가리키는 문서가 있으면 함께 싣는다)과, outcome이 없는 BLOCKED는
+    "판정에 이르지 못하고 멈췄다"이므로 문서 metadata를 신뢰할 근거가 되는 완결된 판정
+    자체가 없다는 원칙을 여기 한 자리에서 함께 지킨다. 호출자가 evidence와 무관하게
+    source_documents를 넘겨도, outcome이 없으면 여기서 걸러진다.
     """
     outcome = ANSWERABILITY_BY_STOP.get((blocked.stage, blocked.reason))
 
     if outcome is None:
         # 답변 가능성을 판정하지 못했으므로 answerability_detail도 만들지 않는다.
-        # 멈춘 지점은 execution_issue가 담는다.
+        # 멈춘 지점은 execution_issue가 담는다. source_documents도 싣지 않는다 —
+        # 판정에 이르지 못하고 멈춘 실행에는 문서 metadata를 뒷받침할 완결된 판단이 없다.
         return AgentExecutionResult(
             execution_status=ExecutionStatus.BLOCKED,
             execution_issue=ExecutionIssue(
@@ -571,6 +584,7 @@ def _stopped_execution(
         facts=list(facts),
         event_links=list(event_links),
         evidence=list(evidence),
+        source_documents=list(source_documents),
         warnings=list(warnings),
         conversion_gaps=list(conversion_gaps),
     )
@@ -824,8 +838,32 @@ def normalize_temporal_compare_result(result: TemporalCompareResult) -> AgentExe
 
     ComparisonResult를 만들지 않는다. Q08은 변화량 자체를 묻고 최종 우열 판정을 요구하지
     않는다(evidence_and_answerability.md Calculation cardinality).
+
+    source_documents는 status가 아니라 실제로 확보한 FilingRef(result.period_facts)로
+    정한다. guard②(비교 가능성)가 막아 COMPLETED+UNANSWERABLE+NOT_COMPARABLE로 나가도
+    두 기간의 문서는 실제로 열어 확보를 끝낸 뒤이므로 period_facts가 채워져 있고
+    (handlers.temporal_compare의 guard② except 분기 참조), 그 문서들이 여전히 Evidence가
+    가리키는 실제 근거다. 반대로 filing_discovery/pattern_entry에서 막힌 경우는
+    period_facts가 애초에 비어 있으므로(TemporalCompareResult 기본값) 자동으로 빈 목록이
+    된다 — 여기서 status로 분기하지 않아도 결과가 같다.
+
+    _stopped_execution이 outcome(=이 정지가 COMPLETED로 판정되는지)에 따라 다시 한 번
+    걸러 준다. guard②처럼 대응표에 있는 정지만 source_documents를 실제로 얻고,
+    unusable_calculation_input처럼 대응표에 없어 BLOCKED로 남는 정지는 period_facts를
+    넘겨도 버려진다(_stopped_execution 참조) — "판정에 이르지 못하고 멈췄다"에는 문서
+    metadata를 실을 완결된 판단이 없기 때문이다.
     """
     warnings = list(result.plan.warnings)
+
+    # 두 갈래가 같은 값을 쓰므로 한 번만 만든다(generator로 두면 한쪽에서 소진된다).
+    source_documents = collect_source_documents(
+        tuple(
+            period_fact.filing
+            for period_fact in result.period_facts
+            if period_fact.filing
+        ),
+        canonical_company=result.plan.company,
+    )
 
     if result.blocked is not None:
         return _stopped_execution(
@@ -833,6 +871,7 @@ def normalize_temporal_compare_result(result: TemporalCompareResult) -> AgentExe
             warnings=warnings,
             facts=result.facts,
             evidence=result.evidence,
+            source_documents=source_documents,
         )
 
     return AgentExecutionResult(
@@ -841,6 +880,7 @@ def normalize_temporal_compare_result(result: TemporalCompareResult) -> AgentExe
         facts=list(result.facts),
         evidence=list(result.evidence),
         calculations=list(result.calculations),
+        source_documents=source_documents,
         warnings=warnings,
     )
 
@@ -897,6 +937,21 @@ def normalize_cross_entity_compare_result(
     """
     warnings = list(result.plan.warnings)
 
+    # 기업마다 canonical_company가 다르므로(entity.company가 곧 그 기업의 Fact.company와
+    # 같은 표기다) collect_source_documents를 기업별로 따로 부른 뒤 merge_source_documents로
+    # 순서대로 잇는다. Pattern A/B/Q02처럼 canonical_company 하나로는 표현할 수 없다.
+    #
+    # status로 분기하지 않는다. blocked·answerability_status·성공 세 갈래 모두 같은
+    # entity_filings 조립 규칙을 쓴다 — 어느 문서가 실제로 쓰였는지는 실행 결과가 이미 정한
+    # 사실이고, 여기서 다시 판정하지 않는다. blocked 갈래는 _stopped_execution이 outcome
+    # 유무로 마지막에 한 번 더 거른다(대응표에 없는 정지는 여기서 무엇을 넘겨도 버려진다).
+    source_documents = merge_source_documents(
+        *(
+            collect_source_documents(entity.filings, canonical_company=entity.company)
+            for entity in result.entity_filings
+        )
+    )
+
     if result.blocked is not None:
         return _stopped_execution(
             result.blocked,
@@ -904,6 +959,7 @@ def normalize_cross_entity_compare_result(
             facts=result.facts,
             evidence=result.evidence,
             conversion_gaps=result.conversion_gaps,
+            source_documents=source_documents,
         )
 
     if result.answerability_status is not None:
@@ -918,6 +974,7 @@ def normalize_cross_entity_compare_result(
             ),
             facts=list(result.facts),
             evidence=list(result.evidence),
+            source_documents=source_documents,
             warnings=warnings,
             conversion_gaps=list(result.conversion_gaps),
         )
@@ -929,6 +986,7 @@ def normalize_cross_entity_compare_result(
         evidence=list(result.evidence),
         calculations=list(result.calculations),
         comparisons=list(result.comparisons),
+        source_documents=source_documents,
         warnings=warnings,
         conversion_gaps=list(result.conversion_gaps),
     )
@@ -973,6 +1031,12 @@ def normalize_event_history_result(result: EventHistoryResult) -> AgentExecution
             conversion_gaps=gaps,
         )
 
+    # source_documents는 chain.entries에 실제로 귀속을 확정한 문서에서만 만든다
+    # (build_event_history_result가 채운 result.filings). 체인이 완결되지 않아
+    # PARTIALLY_ANSWERABLE이어도, 확보한 구간의 Evidence는 여전히 이 문서들을 가리키므로
+    # 함께 싣는다 — 완결된 경우와 자리를 나누지 않는다.
+    source_documents = collect_source_documents(result.filings)
+
     return AgentExecutionResult(
         execution_status=ExecutionStatus.COMPLETED,
         answerability_status=result.status,
@@ -981,6 +1045,7 @@ def normalize_event_history_result(result: EventHistoryResult) -> AgentExecution
         event_links=list(result.links),
         evidence=list(result.evidence),
         operations=list(result.plan.operations),
+        source_documents=source_documents,
         warnings=warnings,
         conversion_gaps=gaps,
     )
@@ -1057,6 +1122,12 @@ def normalize_event_summary_result(result: EventSummaryResult) -> AgentExecution
             conversion_gaps=gaps,
         )
 
+    # source_documents는 evidence가 실제로 가리키는 doc_id만 담은 result.filings에서
+    # 만든다(handlers.event_summary._summarize_selected_event 참조). 체인을 끝까지
+    # 확정하지 못해 root 문서 하나만 근거인 경우도 여기로 온다 — 문서 집합의 크기만 다를 뿐
+    # 만드는 방식은 같다.
+    source_documents = collect_source_documents(result.filings)
+
     return AgentExecutionResult(
         execution_status=ExecutionStatus.COMPLETED,
         answerability_status=result.status,
@@ -1066,6 +1137,7 @@ def normalize_event_summary_result(result: EventSummaryResult) -> AgentExecution
         event_histories=[result.history] if result.history is not None else [],
         resolved_event_states=[result.state] if result.state is not None else [],
         evidence=list(result.evidence),
+        source_documents=source_documents,
         warnings=warnings,
         conversion_gaps=gaps,
     )

@@ -122,7 +122,11 @@ from disclosure_agent.event.contract_adapter import (
 )
 from disclosure_agent.event.linker import FilingChain, FilingLike, build_filing_chain
 from disclosure_agent.event.parser import parse_exchange_document
-from disclosure_agent.retrieval.metadata_filter import FilingNotFoundError, list_event_filings
+from disclosure_agent.retrieval.metadata_filter import (
+    FilingNotFoundError,
+    FilingRef,
+    list_event_filings,
+)
 
 # 정지 사유와 BlockedInfo는 answer_builder가 어휘를 들고 있다. Pattern마다 같은 사유를 다른
 # 문자열로 쓰면 정규화 대응표와 대조할 수 없다.
@@ -161,6 +165,13 @@ class EventHistoryResult:
 
     status가 None이면 답변 가능성을 판정할 단계에 이르지 못한 것이다(blocked 참조).
     데이터가 없어서 답할 수 없는 것과 파이프라인이 막힌 것은 다르다.
+
+    filings를 따로 들고 다니는 이유:
+        history/links/evidence는 이미 공통 Contract 타입이지만 그 안에는 FilingRef가 없다.
+        source_documents(문서 metadata)를 만들려면 이력에 실제로 채택된 원공시·정정공시의
+        FilingRef가 필요하고, 그 값은 event.linker.FilingChain.entries에만 있다. 체인 확정
+        전에 멈춘 결과(history is None)에는 채우지 않는다 — 그때는 아직 이력에 채택된
+        문서 집합 자체가 없다.
     """
 
     plan: QueryPlan
@@ -170,6 +181,7 @@ class EventHistoryResult:
     evidence: tuple[Evidence, ...] = field(default_factory=tuple)
     conversion_gaps: tuple[ContractGap, ...] = field(default_factory=tuple)
     root_candidate_doc_ids: tuple[str, ...] = field(default_factory=tuple)
+    filings: tuple[FilingRef, ...] = field(default_factory=tuple)
     blocked: BlockedInfo | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -483,6 +495,10 @@ def build_event_history_result(
         evidence=build_event_evidence(chain),
         conversion_gaps=conversion.conversion_gaps,
         root_candidate_doc_ids=(_doc_id(root),),
+        # chain.entries가 이 이력에 실제로 귀속을 확정한 문서 전부다(원공시 + 채택된
+        # 정정공시). build_event_evidence(chain)가 만드는 Evidence.doc_id와 정확히 같은
+        # 집합이며, unresolved_links의 후보는 여기 담지 않는다.
+        filings=tuple(entry.filing for entry in chain.entries),
     )
 
 

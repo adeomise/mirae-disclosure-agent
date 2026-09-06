@@ -108,7 +108,7 @@ from disclosure_agent.agent.derived_metrics import (
     required_source_metrics,
 )
 from disclosure_agent.agent.normalization import normalize_temporal_compare_result
-from disclosure_agent.agent.period_retrieval import collect_period_facts
+from disclosure_agent.agent.period_retrieval import PeriodFact, collect_period_facts
 from disclosure_agent.agent.query_analyzer import QueryPlan
 from disclosure_agent.common.enums import MetricConcept, SectionScope
 from disclosure_agent.common.schemas import (
@@ -260,12 +260,19 @@ class TemporalCompareResult:
 
     facts와 evidence는 blocked여도 남는다. 확보 자체는 정상이었고, 어느 값이 견줄 수 없다고
     판정됐는지 보려면 그 값이 있어야 한다.
+
+    period_facts를 따로 들고 다니는 이유:
+        facts/evidence는 이미 공통 Contract 타입이지만 그 안에는 FilingRef가 없다. 문서
+        metadata(source_documents)를 만들려면 실제 선택된 FilingRef가 필요하고, 그 값은
+        agent.period_retrieval.PeriodFact 안에만 있다. blocked일 때는 비워 둔다 — guard가
+        막은 결과에 문서 metadata를 실으면 파생값을 지운 규칙과 어긋난다(위 문단).
     """
 
     plan: QueryPlan
     facts: tuple[Fact, ...] = field(default_factory=tuple)
     evidence: tuple[Evidence, ...] = field(default_factory=tuple)
     calculations: tuple[CalculationResult, ...] = field(default_factory=tuple)
+    period_facts: tuple[PeriodFact, ...] = field(default_factory=tuple)
     blocked: BlockedInfo | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -870,10 +877,16 @@ def build_temporal_compare_result(
 
     except CalculationBlockedError as error:
         # 확보한 Fact와 Evidence는 남기고 파생값은 하나도 남기지 않는다.
+        #
+        # period_facts는 남긴다. guard②가 막은 것은 "이 두 값을 함께 견줄 수 없다"이며,
+        # 그 판정 자체는 두 기간의 문서를 모두 열어 확보를 끝낸 뒤에 내려졌다. 어느 값이
+        # 어느 문서에서 왔는지는 여전히 실제 사실이고, normalize가 이 값으로 UNANSWERABLE
+        # 판정에도 source_documents를 실을지 결정한다(guard②가 실제로 매핑된 사유일 때만).
         return TemporalCompareResult(
             plan=plan,
             facts=collection.facts,
             evidence=collection.evidence,
+            period_facts=collection.period_facts,
             blocked=BlockedInfo(
                 stage=STAGE_COMPARABILITY,
                 reason=error.reason,
@@ -886,6 +899,7 @@ def build_temporal_compare_result(
         facts=collection.facts,
         evidence=collection.evidence,
         calculations=calculations,
+        period_facts=collection.period_facts,
     )
 
 

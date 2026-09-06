@@ -1088,3 +1088,374 @@ test("the answer summary is rendered via textContent, so HTML in the answer is s
   // app.js 소스 자체가 답변 렌더링에 innerHTML을 쓰지 않는지도 함께 확인한다.
   assert.equal(/fields\.answer\.innerHTML/.test(appSource), false);
 });
+
+// ---------------------------------------------------------------------------
+// 22. source_documents(신규 additive 필드) — doc_id join으로 문서 라벨을
+//     추측 없이 표시한다. document_subtype/base_month는 SourceDocument가 내려준
+//     값만 쓰고, report_name이 있으면 항상 그것을 우선한다.
+// ---------------------------------------------------------------------------
+
+test("sourceDocumentLabel builds report labels from document_subtype + base_month, and report_name always wins", () => {
+  const ui = createUi(async () => okResponse(answerableBody()));
+
+  const label = (sourceDoc) =>
+    evalInContext(ui.context, "sourceDocumentLabel(__doc)", { __doc: sourceDoc });
+
+  // annual + base_month=12.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0001",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      document_subtype: "annual",
+      base_month: 12,
+    }),
+    "삼성전자 2025년 사업보고서",
+  );
+
+  // quarter + base_month=3 → 1분기.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0002",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      document_subtype: "quarter",
+      base_month: 3,
+    }),
+    "삼성전자 2025년 1분기보고서",
+  );
+
+  // half + base_month=6 → 반기(분기 번호를 매기지 않는다).
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0003",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      document_subtype: "half",
+      base_month: 6,
+    }),
+    "삼성전자 2025년 반기보고서",
+  );
+
+  // quarter + base_month=9 → 3분기.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0004",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      document_subtype: "quarter",
+      base_month: 9,
+    }),
+    "삼성전자 2025년 3분기보고서",
+  );
+
+  // report_name에 "(2025.12)"처럼 결산연도.월이 이미 포함되어 있어도, 연도를
+  // 중복 표시하지 않고 표준 "{fiscal_year}년 {report_name}" 형식 하나로 통일한다.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0005",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      report_name: "사업보고서 (2025.12)",
+      // document_subtype이 함께 와도 report_name이 항상 우선한다(요구사항 5).
+      document_subtype: "quarter",
+      base_month: 3,
+    }),
+    "삼성전자 2025년 사업보고서",
+  );
+});
+
+test("evidence linked to source_documents shows the exact metadata label, not a guess from document_subtype/base_month alone", async () => {
+  const ui = createUi(async () =>
+    okResponse(
+      answerableBody({
+        source_documents: [
+          {
+            doc_id: "periodic_SD0010",
+            company: "삼성전자",
+            fiscal_year: 2025,
+            document_subtype: "annual",
+            base_month: 12,
+            filing_date: "2026-03-15",
+            receipt_no: "20260315000123",
+          },
+        ],
+        evidence: [
+          {
+            evidence_id: "e-annual",
+            doc_id: "periodic_SD0010",
+            section_path: ["III. 재무에 관한 사항"],
+            row_label: "매출액",
+          },
+        ],
+      }),
+    ),
+  );
+  ui.input.value = "삼성전자 2025년 매출 알려줘";
+
+  await ui.form.listeners.submit({ preventDefault() {} });
+
+  const html = ui.elements["#evidence-list"].innerHTML;
+
+  assert.match(html, /삼성전자 2025년 사업보고서/);
+  assert.equal(html.includes("periodic_SD0010"), false);
+  // 기존 section_path 표시는 그대로 유지된다.
+  assert.match(html, /III\. 재무에 관한 사항/);
+});
+
+test("the same source document referenced by multiple evidence items renders the identical document label for both", async () => {
+  const ui = createUi(async () =>
+    okResponse(
+      answerableBody({
+        source_documents: [
+          {
+            doc_id: "periodic_SD0020",
+            company: "삼성전자",
+            fiscal_year: 2025,
+            document_subtype: "quarter",
+            base_month: 9,
+          },
+        ],
+        evidence: [
+          {
+            evidence_id: "e-first",
+            doc_id: "periodic_SD0020",
+            row_label: "매출액",
+          },
+          {
+            evidence_id: "e-second",
+            doc_id: "periodic_SD0020",
+            row_label: "영업이익",
+          },
+        ],
+      }),
+    ),
+  );
+  ui.input.value = "삼성전자 2025년 3분기 실적 알려줘";
+
+  await ui.form.listeners.submit({ preventDefault() {} });
+
+  const html = ui.elements["#evidence-list"].innerHTML;
+  const occurrences = html.match(/삼성전자 2025년 3분기보고서/g) || [];
+
+  assert.equal(occurrences.length, 2);
+  assert.equal(html.includes("periodic_SD0020"), false);
+});
+
+test("without source_documents in the response, the existing fact/evidence context fallback still renders a document label", async () => {
+  const ui = createUi(async () =>
+    okResponse(
+      answerableBody({
+        facts: [
+          {
+            fact_id: "fact-fallback",
+            company: "삼성전자",
+            metric: "revenue",
+            fiscal_year: 2025,
+            fiscal_period: "half-year",
+            evidence_ids: ["e-fallback"],
+          },
+        ],
+        evidence: [
+          {
+            evidence_id: "e-fallback",
+            doc_id: "periodic_SD0030",
+            row_label: "매출액",
+          },
+        ],
+        // source_documents 필드 자체가 없다 — 기존 context fallback 경로로 가야 한다.
+      }),
+    ),
+  );
+  ui.input.value = "삼성전자 2025년 반기 매출 알려줘";
+
+  await ui.form.listeners.submit({ preventDefault() {} });
+
+  const html = ui.elements["#evidence-list"].innerHTML;
+
+  assert.match(html, /삼성전자 2025년 반기보고서/);
+  assert.equal(html.includes("periodic_SD0030"), false);
+});
+
+test("when an evidence doc_id has no matching entry in source_documents, the join fails silently and no periodic_* doc_id leaks to the screen", async () => {
+  const ui = createUi(async () =>
+    okResponse(
+      answerableBody({
+        source_documents: [
+          {
+            doc_id: "periodic_SD0040",
+            company: "삼성전자",
+            fiscal_year: 2025,
+            document_subtype: "annual",
+          },
+        ],
+        evidence: [
+          {
+            evidence_id: "e-unmatched",
+            // source_documents에는 없는 doc_id — join 실패 케이스.
+            doc_id: "periodic_SD_UNMATCHED",
+            row_label: "매출액",
+          },
+        ],
+      }),
+    ),
+  );
+  ui.input.value = "매출 알려줘";
+
+  await ui.form.listeners.submit({ preventDefault() {} });
+
+  const html = ui.elements["#evidence-list"].innerHTML;
+
+  assert.equal(html.includes("periodic_SD_UNMATCHED"), false);
+  assert.equal(html.includes("periodic_SD0040"), false);
+  assert.match(html, /관련 공시 문서/);
+});
+
+// ---------------------------------------------------------------------------
+// 23. subtypeReportLabel — exact allowlist만 허용한다. quarter의 분기 번호를
+//     base_month로부터 계산하지 않으며, allowlist에 없는 조합/숫자가 아닌
+//     base_month는 전부 null이다(호출부가 report_name/기존 fallback으로 넘어간다).
+// ---------------------------------------------------------------------------
+
+test("subtypeReportLabel only recognizes the exact allowlisted subtype+base_month combinations, never computing a quarter number", () => {
+  const ui = createUi(async () => okResponse(answerableBody()));
+
+  const resolve = (documentSubtype, baseMonth) =>
+    evalInContext(ui.context, "subtypeReportLabel(__subtype, __month)", {
+      __subtype: documentSubtype,
+      __month: baseMonth,
+    });
+
+  // 허용된 조합.
+  assert.equal(resolve("annual", 12), "사업보고서");
+  assert.equal(resolve("half", 6), "반기보고서");
+  assert.equal(resolve("quarter", 3), "1분기보고서");
+  assert.equal(resolve("quarter", 9), "3분기보고서");
+
+  // 허용되지 않은 조합 — 계산식이 있었다면 "2분기보고서"/"4분기보고서"를 만들어
+  // 냈겠지만, allowlist에 없으므로 null이어야 한다.
+  assert.equal(resolve("quarter", 6), null);
+  assert.equal(resolve("quarter", 12), null);
+  assert.equal(resolve("half", 3), null);
+  assert.equal(resolve("annual", 9), null);
+
+  // base_month 누락(null/undefined) 및 숫자가 아닌 값.
+  assert.equal(resolve("quarter", null), null);
+  assert.equal(resolve("quarter", undefined), null);
+  assert.equal(resolve("quarter", "3"), null);
+  assert.equal(resolve("quarter", "삼월"), null);
+});
+
+test("an evidence item whose source document has a non-allowlisted subtype+base_month combination falls back honestly instead of a guessed label", async () => {
+  const ui = createUi(async () =>
+    okResponse(
+      answerableBody({
+        source_documents: [
+          {
+            doc_id: "periodic_SD0050",
+            company: "삼성전자",
+            fiscal_year: 2025,
+            // quarter + base_month=6은 실제로 존재하지 않는 조합 — 계산식이었다면
+            // "2분기보고서"를 만들어 냈을 것이다.
+            document_subtype: "quarter",
+            base_month: 6,
+          },
+        ],
+        evidence: [
+          {
+            evidence_id: "e-invalid-combo",
+            doc_id: "periodic_SD0050",
+            row_label: "매출액",
+          },
+        ],
+      }),
+    ),
+  );
+  ui.input.value = "매출 알려줘";
+
+  await ui.form.listeners.submit({ preventDefault() {} });
+
+  const html = ui.elements["#evidence-list"].innerHTML;
+
+  assert.equal(html.includes("2분기보고서"), false);
+  assert.equal(html.includes("periodic_SD0050"), false);
+  assert.match(html, /관련 공시 문서/);
+});
+
+// ---------------------------------------------------------------------------
+// 24. report_name의 날짜 suffix("(2025.12)")는 fiscal_year가 있을 때만 표준
+//     형식으로 재구성하며, fiscal_year가 없으면 backend가 준 report_name을 그대로
+//     보존한다(UI가 backend 정보를 임의로 버리지 않는다).
+// ---------------------------------------------------------------------------
+
+test("the report_name date suffix is only reconstructed away when fiscal_year is present; without it, the suffix is preserved verbatim", () => {
+  const ui = createUi(async () => okResponse(answerableBody()));
+
+  const label = (sourceDoc) =>
+    evalInContext(ui.context, "sourceDocumentLabel(__doc)", { __doc: sourceDoc });
+
+  // fiscal_year=2025 → "(2025.12)"를 떼고 표준 "2025년 사업보고서" 형식으로.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0060",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      report_name: "사업보고서 (2025.12)",
+    }),
+    "삼성전자 2025년 사업보고서",
+  );
+
+  // fiscal_year가 null이면 대체할 연도 정보가 없으므로 report_name을 원문 그대로
+  // 보존한다 — "(2025.12)"를 지우지 않는다.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0061",
+      company: "삼성전자",
+      fiscal_year: null,
+      report_name: "사업보고서 (2025.12)",
+    }),
+    "삼성전자 사업보고서 (2025.12)",
+  );
+
+  // fiscal_year가 아예 없는(undefined) 경우도 동일하게 보존한다.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0062",
+      company: "삼성전자",
+      report_name: "사업보고서 (2025.12)",
+    }),
+    "삼성전자 사업보고서 (2025.12)",
+  );
+});
+
+test("an evidence item whose source document has report_name with a date suffix but no fiscal_year keeps the suffix on screen", async () => {
+  const ui = createUi(async () =>
+    okResponse(
+      answerableBody({
+        source_documents: [
+          {
+            doc_id: "periodic_SD0063",
+            company: "삼성전자",
+            fiscal_year: null,
+            report_name: "사업보고서 (2025.12)",
+          },
+        ],
+        evidence: [
+          {
+            evidence_id: "e-no-fiscal-year",
+            doc_id: "periodic_SD0063",
+            row_label: "매출액",
+          },
+        ],
+      }),
+    ),
+  );
+  ui.input.value = "매출 알려줘";
+
+  await ui.form.listeners.submit({ preventDefault() {} });
+
+  const html = ui.elements["#evidence-list"].innerHTML;
+
+  assert.match(html, /삼성전자 사업보고서 \(2025\.12\)/);
+  assert.equal(html.includes("periodic_SD0063"), false);
+});

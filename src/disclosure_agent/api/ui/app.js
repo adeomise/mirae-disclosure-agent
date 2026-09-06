@@ -993,7 +993,124 @@ const documentLabel = (evidenceItem, context) => {
 };
 
 
-const renderEvidence = (evidence, context) => {
+// AnswerResponse.source_documents(additive 필드)를 doc_id 기준 Map으로 만든다.
+// Evidence.doc_id와 정확히 일치하는 항목만 찾아 쓰기 위한 색인이다 — 이 Map 자체는
+// 추측을 하지 않으며, 백엔드가 내려준 SourceDocument를 그대로 담는다.
+const buildSourceDocumentIndex = (response) => {
+  const index = new Map();
+
+  list(response.source_documents).forEach((doc) => {
+    if (doc?.doc_id) {
+      index.set(doc.doc_id, doc);
+    }
+  });
+
+  return index;
+};
+
+
+// document_subtype + base_month로부터 사람이 읽는 보고서 종류를 만든다. 질문
+// 문장이나 다른 필드로부터 절대 추측하지 않고, 실제 국내 정기공시 체계에서 확인된
+// 조합만 exact allowlist로 등록한다 — "quarter"의 분기 번호를 base_month로부터
+// 계산(Math.ceil(base_month / 3) 등)하지 않는다. 예를 들어 "quarter + base_month=6"은
+// 실제로 존재하지 않는 조합(2분기만 단독 보고서로 나오지 않음)인데 계산식은 이를
+// "2분기보고서"로 만들어낼 수 있으므로 금지한다. allowlist에 없는 조합이거나
+// base_month가 숫자가 아니면 null을 돌려줘 호출부가 report_name/기존 fallback으로
+// 넘어가게 한다.
+const DOCUMENT_SUBTYPE_BASE_MONTH_LABELS = new Map([
+  ["annual:12", "사업보고서"],
+  ["half:6", "반기보고서"],
+  ["quarter:3", "1분기보고서"],
+  ["quarter:9", "3분기보고서"],
+]);
+
+const subtypeReportLabel = (documentSubtype, baseMonth) => {
+  if (
+    typeof documentSubtype !== "string" ||
+    typeof baseMonth !== "number" ||
+    !Number.isFinite(baseMonth)
+  ) {
+    return null;
+  }
+
+  return DOCUMENT_SUBTYPE_BASE_MONTH_LABELS.get(`${documentSubtype}:${baseMonth}`) || null;
+};
+
+
+// report_name 끝에 "(2025.12)"처럼 결산연도.월이 괄호로 붙어 있으면 떼어낸다.
+// 이 괄호를 그대로 두고 앞에 "{fiscal_year}년"을 붙이면 "2025년 사업보고서
+// (2025.12)"처럼 연도가 두 번 나오게 되므로, 표준 "{fiscal_year}년 {report_name}"
+// 형식 하나로 통일하기 위해 뗀다. "(수정)"처럼 연도.월 형식이 아닌 괄호는 그
+// 안에 무슨 내용이 있는지 모르므로 손대지 않는다.
+//
+// 호출부(sourceDocumentLabel)는 fiscal_year가 있을 때만 이 함수를 부른다 —
+// fiscal_year가 없으면 괄호를 대체할 연도 정보 자체가 없으므로, backend가 내려준
+// report_name을 그대로 보존해야 한다(UI가 backend 정보를 임의로 버리지 않는다).
+const stripReportNameDateSuffix = (reportName) => {
+  if (typeof reportName !== "string") {
+    return reportName;
+  }
+
+  return reportName
+    .replace(/\s*\(\s*\d{4}\s*\.\s*\d{1,2}\s*\)\s*$/, "")
+    .trim();
+};
+
+
+// SourceDocument(신규 additive 필드) 하나로부터 사람이 읽는 문서 라벨을 만든다.
+// 우선순위: report_name(있으면 document_subtype 매핑보다 항상 우선, 요구사항 5) >
+// document_subtype+base_month exact allowlist. fiscal_year는 그 문구에 연도가 이미
+// 포함되어 있지 않을 때만 앞에 붙여 중복 표시를 막는다 — 단, report_name의 날짜
+// suffix("(2025.12)")를 떼어내는 것은 fiscal_year가 있어 그 자리를 표준
+// "{fiscal_year}년 {report_name}" 형식으로 대체할 수 있을 때만 한다. fiscal_year가
+// 없으면 report_name을 원문 그대로 둔다. company는 있으면 맨 앞에 붙인다. report_name도
+// subtype 매핑도 없어 phrase를 만들 수 없으면 null을 돌려줘, 호출부가 기존
+// fact/evidence context fallback으로 넘어가게 한다.
+const sourceDocumentLabel = (sourceDoc) => {
+  if (!sourceDoc) {
+    return null;
+  }
+
+  const { company, fiscal_year: fiscalYear, report_name: reportName } = sourceDoc;
+  const hasFiscalYear = fiscalYear !== undefined && fiscalYear !== null;
+
+  const reportNameBare = reportName
+    ? hasFiscalYear
+      ? stripReportNameDateSuffix(reportName)
+      : reportName
+    : null;
+
+  const phrase =
+    reportNameBare || subtypeReportLabel(sourceDoc.document_subtype, sourceDoc.base_month);
+
+  if (!phrase) {
+    return null;
+  }
+
+  const alreadyHasYear = hasFiscalYear && phrase.includes(String(fiscalYear));
+
+  const withYear =
+    hasFiscalYear && !alreadyHasYear ? `${fiscalYear}년 ${phrase}` : phrase;
+
+  return company ? `${company} ${withYear}` : withYear;
+};
+
+
+// Evidence 카드 제목에 실제로 쓸 라벨. source_documents가 doc_id로 join되고 그
+// metadata로 라벨을 만들 수 있으면 그 값을 최우선으로 쓴다(추측 없는 정확한 값).
+// join이 실패하거나(doc_id가 source_documents에 없음) 라벨을 만들 필드가 부족하면
+// 기존 fact/evidence context 기반 documentLabel로 fallback한다 — 이 fallback은
+// 이미 periodic_* 원시 doc_id를 노출하지 않는다.
+const resolveDocumentLabel = (evidenceItem, context, sourceDocumentIndex) => {
+  const sourceDoc = evidenceItem?.doc_id
+    ? sourceDocumentIndex?.get(evidenceItem.doc_id)
+    : undefined;
+
+  return sourceDocumentLabel(sourceDoc) || documentLabel(evidenceItem, context);
+};
+
+
+const renderEvidence = (evidence, context, sourceDocumentIndex) => {
   const items = list(evidence);
 
   fields.evidenceCount.textContent = `${items.length}개 근거`;
@@ -1056,7 +1173,7 @@ const renderEvidence = (evidence, context) => {
 
           <div class="evidence-content">
             <p class="document-name">
-              ${escapeHtml(documentLabel(item, context))}
+              ${escapeHtml(resolveDocumentLabel(item, context, sourceDocumentIndex))}
             </p>
 
             <p class="document-path">
@@ -1144,7 +1261,11 @@ const renderResponse = (response) => {
   renderSummaries(response.document_summaries);
   renderNarratives(response.narrative_comparisons);
   renderWarnings(response.warnings);
-  renderEvidence(response.evidence, buildEvidenceContext(response));
+  renderEvidence(
+    response.evidence,
+    buildEvidenceContext(response),
+    buildSourceDocumentIndex(response),
+  );
 
   stateCard.hidden = true;
   resultCard.hidden = false;

@@ -100,6 +100,8 @@ def extract_fact(
     metric: str,
     fiscal_year: int,
     accounting_scope: str,
+    document_subtype: str = "annual",
+    base_month: int | None = None,
 ) -> FinancialFact:
     """
     파싱된 문서에서 단일 재무 수치를 뽑는다.
@@ -112,6 +114,8 @@ def extract_fact(
         metric=metric,
         fiscal_year=fiscal_year,
         accounting_scope=accounting_scope,
+        document_subtype=document_subtype,
+        base_month=base_month,
     )
 
 

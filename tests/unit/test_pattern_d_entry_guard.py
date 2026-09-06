@@ -329,6 +329,98 @@ def test_q12_entry_does_not_open_for_missing_or_mixed_semantics(question: str) -
     assert _unsupported_plan(plan).reason == REASON_UNSUPPORTED_COMPARISON_METRIC
 
 
+# --------------------------------------------------------------------------
+# 4b. 같은 시설투자 집계 질문을 다르게 말해도 같은 계획이 된다
+#
+# 사용자가 이 공시를 부르는 이름은 '시설투자' 하나가 아니고('설비투자'), 더해 달라고 말하는
+# 방식도 '다 합치면' 하나가 아니다('규모가 더 큰'). 표기가 다르다는 이유로 계획이 갈리면
+# 같은 질문이 낱말에 따라 답과 차단으로 나뉘고, 차단 사유(지표를 읽지 못했다)는 실제로
+# 일어난 일과 다르다.
+#
+# 그래서 정본 표기 하나만 통과하는지가 아니라, 아래 표기가 전부 '같은 계획'이 되는지를
+# 고정한다. 계획을 통째로 견주는 이유는 필드를 골라 견주면 고르지 않은 필드가 갈려도
+# 드러나지 않기 때문이다. 질문 문자열은 계획마다 다르므로 그 자리만 뺀다.
+# --------------------------------------------------------------------------
+
+# 이 공시 집계를 묻는 같은 질문의 여러 표기.
+#
+#   1. 정본 Q12          '시설투자' + '다 합치면' + '더 커'
+#   2. 규모 표현         '시설투자' + '규모' + '더 큰'
+#   3. 설비투자 표현     '설비투자' + '규모' + '더 큰'
+#   4. 띄어 쓴 설비투자  '설비 투자' + '규모' + '더 큰'
+#   5. 공시명 + 합계     '신규시설투자등' + '합계' + '비교'
+FACILITY_AGGREGATE_PHRASINGS = (
+    Q12,
+    "LG이노텍과 레인보우로보틱스 중 2024년 시설투자 규모가 더 큰 기업은 어디야?",
+    "LG이노텍과 레인보우로보틱스 중 2024년 설비투자 규모가 더 큰 기업은 어디야?",
+    "LG이노텍과 레인보우로보틱스 중 2024년 설비 투자 규모가 더 큰 기업은 어디야?",
+    (
+        "LG이노텍과 레인보우로보틱스의 2024년 신규시설투자등 공시 "
+        "투자금액 합계를 비교해줘."
+    ),
+)
+
+
+@pytest.mark.parametrize("question", FACILITY_AGGREGATE_PHRASINGS)
+def test_facility_aggregate_phrasings_build_the_same_plan(question: str) -> None:
+    """표기가 달라도 정본 Q12와 같은 계획이 나오고 같은 모양으로 해소된다."""
+    plan = build_query_plan(question, known_companies=Q12_COMPANIES)
+    canonical = build_query_plan(Q12, known_companies=Q12_COMPANIES)
+
+    # 질문 문자열은 표기마다 다르다. 그 자리만 빼고 나머지를 통째로 견준다.
+    assert {k: v for k, v in plan.__dict__.items() if k != "question"} == {
+        k: v for k, v in canonical.__dict__.items() if k != "question"
+    }
+
+    assert resolve_shape(plan) is CrossEntityShape.FACILITY_EVENT_AGGREGATE
+    assert _unsupported_plan(plan) is None
+
+
+def test_facility_aggregate_resolves_the_listed_name_without_a_new_alias() -> None:
+    """'하이닉스'는 manifest가 준 목록만으로 SK하이닉스가 된다.
+
+    이 경로를 열면서 별칭을 새로 적지 않았다는 것을 고정한다. 여기서 별칭을 적으면
+    해석기와 두 벌이 되고, 한쪽만 늘어난 날 같은 질문이 경로에 따라 갈린다.
+    """
+    plan = build_query_plan(
+        "삼성전자와 하이닉스 중 2025년 설비투자 규모가 더 큰 기업은 어디야?",
+        known_companies=("삼성전자", "SK하이닉스"),
+    )
+
+    assert plan.companies == ("삼성전자", "SK하이닉스")
+    assert plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+    assert resolve_shape(plan) is CrossEntityShape.FACILITY_EVENT_AGGREGATE
+
+
+# 이 경로가 받지 않는 지표 표현.
+#
+# 이 경로가 세는 것은 신규시설투자등 공시의 투자금액 합계 하나다. 아래 표현은 전부 그것보다
+# 넓은 개념(전체 CAPEX, 현금흐름표의 유형자산 취득, 사업보고서의 설비투자액)이며, 값의
+# 출처도 크기도 다르다. 시설투자로 옮겨 답하면 형식이 맞는 답이 나가므로 물어본 것과 다른
+# 값을 받았다는 사실이 드러나지 않는다.
+#
+# '설비투자액'을 여기 두는 이유:
+#     '설비투자'를 이 공시 유형으로 읽게 했으므로 유형 자체는 맞다. 그러나 이 질문은
+#     사업보고서를 지목했고 집계를 요청하지 않았다. 유형 표기 하나로 집계 경로가 열리지
+#     않는다는 것을 이 자리에서 함께 고정한다.
+UNSUPPORTED_INVESTMENT_METRIC_QUESTIONS = (
+    "LG이노텍과 레인보우로보틱스의 2024년 CAPEX를 비교해줘.",
+    "LG이노텍과 레인보우로보틱스의 2024년 현금흐름표상 유형자산 취득액을 비교해줘.",
+    "LG이노텍과 레인보우로보틱스의 2024년 사업보고서 설비투자액을 비교해줘.",
+)
+
+
+@pytest.mark.parametrize("question", UNSUPPORTED_INVESTMENT_METRIC_QUESTIONS)
+def test_broader_investment_metrics_do_not_reach_the_facility_aggregate(
+    question: str,
+) -> None:
+    """전체 CAPEX 계열은 이 경로로 새지 않고 입구에서 막힌 채로 남는다."""
+    plan = build_query_plan(question, known_companies=Q12_COMPANIES)
+
+    assert resolve_shape(plan) is None
+    assert _unsupported_plan(plan).reason == REASON_UNSUPPORTED_COMPARISON_METRIC
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

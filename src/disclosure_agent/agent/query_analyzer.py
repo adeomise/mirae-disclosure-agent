@@ -88,6 +88,7 @@ from disclosure_agent.agent.query_vocabulary import (
     normalize_aggregate_request,
     normalize_change_count_request,
     normalize_comparison_request,
+    normalize_scale_request,
 )
 from disclosure_agent.common.enums import (
     ChainPolicy,
@@ -755,7 +756,20 @@ EVENT_SUBTYPE_RULES: tuple[EventSubtypeRule, ...] = (
     ),
     EventSubtypeRule(
         subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
-        tokens=("신규시설투자", "시설투자"),
+        # '설비투자'를 함께 두는 이유:
+        #     같은 공시를 사용자는 '시설투자'라고도 '설비투자'라고도 부른다. 코퍼스가 쓰는
+        #     이름은 '신규시설투자등' 하나지만, 질문에 적히는 표기가 그것으로 고정되어
+        #     있지 않다. 표기 하나만 읽으면 같은 공시를 가리킨 같은 질문이 낱말에 따라
+        #     갈리고, 막힌 사유(지표를 읽지 못했다)가 실제로 일어난 일과 다르다.
+        #
+        #     넓혀도 다른 뜻으로 새지 않는다. '설비투자'는 이 유형 말고 다른 공시 유형을
+        #     가리키지 않으며, 이 규칙이 정하는 것은 어느 공시 유형인가 하나뿐이다.
+        #     사업보고서의 설비 관련 서술이나 현금흐름표의 유형자산 취득은 이 규칙이 아니라
+        #     문서 종류·지표 인식이 가르므로 여기서 끌려오지 않는다.
+        #
+        #     띄어 쓴 표기를 따로 적는 이유는 matches가 원문을 보기 때문이다. 질문을
+        #     compact하지 않는 이유는 query_vocabulary.compact의 설명과 같다.
+        tokens=("신규시설투자", "시설투자", "설비투자", "설비 투자"),
         # 대상은 시설 자체를 가리키는 말만 둔다. '투자'가 붙은 다른 개념(투자판단·투자자문)과
         # 겹치는 낱말은 넣지 않는다.
         target_tokens=("제조시설", "생산시설", "사옥", "공장"),
@@ -2814,15 +2828,34 @@ def _looks_like_facility_investment_aggregate(question: str) -> bool:
     시설투자 유형, 집계, 비교 세 신호를 모두 요구한다. 어느 하나라도 비면
     metric이 없는 다른 다중 기업 질문이 Q12 실행 경로로 들어가지 않는다.
     여러 거래소공시 유형이 동시에 맞으면 한 유형을 고르지 않는다.
+
+    집계 신호를 두 어휘로 읽는 이유:
+        사용자가 더해 달라고 말하는 방식이 하나가 아니다. 정본 Q12는 "다 합치면"이라고
+        말하지만, 같은 것을 "시설투자 규모가 더 큰 기업"이라고도 묻는다. 앞쪽만 읽으면
+        뒤쪽 질문은 집계 신호가 비어 이 경로에 서지 못하고, 지표를 읽지 못했다는 사유로
+        막힌다. 그 사유는 실제로 일어난 일과 다르다. 질문은 무엇을 묻는지 밝혔고, 못 읽은
+        것은 이 구현이다.
+
+        '규모'를 집계 어휘(AGGREGATE_REQUEST_PATTERN)에 넣지 않고 여기서 따로 읽는 이유는
+        query_vocabulary.SCALE_REQUEST_PATTERN에 있다. 요약하면 그 낱말은 값 하나의 크기를
+        부르는 자리에도 쓰이므로, 묻는 대상이 이미 여러 건으로 확정된 자리에서만 집계로
+        읽을 수 있다. 이 자리가 그 조건을 갖춘다. 위 두 줄이 질문을 신규시설투자등 공시로
+        확정한 뒤에야 여기에 닿으며, 한 해에 그 공시는 기업마다 여러 건이다.
+
+        읽는 자리를 이 함수 안으로 한정하는 것이 규약이다. 밖으로 옮기면 문서 하나의 값을
+        묻는 질문("2025년 매출 규모 알려줘")이 집계 요청으로 읽힌다.
     """
     matched = _find_event_subtype_rules(question)
 
-    return (
-        len(matched) == 1
-        and matched[0].subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
-        and normalize_aggregate_request(question) == OPERATION_AGGREGATE
-        and normalize_comparison_request(question) == OPERATION_COMPARE
+    if len(matched) != 1 or matched[0].subtype != EVENT_SUBTYPE_FACILITY_INVESTMENT:
+        return False
+
+    aggregate = (
+        normalize_aggregate_request(question) == OPERATION_AGGREGATE
+        or normalize_scale_request(question) == OPERATION_AGGREGATE
     )
+
+    return aggregate and normalize_comparison_request(question) == OPERATION_COMPARE
 
 
 def _selects_latest_report(question: str) -> bool:

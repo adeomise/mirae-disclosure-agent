@@ -476,6 +476,46 @@ h2 {
   color: var(--subtext);
 
   line-height: 1.6;
+
+  white-space: pre-line;
+}
+
+
+.state-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+
+  gap: 8px;
+
+  margin-top: 14px;
+}
+
+.state-suggestions button {
+  padding: 8px 13px;
+
+  border: 1px solid var(--line);
+  border-radius: 999px;
+
+  color: var(--subtext);
+  background: rgba(255, 255, 255, 0.68);
+
+  font-size: 13px;
+
+  transition:
+    background 160ms,
+    border-color 160ms,
+    color 160ms,
+    transform 160ms;
+}
+
+.state-suggestions button:hover,
+.state-suggestions button:focus-visible {
+  border-color: var(--primary);
+
+  color: var(--primary-dark);
+  background: var(--evidence);
+
+  transform: translateY(-1px);
 }
 
 .state-card.is-blocked {
@@ -744,6 +784,48 @@ h2 {
   font-variant-numeric: tabular-nums;
   word-break: keep-all;
   overflow-wrap: normal;
+}
+
+
+/* ---------------------------------
+   원화 금액 보조 표기 ("약 N조 N억원")
+---------------------------------- */
+
+.value-readable {
+  display: block;
+
+  color: var(--subtext);
+  text-decoration: none;
+
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.fact-value .value-readable {
+  margin-top: 6px;
+
+  font-size: 14px;
+}
+
+.detail-card-value .value-readable {
+  margin-top: 5px;
+
+  font-size: 13px;
+}
+
+.key-value-row strong .value-readable,
+.change-values span .value-readable,
+.change-values strong .value-readable {
+  margin-top: 3px;
+
+  font-size: 11px;
+}
+
+.comparison-side strong .value-readable {
+  margin-top: 4px;
+
+  font-size: 12px;
 }
 
 

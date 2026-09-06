@@ -11,6 +11,7 @@ const stateCard = document.querySelector("#state-card");
 const stateIcon = document.querySelector(".state-icon");
 const stateTitle = document.querySelector("#state-title");
 const stateDescription = document.querySelector("#state-description");
+const stateSuggestions = document.querySelector("#state-suggestions");
 
 const fields = {
   status: document.querySelector("#status-badge"),
@@ -189,13 +190,30 @@ const formatNumber = (value) => {
 };
 
 
+// 소수점 둘째 자리로 고정 표기한다(12.3 → "12.30", 12.345 → "12.35"). "%" 단위 값
+// 전용이며, 다른 단위는 formatNumber를 그대로 쓴다.
+const formatPercent = (value) => {
+  const numeric = typeof value === "number" ? value : Number(value);
+
+  if (!Number.isFinite(numeric)) {
+    return String(value ?? "");
+  }
+
+  return numeric.toLocaleString("ko-KR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+};
+
+
 const formatValue = (value, unit = "") => {
   if (value === null || value === undefined || value === "") {
     return "확인된 값 없음";
   }
 
-  const formattedValue = formatNumber(value);
   const formattedUnit = readableUnit(unit);
+  const formattedValue =
+    formattedUnit === "%" ? formatPercent(value) : formatNumber(value);
 
   if (!formattedUnit) {
     return formattedValue;
@@ -209,11 +227,94 @@ const formatValue = (value, unit = "") => {
 };
 
 
-const factValue = (fact) =>
-  formatValue(
-    fact?.normalized_value ?? fact?.raw_value,
-    fact?.normalized_unit ?? fact?.raw_unit,
-  );
+// "17,580,633,257,000" 같은 정확한 값을 "17조 5,806억" 형태로 보조 표기한다. 조/억
+// 단위로만 나누고 억 미만은 절사한다("약"이 붙으므로 반올림하지 않는다). 1억 미만
+// 소액은 보조 표기가 의미 없으므로 null을 돌려준다(호출부는 이때 보조 줄을 붙이지
+// 않는다).
+const formatMoneyKorean = (value) => {
+  const numeric = typeof value === "number" ? value : Number(value);
+
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+
+  const sign = numeric < 0 ? "-" : "";
+  const absValue = Math.abs(numeric);
+
+  const trillion = Math.floor(absValue / 1e12);
+  const remainder = absValue - trillion * 1e12;
+  const eok = Math.floor(remainder / 1e8);
+
+  const parts = [];
+
+  if (trillion > 0) {
+    parts.push(`${trillion.toLocaleString("ko-KR")}조`);
+  }
+
+  if (eok > 0) {
+    parts.push(`${eok.toLocaleString("ko-KR")}억`);
+  }
+
+  if (!parts.length) {
+    return null;
+  }
+
+  return sign + parts.join(" ");
+};
+
+
+// 정확한 값과, 원화일 때만 붙는 "약 N조 N억원" 보조 표기를 함께 돌려준다. 이 보조
+// 표기는 normalized_value + normalized_unit에만 적용한다 — raw_value/raw_text는
+// 원문 그대로 유지해야 하므로 호출부에서 normalized 값일 때만 이 함수를 쓴다.
+const formatValueWithReadable = (value, unit = "") => {
+  const exact = formatValue(value, unit);
+  const formattedUnit = readableUnit(unit);
+
+  if (formattedUnit !== "원") {
+    return { exact, readable: null };
+  }
+
+  const numeric = typeof value === "number" ? value : Number(value);
+
+  if (!Number.isFinite(numeric)) {
+    return { exact, readable: null };
+  }
+
+  const readableAmount = formatMoneyKorean(numeric);
+
+  return {
+    exact,
+    readable: readableAmount ? `약 ${readableAmount}원` : null,
+  };
+};
+
+
+// formatValueWithReadable의 결과를 안전하게 이스케이프한 HTML 마크업으로 만든다.
+// 보조 표기가 있으면 별도 <span class="value-readable">로 감싸 두 줄로 보이게 한다.
+const valueMarkup = (value, unit = "") => {
+  const { exact, readable } = formatValueWithReadable(value, unit);
+  const readableHtml = readable
+    ? `<span class="value-readable">${escapeHtml(readable)}</span>`
+    : "";
+
+  return `${escapeHtml(exact)}${readableHtml}`;
+};
+
+
+// normalized_value가 있으면 그 값에만 "약 N조 N억원" 보조 표기를 적용한다. raw_value로
+// 대체 표시하는 경우(정규화 실패 등)는 원문 값이므로 보조 표기를 붙이지 않는다.
+const factValue = (fact) => {
+  const hasNormalized =
+    fact?.normalized_value !== null &&
+    fact?.normalized_value !== undefined &&
+    fact?.normalized_value !== "";
+
+  if (hasNormalized) {
+    return valueMarkup(fact.normalized_value, fact.normalized_unit);
+  }
+
+  return escapeHtml(formatValue(fact?.raw_value, fact?.raw_unit));
+};
 
 
 const setSection = (section, container, html) => {
@@ -252,6 +353,56 @@ const resetResult = () => {
 };
 
 
+// BLOCKED 응답이 payload.error.details.allowed_report_types 같은 배열을 내려줄 때만
+// pill 버튼으로 나열한다. 배열이 없으면 아무것도 그리지 않는다 — UI가 임의로 보고서
+// 종류를 하드코딩해서 항상 보여주지 않는다.
+const renderStateSuggestions = (suggestions) => {
+  const items = list(suggestions).filter(
+    (value) => typeof value === "string" && value.trim(),
+  );
+
+  if (!items.length) {
+    stateSuggestions.hidden = true;
+    stateSuggestions.innerHTML = "";
+    return;
+  }
+
+  stateSuggestions.innerHTML = items
+    .map(
+      (value) => `
+        <button type="button" data-question-fill="${escapeHtml(value)}">
+          ${escapeHtml(value)}
+        </button>
+      `,
+    )
+    .join("");
+
+  stateSuggestions.hidden = false;
+
+  // 후보 버튼은 "상반기 보고서"·"반기보고서"처럼 백엔드가 구분해 둔 보고서 종류
+  // 문자열일 뿐, UI는 그 의미(상반기/하반기 등)를 스스로 해석하지 않는다. 그래서
+  // 기존 질문을 지우고 그 문자열로 통째로 바꾸는 대신, 사용자가 이미 입력한 질문
+  // 뒤에 선택값을 안전하게 덧붙이기만 한다 — 질문 문장 구조를 UI가 재구성하려 하면
+  // 원래 의도(회사명·연도 등)를 깨뜨릴 수 있기 때문이다.
+  stateSuggestions
+    .querySelectorAll("[data-question-fill]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        const current = input.value.trim();
+        const addition = button.dataset.questionFill;
+
+        if (!current) {
+          input.value = addition;
+        } else if (!current.includes(addition)) {
+          input.value = `${current} ${addition}`;
+        }
+
+        input.focus();
+      });
+    });
+};
+
+
 const showLoadingState = () => {
   resultsSection.hidden = false;
   resultsSection.classList.add("is-visible");
@@ -264,6 +415,8 @@ const showLoadingState = () => {
   stateTitle.textContent = "공시를 분석하고 있습니다";
   stateDescription.textContent =
     "관련 공시와 근거를 확인하는 동안 잠시만 기다려 주세요.";
+
+  renderStateSuggestions([]);
 };
 
 
@@ -272,6 +425,7 @@ const showExecutionState = ({
   title,
   description,
   mode = "error",
+  suggestions = [],
 }) => {
   resultsSection.hidden = false;
   resultCard.hidden = true;
@@ -282,6 +436,8 @@ const showExecutionState = ({
   stateIcon.textContent = icon;
   stateTitle.textContent = title;
   stateDescription.textContent = description;
+
+  renderStateSuggestions(suggestions);
 };
 
 
@@ -315,7 +471,7 @@ const renderFacts = (facts) => {
           </p>
 
           <p class="fact-value">
-            ${escapeHtml(factValue(fact))}
+            ${factValue(fact)}
           </p>
         </article>
       `;
@@ -336,7 +492,7 @@ const renderCalculations = (calculations) => {
           </p>
 
           <p class="detail-card-value">
-            ${escapeHtml(formatValue(calculation.value, calculation.unit))}
+            ${valueMarkup(calculation.value, calculation.unit)}
           </p>
 
           <p class="detail-card-meta">
@@ -370,7 +526,7 @@ const buildResultIndex = (response) => {
     index.set(calculation.calculation_id, {
       type: "calculation",
       label: calculation.operation,
-      value: formatValue(calculation.value, calculation.unit),
+      value: valueMarkup(calculation.value, calculation.unit),
     });
   });
 
@@ -396,7 +552,7 @@ const renderComparisons = (comparisons, response) => {
         <article class="comparison-card">
           <div class="comparison-side">
             <p>${escapeHtml(left?.label || comparison.left?.input_id || "왼쪽 값")}</p>
-            <strong>${escapeHtml(left?.value || "—")}</strong>
+            <strong>${left?.value || "—"}</strong>
           </div>
 
           <span class="comparison-relation">
@@ -405,7 +561,7 @@ const renderComparisons = (comparisons, response) => {
 
           <div class="comparison-side">
             <p>${escapeHtml(right?.label || comparison.right?.input_id || "오른쪽 값")}</p>
-            <strong>${escapeHtml(right?.value || "—")}</strong>
+            <strong>${right?.value || "—"}</strong>
           </div>
         </article>
       `;
@@ -474,7 +630,7 @@ const renderResolvedStates = (states) => {
             <div class="key-value-row">
               <span>${escapeHtml(readableField(name))}</span>
               <strong>
-                ${escapeHtml(formatValue(field.value, field.unit))}
+                ${valueMarkup(field.value, field.unit)}
               </strong>
             </div>
           `;
@@ -524,13 +680,13 @@ const renderHistories = (histories) => {
 
               <div class="change-values">
                 <span>
-                  ${escapeHtml(formatValue(change.before, change.unit))}
+                  ${valueMarkup(change.before, change.unit)}
                 </span>
 
                 <span class="change-arrow" aria-hidden="true">→</span>
 
                 <strong>
-                  ${escapeHtml(formatValue(change.after, change.unit))}
+                  ${valueMarkup(change.after, change.unit)}
                 </strong>
               </div>
             </div>
@@ -662,7 +818,182 @@ const renderWarnings = (warnings) => {
 };
 
 
-const renderEvidence = (evidence) => {
+// 백엔드가 표/셀 위치를 추적하려고 row_label/column_label/field_name 등에 심어 두는
+// 내부 provenance 문자열("table_id=table_0127;row_index=5;col_index=1")을 걸러낸다.
+// 이런 값은 화면에 그대로 보여줄 게 아니라 완전히 감춰야 한다.
+const looksLikeRawProvenance = (value) =>
+  typeof value === "string" &&
+  /(table_id|row_index|col_index)\s*=/.test(value);
+
+
+// 재무제표 원문의 row_label/field_name에는 "매출액(주30)"처럼 주석 번호가 붙어 있을
+// 때가 있다. "주30"은 자산 수량이 아니라 재무제표 하단 주석 제30번을 가리키는 참조
+// 표기라 사용자용 위치 라벨에서는 의미가 없고 오히려 "수량 30"처럼 오해를 준다.
+// 두 형태만 좁게 제거한다 — 괄호로 감싼 "(주30)"·"(주 12)"와, 값 끝에 단독으로 붙은
+// "주30". "수익(매출액)"처럼 괄호 안에 "주"+숫자가 아닌 내용이 있으면 손대지 않는다.
+// raw_text/evidence 원문에는 적용하지 않고, 위치 라벨(row_label/field_name)에만 쓴다.
+const stripFootnoteReference = (value) => {
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  return value
+    .replace(/\s*\(\s*주\s*\d{1,3}\s*\)/g, "")
+    .replace(/(^|\s)주\s?\d{1,3}$/, "$1")
+    .trim();
+};
+
+
+// fiscal_period로 표현 가능한 값들을 실제 코드에서 확인한 대로 매핑한다.
+//
+// - "quarter" / "half-year" / "annual": periodic/extractor.py의 infer_period가
+//   만드는 값. Q1/Q3를 구분하는 정보가 infer_period 자체에 없으므로 "quarter"는
+//   분기 구분 없이 "분기보고서"로만 표기한다(1분기/3분기를 UI가 지어내지 않는다).
+// - "FY": common/schemas.py 계약 테스트(FULL_YEAR_FISCAL_PERIODS)가 쓰는 연간 표기.
+//
+// 실제 프로덕션 응답(단일 Fact 조회 Pattern A: periodic/adapter.py의
+// adapt_financial_fact)은 fiscal_period를 항상 None으로 채운다 — 파싱된 원문
+// metadata.report_name/기간 정보가 있어도 Fact/Evidence Contract로 옮겨지지
+// 않는다. 그래서 이 표는 document_summaries에도 없고 fiscal_period도 없는
+// 대부분의 단일 수치 조회에는 적용되지 않으며, 그 경우는 아래 documentLabel의
+// "관련 공시 문서" 폴백으로 정직하게 떨어지는 것이 맞다(같은 연도라고 사업보고서로
+// 추정하지 않는다).
+const FISCAL_PERIOD_REPORT_LABELS = {
+  quarter: "분기보고서",
+  "half-year": "반기보고서",
+  annual: "사업보고서",
+  FY: "사업보고서",
+};
+
+
+// evidence_id -> { company, fiscalYear, fiscalPeriod, docId, reportName } 맵을 만든다.
+// document_summaries가 가장 신뢰할 수 있는 출처(report_name을 직접 가짐)이고, 그 다음
+// facts.evidence_ids를 통해 간접적으로 채운다. calculations는 자신의 evidence_ids를
+// inputs가 가리키는 fact로부터 회사/연도 정보를 상속받는다. comparisons는 자체
+// evidence_ids를 갖지 않는 스키마이므로(관련 fact/calculation을 통해서만 근거를 가짐)
+// 여기서 직접 다루지 않는다.
+const buildEvidenceContext = (response) => {
+  const context = new Map();
+
+  const summaryByDocId = new Map();
+  list(response.document_summaries).forEach((summary) => {
+    if (summary?.doc_id) {
+      summaryByDocId.set(summary.doc_id, summary);
+    }
+  });
+
+  const evidenceById = new Map();
+  list(response.evidence).forEach((item) => {
+    if (item?.evidence_id) {
+      evidenceById.set(item.evidence_id, item);
+    }
+  });
+
+  const applyContext = ({ evidenceIds, company, fiscalYear, fiscalPeriod }) => {
+    list(evidenceIds).forEach((evidenceId) => {
+      if (context.has(evidenceId)) {
+        return;
+      }
+
+      const evidenceItem = evidenceById.get(evidenceId);
+      const docId = evidenceItem?.doc_id;
+      const summary = docId ? summaryByDocId.get(docId) : undefined;
+
+      context.set(evidenceId, {
+        company: summary?.company || company,
+        fiscalYear,
+        fiscalPeriod,
+        docId,
+        reportName: summary?.report_name,
+      });
+    });
+  };
+
+  list(response.facts).forEach((fact) => {
+    applyContext({
+      evidenceIds: fact.evidence_ids,
+      company: fact.company,
+      fiscalYear: fact.fiscal_year,
+      fiscalPeriod: fact.fiscal_period,
+    });
+  });
+
+  const factById = new Map();
+  list(response.facts).forEach((fact) => {
+    factById.set(fact.fact_id, fact);
+  });
+
+  list(response.calculations).forEach((calculation) => {
+    const sourceFact = list(calculation.inputs)
+      .filter((input) => input?.input_type === "fact")
+      .map((input) => factById.get(input.input_id))
+      .find(Boolean);
+
+    if (sourceFact) {
+      applyContext({
+        evidenceIds: calculation.evidence_ids,
+        company: sourceFact.company,
+        fiscalYear: sourceFact.fiscal_year,
+        fiscalPeriod: sourceFact.fiscal_period,
+      });
+    }
+  });
+
+  // fact/calculation 어디에도 연결되지 않았지만(예: Pattern B 요약형 응답) 같은
+  // doc_id에 document_summaries가 있는 evidence는 그 정보만으로라도 채운다.
+  list(response.evidence).forEach((item) => {
+    if (context.has(item.evidence_id) || !item.doc_id) {
+      return;
+    }
+
+    const summary = summaryByDocId.get(item.doc_id);
+
+    if (summary) {
+      context.set(item.evidence_id, {
+        company: summary.company,
+        fiscalYear: undefined,
+        fiscalPeriod: undefined,
+        docId: item.doc_id,
+        reportName: summary.report_name,
+      });
+    }
+  });
+
+  return context;
+};
+
+
+// Evidence 카드 제목에 쓸 사람이 읽는 문서 라벨. doc_id를 그대로 노출하지 않는 것이
+// 이 함수의 핵심 목적이다 — 우선순위: report_name > company+fiscalYear(+fiscalPeriod
+// 매핑) > "관련 공시 문서" 폴백.
+const documentLabel = (evidenceItem, context) => {
+  const info = context.get(evidenceItem.evidence_id);
+
+  if (info?.reportName) {
+    const alreadyHasYear =
+      info.fiscalYear !== undefined &&
+      info.fiscalYear !== null &&
+      info.reportName.includes(String(info.fiscalYear));
+
+    const label =
+      info.fiscalYear && !alreadyHasYear
+        ? `${info.fiscalYear}년 ${info.reportName}`
+        : info.reportName;
+
+    return info.company ? `${info.company} ${label}` : label;
+  }
+
+  if (info?.company && info?.fiscalYear) {
+    const periodLabel = FISCAL_PERIOD_REPORT_LABELS[info.fiscalPeriod] || "공시";
+
+    return `${info.company} ${info.fiscalYear}년 ${periodLabel}`;
+  }
+
+  return "관련 공시 문서";
+};
+
+
+const renderEvidence = (evidence, context) => {
   const items = list(evidence);
 
   fields.evidenceCount.textContent = `${items.length}개 근거`;
@@ -674,18 +1005,50 @@ const renderEvidence = (evidence) => {
         item.table_name ||
         "문서 내 위치";
 
-      const position = [
-        item.row_label,
-        item.column_label,
-        item.field_name,
-      ]
-        .filter(Boolean)
-        .join(" · ");
+      // row_label은 표의 "행 이름"이라 값만 남으면 "OO 항목"처럼 자연스럽게 읽힌다.
+      // column_label은 표의 "열 이름"이라 같은 접미사를 붙이면 어색해지므로("매출액
+      // 항목" O, "2025년 3분기 항목" X) 원문 그대로 둔다. 둘 다에서 재무제표 주석
+      // 번호("(주30)" 등)는 떼어내고, 뗀 결과가 빈 문자열이면 그 후보는 버린다.
+      const rowLabel = stripFootnoteReference(item.row_label);
+      const hasRowLabel = Boolean(rowLabel) && !looksLikeRawProvenance(rowLabel);
 
-      const unit =
+      const columnLabel = item.column_label;
+      const hasColumnLabel =
+        Boolean(columnLabel) && !looksLikeRawProvenance(columnLabel);
+
+      // field_name은 investment_amount처럼 내부 snake_case 식별자라, row_label이나
+      // column_label 같은 사람이 읽는 라벨이 하나라도 있으면 화면에서 완전히
+      // 제외한다("투자금액(원) · investment_amount"처럼 나란히 보이면 안 된다).
+      // 사람이 읽는 라벨이 전혀 없을 때만 field_name을 최후 후보로 보되, 그마저도
+      // FIELD_LABELS에 명시적 매핑이 있는 값일 때만 쓴다 — 매핑이 없는 내부
+      // 식별자를 그대로 노출하거나 임의로 번역하지 않는다.
+      let position = "";
+
+      if (hasRowLabel && hasColumnLabel) {
+        position =
+          rowLabel === columnLabel
+            ? `${rowLabel} 항목`
+            : `${rowLabel} · ${columnLabel}`;
+      } else if (hasRowLabel) {
+        position = `${rowLabel} 항목`;
+      } else if (hasColumnLabel) {
+        position = columnLabel;
+      } else {
+        const fieldName = stripFootnoteReference(item.field_name);
+        const mappedFieldLabel =
+          fieldName && !looksLikeRawProvenance(fieldName)
+            ? FIELD_LABELS[fieldName]
+            : undefined;
+
+        position = mappedFieldLabel ? `${mappedFieldLabel} 항목` : "";
+      }
+
+      const unitRaw =
         item.provenance?.unit_declaration ||
         item.provenance?.unit_source ||
         "";
+
+      const unit = looksLikeRawProvenance(unitRaw) ? "" : unitRaw;
 
       return `
         <article class="evidence-item">
@@ -693,7 +1056,7 @@ const renderEvidence = (evidence) => {
 
           <div class="evidence-content">
             <p class="document-name">
-              ${escapeHtml(item.doc_id)}
+              ${escapeHtml(documentLabel(item, context))}
             </p>
 
             <p class="document-path">
@@ -755,7 +1118,7 @@ const renderResponse = (response) => {
 
   fields.status.textContent = statusMeta.label;
   fields.answer.textContent =
-    cleanAnswerText(response.answer) ||
+    insertKoreanWonBreakdown(cleanAnswerText(response.answer)) ||
     "답변 문장이 제공되지 않았습니다.";
 
   resultCard.dataset.status = status;
@@ -781,7 +1144,7 @@ const renderResponse = (response) => {
   renderSummaries(response.document_summaries);
   renderNarratives(response.narrative_comparisons);
   renderWarnings(response.warnings);
-  renderEvidence(response.evidence);
+  renderEvidence(response.evidence, buildEvidenceContext(response));
 
   stateCard.hidden = true;
   resultCard.hidden = false;
@@ -795,11 +1158,13 @@ const handleHttpError = (response, payload) => {
   ) {
     showExecutionState({
       icon: "!",
-      title: "질문을 현재 조건으로 처리할 수 없습니다",
+      title: "조회 기준을 선택해 주세요",
       description:
         payload.error?.message ||
         "질문을 조금 더 구체적으로 입력해 주세요.",
       mode: "blocked",
+      // 백엔드가 기계가 읽을 수 있는 후보 목록을 내려줄 때만 pill 버튼으로 보여준다.
+      suggestions: payload.error?.details?.allowed_report_types,
     });
 
     return;
@@ -944,3 +1309,68 @@ const cleanAnswerText = (answer = "") =>
   String(answer)
     .replace(/\s*\(정규화\s*[\d,]+원\)/g, "")
     .trim();
+
+
+// 답변 문장 안에서 "758,900,000,000원"처럼 숫자 바로 뒤에 "원"이 붙은 원화 정수만
+// 조/억/만 단위로 풀어 쓴다. formatMoneyKorean(조/억까지만, fact 카드 보조 표기용)과
+// 달리 이 함수는 답변 문장 자체에 끼워 넣는 값이라 만 단위까지 남긴다("285억 3,352만
+// 원"처럼 억 밑에 남는 값도 버리지 않아야 문장이 정확하다).
+//
+// 1만원 미만은 더 굵은 단위로 묶을 게 없어 원본 그대로 둔다("100원"을 그대로 유지).
+const koreanWonBreakdown = (numeric) => {
+  if (!Number.isFinite(numeric) || Math.abs(numeric) < 10000) {
+    return null;
+  }
+
+  const sign = numeric < 0 ? "-" : "";
+  const absValue = Math.abs(numeric);
+
+  const trillion = Math.floor(absValue / 1e12);
+  const afterTrillion = absValue - trillion * 1e12;
+  const eok = Math.floor(afterTrillion / 1e8);
+  const afterEok = afterTrillion - eok * 1e8;
+  const man = Math.floor(afterEok / 1e4);
+
+  const parts = [];
+
+  if (trillion > 0) {
+    parts.push(`${trillion.toLocaleString("ko-KR")}조`);
+  }
+
+  if (eok > 0) {
+    parts.push(`${eok.toLocaleString("ko-KR")}억`);
+  }
+
+  if (man > 0) {
+    parts.push(`${man.toLocaleString("ko-KR")}만`);
+  }
+
+  if (!parts.length) {
+    return null;
+  }
+
+  return sign + parts.join(" ");
+};
+
+
+// 숫자 바로 뒤에 "원"이 붙은 자리만 잡는다. 연도("2025년")·비율("12.34%")·주식
+// 수("1,237,964,708주")는 접미사가 달라 애초에 매칭되지 않는다. 앞에 "."/숫자/","가
+// 오면(소수점의 뒷부분이거나 더 긴 숫자의 일부이면) 시작점으로 잡지 않아, 숫자를
+// 조각내 잘못 변환하지 않는다. "17조 5,806억원"처럼 이미 조/억/만 단위가 붙은
+// 표현은 숫자와 "원" 사이에 그 단위 글자가 끼어 있어 애초에 이 패턴과 맞지 않으므로
+// 다시 변환되지 않는다.
+const WON_AMOUNT_PATTERN = /(?<![.\d,])(\d{1,3}(?:,\d{3})+|\d+)원/g;
+
+
+const insertKoreanWonBreakdown = (text) => {
+  if (typeof text !== "string" || !text) {
+    return text;
+  }
+
+  return text.replace(WON_AMOUNT_PATTERN, (match, digits) => {
+    const numeric = Number(digits.replace(/,/g, ""));
+    const breakdown = koreanWonBreakdown(numeric);
+
+    return breakdown ? `${breakdown} 원` : match;
+  });
+};

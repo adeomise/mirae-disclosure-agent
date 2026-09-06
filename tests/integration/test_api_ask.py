@@ -854,14 +854,15 @@ def test_missing_year_blocked_result_returns_year_guidance_message() -> None:
 
 def test_unknown_company_blocked_result_returns_company_guidance_message() -> None:
     """
-    reason == "unknown_company"인 BLOCKED만 전용 기업 확인 안내문을 받는다.
+    stage == "query_plan" and reason == "unknown_company"인 BLOCKED만 전용 안내문을 받는다.
 
     Query Analyzer가 어떤 이름을 왜 못 풀었는지(계약 상대방 vs 공시 기업명)는 이 계층이
     판단하지 않는다 — stage/reason/execution_status/HTTP status는 원형 그대로 두고
-    message 하나만 갈아 끼운다.
+    message 하나만 갈아 끼운다. stage는 실제 계약(query_plan)과 같은 값을 쓴다 — synthetic
+    stage로는 이 mapping이 (stage, reason) 조합을 보는지 확인할 수 없다.
     """
     issue = ExecutionIssue(
-        stage="synthetic-company-resolution-stage",
+        stage="query_plan",
         reason="unknown_company",
         detail="회사명을 dictionary에서 찾지 못했습니다: Ford",
     )
@@ -876,7 +877,7 @@ def test_unknown_company_blocked_result_returns_company_guidance_message() -> No
     assert response.status_code == 422
     payload = response.json()
     assert payload["execution_status"] == "BLOCKED"
-    assert payload["error"]["stage"] == "synthetic-company-resolution-stage"
+    assert payload["error"]["stage"] == "query_plan"
     assert payload["error"]["reason"] == "unknown_company"
     assert payload["error"]["message"] == UNKNOWN_COMPANY_PUBLIC_MESSAGE
     assert payload["error"]["message"] == (
@@ -889,15 +890,16 @@ def test_unknown_company_blocked_result_returns_company_guidance_message() -> No
     assert "Ford" not in response.text
 
 
-def test_unsupported_metric_blocked_result_returns_metric_guidance_message() -> None:
+def test_unsupported_metric_at_query_plan_returns_metric_guidance_message() -> None:
     """
-    reason == "unsupported_metric"인 BLOCKED만 전용 지표 안내문을 받는다.
+    stage == "query_plan" and reason == "unsupported_metric"만 전용 지표 안내문을 받는다.
 
-    지원 지표 목록을 여기서 나열하지 않으며, 질문의 실제 의도(투자계획 등)를 재분류하지도
-    않는다 — message 하나만 갈아 끼운다.
+    이 조합은 사용자가 질문을 고쳐 풀 수 있는 자리다(query_analyzer가 질문에서 지표를
+    못 읽음). 지원 지표 목록을 여기서 나열하지 않으며, 질문의 실제 의도(투자계획 등)를
+    재분류하지도 않는다 — message 하나만 갈아 끼운다.
     """
     issue = ExecutionIssue(
-        stage="synthetic-metric-resolution-stage",
+        stage="query_plan",
         reason="unsupported_metric",
         detail="지원하지 않는 지표 키워드: 투자계획",
     )
@@ -912,7 +914,7 @@ def test_unsupported_metric_blocked_result_returns_metric_guidance_message() -> 
     assert response.status_code == 422
     payload = response.json()
     assert payload["execution_status"] == "BLOCKED"
-    assert payload["error"]["stage"] == "synthetic-metric-resolution-stage"
+    assert payload["error"]["stage"] == "query_plan"
     assert payload["error"]["reason"] == "unsupported_metric"
     assert payload["error"]["message"] == UNSUPPORTED_METRIC_PUBLIC_MESSAGE
     assert payload["error"]["message"] == (
@@ -926,10 +928,47 @@ def test_unsupported_metric_blocked_result_returns_metric_guidance_message() -> 
     assert "투자계획" not in response.text
 
 
-def test_other_blocked_reasons_keep_the_generic_public_message() -> None:
-    """등록되지 않은 BLOCKED reason은 여전히 generic 문장을 받는다.
+def test_unsupported_metric_blocked_result_at_extraction_keeps_the_generic_message() -> None:
+    """
+    stage == "extraction" and reason == "unsupported_metric"은 전용 안내문을 받지 않는다.
 
-    다른 reason 전용 안내문(연도/기업/지표)이 여기로 새지 않는다.
+    이 조합은 periodic.extractor가 문서에서 그 지표를 못 뽑아 나는 것이다
+    (ExtractionBlockedError -> agent.period_retrieval의 STAGE_EXTRACTION). 질문은 이미
+    지표를 정확히 짚었을 수 있으므로, "질문을 더 구체적으로 입력해 달라"는 안내는 맞지
+    않는다 — 이 조합에서는 generic BLOCKED_PUBLIC_MESSAGE를 그대로 받아야 한다.
+
+    reason 문자열만 같고 stage가 다른 경우이므로, mapping이 reason 하나만으로 판정하면
+    (구 버전 버그) 이 테스트가 UNSUPPORTED_METRIC_PUBLIC_MESSAGE를 보고 실패한다.
+    """
+    issue = ExecutionIssue(
+        stage="extraction",
+        reason="unsupported_metric",
+        detail="지원하지 않는 지표입니다: some-internal-metric-code",
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.BLOCKED,
+        execution_issue=issue,
+    )
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "합성회사 2025년 설비투자 내역"})
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["execution_status"] == "BLOCKED"
+    assert payload["error"]["stage"] == "extraction"
+    assert payload["error"]["reason"] == "unsupported_metric"
+    assert payload["error"]["message"] == BLOCKED_PUBLIC_MESSAGE
+
+    # 지표 전용 안내문과 내부 진단이 새지 않는다.
+    assert UNSUPPORTED_METRIC_PUBLIC_MESSAGE not in response.text
+    assert issue.detail not in response.text
+
+
+def test_other_blocked_reasons_keep_the_generic_public_message() -> None:
+    """등록되지 않은 (stage, reason) 조합은 여전히 generic 문장을 받는다.
+
+    다른 조합 전용 안내문(연도/기업/지표)이 여기로 새지 않는다.
     """
     issue = ExecutionIssue(
         stage="synthetic-stage",
@@ -949,6 +988,8 @@ def test_other_blocked_reasons_keep_the_generic_public_message() -> None:
     assert payload["error"]["reason"] == "synthetic-reason"
     assert payload["error"]["message"] == BLOCKED_PUBLIC_MESSAGE
     assert MISSING_YEAR_PUBLIC_MESSAGE not in response.text
+    assert UNKNOWN_COMPANY_PUBLIC_MESSAGE not in response.text
+    assert UNSUPPORTED_METRIC_PUBLIC_MESSAGE not in response.text
     assert UNKNOWN_COMPANY_PUBLIC_MESSAGE not in response.text
     assert UNSUPPORTED_METRIC_PUBLIC_MESSAGE not in response.text
 

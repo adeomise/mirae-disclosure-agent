@@ -87,11 +87,30 @@ REASON_MISSING_YEAR = "missing_year"
 REASON_UNKNOWN_COMPANY = "unknown_company"
 REASON_UNSUPPORTED_METRIC = "unsupported_metric"
 
-# BLOCKED reason별 전용 public message. 여기 없는 reason은 BLOCKED_PUBLIC_MESSAGE를 쓴다.
-_BLOCKED_PUBLIC_MESSAGE_BY_REASON: dict[str, str] = {
-    REASON_MISSING_YEAR: MISSING_YEAR_PUBLIC_MESSAGE,
-    REASON_UNKNOWN_COMPANY: UNKNOWN_COMPANY_PUBLIC_MESSAGE,
-    REASON_UNSUPPORTED_METRIC: UNSUPPORTED_METRIC_PUBLIC_MESSAGE,
+# ExecutionIssue.stage/reason은 둘 다 순수 str이다(schemas.ExecutionIssue). Enum이 아니므로
+# 여기서도 str 그대로 비교한다. 값은 answer_builder.STAGE_QUERY_PLAN/STAGE_EXTRACTION과
+# 같은 문자열이지만, 그 모듈을 이 경계에서 새로 import하지 않는다 — service.py는 이미
+# 만들어진 공개 문자열(stage/reason)만 보고, Agent 내부 모듈의 상수 정의에 묶이지 않는다.
+STAGE_QUERY_PLAN = "query_plan"
+STAGE_EXTRACTION = "extraction"
+
+# BLOCKED public message는 reason 하나만으로 고를 수 없다. unsupported_metric은 두 자리에서
+# 난다:
+#
+#   query_plan / unsupported_metric  - query_analyzer가 질문에서 지표를 못 읽음.
+#                                       사용자가 질문을 고치면 풀릴 수 있다.
+#   extraction / unsupported_metric  - periodic.extractor가 문서에서 그 지표를 못 뽑음
+#                                       (ExtractionBlockedError -> period_retrieval.py).
+#                                       질문은 이미 지표를 정확히 짚었을 수 있고, 여기서
+#                                       막힌 것은 내부 처리 실패에 가깝다. 질문 수정 안내를
+#                                       그대로 주면 사용자가 이미 맞는 표현을 다시 써 보다가
+#                                       똑같이 막힌다.
+#
+# 그래서 key를 (stage, reason)으로 둔다. 여기 없는 조합은 BLOCKED_PUBLIC_MESSAGE를 쓴다.
+_BLOCKED_PUBLIC_MESSAGE_BY_STAGE_AND_REASON: dict[tuple[str, str], str] = {
+    (STAGE_QUERY_PLAN, REASON_MISSING_YEAR): MISSING_YEAR_PUBLIC_MESSAGE,
+    (STAGE_QUERY_PLAN, REASON_UNKNOWN_COMPANY): UNKNOWN_COMPANY_PUBLIC_MESSAGE,
+    (STAGE_QUERY_PLAN, REASON_UNSUPPORTED_METRIC): UNSUPPORTED_METRIC_PUBLIC_MESSAGE,
 }
 
 
@@ -184,7 +203,9 @@ def agent_execution_error_response(
 ) -> AgentExecutionErrorResponse:
     """Build a public error without copying the internal diagnostic detail."""
     if execution_status is ExecutionStatus.BLOCKED:
-        message = _BLOCKED_PUBLIC_MESSAGE_BY_REASON.get(reason, BLOCKED_PUBLIC_MESSAGE)
+        message = _BLOCKED_PUBLIC_MESSAGE_BY_STAGE_AND_REASON.get(
+            (stage, reason), BLOCKED_PUBLIC_MESSAGE
+        )
     else:
         message = FAILED_PUBLIC_MESSAGE
     return AgentExecutionErrorResponse(

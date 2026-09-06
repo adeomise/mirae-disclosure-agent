@@ -1110,6 +1110,43 @@ const resolveDocumentLabel = (evidenceItem, context, sourceDocumentIndex) => {
 };
 
 
+// SourceDocument.filing_date(백엔드 ISO "YYYY-MM-DD")를 화면 표기 "YYYY.MM.DD"로
+// 바꾼다. 정확히 그 형식이고, 실제로 존재하는 달력 날짜일 때만 값을 돌려준다 —
+// 그 외(누락, 형식 불일치, "2024-02-30"처럼 실재하지 않는 날짜)는 null을 돌려줘
+// 호출부가 제출일 행 자체를 숨기게 한다. 오늘 날짜나 질문 속 연도로 추측하지 않는다.
+const formatFilingDate = (isoDate) => {
+  if (typeof isoDate !== "string") {
+    return null;
+  }
+
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+
+  if (!match) {
+    return null;
+  }
+
+  const [, yearStr, monthStr, dayStr] = match;
+  const year = Number(yearStr);
+  const month = Number(monthStr);
+  const day = Number(dayStr);
+
+  // Date.UTC는 범위를 벗어난 월/일을 다음 달력으로 "정규화"한다(예: 2월 30일 →
+  // 3월 1~2일). 정규화된 결과가 입력과 다르면 애초에 존재하지 않는 날짜였다는
+  // 뜻이므로 그 경우를 걸러낸다.
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return `${yearStr}.${monthStr}.${dayStr}`;
+};
+
+
 const renderEvidence = (evidence, context, sourceDocumentIndex) => {
   const items = list(evidence);
 
@@ -1167,6 +1204,16 @@ const renderEvidence = (evidence, context, sourceDocumentIndex) => {
 
       const unit = looksLikeRawProvenance(unitRaw) ? "" : unitRaw;
 
+      // 제출일은 evidence.doc_id가 source_documents와 exact join된 경우에만 값을
+      // 얻을 수 있다(join 실패 시 sourceDoc 자체가 undefined). filing_date가 있어도
+      // 형식이 맞지 않거나 실재하지 않는 날짜면 formatFilingDate가 null을 돌려주고,
+      // 이때는 행 자체를 그린다.
+      const sourceDoc = item.doc_id
+        ? sourceDocumentIndex?.get(item.doc_id)
+        : undefined;
+
+      const filingDate = formatFilingDate(sourceDoc?.filing_date);
+
       return `
         <article class="evidence-item">
           <div class="document-icon" aria-hidden="true"></div>
@@ -1191,8 +1238,19 @@ const renderEvidence = (evidence, context, sourceDocumentIndex) => {
                 position
                   ? `
                     <div>
-                      <dt>위치</dt>
+                      <dt>근거 항목</dt>
                       <dd>${escapeHtml(position)}</dd>
+                    </div>
+                  `
+                  : ""
+              }
+
+              ${
+                filingDate
+                  ? `
+                    <div>
+                      <dt>제출일</dt>
+                      <dd>${escapeHtml(filingDate)}</dd>
                     </div>
                   `
                   : ""

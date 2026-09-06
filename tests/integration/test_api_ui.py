@@ -36,6 +36,17 @@ def test_root_serves_disclosure_ui() -> None:
     assert 'id="evidence-panel"' in response.text
 
 
+def test_ui_brand_name_is_darti() -> None:
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "<title>DArTi | DART 공시 AI Agent</title>" in response.text
+    assert 'aria-label="DArTi 홈"' in response.text
+    assert "DArTi의 답변은 DART 공시 자료를 기반으로 제공되며" in response.text
+    # 기존 브랜드명이 어디에도 남아 있지 않아야 한다.
+    assert "공시한눈" not in response.text
+
+
 def test_ui_static_assets_are_available() -> None:
     stylesheet = client.get("/static/styles.css")
     javascript = client.get("/static/app.js")

@@ -6,7 +6,7 @@ README(6).md
 
 즉 우리 서버 IP가 지금 쓰는 34.64.175.191이라면 최종 README에는:
 
-- **Endpoint:** `http://34.64.175.191/answer`
+- **Endpoint:** `http://349.50.143.186/answer`
 
 이렇게 쓰는 구조가 맞아.
 

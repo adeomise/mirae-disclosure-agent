@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 
 from disclosure_agent.agent.query_analyzer import (
+    _FUTURE_DEICTIC_PERIOD_PATTERN,
     ANCHOR_SOURCE_LATEST_ANNUAL_FILING,
     INTENT_TEMPORAL_COMPARE,
     METRIC_REVENUE,
@@ -38,6 +39,10 @@ from disclosure_agent.agent.query_analyzer import (
     UnsupportedQuestionError,
     build_query_plan,
 )
+
+# _FUTURE_RELATIVE_DEICTIC은 Pattern F의 미래 표현 어휘다. 두 곳이 어긋나지 않는지 대조하는
+# 데만 쓴다(test_deictic_future_vocabulary_matches_the_safety_gate).
+from disclosure_agent.agent.safety import _FUTURE_RELATIVE_DEICTIC
 from disclosure_agent.retrieval import metadata_filter
 from disclosure_agent.retrieval.metadata_filter import (
     latest_annual_fiscal_year,
@@ -464,16 +469,95 @@ def test_future_relative_period_never_becomes_a_historical_query(question: str) 
     그것은 '보유 기간 밖이라 있을 수 없다'(F1)와 다른 진술이다. 미래 방향 판정은 Pattern F가
     맡으며, 이 해석기는 만들지 않는 쪽으로 남는다.
 
-    지금은 연도를 하나도 읽지 못해 막힌다. 상대 기간 해석 경로가 열린 뒤에도 그대로여야 한다.
+    막힌다는 것만 본다. 어느 사유로 막히는지는 표현마다 다르고, 그 구분은 아래 두 테스트가
+    따로 고정한다. 여기서 사유까지 함께 보면 어휘가 넓어질 때마다 이 목록이 갈라진다.
     """
-    with pytest.raises(UnsupportedQuestionError) as error:
+    with pytest.raises(UnsupportedQuestionError):
         build_query_plan(
             question,
             known_companies=KNOWN_COMPANIES,
             fiscal_year_anchors=ANCHORS,
         )
 
+
+@pytest.mark.parametrize("expression", ["내년", "내후년"])
+def test_deictic_future_period_is_not_reported_as_a_missing_year(
+    expression: str,
+) -> None:
+    """
+    발화 시점 기준 미래 표현은 missing_year로 보고하지 않는다.
+
+    질문에는 기간이 분명히 적혀 있다. '연도를 못 읽었다'는 사유는 실제로 일어난 일과 다르고,
+    무엇을 구현하면 풀리는 질문인지가 결과에서 사라진다. "재작년"에 대해 이미 같은 판단을
+    했으므로 사유도 그것과 같은 unsupported_relative_period를 쓴다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(
+            f"한미반도체 {expression} 매출 알려줘",
+            known_companies=KNOWN_COMPANIES,
+            fiscal_year_anchors=ANCHORS,
+        )
+
+    assert error.value.reason == "unsupported_relative_period"
+
+    # 어느 표현에 걸렸는지가 사유에 남아야 무엇을 구현하면 풀리는지 알 수 있다.
+    assert expression in error.value.detail
+
+
+def test_source_backed_future_plan_is_fail_closed_with_an_accurate_reason() -> None:
+    """
+    Gate가 면제한 source-backed 미래 계획 질문도 계획 단계에서 막힌다.
+
+    Pattern F는 "공시에 기재된 내년 투자계획"을 예측 요구로 보지 않고 통과시킨다. 그러나
+    통과한 뒤에도 '내년'이 어느 회계연도인지는 정해진 바 없고, 최신 사업보고서가 그 연도의
+    계획을 담고 있다는 보장도 없다. 그 상태에서 요약 경로를 열면 다른 해의 계획이 "내년"
+    계획으로 나간다.
+
+    그래서 막되, 막힌 사유가 실제와 맞아야 한다. missing_year는 맞지 않는다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(
+            "한미반도체 공시에 기재된 내년 투자계획 알려줘",
+            known_companies=KNOWN_COMPANIES,
+            fiscal_year_anchors=ANCHORS,
+        )
+
+    assert error.value.reason == "unsupported_relative_period"
+
+
+def test_anchorable_future_expressions_are_left_to_the_existing_path() -> None:
+    """
+    anchor로 읽힐 수 있는 미래 표현은 이번 규칙이 가져가지 않는다.
+
+    "2024년 다음 해"는 FY2025를 뜻할 수 있고, Pattern F가 그 경우 판정을 보류해 이 모듈로
+    넘긴다(safety._first_future_relative_in_request). 여기서 낱말만 보고 거절하면 그 보류가
+    무의미해진다. 넓히는 것과 이번 수정은 다른 문제다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(
+            "한미반도체 다음 해 매출 알려줘",
+            known_companies=KNOWN_COMPANIES,
+            fiscal_year_anchors=ANCHORS,
+        )
+
     assert error.value.reason == "missing_year"
+
+
+def test_deictic_future_vocabulary_matches_the_safety_gate() -> None:
+    """
+    이 모듈의 미래 표현 어휘가 Pattern F의 것과 어긋나지 않는지 본다.
+
+    두 곳이 같은 표현을 각각 적고 있다. Gate가 '발화 시점의 다음 해'로 판정해 통과시킨
+    표현을 이 모듈이 모르면, 그 질문은 다시 missing_year로 막힌다. 지금 고치는 것이 바로
+    그 상태이므로, 한쪽만 넓어지는 날을 테스트로 막는다.
+    """
+    for _label, pattern in _FUTURE_RELATIVE_DEICTIC:
+        for expression in ("내년", "내후년"):
+            if pattern.search(expression):
+                assert _FUTURE_DEICTIC_PERIOD_PATTERN.search(expression), (
+                    f"Pattern F는 '{expression}'을 미래 상대기간으로 보는데 "
+                    "query_analyzer는 알아보지 못한다."
+                )
 
 
 def test_future_expression_is_absent_from_the_supported_vocabulary() -> None:

@@ -54,6 +54,65 @@ logger = logging.getLogger(__name__)
 BLOCKED_PUBLIC_MESSAGE = "요청을 처리하는 데 필요한 조건을 충족하지 못했습니다."
 FAILED_PUBLIC_MESSAGE = "요청 처리 중 오류가 발생했습니다."
 
+# reason == "missing_year"(query_analyzer._require_years -> router가 옮기는 query_plan
+# 단계 진단) 전용 안내문. 다음 행동(연도를 채워 다시 물어봄)을 구체적으로 알려준다.
+#
+# BLOCKED_PUBLIC_MESSAGE 자체를 이 문장으로 바꾸지 않는다. 등록되지 않은 다른 BLOCKED
+# reason(예: ambiguous_period)은 여전히 generic 문장을 받아야 하고, 그 사유들의 안내문은
+# 이후 단계(다른 팀 작업)에서 각자 정해진다.
+MISSING_YEAR_PUBLIC_MESSAGE = (
+    "조회 연도를 입력해 주세요. 예: 2025년 한화오션 공급계약 내용을 알려줘."
+)
+
+# reason == "unknown_company"(query_analyzer의 company resolution 실패) 전용 안내문.
+#
+# 어떤 이름이 왜 풀리지 않았는지는 여기서 판단하지 않는다(예: 계약 상대방 이름과 공시
+# 기업명의 구분). Team3은 company resolver를 보정하지 않고, 사용자에게 "정확한 공시
+# 기업명"을 다시 입력해 달라고만 안내한다.
+UNKNOWN_COMPANY_PUBLIC_MESSAGE = (
+    "조회할 기업을 확인하지 못했습니다. 공시 기업명을 정확히 입력해 주세요."
+)
+
+# reason == "unsupported_metric"(query_analyzer의 metric 판정 실패) 전용 안내문.
+#
+# 지원 지표 목록을 여기서 나열하지 않는다 — 그 목록은 query_vocabulary 쪽 값이고, 여기서
+# 하드코딩하면 지표가 늘거나 줄 때마다 이 파일도 같이 고쳐야 한다. 질문이 실제로 어떤
+# 의도(투자계획 등)였는지도 재분류하지 않는다.
+UNSUPPORTED_METRIC_PUBLIC_MESSAGE = (
+    "요청하신 항목을 현재 지원하는 공시 지표로 확인하지 못했습니다. "
+    "조회할 항목을 조금 더 구체적으로 입력해 주세요."
+)
+
+REASON_MISSING_YEAR = "missing_year"
+REASON_UNKNOWN_COMPANY = "unknown_company"
+REASON_UNSUPPORTED_METRIC = "unsupported_metric"
+
+# ExecutionIssue.stage/reason은 둘 다 순수 str이다(schemas.ExecutionIssue). Enum이 아니므로
+# 여기서도 str 그대로 비교한다. 값은 answer_builder.STAGE_QUERY_PLAN/STAGE_EXTRACTION과
+# 같은 문자열이지만, 그 모듈을 이 경계에서 새로 import하지 않는다 — service.py는 이미
+# 만들어진 공개 문자열(stage/reason)만 보고, Agent 내부 모듈의 상수 정의에 묶이지 않는다.
+STAGE_QUERY_PLAN = "query_plan"
+STAGE_EXTRACTION = "extraction"
+
+# BLOCKED public message는 reason 하나만으로 고를 수 없다. unsupported_metric은 두 자리에서
+# 난다:
+#
+#   query_plan / unsupported_metric  - query_analyzer가 질문에서 지표를 못 읽음.
+#                                       사용자가 질문을 고치면 풀릴 수 있다.
+#   extraction / unsupported_metric  - periodic.extractor가 문서에서 그 지표를 못 뽑음
+#                                       (ExtractionBlockedError -> period_retrieval.py).
+#                                       질문은 이미 지표를 정확히 짚었을 수 있고, 여기서
+#                                       막힌 것은 내부 처리 실패에 가깝다. 질문 수정 안내를
+#                                       그대로 주면 사용자가 이미 맞는 표현을 다시 써 보다가
+#                                       똑같이 막힌다.
+#
+# 그래서 key를 (stage, reason)으로 둔다. 여기 없는 조합은 BLOCKED_PUBLIC_MESSAGE를 쓴다.
+_BLOCKED_PUBLIC_MESSAGE_BY_STAGE_AND_REASON: dict[tuple[str, str], str] = {
+    (STAGE_QUERY_PLAN, REASON_MISSING_YEAR): MISSING_YEAR_PUBLIC_MESSAGE,
+    (STAGE_QUERY_PLAN, REASON_UNKNOWN_COMPANY): UNKNOWN_COMPANY_PUBLIC_MESSAGE,
+    (STAGE_QUERY_PLAN, REASON_UNSUPPORTED_METRIC): UNSUPPORTED_METRIC_PUBLIC_MESSAGE,
+}
+
 
 class PublicExecutionError(BaseModel):
     """Public-safe projection of an internal execution diagnostic."""
@@ -143,11 +202,12 @@ def agent_execution_error_response(
     reason: str,
 ) -> AgentExecutionErrorResponse:
     """Build a public error without copying the internal diagnostic detail."""
-    message = (
-        BLOCKED_PUBLIC_MESSAGE
-        if execution_status is ExecutionStatus.BLOCKED
-        else FAILED_PUBLIC_MESSAGE
-    )
+    if execution_status is ExecutionStatus.BLOCKED:
+        message = _BLOCKED_PUBLIC_MESSAGE_BY_STAGE_AND_REASON.get(
+            (stage, reason), BLOCKED_PUBLIC_MESSAGE
+        )
+    else:
+        message = FAILED_PUBLIC_MESSAGE
     return AgentExecutionErrorResponse(
         execution_status=execution_status,
         error=PublicExecutionError(stage=stage, reason=reason, message=message),

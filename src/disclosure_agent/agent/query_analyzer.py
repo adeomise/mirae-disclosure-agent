@@ -364,6 +364,32 @@ _UNSUPPORTED_RELATIVE_PERIOD_PATTERN = re.compile(
 # 막는다.
 _FUTURE_DEICTIC_PERIOD_PATTERN = re.compile(r"내후년|내년")
 
+# 앞의 절대연도를 기준으로 읽힐 수 있는 미래 표현.
+#
+# Pattern F는 이 표현들을 만나면 판정을 보류하고 이 모듈에 넘긴다. 같은 요청 안에 절대연도가
+# 있으면 "2024년 다음 해"가 FY2025를 뜻할 수 있고, 그것은 코퍼스 안이라 미래로 단정하면
+# 답할 수 있는 질문을 막기 때문이다(safety._first_future_relative_in_request).
+#
+# 넘겨받은 이 모듈이 그 해석을 하지 않았다. 그래서 "2024년 다음 해 매출"은 표현이 조용히
+# 무시되고 _extract_years가 읽은 2024만 남아, 2025를 물은 질문에 2024 Fact가 근거까지 갖춰
+# 나갔다. 개수로도 형식으로도 드러나지 않는 종류의 오답이며, 이 모듈이 "재작년"·"전년 동기"에
+# 대해 이미 같은 이유로 거절을 택한 자리와 같다.
+#
+# 옮기지는 않는다. anchor + 1을 계산하는 것은 미래 기간 해석을 여는 일이고 이번 범위가 아니다.
+# 여기서 하는 것은 조용히 다른 해로 답하지 않는 것뿐이다.
+#
+# 어휘는 Pattern F의 _FUTURE_RELATIVE_ANCHORABLE에서 연도 단위 표현만 가져온다.
+#
+#   '다음 반기'·'다음 분기'는 두지 않는다. QUARTER_TOKENS가 의도 분기보다 앞에서 이미
+#   unsupported_period로 막으며(_reject_out_of_scope_period), 그 사유가 이 자리의 것보다
+#   정확하다. 여기 두면 먼저 도달하는 쪽이 이기는 순서 의존이 생기고, 사유만 흔들린다.
+#
+#   '다음 해당 공시'는 걸리지 않아야 한다. 그래서 Pattern F와 같은 lookahead를 그대로 쓴다.
+#   뒤따르는 글자를 보지 않으면 '해당'의 '해'만 떼어 읽는다.
+_ANCHORED_FUTURE_PERIOD_PATTERN = re.compile(
+    r"다음\s*(?:연도|년도)|다음\s*[해년](?=[\s.,?!]|[에의는도와과]|$)"
+)
+
 # 옛 이름. 부분문자열 검사만 하던 시절의 어휘이며 정본이 아니다.
 #
 # 남겨 둔 이유는 이 값을 import해 "해석하지 않은 상대 기간이 있는가"를 판정하던 호출부가 있기
@@ -2005,9 +2031,9 @@ def _reject_unsupported_relative_period(question: str) -> None:
     )
 
 
-def _reject_future_deictic_period(question: str) -> None:
+def _reject_future_relative_period(question: str) -> None:
     """
-    발화 시점 기준 미래 상대 기간("내년"·"내후년")을 거절한다.
+    미래 방향 상대 기간을 거절한다. 발화 시점 기준과 절대연도 기준을 모두 본다.
 
     _reject_unsupported_relative_period 바로 옆에 두고 같은 사유를 쓴다. 두 함수가 말하는
     것이 같기 때문이다. 질문에 기간이 분명히 적혀 있고, 이 구현이 그 표현을 해석하지 않는다.
@@ -2039,23 +2065,49 @@ def _reject_future_deictic_period(question: str) -> None:
         질문과 다른 기간을 답하는 형태이며, 개수나 형식으로는 드러나지 않는다. 이 모듈이
         재작년·전년 동기에 대해 이미 같은 이유로 같은 선택을 했다.
 
+    절대연도 기준 표현("2024년 다음 해")도 여기서 함께 막는다:
+        Pattern F가 그 조합을 만나면 판정을 보류하고 이 모듈에 넘긴다. 넘겨받은 쪽이 해석을
+        하지 않으면 표현이 조용히 무시되고 _extract_years가 읽은 연도만 남는다. 그러면 2025를
+        물은 질문에 2024 Fact가 근거까지 갖춰 나가고, 개수로도 형식으로도 드러나지 않는다.
+
+        보류를 받아 놓고 아무것도 하지 않는 상태가 가장 나쁘다. 해석을 열지는 않되, 조용히
+        다른 해로 답하지도 않는다.
+
+    두 경우의 사유는 같고 detail만 다르다. 막는 이유가 "이 모듈이 미래 방향을 옮기지 않는다"
+    하나이기 때문이다. 다만 사용자가 할 수 있는 다음 행동이 다르므로 그 부분만 나눠 적는다.
+
     의도 분기보다 앞에서 실행한다. _reject_unsupported_relative_period와 같은 자리이며
     이유도 같다. 의도별 builder 안에서 부르면 Pattern을 추가할 때마다 같은 검사를 다시 붙여야
     하고, 한 번 빠뜨린 Pattern만 조용히 검사를 건너뛴다.
     """
-    match = _FUTURE_DEICTIC_PERIOD_PATTERN.search(question)
+    deictic = _FUTURE_DEICTIC_PERIOD_PATTERN.search(question)
 
-    if match is None:
+    if deictic is not None:
+        raise UnsupportedQuestionError(
+            reason="unsupported_relative_period",
+            detail=(
+                f"미래 방향 상대 기간 표현 '{deictic.group(0)}'을 절대연도로 옮기지 않습니다. "
+                "공시에 이미 기재된 미래 계획을 묻는 질문도 여기서 막힙니다. 그 계획이 어느 "
+                "회계연도를 가리키는지 정하는 기준이 아직 없고, 최신 사업보고서가 그 연도의 "
+                "계획을 담고 있다는 보장도 없기 때문입니다. 다른 연도의 계획을 대신 답하지 "
+                "않습니다. 연도를 밝혀 주십시오."
+            ),
+        )
+
+    # deictic을 먼저 본다. Pattern F와 같은 순서다. '내년'은 앞에 절대연도가 있든 없든 발화
+    # 시점의 다음 해이므로, 절대연도 기준 판정이 그것을 가로채면 안 된다.
+    anchored = _ANCHORED_FUTURE_PERIOD_PATTERN.search(question)
+
+    if anchored is None:
         return
 
     raise UnsupportedQuestionError(
         reason="unsupported_relative_period",
         detail=(
-            f"미래 방향 상대 기간 표현 '{match.group(0)}'을 절대연도로 옮기지 않습니다. "
-            "공시에 이미 기재된 미래 계획을 묻는 질문도 여기서 막힙니다. 그 계획이 어느 "
-            "회계연도를 가리키는지 정하는 기준이 아직 없고, 최신 사업보고서가 그 연도의 "
-            "계획을 담고 있다는 보장도 없기 때문입니다. 다른 연도의 계획을 대신 답하지 "
-            "않습니다. 연도를 밝혀 주십시오."
+            f"미래 방향 상대 기간 표현 '{anchored.group(0)}'을 해석하지 않습니다. "
+            "질문에 절대연도가 함께 적혀 있어도 그 연도를 기준으로 다음 해를 계산하지 "
+            "않습니다. 그 계산 규칙이 아직 정해지지 않았기 때문입니다. 표현을 무시하고 "
+            "질문에 적힌 연도로 답하지도 않습니다. 물으시려는 연도를 직접 밝혀 주십시오."
         ),
     )
 
@@ -4147,9 +4199,9 @@ def _build_query_plan(
     # 사유는 실제로 일어난 일과 다르다.
     #
     # 답변 가능성 Gate가 추측·예측 요구를 이미 걸러냈으므로, 여기 오는 미래 질문은 문서에
-    # 기재된 진술을 조회하는 것뿐이다. 그 질문도 지금은 막는다. 이유는
-    # _reject_future_deictic_period에 있다.
-    _reject_future_deictic_period(question)
+    # 기재된 진술 조회이거나, Gate가 anchor 가능성 때문에 판정을 보류하고 넘긴 것이다.
+    # 둘 다 지금은 막는다. 이유는 _reject_future_relative_period에 있다.
+    _reject_future_relative_period(question)
 
     # 지분공시는 보고자와 발행회사 두 곳을 모두 지목한다. 비교 질문이
     # 아니므로 다중 기업 분기보다 먼저 구조를 확정한다.

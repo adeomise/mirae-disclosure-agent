@@ -211,3 +211,85 @@ def test_plain_company_comparison_still_reaches_the_comparison_path() -> None:
         ("삼성중공업(주)", MetricConcept.OPERATING_INCOME, 2025),
     }
     assert actual.evidence
+
+
+# --------------------------------------------------------------------------
+# 미래 상대기간 질문의 생산 경로 순서 (Safety Gate -> Query Analyzer)
+#
+# 두 질문 모두 '내년'을 쓰지만 서로 다른 자리에서 끝나야 한다. 그 구분이 순서에 기대고
+# 있으므로, 단위 테스트가 아니라 실제 요청 경로에서 고정한다.
+#
+#   출처를 지목한 계획 조회   Gate가 source-backed로 면제한다. 그 뒤 query_analyzer가
+#                            미래 방향을 옮기지 않아 BLOCKED로 끝난다(F6, 능력 부재).
+#
+#   예측 요구                Gate가 먼저 거부한다. query_analyzer에 닿지 않으므로 위의
+#                            새 가드가 이 판정을 가로챌 수 없다(F5 계열, 정책 판정).
+#
+# 뒤엣것이 앞엣것으로 바뀌면 "예측은 답하지 않는다"는 정책 문장이 "처리 조건을 충족하지
+# 못했습니다"라는 고장 메시지로 바뀐다. 사용자가 할 수 있는 다음 행동이 달라진다.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.corpus
+def test_source_backed_future_plan_is_blocked_by_the_query_analyzer() -> None:
+    """
+    출처를 지목한 미래 계획 조회는 Gate를 통과하고 계획 단계에서 막힌다.
+
+    막히는 자리가 Gate가 아니라는 것이 요점이다. Gate에서 막혔다면 "보유 기간 밖"이라는
+    확정 진술이 나가는데, 그 진술은 사실과 다르다. 이 질문이 요구하는 것은 지금 문서에 적혀
+    있는 계획이며, 답하지 못하는 이유는 능력 부재다.
+
+    실측 코퍼스를 쓴다. 없는 코퍼스 경로로는 이 순서를 볼 수 없다. Gate 다음에 오는 것이
+    바로 query_analyzer가 아니라 manifest 적재이고(router.answer_question이 인식할 기업명을
+    거기서 읽어 넘긴다), 경로가 없으면 filing_discovery가 먼저 막아 계획 단계에 닿지 않는다.
+    """
+    _require_actual_corpus()
+    assert get_ask_service not in app.dependency_overrides
+
+    response = client.post(
+        "/api/ask",
+        json={"question": "삼성전자 공시에 기재된 내년 투자계획 알려줘."},
+    )
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["execution_status"] == "BLOCKED"
+    assert payload["error"]["stage"] == "query_plan"
+    assert payload["error"]["reason"] == "unsupported_relative_period"
+
+    # 능력 부재는 답변 가능성 판정이 아니다. 코퍼스를 보지 않았으므로 "답이 없다"고 말하지
+    # 않는다(F5/F6 구분, docs/agent_design/pattern_f_safety.md).
+    assert "status" not in payload
+    assert "reason" not in payload
+
+
+def test_future_prediction_request_still_stops_at_the_safety_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    예측 요구는 계획 단계의 새 가드에 닿지 않는다.
+
+    '내년'이 들어 있다는 이유만으로 위 질문과 같은 자리에서 막히면, 정책 판정이 실행 중단으로
+    바뀐다. 그 둘은 execution_status도 사용자에게 나가는 문장도 다르다.
+
+    이 테스트가 고정하는 것은 Gate가 먼저라는 순서이며, 예측 정책 자체는 건드리지 않는다.
+    """
+    monkeypatch.setenv("DISCLOSURE_CORPUS_ROOT", str(tmp_path / "unused-corpus"))
+    assert get_ask_service not in app.dependency_overrides
+
+    response = client.post(
+        "/api/ask",
+        json={"question": "삼성전자 내년 매출 얼마나 될 것 같아?"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "UNANSWERABLE"
+    assert payload["reason"] == "out_of_scope_policy"
+    assert payload["facts"] == []
+    assert payload["evidence"] == []
+
+    # 계획 단계까지 내려가지 않았다는 것을 사유로 확인한다.
+    assert "execution_status" not in payload
+    assert "error" not in payload

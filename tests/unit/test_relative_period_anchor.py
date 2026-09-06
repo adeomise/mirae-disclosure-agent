@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 
 from disclosure_agent.agent.query_analyzer import (
+    _ANCHORED_FUTURE_PERIOD_PATTERN,
     ANCHOR_SOURCE_LATEST_ANNUAL_FILING,
     INTENT_TEMPORAL_COMPARE,
     METRIC_REVENUE,
@@ -36,8 +37,14 @@ from disclosure_agent.agent.query_analyzer import (
     PREVIOUS_YEAR_OFFSET,
     RelativePeriod,
     UnsupportedQuestionError,
+    _extract_years,
     build_query_plan,
 )
+
+# Pattern F의 미래 기간 판정. 어휘가 두 곳에 적혀 있어 한쪽만 넓어질 수 있으므로, 그쪽 판정을
+# 정본으로 삼아 대조하는 데 쓴다
+# (test_expressions_the_safety_gate_calls_future_are_never_answered_by_year).
+from disclosure_agent.agent.safety import _first_future_relative_in_request
 from disclosure_agent.retrieval import metadata_filter
 from disclosure_agent.retrieval.metadata_filter import (
     latest_annual_fiscal_year,
@@ -464,8 +471,85 @@ def test_future_relative_period_never_becomes_a_historical_query(question: str) 
     그것은 '보유 기간 밖이라 있을 수 없다'(F1)와 다른 진술이다. 미래 방향 판정은 Pattern F가
     맡으며, 이 해석기는 만들지 않는 쪽으로 남는다.
 
-    지금은 연도를 하나도 읽지 못해 막힌다. 상대 기간 해석 경로가 열린 뒤에도 그대로여야 한다.
+    막힌다는 것만 본다. 어느 사유로 막히는지는 표현마다 다르고, 그 구분은 아래 두 테스트가
+    따로 고정한다. 여기서 사유까지 함께 보면 어휘가 넓어질 때마다 이 목록이 갈라진다.
     """
+    with pytest.raises(UnsupportedQuestionError):
+        build_query_plan(
+            question,
+            known_companies=KNOWN_COMPANIES,
+            fiscal_year_anchors=ANCHORS,
+        )
+
+
+@pytest.mark.parametrize("expression", ["내년", "내후년"])
+def test_deictic_future_period_is_not_reported_as_a_missing_year(
+    expression: str,
+) -> None:
+    """
+    발화 시점 기준 미래 표현은 missing_year로 보고하지 않는다.
+
+    질문에는 기간이 분명히 적혀 있다. '연도를 못 읽었다'는 사유는 실제로 일어난 일과 다르고,
+    무엇을 구현하면 풀리는 질문인지가 결과에서 사라진다. "재작년"에 대해 이미 같은 판단을
+    했으므로 사유도 그것과 같은 unsupported_relative_period를 쓴다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(
+            f"한미반도체 {expression} 매출 알려줘",
+            known_companies=KNOWN_COMPANIES,
+            fiscal_year_anchors=ANCHORS,
+        )
+
+    assert error.value.reason == "unsupported_relative_period"
+
+    # 어느 표현에 걸렸는지가 사유에 남아야 무엇을 구현하면 풀리는지 알 수 있다.
+    assert expression in error.value.detail
+
+
+def test_source_backed_future_plan_is_fail_closed_with_an_accurate_reason() -> None:
+    """
+    Gate가 면제한 source-backed 미래 계획 질문도 계획 단계에서 막힌다.
+
+    Pattern F는 "공시에 기재된 내년 투자계획"을 예측 요구로 보지 않고 통과시킨다. 그러나
+    통과한 뒤에도 '내년'이 어느 회계연도인지는 정해진 바 없고, 최신 사업보고서가 그 연도의
+    계획을 담고 있다는 보장도 없다. 그 상태에서 요약 경로를 열면 다른 해의 계획이 "내년"
+    계획으로 나간다.
+
+    그래서 막되, 막힌 사유가 실제와 맞아야 한다. missing_year는 맞지 않는다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(
+            "한미반도체 공시에 기재된 내년 투자계획 알려줘",
+            known_companies=KNOWN_COMPANIES,
+            fiscal_year_anchors=ANCHORS,
+        )
+
+    assert error.value.reason == "unsupported_relative_period"
+
+
+@pytest.mark.parametrize("expression", ["다음 해", "다음해", "다음 연도", "다음 년도"])
+def test_anchored_next_year_expression_does_not_silently_use_the_anchor_year(
+    expression: str,
+) -> None:
+    """
+    "2024년 다음 해 매출"이 2024년 매출로 축소되지 않는다.
+
+    Pattern F는 이 조합을 만나면 판정을 보류하고 이 모듈에 넘긴다. 같은 요청에 절대연도가
+    있으면 FY2025를 뜻할 수 있고 그것은 코퍼스 안이라, 미래로 단정하면 답할 수 있는 질문이
+    막히기 때문이다(safety._first_future_relative_in_request).
+
+    넘겨받은 이 모듈이 그 해석을 하지 않으면 표현이 조용히 무시되고 _extract_years가 읽은
+    2024만 남는다. 그러면 2025를 물은 질문에 2024 Fact가 근거까지 갖춰 나가고, 개수로도
+    형식으로도 드러나지 않는다. 재작년을 작년으로 읽는 것과 같은 종류의 오답이다.
+
+    여기서 2024 + 1 = 2025를 계산하지는 않는다. 그것은 미래 기간 해석을 여는 일이고 이번
+    범위가 아니다. 고정하는 것은 '조용히 다른 해로 답하지 않는다' 하나다.
+    """
+    question = f"한미반도체 2024년 {expression} 매출 알려줘"
+
+    # 전제 확인: 이 질문에는 절대연도가 실제로 읽힌다. 그래서 막지 않으면 그 연도로 답한다.
+    assert _extract_years(question) == (2024,)
+
     with pytest.raises(UnsupportedQuestionError) as error:
         build_query_plan(
             question,
@@ -473,7 +557,71 @@ def test_future_relative_period_never_becomes_a_historical_query(question: str) 
             fiscal_year_anchors=ANCHORS,
         )
 
-    assert error.value.reason == "missing_year"
+    assert error.value.reason == "unsupported_relative_period"
+
+    # 어느 표현에 걸렸는지가 사유에 남아야 무엇을 구현하면 풀리는지 알 수 있다.
+    assert expression in error.value.detail
+
+    # 막힌 사유가 '연도를 못 읽었다'가 되어서는 안 된다. 연도는 읽혔고, 그것으로 답하지
+    # 않기로 한 것이다.
+    assert "2024" not in error.value.detail
+
+
+def test_anchored_future_expression_does_not_hide_a_deictic_one() -> None:
+    """
+    '내년'은 앞에 절대연도가 있어도 발화 시점의 다음 해다.
+
+    절대연도 기준 판정이 먼저 걸리면 '내년'을 anchor 표현으로 잘못 설명하게 된다. Pattern F가
+    deictic을 먼저 보는 것과 같은 순서를 지킨다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(
+            "한미반도체 2024년 내년 매출 알려줘",
+            known_companies=KNOWN_COMPANIES,
+            fiscal_year_anchors=ANCHORS,
+        )
+
+    assert error.value.reason == "unsupported_relative_period"
+    assert "내년" in error.value.detail
+
+
+def test_next_relevant_filing_wording_is_not_read_as_a_future_period() -> None:
+    """
+    "다음 해당"의 '해'를 떼어 읽지 않는다.
+
+    Pattern F가 같은 이유로 lookahead를 두었고, 그 경계를 이 모듈도 그대로 쓴다. 넓히면
+    기간을 가리키지 않는 질문이 미래 기간으로 막힌다.
+    """
+    assert _ANCHORED_FUTURE_PERIOD_PATTERN.search("다음 해당 공시") is None
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["내년", "내후년", "다음 해", "다음해", "다음 연도", "다음 년도"],
+)
+def test_expressions_the_safety_gate_calls_future_are_never_answered_by_year(
+    expression: str,
+) -> None:
+    """
+    Pattern F가 미래 상대기간으로 보는 표현은 이 모듈도 연도로 옮겨 답하지 않는다.
+
+    어휘가 두 곳에 적혀 있어 한쪽만 넓어질 수 있다. 그래서 Pattern F의 판정을 정본으로 삼아
+    (여기서 먼저 확인한다) 이 모듈의 결과를 대조한다. 표현 목록은 이 테스트가 실제로 보는
+    것만 적으며, Pattern F의 어휘 전부를 덮는다고 주장하지 않는다. '다음 반기'·'다음 분기'는
+    QUARTER_TOKENS가 더 정확한 사유로 먼저 막으므로 여기 두지 않는다.
+    """
+    # 정본: Pattern F가 이 표현을 미래 상대기간으로 보는가.
+    assert _first_future_relative_in_request(f"{expression} 매출") is not None
+
+    # 대조: 절대연도가 함께 있어도 그 연도로 답하지 않는다.
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(
+            f"한미반도체 2024년 {expression} 매출 알려줘",
+            known_companies=KNOWN_COMPANIES,
+            fiscal_year_anchors=ANCHORS,
+        )
+
+    assert error.value.reason == "unsupported_relative_period"
 
 
 def test_future_expression_is_absent_from_the_supported_vocabulary() -> None:

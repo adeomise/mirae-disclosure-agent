@@ -39,6 +39,7 @@ from disclosure_agent.agent.query_vocabulary import (
     matches_product_phrase,
     normalize_aggregate_request,
     normalize_comparison_request,
+    normalize_scale_request,
 )
 from disclosure_agent.common.enums import MetricConcept, SectionScope
 
@@ -738,6 +739,102 @@ def test_aggregate_request_without_a_facility_subtype_does_not_open_the_path() -
 
     assert plan.intent == INTENT_CROSS_ENTITY_COMPARE
     assert plan.operations == ()
+
+
+# --------------------------------------------------------------------------
+# 4b. '규모'는 집계 어휘와 나뉘어 있고, 부르는 자리에서만 집계로 읽힌다
+#
+# 사용자가 여러 건을 더해 달라고 말하는 방식이 '합치다' 계열만은 아니다. "시설투자 규모가
+# 더 큰 기업"은 그 해의 시설투자 공시를 전부 더해 견주어 달라는 말이며, 정본 Q12의 "다
+# 합치면"과 같은 요청이다.
+#
+# 그런데 '규모'는 값 하나의 크기를 부르는 자리에도 쓰인다("매출 규모 알려줘"). 그래서 이
+# 낱말을 AGGREGATE_REQUEST_PATTERN에 넣지 않고 따로 두었고, 읽을지 말지는 부르는 쪽이
+# 정한다. 아래 두 갈래가 그 분업을 고정한다.
+#
+#   어휘   normalize_scale_request는 '규모'를 집계로 옮긴다
+#   자리   normalize_aggregate_request는 그것을 집계로 읽지 않는다
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["시설투자 규모", "투자 규모가 더 큰", "규모"],
+)
+def test_scale_wording_normalizes_to_the_canonical_aggregate_operation(
+    expression: str,
+) -> None:
+    assert normalize_scale_request(expression) == OPERATION_AGGREGATE
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["시설투자 규모", "매출 규모 알려줘", "계약 규모가 얼마야"],
+)
+def test_scale_wording_stays_out_of_the_general_aggregate_vocabulary(
+    expression: str,
+) -> None:
+    """'규모'를 넣은 것이 전역 집계 어휘를 넓힌 것은 아니다.
+
+    넓혔다면 값 하나를 물은 질문("매출 규모 알려줘")이 전부 집계 요청이 되고, 형식이 맞는
+    답이 나가므로 틀렸다는 사실이 드러나지 않는다.
+    """
+    assert normalize_aggregate_request(expression) is None
+
+
+@pytest.mark.parametrize(
+    "facility_wording",
+    ["시설투자", "설비투자", "설비 투자"],
+)
+def test_scale_wording_reaches_the_facility_aggregate_plan(
+    facility_wording: str,
+) -> None:
+    """'규모'로 말한 시설투자 비교가 정본 Q12와 같은 연산·지표를 갖는다.
+
+    시설투자를 부르는 세 표기를 함께 본다. 같은 공시를 가리키는 표기가 낱말 하나 차이로
+    갈리면, 막힌 질문은 답할 수 없어서가 아니라 낱말을 못 알아봐서 막힌 것이 된다.
+    """
+    plan = build_query_plan(
+        f"LG이노텍과 레인보우로보틱스 중 2024년 {facility_wording} 규모가 "
+        "더 큰 기업은 어디야?",
+        known_companies=AGGREGATE_COMPANIES,
+    )
+
+    assert plan.intent == INTENT_CROSS_ENTITY_COMPARE
+    assert plan.operations == (OPERATION_AGGREGATE, OPERATION_COMPARE)
+    assert plan.metric is MetricConcept.INVESTMENT_AMOUNT
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 유형 신호가 없다. '규모'만으로는 무엇을 더하는지가 계획에 남지 않는다.
+        "2024년에 LG이노텍하고 레인보우로보틱스 매출 규모가 더 큰 기업은 어디야?",
+        # 비교 신호가 없다.
+        "2024년에 LG이노텍하고 레인보우로보틱스가 발표한 시설투자 규모를 알려줘.",
+    ],
+)
+def test_scale_wording_alone_does_not_open_the_facility_aggregate_path(
+    question: str,
+) -> None:
+    """'규모'를 읽는 자리는 시설투자 집계 하나뿐이며, 나머지 요구는 그대로다."""
+    plan = build_query_plan(question, known_companies=AGGREGATE_COMPANIES)
+
+    assert plan.operations == ()
+
+
+def test_single_company_scale_question_is_not_read_as_an_aggregate() -> None:
+    """문서 하나의 값을 '규모'로 물은 질문은 집계가 되지 않는다.
+
+    이 낱말을 전역 집계 어휘에 넣었다면 이 질문이 집계 요청으로 읽혔을 자리다.
+    """
+    plan = build_query_plan(
+        "테스트반도체 2025년 매출 규모 알려줘.",
+        known_companies=COMPANIES,
+    )
+
+    assert plan.operations == ()
+    assert plan.metric is MetricConcept.REVENUE
 
 
 # --------------------------------------------------------------------------

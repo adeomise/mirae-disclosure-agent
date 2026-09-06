@@ -47,6 +47,8 @@ __all__ = [
     "normalize_aggregate_request",
     "normalize_change_count_request",
     "normalize_comparison_request",
+    "normalize_scale_request",
+    "SCALE_REQUEST_PATTERN",
     "OPERATION_CHANGE_COUNT",
     "CHANGE_COUNT_REQUEST_PATTERN",
 ]
@@ -434,6 +436,44 @@ def normalize_change_count_request(question: str) -> str | None:
 def normalize_aggregate_request(question: str) -> str | None:
     """질문이 집계를 요청했으면 정본 이름으로 옮긴다. 아니면 None이며 추측하지 않는다."""
     if AGGREGATE_REQUEST_PATTERN.search(question) is None:
+        return None
+
+    return OPERATION_AGGREGATE
+
+
+# 여러 건을 뭉뚱그려 '규모'라고 부르는 표현.
+#
+# 왜 AGGREGATE_REQUEST_PATTERN과 나눠 두는가:
+#     위 어휘는 사용자가 더해 달라고 말한 표현이다("다 합치면"). '규모'는 그렇지 않다.
+#     값 하나의 크기를 부르는 자리에 훨씬 자주 쓰이며("2025년 매출 규모 알려줘", "계약
+#     규모가 얼마야"), 그 질문은 집계를 요청하지 않았다. 위 어휘에 넣으면 값 하나를 물은
+#     질문이 전부 집계 요청이 되고, 형식이 맞는 답이 나가므로 틀렸다는 사실이 드러나지
+#     않는다. 그래서 같은 모듈에 두되 다른 이름으로 두고, 읽을지 말지는 부르는 쪽이 정한다.
+#
+# 어디서 읽어도 되는가:
+#     묻는 대상이 이미 '여러 건'으로 확정된 자리에서만이다. 그 자리에서는 '규모'가 가리킬
+#     수 있는 것이 그 여러 건의 합계 말고 없다. 지금 그 조건을 갖춘 부르는 쪽은
+#     query_analyzer._looks_like_facility_investment_aggregate 하나뿐이다. 그쪽은 질문이
+#     신규시설투자등 공시를 가리켰다는 것을 이미 확정한 뒤에 이것을 읽으며, 한 해에 그
+#     공시는 기업마다 여러 건이다.
+#
+#     문서 하나의 값을 묻는 자리(Pattern A·B)에서는 읽지 않는다. 읽으면 위에 적은 오탐이
+#     그대로 일어난다.
+#
+# 표기:
+#     '규모' 하나다. '총액'·'전체'처럼 뜻이 가까운 표기를 함께 넣지 않는다. 넣는 것은 그
+#     표기가 실제로 오는 것을 본 뒤가 먼저이며, 이 모듈이 넓힐 때마다 지키는 순서다.
+SCALE_REQUEST_PATTERN = re.compile(r"규모")
+
+
+def normalize_scale_request(question: str) -> str | None:
+    """질문이 '규모'로 여러 건을 뭉뚱그렸으면 집계의 정본 이름으로 옮긴다.
+
+    부르기 전에 SCALE_REQUEST_PATTERN의 설명을 읽는다. 묻는 대상이 여러 건으로 확정된
+    자리에서만 부를 수 있으며, 그렇지 않은 자리에서 부르면 값 하나를 물은 질문이 집계
+    요청으로 읽힌다.
+    """
+    if SCALE_REQUEST_PATTERN.search(question) is None:
         return None
 
     return OPERATION_AGGREGATE

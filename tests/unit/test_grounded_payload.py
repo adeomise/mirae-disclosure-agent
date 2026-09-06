@@ -25,6 +25,7 @@ from disclosure_agent.agent.grounded_payload import (
     PayloadNotGroundableError,
     build_grounded_payload,
 )
+from disclosure_agent.agent.query_vocabulary import OPERATION_CHANGE_COUNT
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
@@ -356,8 +357,13 @@ def history_result(
     )
 
 
-def test_event_history_carries_counts_and_completeness_only() -> None:
-    """변경 항목의 영문 이름과 전후 값은 싣지 않는다."""
+def test_event_history_carries_its_changes_with_korean_field_names() -> None:
+    """건수와 함께 바뀐 항목의 이름·전후 값을 싣는다. 이름은 한국어 표기다.
+
+    건수만 보내면 모델이 답할 수 있는 것도 건수뿐이고, "무엇이 어떻게 바뀌었는가"는 답변
+    어디에도 남지 않는다. 영문 canonical 식별자는 그대로 넘기지 않는다. 넘기면 모델이 그것을
+    한국어로 옮기게 되고, 그 번역이 추출 계층의 어휘와 다른 두 번째 대응표가 된다.
+    """
     payload = grounded(history_result())
 
     [history] = payload.event_histories  # type: ignore[attr-defined]
@@ -365,10 +371,26 @@ def test_event_history_carries_counts_and_completeness_only() -> None:
     assert (history.document_count, history.change_count) == (2, 1)
     assert history.chain_complete is True
 
+    [change] = history.changes
+
+    assert (change.field_label, change.before, change.after) == ("계약금액", "100.0", "120.0")
+
     body = payload.to_json()  # type: ignore[attr-defined]
 
     assert "contract_amount" not in body
-    assert "120" not in body
+    assert "계약금액" in body
+    assert "120.0" in body
+
+
+def test_history_without_the_change_count_question_omits_the_correction_count() -> None:
+    """묻지 않은 셈은 싣지 않는다. 보내면 모델이 그 수를 답의 일부로 만든다."""
+    payload = grounded(history_result())
+
+    [history] = payload.event_histories  # type: ignore[attr-defined]
+
+    assert history.correction_count is None
+    assert history.correction_count_display is None
+    assert "correction_count" not in payload.to_json()  # type: ignore[attr-defined]
 
 
 def q15_shaped_result() -> AgentExecutionResult:
@@ -411,29 +433,62 @@ def q15_shaped_result() -> AgentExecutionResult:
         event_histories=[history],
         event_links=links,
         evidence=[evidence()],
+        # 질문이 횟수를 물었다는 신호. 이 신호가 없으면 정정 횟수를 세지 않는다.
+        operations=[OPERATION_CHANGE_COUNT],
     )
 
 
-def test_event_links_block_grounding() -> None:
+def test_event_links_become_corrections_with_their_own_count() -> None:
     """
-    답에 필요한 셈이 payload에 없는 모양은 외부 모델에 넘기지 않는다.
+    "몇 번 바뀌었어?"의 답이 payload 안에 있어야 그 질문에 답할 수 있다.
 
-    "몇 번 바뀌었어?"의 답은 EventLink의 개수(3)이고 payload가 싣는 셈은 공시 4건과 필드 변경
-    4건뿐이다. 그대로 보내면 모델은 갖고 있는 수로 답하며 "4번 바뀌었습니다"가 나간다. 그 4는
-    payload 안의 수라서 수치 검증도 값-주인 짝 검사도 통과하고, 틀렸다는 사실이 남는 자리가
-    없다.
+    그 셈은 정정 이력의 개수(3)이고, payload가 싣던 두 셈은 공시 4건과 필드 변경 4건이었다.
+    그대로 보내면 모델은 갖고 있는 수로 답하며 "4번 바뀌었습니다"가 나간다. 그 4는 payload
+    안의 수라서 수치 검증도 값-주인 짝 검사도 통과하고, 틀렸다는 사실이 남는 자리가 없다.
 
-    셈을 여기서 새로 싣지 않는다. 그 값을 무엇이라 부르고 어떤 표기로 적을지가 결정론 경로에도
-    아직 없으므로, 그 계약이 생기기 전까지 이 모양은 통째로 결정론 경로에 맡긴다.
+    셈만 여는 대신 정정 자체를 싣는다. 시점과 사유가 함께 실리므로 "언제 무엇 때문에
+    고쳤는가"까지 답할 수 있고, 셈은 그 목록의 길이다.
     """
     result = q15_shaped_result()
 
-    # 문제의 전제. 답이 될 3은 payload가 싣는 두 셈 어디에도 없다.
     assert len(result.event_histories[0].document_ids) == 4
     assert len(result.event_histories[0].changes) == 4
     assert len(result.event_links) == 3
 
+    payload = grounded(result)
+
+    [history] = payload.event_histories  # type: ignore[attr-defined]
+
+    assert (history.document_count, history.change_count) == (4, 4)
+    assert history.correction_count == 3
+    assert history.correction_count_display == "3회"
+    assert [correction.correction_date for correction in history.corrections] == [
+        "2025-01-01",
+        "2025-02-01",
+        "2025-03-01",
+    ]
+
+
+def test_correction_outside_the_history_documents_blocks_grounding() -> None:
+    """어느 이력의 정정인지 정해지지 않은 연결은 옮기지 않는다.
+
+    목록 밖의 정정을 함께 실으면 다른 건의 정정 시점이 이 건의 이력으로 읽힌다.
+    """
+    result = q15_shaped_result()
+
+    result.event_links[0].source_doc_id = "doc_other_event"
+
     with pytest.raises(PayloadNotGroundableError, match="EventLink"):
+        grounded(result)
+
+
+def test_unresolved_correction_blocks_grounding() -> None:
+    """무엇을 고친 것인지 정해지지 않은 정정을 이력의 일부로 옮기지 않는다."""
+    result = q15_shaped_result()
+
+    result.event_links[0].resolution_status = EventLinkResolutionStatus.AMBIGUOUS
+
+    with pytest.raises(PayloadNotGroundableError, match="해소되지 않았습니다"):
         grounded(result)
 
 
@@ -869,8 +924,12 @@ def test_empty_result_is_not_grounded() -> None:
         grounded(completed(evidence=[evidence()]))
 
 
-def test_document_summary_result_is_not_grounded() -> None:
-    """Pattern B는 이번 범위 밖이다. 요약을 뺀 나머지만 보내지 않는다."""
+def test_document_summary_carries_every_item_with_korean_labels() -> None:
+    """Pattern B의 답은 범위 안의 내용이다. 항목을 고르지 않고 전부 싣는다.
+
+    무엇이 질문에 가까운지는 질문을 함께 보는 표현 단계가 정한다. 여기서 미리 고르면 그 판정이
+    payload 계층으로 내려온다.
+    """
     summary = DocumentSummary(
         summary_id="sum_1",
         company="한미반도체",
@@ -881,8 +940,22 @@ def test_document_summary_result_is_not_grounded() -> None:
         items=[summary_item()],
     )
 
-    with pytest.raises(PayloadNotGroundableError, match="DocumentSummary"):
-        grounded(completed(document_summaries=[summary], evidence=[evidence()]))
+    payload = grounded(completed(document_summaries=[summary], evidence=[evidence()]))
+
+    [grounded_summary] = payload.document_summaries  # type: ignore[attr-defined]
+
+    assert grounded_summary.company == "한미반도체"
+    assert grounded_summary.scope_label == "설비 투자"
+    assert grounded_summary.section_path == ("II. 사업의 내용",)
+    assert [item.content for item in grounded_summary.items] == [
+        item.label for item in summary.items
+    ]
+
+    body = payload.to_json()  # type: ignore[attr-defined]
+
+    # enum 값도 내부 식별자도 나가지 않는다.
+    assert SectionScope.FACILITY_INVESTMENT.value not in body
+    assert "sum_1" not in body
 
 
 def test_document_summary_beside_facts_blocks_the_whole_payload() -> None:

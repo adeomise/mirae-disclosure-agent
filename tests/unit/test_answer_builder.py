@@ -1051,7 +1051,7 @@ def test_q12_shape_renders_aggregate_values_and_preserves_the_result() -> None:
 
     assert OPERATION_AGGREGATE == CALCULATOR_OPERATION_AGGREGATE
     assert response.answer == (
-        f"{LEFT_COMPANY}의 시설투자 합계는 3000원이고, "
+        f"{LEFT_COMPANY}의 시설투자 합계는 3,000원(2000원, 1000원 합산)이고, "
         f"{RIGHT_COMPANY}의 시설투자 합계는 500원입니다. "
         f"{LEFT_COMPANY} 쪽이 더 큽니다."
     )
@@ -1072,7 +1072,7 @@ def test_q12_aggregate_values_are_not_recomputed_from_input_facts() -> None:
 
     assert "17원" in answer
     assert "29원" in answer
-    assert "3000원" not in answer
+    assert "3,000원" not in answer
     assert "500원" not in answer
     assert answer.endswith(f"{RIGHT_COMPANY} 쪽이 더 큽니다.")
 
@@ -1097,7 +1097,7 @@ def test_q12_relation_is_read_without_comparing_aggregate_values(
 
     answer = build_answer_response(result).answer
 
-    assert "3000원" in answer
+    assert "3,000원" in answer
     assert "500원" in answer
     assert answer.endswith(expected_clause)
 

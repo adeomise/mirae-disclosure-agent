@@ -141,16 +141,17 @@ def test_answer_does_not_leak_contract_enum_values() -> None:
     assert SummaryItemType.PARAGRAPH.value not in response.answer
 
 
-def test_answer_does_not_list_item_labels() -> None:
+def test_answer_lists_every_item_label_in_source_order() -> None:
     """
-    항목 이름을 문장에 나열하지 않는다.
+    항목 이름을 원문 순서 그대로 전부 나열한다.
 
     앞의 몇 건만 적으면 그 몇 건이 나머지보다 중요하다는 뜻이 된다. 항목 순서는 원문 배치일
-    뿐 중요도가 아니므로 결과가 그 주장을 보장하지 않는다. Q04의 해당 Section이 실제로
-    그렇다 — 앞쪽이 원재료 관련 본문이고 투자 내용은 뒤에 있어, 앞 몇 건을 내세우면 질문이
-    묻지 않은 쪽이 답의 머리에 온다.
+    뿐 중요도가 아니므로 결과가 그 주장을 보장하지 않는다. 그래서 고르는 대신 전부 적는다.
+    전부 적으면 무엇이 더 중요하다는 주장을 하지 않으면서도 범위 안에 무엇이 있는지가 답변에
+    남는다.
 
-    항목 이름은 DocumentSummary.items에, 원문 발췌는 Evidence에 그대로 남는다.
+    건수만 적던 이전 문장은 "무슨 사업을 하느냐"에 "본문 6건입니다"로 답했다. 형식은 정상이고
+    근거도 맞지만 질문에 답하지 않는다.
     """
     labels = tuple(f"항목{index}" for index in range(8))
 
@@ -158,9 +159,13 @@ def test_answer_does_not_list_item_labels() -> None:
 
     response = build_answer_response(result)
 
-    assert not [label for label in labels if label in response.answer]
+    assert [label for label in labels if label in response.answer] == list(labels)
 
-    # 문장에서 빠졌을 뿐 결과에서 사라지지 않는다.
+    positions = [response.answer.index(label) for label in labels]
+
+    assert positions == sorted(positions)
+
+    # 결과에도 그대로 남는다.
     assert [item.label for item in result.document_summaries[0].items] == list(labels)
 
 

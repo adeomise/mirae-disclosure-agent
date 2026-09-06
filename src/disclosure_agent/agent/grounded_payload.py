@@ -47,6 +47,11 @@
         2. payload는 외부로 나간다. 최소 전송이 hyperclova 모듈의 정책이다.
     실리는 것은 evidence_id와 doc_id뿐이며, 그 목록은 검증 단계의 화이트리스트가 된다.
 
+    DocumentSummary의 항목 이름(items[].label)은 예외가 아니다. 그것은 Evidence가 아니라
+    producer가 요약 항목의 이름으로 확정해 실어 둔 상한 있는 문자열이고(periodic.sections),
+    결정론 문장도 같은 값을 적는다. 같은 문서의 원문 발췌(Evidence.raw_text, 최대 300자)는
+    여전히 보내지 않는다.
+
     answerability_detail·execution_issue·warnings·conversion_gaps도 넣지 않는다. 진단용
     내부 서술이고 사용자 문장의 재료가 아니다. 넘기면 모델이 그것을 근거로 삼아 답변에
     내부 사정을 적는다.
@@ -58,9 +63,9 @@
 - GroundedPayload
 
 TODO:
-- DocumentSummary(Pattern B) 지원. 현재는 요약 결과를 만나면 멈추고 결정론 경로에 맡긴다.
-- 계약 묶음(Q02)·지분공시 묶음(Q03) 지원. 결정론 경로는 답하지만 그 모양의 payload 표기가
-  아직 정해지지 않아 멈춘다.
+- ResolvedEventState(Q06) 지원. 현재는 이벤트 단건 요약을 만나면 멈추고 결정론 경로에 맡긴다.
+- 계약 묶음(Q02)·지분공시 묶음(Q03)·시설투자 집계(Q12) 지원. 결정론 경로는 답하지만 그 모양의
+  payload 표기가 아직 정해지지 않아 멈춘다.
 """
 
 from __future__ import annotations
@@ -79,6 +84,8 @@ from disclosure_agent.agent.answer_builder import (
     LIMITATION_WITHOUT_REASON_MESSAGE,
     METRIC_LABELS,
     SCOPE_OMITTED_IN_ANSWER,
+    SECTION_SCOPE_LABELS,
+    SUMMARY_ITEM_TYPE_LABELS,
     TEMPORAL_OPERATION_LABELS,
     UNIT_PERCENTAGE_POINT,
     AnswerBuildError,
@@ -91,13 +98,27 @@ from disclosure_agent.agent.answer_builder import (
     _is_temporal_derived_delta_shape,
     _normalized_value_with_unit,
     _referenced_fact,
+    change_value_display,
+    correction_count_display,
+    correction_field_label,
+    delta_direction_label,
     event_count_display,
+    unsigned_display,
 )
 from disclosure_agent.agent.derived_metrics import UNIT_PERCENT
-from disclosure_agent.common.enums import AnswerabilityStatus, ResultInputType
+from disclosure_agent.agent.query_vocabulary import OPERATION_CHANGE_COUNT
+from disclosure_agent.common.enums import (
+    AnswerabilityStatus,
+    EventLinkRelation,
+    EventLinkResolutionStatus,
+    ResultInputType,
+)
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
     CalculationResult,
+    DocumentSummary,
+    EventHistory,
+    EventLink,
     Fact,
 )
 
@@ -176,6 +197,15 @@ class GroundedCalculation:
     display_value: str
     input_ids: tuple[str, ...]
     evidence_ids: tuple[str, ...]
+    # 부호를 뗀 표기와 그 부호의 이름. 부호가 없는 값에서는 둘 다 None이다.
+    #
+    # display_value를 대신하지 않는다. 두 표기는 같은 값을 말하며, 어느 쪽으로 적어도 되고
+    # 어느 쪽도 적지 않으면 값을 빠뜨린 것이 된다(verbalizer의 완결성 규칙).
+    #
+    # 방향을 함께 싣는 이유는 크기만 남기면 방향이 사라지기 때문이다. "2.1017%p"만 보고
+    # 늘었는지 줄었는지 알 수 없고, 그 자리에서 모델이 고르면 그것은 추측이다.
+    magnitude_display: str | None = None
+    direction_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -204,27 +234,104 @@ class GroundedEventCount:
 
 
 @dataclass(frozen=True)
+class GroundedFieldChange:
+    """이력이 바꾼 항목 1건.
+
+    이름과 값 모두 answer_builder가 확정한 표기다(correction_field_label,
+    change_value_display). 영문 식별자를 넘겨 모델에게 옮기게 하지 않는다. 그 번역은 추출
+    계층의 라벨 어휘와 다른 두 번째 대응표가 되고, 어느 쪽이 정본인지 알 수 없게 된다.
+
+    값은 원문 문자열 그대로다. 날짜를 다시 쓰거나 금액의 자릿수를 바꾸면 그것이 새 수치가
+    되고, 정정 표의 값과 답변의 값을 대조할 수 없게 된다.
+    """
+
+    field_label: str
+    before: str
+    after: str
+
+
+@dataclass(frozen=True)
+class GroundedCorrection:
+    """이력에 걸린 정정 공시 1건.
+
+    언제 무엇 때문에 고쳤는지는 EventLink.raw_reference가 원문에서 그대로 옮겨 온 값이다.
+    "나중에 바뀐 내용 있어?"가 묻는 것의 절반이 그 시점이므로, 날짜가 없는 정정은 싣지 않고
+    payload 전체를 멈춘다(_ground_corrections).
+    """
+
+    correction_date: str
+    reason: str | None
+
+
+@dataclass(frozen=True)
 class GroundedEventHistory:
-    """이력 1건의 셈.
+    """이력 1건의 셈과 바뀐 내용.
 
-    변경 항목의 이름은 싣지 않는다. FieldChange.field_name은 canonical 영문 식별자이고
-    production에서 raw_field는 비어 있다. 영문 이름을 넘기면 모델이 그것을 한국어로 옮기게
-    되고, 그 번역이 추출 계층의 라벨 어휘와 다른 두 번째 대응표가 된다.
+    변경 항목의 이름과 전후 값을 함께 싣는다. 건수만 보내면 모델이 답할 수 있는 것도 건수뿐이고,
+    "무엇이 어떻게 바뀌었는가"는 답변 어디에도 남지 않는다. 표기는 결정론 문장이 쓰는 것과
+    같은 함수에서 나오므로(answer_builder.field_change_display) 두 경로의 문자열이 갈리지
+    않는다.
 
-    변경 전후 값도 싣지 않는다. 그 값을 문장에 적는 형태는 결정론 경로에도 아직 없다
-    (answer_builder의 Pattern E narrative TODO). 표현 방법이 정해지기 전에 모델에게 먼저
-    주면, 그 문장이 사실상의 정본이 된다.
+    correction_count는 "몇 번 바뀌었어?"에 답할 값이며, 질문이 횟수를 물었을 때만 채운다.
+    무엇을 세는지가 다른 두 셈(공시 건수·변경 항목 건수)과 축이 다르다.
     """
 
     event_id: str
     document_count: int
     change_count: int
     chain_complete: bool
+    changes: tuple[GroundedFieldChange, ...] = ()
+    corrections: tuple[GroundedCorrection, ...] = ()
+    correction_count: int | None = None
     # 셈마다 무엇을 센 것인지. 전송하지 않는다(as_dict 참조).
     #
     # 모델에게는 지금까지와 같은 정수를 보낸다. 이 표기는 돌아온 문장에서 어느 셈이 어느
     # 숫자에 걸렸는지 볼 때 쓰는 기준이며, 보내는 재료가 아니다.
     counts: tuple[GroundedEventCount, ...] = ()
+
+    @property
+    def correction_count_display(self) -> str | None:
+        """정정 횟수가 문장에 적히는 표기. 묻지 않은 질문이면 None."""
+        if self.correction_count is None:
+            return None
+
+        return correction_count_display(self.correction_count)
+
+
+@dataclass(frozen=True)
+class GroundedSummaryItem:
+    """요약 범위 안의 내용 1건.
+
+    content는 DocumentSummary.items[].label이다. Evidence.raw_text가 아니다:
+        원문 발췌를 보내지 않는 정책은 그대로다(모듈 docstring). 이 값은 producer가 요약
+        항목의 이름으로 확정해 실어 둔 상한 있는 문자열이며(periodic.sections의
+        LABEL_MAX_LENGTH), 결정론 문장도 같은 값을 적는다.
+
+        상한에 걸린 항목은 끝에 '…'가 붙어 있다. 잘린 자리를 모델이 이어 쓰지 않도록 지시문이
+        따로 막는다(verbalizer.SYSTEM_PROMPT).
+    """
+
+    item_id: str
+    type_label: str
+    content: str
+    evidence_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GroundedDocumentSummary:
+    """문서 1건의 한 범위에서 확보한 내용 전부(Pattern B).
+
+    항목을 고르지 않고 전부 싣는다. 무엇이 질문에 가까운지는 질문을 함께 보는 표현 단계가
+    정하며, 여기서 미리 고르면 그 판정이 payload 계층으로 내려온다. 결정론 문장이 전부
+    나열하는 것과 같은 이유다(answer_builder._single_document_summary_sentence).
+    """
+
+    summary_id: str
+    company: str
+    report_name: str
+    scope_label: str
+    section_path: tuple[str, ...]
+    items: tuple[GroundedSummaryItem, ...]
 
 
 @dataclass(frozen=True)
@@ -247,6 +354,7 @@ class GroundedPayload:
     event_histories: tuple[GroundedEventHistory, ...]
     evidence: tuple[GroundedEvidence, ...]
     limitation: str | None
+    document_summaries: tuple[GroundedDocumentSummary, ...] = ()
 
     def to_json(self) -> str:
         """모델에게 실제로 보내는 문자열."""
@@ -296,6 +404,14 @@ class GroundedPayload:
                         else {}
                     ),
                     "value": calculation.display_value,
+                    **(
+                        {
+                            "magnitude": calculation.magnitude_display,
+                            "direction": calculation.direction_label,
+                        }
+                        if calculation.magnitude_display and calculation.direction_label
+                        else {}
+                    ),
                     "input_ids": list(calculation.input_ids),
                     "evidence_ids": list(calculation.evidence_ids),
                 }
@@ -313,6 +429,25 @@ class GroundedPayload:
                 for comparison in self.comparisons
             ]
 
+        if self.document_summaries:
+            body["document_summaries"] = [
+                {
+                    "company": summary.company,
+                    "report_name": summary.report_name,
+                    "scope": summary.scope_label,
+                    "section_path": list(summary.section_path),
+                    "items": [
+                        {
+                            "type": item.type_label,
+                            "content": item.content,
+                            "evidence_ids": list(item.evidence_ids),
+                        }
+                        for item in summary.items
+                    ],
+                }
+                for summary in self.document_summaries
+            ]
+
         if self.event_histories:
             body["event_histories"] = [
                 {
@@ -320,6 +455,42 @@ class GroundedPayload:
                     "document_count": history.document_count,
                     "change_count": history.change_count,
                     "chain_complete": history.chain_complete,
+                    **(
+                        {"correction_count": history.correction_count}
+                        if history.correction_count is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "changes": [
+                                {
+                                    "field": change.field_label,
+                                    "before": change.before,
+                                    "after": change.after,
+                                }
+                                for change in history.changes
+                            ]
+                        }
+                        if history.changes
+                        else {}
+                    ),
+                    **(
+                        {
+                            "corrections": [
+                                {
+                                    "correction_date": correction.correction_date,
+                                    **(
+                                        {"reason": correction.reason}
+                                        if correction.reason
+                                        else {}
+                                    ),
+                                }
+                                for correction in history.corrections
+                            ]
+                        }
+                        if history.corrections
+                        else {}
+                    ),
                 }
                 for history in self.event_histories
             ]
@@ -377,25 +548,17 @@ def build_grounded_payload(
         for comparison in result.comparisons
     )
 
-    histories = tuple(
-        GroundedEventHistory(
-            event_id=history.event_id,
-            document_count=len(history.document_ids),
-            change_count=len(history.changes),
-            chain_complete=history.chain_complete,
-            counts=(
-                GroundedEventCount(
-                    kind_label=EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT],
-                    display_value=event_count_display(len(history.document_ids)),
-                ),
-                GroundedEventCount(
-                    kind_label=EVENT_COUNT_LABELS[EVENT_COUNT_CHANGE],
-                    display_value=event_count_display(len(history.changes)),
-                ),
-            ),
+    try:
+        histories = _ground_histories(result)
+
+        summaries = tuple(
+            _ground_document_summary(summary) for summary in result.document_summaries
         )
-        for history in result.event_histories
-    )
+
+    except AnswerBuildError as error:
+        # 표기가 정해지지 않은 값이다(변경 항목 이름). 여기서 generic 표기를 만들면 대응표가
+        # 두 벌이 된다.
+        raise PayloadNotGroundableError(str(error)) from error
 
     _require_known_comparison_operands(comparisons, facts, calculations)
 
@@ -411,6 +574,192 @@ def build_grounded_payload(
             for item in result.evidence
         ),
         limitation=_limitation(result, status),
+        document_summaries=summaries,
+    )
+
+
+def _ground_histories(
+    result: AgentExecutionResult,
+) -> tuple[GroundedEventHistory, ...]:
+    """이력을 셈·바뀐 내용·정정 시점까지 옮긴다.
+
+    정정 횟수를 세는 규칙은 결정론 경로와 같은 것을 따른다. 질문이 횟수를 물었을 때만
+    (OPERATION_CHANGE_COUNT) 정정 연결의 개수를 싣는다. 묻지 않았는데 세어 보내면 모델이 그
+    수를 답에 넣게 되고, 사용자가 묻지 않은 것이 답의 일부가 된다
+    (answer_builder._supported_answer의 같은 분기).
+    """
+    corrections_by_event = _ground_corrections(result)
+
+    requested_count = OPERATION_CHANGE_COUNT in result.operations
+
+    return tuple(
+        GroundedEventHistory(
+            event_id=history.event_id,
+            document_count=len(history.document_ids),
+            change_count=len(history.changes),
+            chain_complete=history.chain_complete,
+            changes=_ground_changes(history),
+            corrections=corrections_by_event[history.event_id],
+            correction_count=(
+                len(corrections_by_event[history.event_id]) if requested_count else None
+            ),
+            counts=(
+                GroundedEventCount(
+                    kind_label=EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT],
+                    display_value=event_count_display(len(history.document_ids)),
+                ),
+                GroundedEventCount(
+                    kind_label=EVENT_COUNT_LABELS[EVENT_COUNT_CHANGE],
+                    display_value=event_count_display(len(history.changes)),
+                ),
+            ),
+        )
+        for history in result.event_histories
+    )
+
+
+def _ground_changes(history: EventHistory) -> tuple[GroundedFieldChange, ...]:
+    """변경 전부를 옮긴다. 한 건이라도 옮기지 못하면 멈춘다.
+
+    일부만 싣지 않는다. 실린 것만 보면 그것이 변경의 전부로 읽히고, 빠진 항목이 있었다는
+    사실은 payload에도 답변에도 남지 않는다. 결정론 문장이 같은 경우에 건수만 말하는 것과
+    같은 자리이며(answer_builder.field_change_clause), 그때는 이 결과가 통째로 결정론 경로로
+    돌아간다.
+    """
+    grounded: list[GroundedFieldChange] = []
+
+    for change in history.changes:
+        before = change_value_display(change.before)
+
+        after = change_value_display(change.after)
+
+        if before is None or after is None:
+            raise PayloadNotGroundableError(
+                f"이력 {history.event_id!r}의 변경 항목 {change.field_name!r}에 "
+                "변경 전 또는 변경 후 값이 없습니다. 값이 없는 변경은 옮기지 않습니다."
+            )
+
+        grounded.append(
+            GroundedFieldChange(
+                field_label=correction_field_label(change.field_name),
+                before=before,
+                after=after,
+            )
+        )
+
+    return tuple(grounded)
+
+
+def _ground_corrections(
+    result: AgentExecutionResult,
+) -> dict[str, tuple[GroundedCorrection, ...]]:
+    """정정 공시를 이력별로 모은다. 어느 이력의 것인지 정해지지 않으면 멈춘다.
+
+    귀속은 EventLink.source_doc_id로 읽는다. 그 문서는 정정을 낸 쪽이고, 이력이 확인한 문서
+    목록(EventHistory.document_ids) 안에 있어야 그 이력에 걸린 정정이다. 목록 밖의 정정을
+    함께 싣으면 다른 건의 정정 시점이 이 건의 이력으로 읽힌다.
+
+    correction_of가 아닌 연결(후속·해지)은 아직 옮기지 않는다. 그 관계를 무엇이라 부르고 어떤
+    표기로 적을지가 결정론 경로에도 정해져 있지 않다.
+    """
+    if not result.event_links:
+        return {history.event_id: () for history in result.event_histories}
+
+    owner_of: dict[str, str] = {
+        document_id: history.event_id
+        for history in result.event_histories
+        for document_id in history.document_ids
+    }
+
+    grouped: dict[str, list[GroundedCorrection]] = {
+        history.event_id: [] for history in result.event_histories
+    }
+
+    for link in result.event_links:
+        event_id = owner_of.get(link.source_doc_id)
+
+        if event_id is None:
+            raise PayloadNotGroundableError(
+                f"EventLink {link.link_id!r}이 어느 이력의 정정인지 정해지지 않습니다. "
+                f"source_doc_id {link.source_doc_id!r}가 확인한 공시 목록에 없습니다."
+            )
+
+        grouped[event_id].append(_ground_correction(link))
+
+    return {event_id: tuple(items) for event_id, items in grouped.items()}
+
+
+def _ground_correction(link: EventLink) -> GroundedCorrection:
+    """정정 연결 1건을 옮긴다. 시점을 확정하지 못하면 멈춘다."""
+    if link.relation is not EventLinkRelation.CORRECTION_OF:
+        raise PayloadNotGroundableError(
+            f"EventLink {link.link_id!r}의 관계가 정정이 아닙니다: {link.relation.value!r}. "
+            "후속·해지 연결의 표기는 아직 정해지지 않았습니다."
+        )
+
+    if link.resolution_status is not EventLinkResolutionStatus.RESOLVED:
+        raise PayloadNotGroundableError(
+            f"EventLink {link.link_id!r}이 해소되지 않았습니다: "
+            f"{link.resolution_status.value!r}. 어느 공시를 고친 것인지 정해지지 않은 정정을 "
+            "이력의 일부로 옮기지 않습니다."
+        )
+
+    correction_date = (link.raw_reference.correction_filing_date or "").strip()
+
+    if not correction_date:
+        raise PayloadNotGroundableError(
+            f"EventLink {link.link_id!r}에 정정 시점이 없습니다. "
+            "언제 고쳤는지 없이 정정을 옮기지 않습니다."
+        )
+
+    reason = (link.raw_reference.correction_reason or "").strip()
+
+    return GroundedCorrection(correction_date=correction_date, reason=reason or None)
+
+
+def _ground_document_summary(summary: DocumentSummary) -> GroundedDocumentSummary:
+    """문서 요약 1건을 표기까지 확정해 옮긴다."""
+    scope_label = SECTION_SCOPE_LABELS.get(summary.section_scope)
+
+    if scope_label is None:
+        raise PayloadNotGroundableError(
+            f"표기가 정해지지 않은 section_scope입니다: {summary.section_scope.value!r}. "
+            "SECTION_SCOPE_LABELS에 없는 범위는 외부 모델에 넘기지 않습니다."
+        )
+
+    items: list[GroundedSummaryItem] = []
+
+    for item in summary.items:
+        type_label = SUMMARY_ITEM_TYPE_LABELS.get(item.item_type)
+
+        if type_label is None:
+            raise PayloadNotGroundableError(
+                f"표기가 정해지지 않은 요약 항목 종류입니다: {item.item_type.value!r}."
+            )
+
+        content = item.label.strip()
+
+        if not content:
+            raise PayloadNotGroundableError(
+                f"요약 항목 {item.item_id!r}에 옮길 내용이 없습니다."
+            )
+
+        items.append(
+            GroundedSummaryItem(
+                item_id=item.item_id,
+                type_label=type_label,
+                content=content,
+                evidence_ids=tuple(item.evidence_ids),
+            )
+        )
+
+    return GroundedDocumentSummary(
+        summary_id=summary.summary_id,
+        company=summary.company,
+        report_name=summary.report_name,
+        scope_label=scope_label,
+        section_path=tuple(summary.section_path),
+        items=tuple(items),
     )
 
 
@@ -422,38 +771,40 @@ def _resolve_supported_shape(result: AgentExecutionResult) -> _ResultShape:
     그쪽이 이미 거부하는 조합을 여기서도 거부한다. 한쪽만 통과시키면 연동을 켰을 때에만
     답해지는 결과가 생긴다.
 
-    DocumentSummary는 그중에서도 이번 범위 밖이다. 결정론 경로는 Pattern B를 답하지만
-    payload에는 요약을 옮길 자리가 없다. 요약을 빼고 나머지를 보내면 답의 본체가 사라지므로,
-    요약이 실린 결과는 통째로 결정론 경로에 맡긴다.
+    DocumentSummary는 이제 옮긴다. 옮길 자리가 없던 동안 Pattern B의 답은 범위 이름과 건수뿐
+    이었고, "무슨 사업을 하느냐"에 "본문 6건입니다"로 답하는 결과가 그대로 나갔다. 결정론
+    경로가 요약 항목을 전부 나열하게 된 것과 같은 이유로 payload도 전부 싣는다
+    (answer_builder._single_document_summary_sentence).
 
-    ResolvedEventState도 같은 자리다. 이벤트 단건 요약(Q06)의 답은 그 상태의 필드 값들이고,
+    다만 다른 carrier와 섞인 결과는 여전히 막는다. 결정론 경로가 그 조합을 거부하며
+    (_supported_answer의 첫 가드), 요약과 수치를 함께 서술하는 형태가 정해져 있지 않다.
+
+    ResolvedEventState는 아직 범위 밖이다. 이벤트 단건 요약(Q06)의 답은 그 상태의 필드 값들이고,
     payload에는 그것을 담을 자리가 없다. 그대로 보내면 모델은 값을 하나도 받지 못한 채
     EventHistory의 건수만 보고 요약 문장을 지어내게 된다.
 
-    EventLink도 같은 자리다. "그동안 계획이 몇 번 바뀌었어?"가 묻는 셈은 정정 이력의 개수이고
-    그것은 EventLink의 개수다. payload가 싣는 셈은 공시 건수와 필드 변경 건수뿐이다
-    (GroundedEventHistory). 실측 Q15가 공시 4건·필드 변경 4건·EventLink 3건이므로, 답이 될
-    3은 payload 어디에도 없다.
+    EventLink도 이제 옮긴다. "그동안 계획이 몇 번 바뀌었어?"가 묻는 셈은 정정 이력의 개수이고
+    그것은 EventLink의 개수다. 그 값이 payload에 없던 동안, 답이 될 수(실측 Q15의 3)는 어디에도
+    없는 채로 공시 4건·필드 변경 4건만 실려 나갔다. 모델은 받은 수로 답하므로 "4번
+    바뀌었습니다"가 나가고, 그 4는 payload 안의 수라서 수치 검증도 값-주인 짝 검사도 통과한다.
 
-    없는 값을 안 보내는 것으로 끝나지 않는다. 모델은 받은 수로 답하며 "4번 바뀌었습니다"가
-    나간다. 그 4는 payload 안의 수라서 수치 검증도, 값-주인 짝 검사도 통과한다. 틀렸다는 사실이
-    남는 자리가 없다.
-
-    여기서 EventLink를 싣는 자리를 만들지 않는다. 그 셈을 무엇이라 부르고 어떤 표기로 적을지는
-    결정론 경로에도 아직 없다(answer_builder._event_history_sentence는 공시와 변경 항목만
-    적는다). 표기가 정해지기 전에 payload에 먼저 실으면 그 자리가 사실상의 정본이 된다.
-    그때까지 이 모양은 통째로 결정론 경로에 맡긴다. 구조화 결과에는 EventLink가 그대로 실려
-    나가므로(answer_builder.build_answer_response) 셈 자체가 사라지지는 않는다.
+    그래서 셈만 여는 대신 정정 자체를 싣는다(GroundedCorrection). 시점과 사유가 함께 실리므로
+    "언제 무엇 때문에 고쳤는가"까지 답할 수 있고, 셈은 그 목록의 길이다. 어느 이력의 정정인지
+    정해지지 않은 연결이 섞여 있으면 멈춘다(_ground_corrections).
 
     다중 Fact는 반대다. 결정론 경로가 답하는 두 모양(Q07 증감, Q08 파생지표 변화)은 값도 관계도
     payload가 그대로 담을 수 있다. 그래서 그 둘만 열고 나머지 다중 Fact는 그대로 막는다. 계약
     묶음(Q02)·지분공시 묶음(Q03)은 결정론 경로가 답하지만 아직 열지 않았다. 여는 자리는 여기가
     아니라 그 모양의 표기를 정하는 자리다.
     """
-    if result.document_summaries:
+    if result.document_summaries and (
+        result.facts or result.comparisons or result.event_histories
+    ):
         raise PayloadNotGroundableError(
-            f"DocumentSummary {len(result.document_summaries)}건이 실려 있습니다. "
-            "문서 요약은 아직 payload로 옮기지 않으며, 요약을 뺀 나머지만 보내지 않습니다."
+            f"DocumentSummary {len(result.document_summaries)}건이 Fact "
+            f"{len(result.facts)}건 / ComparisonResult {len(result.comparisons)}건 / "
+            f"EventHistory {len(result.event_histories)}건과 함께 있습니다. "
+            "결정론 경로도 이 조합을 거부합니다(_supported_answer)."
         )
 
     if result.resolved_event_states:
@@ -463,11 +814,10 @@ def _resolve_supported_shape(result: AgentExecutionResult) -> _ResultShape:
             "않습니다."
         )
 
-    if result.event_links:
+    if result.event_links and not result.event_histories:
         raise PayloadNotGroundableError(
-            f"EventLink {len(result.event_links)}건이 실려 있습니다. "
-            "이력이 몇 번 바뀌었는지를 세는 값이 payload에 없어, 답에 필요한 셈을 보내지 못한 채 "
-            "다른 셈만 보내게 됩니다."
+            f"EventLink {len(result.event_links)}건이 EventHistory 없이 실려 있습니다. "
+            "어느 이력의 정정인지 정해지지 않은 연결은 옮기지 않습니다."
         )
 
     if result.comparisons and result.event_histories:
@@ -500,9 +850,15 @@ def _resolve_supported_shape(result: AgentExecutionResult) -> _ResultShape:
 
         return shape
 
-    if not (result.facts or result.calculations or result.event_histories):
+    if not (
+        result.facts
+        or result.calculations
+        or result.event_histories
+        or result.document_summaries
+    ):
         raise PayloadNotGroundableError(
-            "옮길 근거가 없습니다. facts/calculations/event_histories가 모두 비어 있습니다."
+            "옮길 근거가 없습니다. "
+            "facts/calculations/event_histories/document_summaries가 모두 비어 있습니다."
         )
 
     return _ResultShape.GENERAL
@@ -733,6 +1089,10 @@ def _ground_temporal_calculation(
     """
     두 기간 사이의 값 1건을 옮긴다. 회계연도 자리는 비운다.
 
+    부호가 있는 값에는 부호를 뗀 표기와 방향 이름을 함께 싣는다. 표기가 하나뿐이면 문장이
+    "-2.1017%p 감소했습니다"가 되어 부호를 두 번 말하게 되고, 부호만 지우면 방향이 사라진다
+    (answer_builder.delta_direction_label).
+
     개념 이름은 연산 이름으로 되짚는다. 파생지표 대응표는 분자·분모 조합으로 개념을 찾으므로
     (agent.derived_metrics) 두 기간 사이의 값에는 닿지 않는다. 그 대신 결정론 문장이 쓰는
     대응표를 그대로 읽는다(answer_builder.TEMPORAL_OPERATION_LABELS).
@@ -745,6 +1105,10 @@ def _ground_temporal_calculation(
             "TEMPORAL_OPERATION_LABELS에 없는 연산은 외부 모델에 넘기지 않습니다."
         )
 
+    direction = delta_direction_label(calculation.value)
+
+    magnitude = unsigned_display(display_value)
+
     return GroundedCalculation(
         calculation_id=calculation.calculation_id,
         metric_label=label,
@@ -754,6 +1118,10 @@ def _ground_temporal_calculation(
         display_value=display_value,
         input_ids=tuple(item.input_id for item in calculation.inputs),
         evidence_ids=tuple(calculation.evidence_ids),
+        # 방향은 두 기간 사이의 값에만 붙인다. 한 기간 안의 파생값(비율)에는 부호가 방향을
+        # 뜻하지 않으므로, 붙이면 없는 변화를 말하게 된다.
+        magnitude_display=magnitude if direction is not None else None,
+        direction_label=direction if magnitude is not None else None,
     )
 
 

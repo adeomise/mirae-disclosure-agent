@@ -161,6 +161,36 @@ def test_fact_and_evidence_stay_linked(
     assert result.facts[0].evidence_ids == [result.evidence[0].evidence_id]
 
 
+def test_single_fact_success_includes_the_selected_filing_as_a_source_document(
+    synthetic_document: dict[str, Any],
+    resolved_filing,
+) -> None:
+    """
+    source_documents는 manifest를 다시 찾지 않고 실제 선택된 FilingRef에서 옮긴다.
+
+    Evidence.doc_id와 정확히 하나의 source document가 연결돼야 한다.
+    """
+    plan, filing = resolved_filing
+
+    result = _normalized(synthetic_document, resolved_filing)
+
+    assert len(result.source_documents) == 1
+
+    document = result.source_documents[0]
+
+    assert document.doc_id == result.evidence[0].doc_id
+    assert document.doc_id == filing.doc_id
+    # Fact.company와 같은 canonical 표기를 쓴다(법인격 표기가 남은 manifest 원 표기가
+    # 아니다). 같은 응답 안에서 회사명이 두 표기로 갈리지 않는다.
+    assert document.company == plan.company == result.facts[0].company
+    assert filing.corp_name != plan.company
+    assert document.report_name == filing.report_name
+    assert document.fiscal_year == filing.base_year == 2025
+    assert document.document_subtype == filing.document_subtype == "annual"
+    assert document.base_month == filing.base_month == 12
+    assert document.receipt_no == filing.receipt_no
+
+
 def test_result_is_json_serializable(
     synthetic_document: dict[str, Any],
     resolved_filing,
@@ -273,6 +303,22 @@ def test_answerability_judgement_keeps_its_diagnosis() -> None:
         detail="합성 사유",
     )
     assert result.conversion_gaps == []
+
+
+def test_blocked_single_fact_result_has_no_source_documents() -> None:
+    """근거가 없는 결과에 문서 metadata만 남으면 부분 답변으로 읽힌다."""
+    result = normalize_single_fact_result(
+        SingleFactResult(
+            plan=build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES),
+            blocked=BlockedInfo(
+                stage=STAGE_FILING_DISCOVERY,
+                reason=REASON_NO_MATCHING_FILING,
+                detail="합성 사유",
+            ),
+        )
+    )
+
+    assert result.source_documents == []
 
 
 # --------------------------------------------------------------------------

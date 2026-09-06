@@ -8,6 +8,7 @@ question_id/question/retrieved_context/think_trace/answer 5개 string 필드를 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,7 @@ from disclosure_agent.common.schemas import (
     Evidence,
     ExecutionIssue,
     Fact,
+    SourceDocument,
 )
 
 client = TestClient(app)
@@ -137,6 +139,67 @@ def test_answer_returns_exact_five_string_fields_and_echoes_request() -> None:
     assert payload["question"] == "[SYNTHETIC] revenue question"
     assert payload["answer"]
     assert calls == ["[SYNTHETIC] revenue question"]
+
+
+def test_answer_does_not_leak_source_documents_into_the_five_field_contract() -> None:
+    """
+    source_documents는 /api/ask의 additive Contract 필드다.
+
+    organizer 5-field 계약(question_id/question/retrieved_context/think_trace/answer)은
+    이 변경으로 넓어지지 않는다 — AnswerResponse에 새 필드가 생겨도 organizer는 그 5개만
+    그대로 유지해야 한다.
+    """
+    evidence = Evidence(
+        evidence_id="synthetic-evidence-1",
+        doc_id="synthetic-doc-1",
+        location_type=EvidenceLocationType.TABLE,
+    )
+    fact = Fact(
+        fact_id="synthetic-fact-1",
+        company="Synthetic Company",
+        metric=MetricConcept.REVENUE,
+        fiscal_year=2025,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+        raw_value="1000",
+        raw_unit="synthetic-currency",
+        evidence_ids=[evidence.evidence_id],
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=[fact],
+        evidence=[evidence],
+        source_documents=[
+            SourceDocument(
+                doc_id="synthetic-doc-1",
+                company="Synthetic Company",
+                report_name="사업보고서",
+                fiscal_year=2025,
+                document_subtype="annual",
+                base_month=12,
+                filing_date=date(2026, 3, 10),
+                receipt_no="20260310002820",
+            )
+        ],
+    )
+    service, _ = counting_runtime_service(result)
+    app.dependency_overrides[get_ask_service] = lambda: service
+
+    response = client.get(
+        "/answer", params={"question_id": "Q-010", "question": "synthetic source document"}
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload.keys()) == {
+        "question_id",
+        "question",
+        "retrieved_context",
+        "think_trace",
+        "answer",
+    }
+    assert "source_documents" not in response.text
+    assert "사업보고서" not in response.text
 
 
 # ---------------------------------------------------------------------------

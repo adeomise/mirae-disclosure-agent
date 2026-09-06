@@ -1132,6 +1132,11 @@ def build_answer_response(result: AgentExecutionResult) -> AnswerResponse:
     (evidence_and_answerability.md 원칙 7)은 producer가 이미 지킨다. 여기서 다시 걸러내면
     같은 판정이 두 곳에 생기고, 정상 응답의 provenance까지 함께 지울 위험이 남는다.
 
+    source_documents도 그대로 옮긴다. Evidence.doc_id가 가리키는 문서의 metadata이므로
+    Evidence와 분리해 실으면 근거는 있는데 문서 이름을 알 수 없는 응답이 된다. 이 값을
+    새로 만들지 않는다 — producer(agent.normalization)가 이미 실제 선택된 FilingRef에서
+    채워 왔다.
+
     Raises:
         UnsupportedExecutionStatusError: execution_status가 COMPLETED가 아닌 경우.
         MissingAnswerabilityStatusError: COMPLETED인데 판정이 비어 있는 경우.
@@ -1161,6 +1166,7 @@ def build_answer_response(result: AgentExecutionResult) -> AnswerResponse:
         event_histories=list(result.event_histories),
         resolved_event_states=list(result.resolved_event_states),
         evidence=list(result.evidence),
+        source_documents=list(result.source_documents),
     )
 
 

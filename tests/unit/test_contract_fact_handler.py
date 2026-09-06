@@ -195,6 +195,31 @@ def test_selected_filing_yields_every_requested_fact(selection) -> None:
     assert {fact.company for fact in result.facts} == {CORP_NAME}
 
 
+def test_selected_filing_yields_exactly_one_source_document(selection) -> None:
+    """
+    거래소공시 계약 조회(Q02)도 실제 선택된 FilingRef의 metadata를 손실 없이 옮긴다.
+
+    회계연도·기준월 축이 없는 거래소공시는 그 값을 지어내지 않고 None으로 둔다.
+    """
+    filing = _filing()
+    selection(_selected(_event()))
+
+    result = _run()
+
+    assert len(result.source_documents) == 1
+
+    document = result.source_documents[0]
+
+    assert {evidence.doc_id for evidence in result.evidence} == {document.doc_id}
+    assert document.doc_id == filing.doc_id
+    assert document.company == CORP_NAME
+    assert document.report_name == filing.report_name
+    assert document.document_subtype == EVENT_SUBTYPE_SUPPLY_CONTRACT
+    assert document.receipt_no == filing.receipt_no
+    assert document.fiscal_year is None
+    assert document.base_month is None
+
+
 def test_plan_is_translated_into_retrieval_primitives(selection) -> None:
     """계획을 검색 조건으로 옮기는 일은 handler가 한다. retrieval은 QueryPlan을 모른다."""
     selection(_selected(_event()))
@@ -226,6 +251,7 @@ def test_no_filing_in_window_is_not_found(selection) -> None:
     assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
     assert result.answerability_reason is AnswerabilityReason.NOT_FOUND
     assert result.facts == []
+    assert result.source_documents == []
 
 
 def test_no_matching_counterparty_is_not_found_with_candidates(selection) -> None:

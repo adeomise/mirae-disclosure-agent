@@ -38,6 +38,7 @@ from disclosure_agent.agent.query_vocabulary import (
     find_years,
     matches_product_phrase,
     normalize_aggregate_request,
+    normalize_comparison_request,
 )
 from disclosure_agent.common.enums import MetricConcept, SectionScope
 
@@ -723,3 +724,426 @@ def test_aggregate_request_without_a_facility_subtype_does_not_open_the_path() -
 
     assert plan.intent == INTENT_CROSS_ENTITY_COMPARE
     assert plan.operations == ()
+
+
+# --------------------------------------------------------------------------
+# 5. 생산설비 표기와 문서 내용 요청 표현
+# --------------------------------------------------------------------------
+#
+# 사업보고서에서 이 범위를 담은 Section의 실제 제목이 "3. 원재료 및 생산설비"이며, 사용자가
+# 가장 자연스럽게 쓰는 낱말도 그 제목의 낱말이다. 그리고 그 절을 요청하는 말은 요약·정리
+# 만이 아니다. 두 어휘 중 하나만 넓히면 나머지 하나 때문에 같은 질문이 여전히 막힌다.
+
+
+@pytest.mark.parametrize(
+    "facility_expression",
+    [
+        "생산설비",
+        "생산 설비",
+        "생산시설",
+        "생산 시설",
+        "제조시설",
+        "주요 생산설비",
+        "생산설비 현황",
+        "설비 투자",
+        "시설투자",
+    ],
+)
+def test_production_facility_wordings_reach_the_facility_section_scope(
+    facility_expression: str,
+) -> None:
+    """
+    생산 관련 시설을 가리키는 표기가 같은 범위로 옮겨진다.
+
+    "생산 설비"는 공백을 걷어내면 설비에 걸리지만 "생산 시설"은 어디에도 걸리지 않았다.
+    같은 것을 가리키는 두 표기가 표기 하나 차이로 갈리면, 막힌 질문은 답할 수 없어서가
+    아니라 낱말을 못 알아봐서 막힌 것이 된다.
+    """
+    plan = build_query_plan(
+        f"테스트바이오 2025년 사업보고서에서 {facility_expression} 관련 내용 정리해줘.",
+        known_companies=COMPANIES,
+    )
+
+    assert plan.intent == INTENT_DOCUMENT_SUMMARY
+    assert plan.section_scope is SectionScope.FACILITY_INVESTMENT
+    assert plan.years == (2025,)
+
+
+@pytest.mark.parametrize(
+    "request_expression",
+    [
+        "관련 내용 정리해줘",
+        "관련 내용 요약해줘",
+        "관련해서 어떤 내용이 담겨 있어?",
+        "관련해서 무슨 내용이 있어?",
+        "관련 내용이 뭐야?",
+        "관련 내용 알려줘",
+        "관련 내용 설명해줘",
+    ],
+)
+def test_document_content_requests_reach_the_summary_plan(request_expression: str) -> None:
+    """
+    문서에 무엇이 적혀 있는지를 묻는 표현이 요약 요청으로 읽힌다.
+
+    요약·정리만 알아보면 보고서 종류와 문서 내 범위를 모두 밝힌 질문이 단일 사실 조회로
+    내려가 "지원하는 지표(매출액)를 찾을 수 없습니다"로 막힌다. 사유가 실제로 일어난 일과
+    다르다.
+    """
+    plan = build_query_plan(
+        f"테스트바이오 2025년 사업보고서에 생산설비 {request_expression}",
+        known_companies=COMPANIES,
+    )
+
+    assert plan.intent == INTENT_DOCUMENT_SUMMARY
+    assert plan.section_scope is SectionScope.FACILITY_INVESTMENT
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 범위가 없다. 문서 전체 요약으로 열지 않는다.
+        "테스트반도체 2025년 사업보고서 매출액 알려줘",
+        "테스트반도체 2025년 사업보고서에 어떤 내용이 담겨 있어?",
+        # 보고서 종류가 없다.
+        "테스트반도체 2025년 설비 내용 알려줘",
+    ],
+)
+def test_content_request_alone_does_not_open_the_summary_path(question: str) -> None:
+    """
+    내용 요청 표현 하나로는 요약 경로가 열리지 않는다.
+
+    보고서 종류와 문서 내 범위를 함께 요구하는 것은 넓히기 전과 같다. 값 조회 질문이 요약
+    경로로 끌려오면 돌아오는 것은 물어본 값이 아니라 그 절의 요약이고, 형식이 맞는 답이
+    나가므로 값이 빠졌다는 사실이 드러나지 않는다.
+    """
+    try:
+        plan = build_query_plan(question, known_companies=COMPANIES)
+    except UnsupportedQuestionError as error:
+        assert error.reason in {"unsupported_metric", "missing_year"}
+        return
+
+    assert plan.intent != INTENT_DOCUMENT_SUMMARY
+
+
+def test_value_request_with_a_scope_word_is_not_taken_by_the_content_request() -> None:
+    """
+    범위 낱말이 있어도 값 이름이 요청의 머리면 요약이 아니다.
+
+    알려·설명을 낱말 하나로 요약 요청에 넣지 않은 이유가 여기 있다. 넣었다면 이 질문이
+    설비 절의 요약으로 돌아갔을 것이다.
+    """
+    plan = build_query_plan(
+        "테스트반도체 2025년 사업보고서에서 설비 관련 매출 알려줘",
+        known_companies=COMPANIES,
+    )
+
+    assert plan.intent == INTENT_SINGLE_FACT
+    assert plan.metric == "revenue"
+
+
+# --------------------------------------------------------------------------
+# 6. 사업 서술 표현
+# --------------------------------------------------------------------------
+#
+# "무슨 사업을 해"·"영위하는 사업이 뭐야"·"주요 사업이 뭐야"는 모두 같은 요청이다. 표기
+# 하나만 알아보면 같은 질문이 표기에 따라 사업 개요 요약에 들어가기도 하고 빠지기도 한다.
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "무슨 사업을 해?",
+        "어떤 사업을 하는지 알려줘",
+        "영위하는 사업이 뭐야?",
+        "영위하는 사업은?",
+        "영위하고 있는 사업 알려줘",
+        "어떤 사업을 영위하고 있어?",
+        "무슨 사업을 영위하나요?",
+        "영위 중인 사업 설명해줘",
+        "주요 사업이 뭐야?",
+        "핵심 사업은 무엇인가요?",
+        "주력 사업이 뭔지 알려줘",
+    ],
+)
+def test_business_description_wordings_reach_the_business_overview_scope(
+    expression: str,
+) -> None:
+    plan = build_query_plan(
+        f"테스트반도체는 {expression}",
+        known_companies=COMPANIES,
+        fiscal_year_anchors={"테스트반도체": 2025},
+    )
+
+    assert plan.intent == INTENT_DOCUMENT_SUMMARY
+    assert plan.section_scopes == (SectionScope.BUSINESS_OVERVIEW,)
+    assert plan.years == (2025,)
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 사업부는 사업 서술이 아니다. 조사를 요구해 걸러 낸다.
+        "테스트반도체는 어떤 사업부가 대표 제품을 담당해?",
+        "테스트반도체 주요 사업부는 어디야?",
+        # 값 조회가 섞였다.
+        "테스트반도체 주요 사업 매출이 얼마야?",
+        "테스트반도체가 영위하는 사업의 영업이익률 알려줘",
+        # 답하지 않을 요청이 함께 왔다.
+        "테스트반도체가 영위하는 사업의 상장 시점 알려줘",
+        # 문서 지목의 사업보고서는 사업 서술이 아니다.
+        "테스트반도체 2025년 사업보고서 매출액 알려줘",
+    ],
+)
+def test_business_description_lookalikes_do_not_open_the_overview_scope(
+    question: str,
+) -> None:
+    try:
+        plan = build_query_plan(
+            question,
+            known_companies=COMPANIES,
+            fiscal_year_anchors={"테스트반도체": 2025},
+        )
+    except UnsupportedQuestionError:
+        return
+
+    assert plan.section_scopes == ()
+
+
+def test_business_and_product_together_still_summarize_both_scopes() -> None:
+    """두 반을 함께 물으면 범위도 둘이다. 넓히기 전과 같다."""
+    plan = build_query_plan(
+        "테스트반도체는 무슨 사업을 하고 주력 제품이 뭐야?",
+        known_companies=COMPANIES,
+        fiscal_year_anchors={"테스트반도체": 2025},
+    )
+
+    assert plan.section_scopes == (SectionScope.BUSINESS_OVERVIEW, SectionScope.PRODUCTS)
+
+
+# --------------------------------------------------------------------------
+# 7. 비교 표현
+# --------------------------------------------------------------------------
+#
+# "비교하면"·"견주면"·"더 크지"는 모두 같은 요청이다. 표기 하나만 알아보면 집계·비교 역량이
+# 있는데도 표현 게이트에서 막힌다.
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "비교",
+        "비교해줘",
+        "비교하면",
+        "견주면",
+        "견줘줘",
+        "견주어",
+        "견준다",
+        "더 커",
+        "더 큰",
+        "더 크지",
+        "더 클까",
+        "더 높은",
+        "더커",
+    ],
+)
+def test_comparison_paraphrases_normalize_to_the_canonical_operation(
+    expression: str,
+) -> None:
+    assert normalize_comparison_request(expression) == OPERATION_COMPARE
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        # 기간 표현이다. 비교로 읽으면 시계열 질문이 기업 간 비교 신호를 갖는다.
+        "전년 대비 증가율",
+        "작년 대비 어때",
+        # 더가 크기 어간과 붙어 있지 않다.
+        "전부 더 하락했어",
+        "더 알려줘",
+        # 용언을 꾸미는 부사형. 크기를 견주는 말이 아니라 시간축의 증가를 묻는 말이다.
+        "더 많이",
+        "더 많이 늘었어",
+        "작년보다 더 많이 늘었어",
+        "더 크게",
+        "더 크게 늘었어",
+        # 비교가 아닌 서술.
+        "투자 규모가 커",
+        "매출이 높아",
+    ],
+)
+def test_unrelated_wording_is_not_read_as_a_comparison_request(expression: str) -> None:
+    assert normalize_comparison_request(expression) is None
+
+
+@pytest.mark.parametrize(
+    "comparison_expression",
+    [
+        "어디가 더 커?",
+        "어디가 더 크지?",
+        "어느 쪽이 더 큰지 알려줘",
+        "견주면 어디가 더 커?",
+        "비교해줘",
+        "견줘줘",
+    ],
+)
+def test_comparison_paraphrases_reach_the_facility_aggregate_plan(
+    comparison_expression: str,
+) -> None:
+    """
+    Q12 계열이 비교 표기 하나에 매이지 않는다.
+
+    비교 신호만으로 이 경로가 열리지는 않는다. 시설투자 유형과 집계 표현이 함께 있어야
+    하며, 그 요구는 넓히기 전과 같다.
+    """
+    question = (
+        "2024년에 LG이노텍하고 레인보우로보틱스가 각각 공시한 시설투자 금액을 "
+        f"합쳐서 {comparison_expression}"
+    )
+
+    plan = build_query_plan(question, known_companies=AGGREGATE_COMPANIES)
+
+    assert plan.intent == INTENT_CROSS_ENTITY_COMPARE
+    assert plan.operations == (OPERATION_AGGREGATE, OPERATION_COMPARE)
+    assert plan.metric is MetricConcept.INVESTMENT_AMOUNT
+
+
+def test_aggregate_without_a_comparison_request_does_not_gain_operations() -> None:
+    """
+    집계만 요청한 질문에 비교를 지어내지 않는다.
+
+    비교 어휘를 넓힌 뒤에도 이 방향이 지켜져야 한다. 지어내면 묻지 않은 우열 판정이 근거를
+    갖춘 채로 나간다.
+    """
+    plan = build_query_plan(
+        "2024년에 LG이노텍하고 레인보우로보틱스가 새로 발표한 시설투자, 회사별로 다 합쳐줘",
+        known_companies=AGGREGATE_COMPANIES,
+    )
+
+    assert plan.intent == INTENT_CROSS_ENTITY_COMPARE
+    assert plan.operations == ()
+
+
+def test_comparison_of_individual_values_does_not_gain_an_aggregate() -> None:
+    """
+    개별 값을 견주라는 질문에 집계를 지어내지 않는다.
+
+    두 신호를 함께 요구하는 것이 이 경로의 규약이며, 어느 한쪽 어휘를 넓혀도 그 요구는
+    그대로다.
+    """
+    plan = build_query_plan(
+        "2024년에 LG이노텍하고 레인보우로보틱스가 각각 공시한 시설투자 금액을 "
+        "견주면 어디가 더 커?",
+        known_companies=AGGREGATE_COMPANIES,
+    )
+
+    assert plan.intent == INTENT_CROSS_ENTITY_COMPARE
+    assert plan.operations == ()
+
+
+# --------------------------------------------------------------------------
+# 8. 내용 요청 표현이 값 조회를 가로채지 않는다
+# --------------------------------------------------------------------------
+#
+# 내용은 값 이름 바로 뒤에도 붙는다("매출 내용 알려줘"). 보고서 종류와 범위 낱말까지 갖춘
+# 질문에서 그 표현을 요약 요청으로 읽으면, 값으로 답할 수 있던 질문이 그 절의 요약으로
+# 돌아가고 물어본 값은 결과 어디에도 남지 않는다.
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_metric"),
+    [
+        ("테스트반도체 2025년 사업보고서에서 설비 관련 매출 내용 알려줘", "revenue"),
+        ("테스트반도체 2025년 사업보고서에서 설비 관련 매출 내용이 뭐야?", "revenue"),
+        ("테스트반도체 2025년 사업보고서에서 설비 관련 매출 내용 설명해줘", "revenue"),
+    ],
+)
+def test_value_request_with_a_content_word_stays_a_value_request(
+    question: str,
+    expected_metric: str,
+) -> None:
+    """지표 이름이 함께 있으면 내용이 있어도 요약이 아니다."""
+    plan = build_query_plan(question, known_companies=COMPANIES)
+
+    assert plan.intent == INTENT_SINGLE_FACT
+    assert plan.metric == expected_metric
+    assert plan.section_scope is None
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "테스트반도체 2025년 사업보고서에서 설비 관련 영업이익 내용 알려줘",
+        "테스트반도체 2025년 사업보고서에서 설비 투자 금액 내용이 뭐야?",
+        "테스트반도체 2025년 사업보고서에서 설비 관련 영업이익률 내용 알려줘",
+    ],
+)
+def test_unsupported_value_request_with_a_content_word_stays_fail_closed(
+    question: str,
+) -> None:
+    """
+    지원하지 않는 지표를 물은 질문은 계속 막힌다.
+
+    요약으로 받으면 fail-closed가 묻지 않은 것에 답함으로 바뀐다. 형식이 맞는 요약이
+    나가므로 물어본 지표가 빠졌다는 사실이 드러나지 않는다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(question, known_companies=COMPANIES)
+
+    assert error.value.reason == "unsupported_metric"
+
+
+def test_content_request_without_a_value_word_still_opens_the_summary() -> None:
+    """값 이름이 없으면 내용 요청은 그대로 요약이다. BB05가 이 자리다."""
+    plan = build_query_plan(
+        "테스트바이오 2025년 사업보고서에 생산설비 관련해서 어떤 내용이 담겨 있어?",
+        known_companies=COMPANIES,
+    )
+
+    assert plan.intent == INTENT_DOCUMENT_SUMMARY
+    assert plan.section_scope is SectionScope.FACILITY_INVESTMENT
+
+
+def test_canonical_summary_tokens_keep_their_previous_behaviour() -> None:
+    """
+    요약·정리 경로는 값 배제를 거치지 않는다.
+
+    "설비 관련 매출 정리해줘"가 요약으로 읽히는 것은 이 어휘를 넓히기 전부터의 동작이며,
+    여기서 함께 고치지 않는다. 이 테스트는 그 동작이 이번 변경으로 바뀌지 않았다는 것을
+    고정한다. 바람직한 동작을 고정하는 것이 아니라 변경 범위를 고정하는 것이다.
+    """
+    plan = build_query_plan(
+        "테스트반도체 2025년 사업보고서에서 설비 관련 매출 정리해줘",
+        known_companies=COMPANIES,
+    )
+
+    assert plan.intent == INTENT_DOCUMENT_SUMMARY
+
+
+# --------------------------------------------------------------------------
+# 9. 시간축 증가 표현이 기업 간 집계 비교를 만들지 않는다
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 집계 표현이 함께 있어도 더 많이는 비교 요청이 아니다.
+        "2024년에 LG이노텍하고 레인보우로보틱스 시설투자를 합쳐서 작년보다 더 많이 늘었어?",
+        "2024년에 LG이노텍하고 레인보우로보틱스 시설투자, 작년보다 더 많이 합쳐서 늘었어?",
+        "2024년에 LG이노텍하고 레인보우로보틱스 시설투자를 합쳐서 작년보다 더 크게 늘었어?",
+    ],
+)
+def test_temporal_growth_wording_does_not_create_a_cross_entity_comparison(
+    question: str,
+) -> None:
+    """
+    더 많이·더 크게는 용언을 꾸미는 말이다.
+
+    이 질문이 묻는 것은 시간축의 증가이고 기업 간 우열이 아니다. 비교로 읽으면 집계 표현이
+    함께 있는 순간 묻지 않은 우열 판정이 근거를 갖춘 채로 나간다.
+    """
+    plan = build_query_plan(question, known_companies=AGGREGATE_COMPANIES)
+
+    assert plan.operations == ()
+    assert plan.metric is not MetricConcept.INVESTMENT_AMOUNT

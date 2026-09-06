@@ -164,6 +164,7 @@ def build_single_fact_result(
             accounting_scope=plan.accounting_scope,
             document_class=plan.document_class,
             document_subtype=plan.document_subtype,
+            base_month=plan.fiscal_base_month,
             corpus_root=corpus_root,
             manifest_path=manifest_path,
         ),

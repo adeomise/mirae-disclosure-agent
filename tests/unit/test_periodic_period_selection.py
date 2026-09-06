@@ -280,3 +280,128 @@ def test_conflicting_signals_fail_closed(conflict):
             document_subtype="quarter",
             base_month=9,
         )
+
+
+@pytest.fixture
+def handler_period_corpus(tmp_path, monkeypatch):
+    """Keep handler/retrieval/locator real; reuse the parsed-document fixture."""
+    from disclosure_agent.agent import period_retrieval
+
+    records = []
+    documents = {}
+    for month, subtype in ((3, "quarter"), (6, "half"), (9, "quarter"), (12, "annual")):
+        directory = tmp_path / f"sample_{month:02}"
+        directory.mkdir()
+        path = directory / "sample.xml"
+        path.write_text("<DOCUMENT/>")
+        receipt = f"SAMPLE_{month:02}"
+        doc_id = f"periodic_{receipt}"
+        records.append(
+            dict(
+                doc_id=doc_id,
+                corp_name="테스트기업",
+                doc_group="periodic",
+                doc_subtype=subtype,
+                base_year=2025,
+                base_month=month,
+                rcept_no=receipt,
+                file_path=directory.name,
+                is_correction=False,
+            )
+        )
+        document = period_document(month)
+        document["metadata"].update(
+            doc_id=doc_id,
+            receipt_no=receipt,
+            source_path=str(path),
+        )
+        documents[path] = document
+
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text("\n".join(json.dumps(record) for record in records))
+    monkeypatch.setattr(period_retrieval, "load_parsed_document", documents.__getitem__)
+    return tmp_path, manifest, records
+
+
+@pytest.mark.parametrize(
+    "report,subtype,month",
+    [
+        ("1분기보고서", "quarter", 3),
+        ("반기보고서", "half", 6),
+        ("3분기보고서", "quarter", 9),
+        ("사업보고서", "annual", 12),
+    ],
+)
+def test_single_fact_handler_propagates_month_and_selects_filing(
+    handler_period_corpus,
+    monkeypatch,
+    report,
+    subtype,
+    month,
+):
+    from unittest.mock import Mock
+
+    from disclosure_agent.agent.handlers import single_fact
+    from disclosure_agent.agent.query_analyzer import build_query_plan
+
+    root, manifest, _ = handler_period_corpus
+    plan = build_query_plan(
+        f"테스트기업 2025년 {report} 연결 매출액 알려줘",
+        known_companies=["테스트기업"],
+    )
+    assert (plan.document_subtype, plan.fiscal_base_month) == (subtype, month)
+    fetch_spy = Mock(wraps=single_fact.fetch_period_fact)
+    monkeypatch.setattr(single_fact, "fetch_period_fact", fetch_spy)
+
+    result = single_fact.build_single_fact_result(plan, corpus_root=root, manifest_path=manifest)
+
+    fetch_spy.assert_called_once_with(
+        company=plan.company,
+        fiscal_year=plan.year,
+        metric=plan.metric,
+        accounting_scope=plan.accounting_scope,
+        document_class=plan.document_class,
+        document_subtype=subtype,
+        base_month=month,
+        corpus_root=root,
+        manifest_path=manifest,
+    )
+    assert result.blocked is None
+    assert (result.filing.document_subtype, result.filing.base_month) == (subtype, month)
+    assert result.filing.doc_id == f"periodic_SAMPLE_{month:02}"
+    assert result.fact.raw_value == "100"
+    assert result.evidence.doc_id == result.filing.doc_id
+    assert result.evidence.receipt_no == result.filing.receipt_no
+
+
+@pytest.mark.parametrize("requested,available", [(3, 9), (9, 3)])
+def test_single_fact_handler_does_not_fall_back_to_other_quarter(
+    handler_period_corpus,
+    monkeypatch,
+    requested,
+    available,
+):
+    from disclosure_agent.agent import period_retrieval
+    from disclosure_agent.agent.handlers.single_fact import build_single_fact_result
+    from disclosure_agent.agent.query_analyzer import build_query_plan
+
+    root, manifest, records = handler_period_corpus
+    manifest.write_text(
+        "\n".join(json.dumps(record) for record in records if record["base_month"] == available)
+    )
+    plan = build_query_plan(
+        f"테스트기업 2025년 {requested // 3}분기보고서 연결 매출액 알려줘",
+        known_companies=["테스트기업"],
+    )
+
+    def unexpected_parse(path):
+        pytest.fail(f"A different quarter must not reach parsing: {path}")
+
+    monkeypatch.setattr(period_retrieval, "load_parsed_document", unexpected_parse)
+    result = build_single_fact_result(plan, corpus_root=root, manifest_path=manifest)
+
+    assert result.blocked.stage == "filing_discovery"
+    assert result.blocked.reason == "no_matching_filing"
+    assert result.filing is None
+    assert result.fact is None
+    assert result.evidence is None

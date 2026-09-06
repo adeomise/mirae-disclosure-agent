@@ -205,7 +205,27 @@ curl -X POST http://127.0.0.1:8000/api/ask \
 | `POST /api/ask` | 구조화 질의응답 API |
 | `GET /answer?question_id=...&question=...` | 주최측 평가 규격 adapter |
 
-`/answer`는 같은 Agent 서비스를 재사용하고, 문자열 필드 `question_id`, `question`, `retrieved_context`, `think_trace`, `answer`를 반환합니다. `think_trace`는 확정된 실행 상태·결과 건수 등 처리 요약이며, 자유로운 추론 과정을 생성하거나 노출하지 않습니다.
+## Evaluation API
+
+공모전 평가용 API는 일반 서비스 API와 같은 Agent 서비스를 재사용합니다.
+
+- **Endpoint:** `http://실제서버주소/answer` — 실제 서버 주소 확인 전 placeholder입니다.
+- **요청:** `GET /answer?question_id={id}&question={query}`
+- **Query parameters:** `question_id`는 질문 식별자, `question`은 URL 인코딩한 질문 문자열입니다.
+
+응답은 다음 5개 문자열 필드로 구성됩니다.
+
+```json
+{
+  "question_id": "{id}",
+  "question": "{query}",
+  "retrieved_context": "원문에서 확보한 근거",
+  "think_trace": "확정된 실행 상태와 처리 요약",
+  "answer": "질문에 대한 답변"
+}
+```
+
+`think_trace`는 확정된 실행 상태·결과 건수 등 처리 요약이며, 자유로운 추론 과정을 생성하거나 노출하지 않습니다.
 
 ## 지원 질문 예시
 

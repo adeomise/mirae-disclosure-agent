@@ -12,6 +12,9 @@
     - 여러 문서가 섞이면 doc_id별로 모두 담기고 순서가 호출자가 넘긴 순서를 따르는가.
 
 manifest도 corpus도 열지 않는다. FilingRef를 손으로 만들어 시험한다.
+
+repository에 common/dates.py 전용 테스트 파일이 따로 없어(검색 결과 없음), 이 모듈이
+쓰는 parse_filing_date의 달력 유효성 회귀도 맨 아래 절에서 여기 같이 고정한다.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from disclosure_agent.agent.source_documents import (
     build_source_document,
     collect_source_documents,
 )
+from disclosure_agent.common.dates import parse_filing_date
 from disclosure_agent.retrieval.metadata_filter import FilingRef
 
 CORPUS_ROOT = Path("corpus")
@@ -113,6 +117,36 @@ def test_build_source_document_leaves_filing_date_unset_when_unparsable() -> Non
     document = build_source_document(filing)
 
     assert document.filing_date is None
+
+
+@pytest.mark.parametrize(
+    "receipt_date",
+    ["20260231", "20251310"],
+    ids=["invalid-day", "invalid-month"],
+)
+def test_build_source_document_leaves_filing_date_unset_for_calendar_invalid_receipt_date(
+    receipt_date: str,
+) -> None:
+    """
+    "20260231"·"20251310"은 YYYYMMDD 자릿수는 맞지만 실제 달력에 없는 날짜다.
+
+    parse_filing_date가 이 값으로 date(...)를 만들다 ValueError를 내면 여기서 그대로
+    올라가 SourceDocument 생성 전체가 실패한다 — Fact/Evidence는 이미 만들어진 뒤인
+    표시용 metadata 변환 단계에서 응답 전체가 500으로 죽는 것이다. filing_date만
+    None이 되고 나머지 metadata는 FilingRef 값 그대로 남아야 한다.
+    """
+    filing = _filing(receipt_date=receipt_date)
+
+    document = build_source_document(filing)
+
+    assert document.filing_date is None
+    assert document.doc_id == filing.doc_id
+    assert document.company == filing.corp_name
+    assert document.report_name == filing.report_name
+    assert document.fiscal_year == filing.base_year
+    assert document.document_subtype == filing.document_subtype
+    assert document.base_month == filing.base_month
+    assert document.receipt_no == filing.receipt_no
 
 
 def test_build_source_document_prefers_canonical_company_over_the_manifest_spelling() -> None:
@@ -236,3 +270,25 @@ def test_collect_source_documents_includes_one_entry_per_distinct_document() -> 
 
 def test_collect_source_documents_returns_an_empty_list_for_no_filings() -> None:
     assert collect_source_documents([]) == []
+
+
+# --------------------------------------------------------------------------
+# 4. parse_filing_date: 달력상 유효하지 않은 YYYYMMDD
+# --------------------------------------------------------------------------
+
+
+def test_parse_filing_date_parses_a_calendar_valid_date() -> None:
+    assert parse_filing_date("20260310") == date(2026, 3, 10)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["20260231", "20251310"],
+    ids=["invalid-day", "invalid-month"],
+)
+def test_parse_filing_date_returns_none_for_calendar_invalid_dates(value: str) -> None:
+    """
+    "20260231"(2월 31일 없음)·"20251310"(13월 없음)은 normalize_filing_date의 자릿수
+    패턴은 통과하지만 date(...)로 만들면 ValueError가 난다. 추측하지 않고 None.
+    """
+    assert parse_filing_date(value) is None

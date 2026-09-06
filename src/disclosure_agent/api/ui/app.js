@@ -1037,23 +1037,29 @@ const subtypeReportLabel = (documentSubtype, baseMonth) => {
 };
 
 
-// report_name 끝에 "(2025.12)"처럼 결산연도.월이 괄호로 붙어 있으면 떼어낸다.
-// 이 괄호를 그대로 두고 앞에 "{fiscal_year}년"을 붙이면 "2025년 사업보고서
-// (2025.12)"처럼 연도가 두 번 나오게 되므로, 표준 "{fiscal_year}년 {report_name}"
-// 형식 하나로 통일하기 위해 뗀다. "(수정)"처럼 연도.월 형식이 아닌 괄호는 그
-// 안에 무슨 내용이 있는지 모르므로 손대지 않는다.
-//
-// 호출부(sourceDocumentLabel)는 fiscal_year가 있을 때만 이 함수를 부른다 —
-// fiscal_year가 없으면 괄호를 대체할 연도 정보 자체가 없으므로, backend가 내려준
-// report_name을 그대로 보존해야 한다(UI가 backend 정보를 임의로 버리지 않는다).
-const stripReportNameDateSuffix = (reportName) => {
+// report_name 끝에 "(2025.12)"처럼 결산연도.월이 괄호로 붙어 있으면 그 연/월과
+// 괄호를 뗀 본문을 함께 돌려준다. 지원 범위는 기존과 동일하게 "끝에 붙은
+// (YYYY.M[M])" 하나뿐이며 여기서 넓히지 않는다 — "(수정)"처럼 연도.월 형식이
+// 아닌 괄호는 그 안에 무슨 내용이 있는지 모르므로 손대지 않고 null을 돌려준다.
+// suffix가 없으면 null이고, 호출부는 report_name을 원문 그대로 쓴다.
+const REPORT_NAME_DATE_SUFFIX_PATTERN = /\s*\(\s*(\d{4})\s*\.\s*(\d{1,2})\s*\)\s*$/;
+
+const parseReportNameDateSuffix = (reportName) => {
   if (typeof reportName !== "string") {
-    return reportName;
+    return null;
   }
 
-  return reportName
-    .replace(/\s*\(\s*\d{4}\s*\.\s*\d{1,2}\s*\)\s*$/, "")
-    .trim();
+  const match = reportName.match(REPORT_NAME_DATE_SUFFIX_PATTERN);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    bare: reportName.slice(0, match.index).trim(),
+  };
 };
 
 
@@ -1061,11 +1067,18 @@ const stripReportNameDateSuffix = (reportName) => {
 // 우선순위: report_name(있으면 document_subtype 매핑보다 항상 우선, 요구사항 5) >
 // document_subtype+base_month exact allowlist. fiscal_year는 그 문구에 연도가 이미
 // 포함되어 있지 않을 때만 앞에 붙여 중복 표시를 막는다 — 단, report_name의 날짜
-// suffix("(2025.12)")를 떼어내는 것은 fiscal_year가 있어 그 자리를 표준
-// "{fiscal_year}년 {report_name}" 형식으로 대체할 수 있을 때만 한다. fiscal_year가
-// 없으면 report_name을 원문 그대로 둔다. company는 있으면 맨 앞에 붙인다. report_name도
-// subtype 매핑도 없어 phrase를 만들 수 없으면 null을 돌려줘, 호출부가 기존
-// fact/evidence context fallback으로 넘어가게 한다.
+// suffix("(2025.12)")를 떼어내는 것은 fiscal_year가 있고 그 suffix의 연도가
+// fiscal_year와 정확히 같아서, 표준 "{fiscal_year}년 {report_name}" 형식이 원래
+// 정보를 그대로 다시 쓴 것일 때만 한다. fiscal_year가 없으면 report_name을 원문
+// 그대로 둔다. company는 있으면 맨 앞에 붙인다. report_name도 subtype 매핑도 없어
+// phrase를 만들 수 없으면 null을 돌려줘, 호출부가 기존 fact/evidence context
+// fallback으로 넘어가게 한다.
+//
+// fiscal_year=2025인데 report_name="사업보고서 (2024.12)"처럼 두 연도가 어긋나면
+// backend metadata 자체가 충돌한 상태다. 이때 suffix를 떼면 UI가 그 충돌을 감추고
+// "2025년 사업보고서"라는 실재 여부를 알 수 없는 문서명을 합성하게 되므로, 어느 한
+// 쪽을 고르지 않고 SourceDocument 기반 라벨 생성 전체를 fail-close(null)한다 —
+// 호출부(resolveDocumentLabel)가 기존 legacy documentLabel fallback으로 넘어간다.
 const sourceDocumentLabel = (sourceDoc) => {
   if (!sourceDoc) {
     return null;
@@ -1074,11 +1087,19 @@ const sourceDocumentLabel = (sourceDoc) => {
   const { company, fiscal_year: fiscalYear, report_name: reportName } = sourceDoc;
   const hasFiscalYear = fiscalYear !== undefined && fiscalYear !== null;
 
-  const reportNameBare = reportName
-    ? hasFiscalYear
-      ? stripReportNameDateSuffix(reportName)
-      : reportName
-    : null;
+  let reportNameBare = reportName || null;
+
+  if (reportName && hasFiscalYear) {
+    const dateSuffix = parseReportNameDateSuffix(reportName);
+
+    if (dateSuffix) {
+      if (String(dateSuffix.year) !== String(fiscalYear).trim()) {
+        return null;
+      }
+
+      reportNameBare = dateSuffix.bare;
+    }
+  }
 
   const phrase =
     reportNameBare || subtypeReportLabel(sourceDoc.document_subtype, sourceDoc.base_month);

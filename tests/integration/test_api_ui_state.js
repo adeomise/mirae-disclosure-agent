@@ -1431,9 +1431,11 @@ test("an evidence item whose source document has a non-allowlisted subtype+base_
 });
 
 // ---------------------------------------------------------------------------
-// 24. report_name의 날짜 suffix("(2025.12)")는 fiscal_year가 있을 때만 표준
-//     형식으로 재구성하며, fiscal_year가 없으면 backend가 준 report_name을 그대로
-//     보존한다(UI가 backend 정보를 임의로 버리지 않는다).
+// 24. report_name의 날짜 suffix("(2025.12)")는 fiscal_year가 있고 그 연도가
+//     suffix의 연도와 정확히 일치할 때만 표준 형식으로 재구성한다. fiscal_year가
+//     없으면 backend가 준 report_name을 그대로 보존하고, 두 연도가 어긋나면
+//     충돌을 감춘 문서명을 합성하는 대신 fail-close(null)한다
+//     (UI가 backend 정보를 임의로 버리거나 덮어쓰지 않는다).
 // ---------------------------------------------------------------------------
 
 test("the report_name date suffix is only reconstructed away when fiscal_year is present; without it, the suffix is preserved verbatim", () => {
@@ -1506,6 +1508,117 @@ test("an evidence item whose source document has report_name with a date suffix 
 
   assert.match(html, /삼성전자 사업보고서 \(2025\.12\)/);
   assert.equal(html.includes("periodic_SD0063"), false);
+});
+
+test("a report_name date suffix whose year conflicts with fiscal_year fails closed instead of synthesizing a document name", () => {
+  const ui = createUi(async () => okResponse(answerableBody()));
+
+  const label = (sourceDoc) =>
+    evalInContext(ui.context, "sourceDocumentLabel(__doc)", { __doc: sourceDoc });
+
+  // 일치: fiscal_year=2025 + "(2025.12)" → 기존 동작 그대로 표준 형식으로 재구성.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0070",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      report_name: "사업보고서 (2025.12)",
+    }),
+    "삼성전자 2025년 사업보고서",
+  );
+
+  // 불일치: fiscal_year=2025인데 report_name suffix는 2024 — backend metadata가
+  // 충돌한 상태다. suffix의 2024를 조용히 버리고 "2025년 사업보고서"를 만들거나,
+  // 연도만 지운 "사업보고서"를 만들지 않고 라벨 생성 자체를 포기한다.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0071",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      report_name: "사업보고서 (2024.12)",
+    }),
+    null,
+  );
+
+  // subtype 매핑이 함께 와도 마찬가지다 — 충돌한 report_name을 우회해 subtype으로
+  // 그럴듯한 라벨을 만들어내지 않는다(SourceDocument 기반 생성 전체를 fail-close).
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0072",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      report_name: "사업보고서 (2024.12)",
+      document_subtype: "annual",
+      base_month: 12,
+    }),
+    null,
+  );
+
+  // suffix가 없는 report_name은 비교 대상 자체가 없으므로 기존 동작을 유지한다.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0073",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      report_name: "사업보고서",
+    }),
+    "삼성전자 2025년 사업보고서",
+  );
+
+  // 연도.월 형식이 아닌 괄호는 지원 범위 밖이라 비교하지 않고 원문을 보존한다.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0074",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      report_name: "사업보고서 (수정)",
+    }),
+    "삼성전자 2025년 사업보고서 (수정)",
+  );
+});
+
+test("evidence whose source document has a conflicting fiscal_year/report_name year falls back to the legacy label without leaking the raw doc_id", async () => {
+  const ui = createUi(async () =>
+    okResponse(
+      answerableBody({
+        source_documents: [
+          {
+            doc_id: "periodic_SD0075",
+            company: "삼성전자",
+            fiscal_year: 2025,
+            report_name: "사업보고서 (2024.12)",
+            filing_date: "2026-03-15",
+          },
+        ],
+        evidence: [
+          {
+            evidence_id: "e-year-conflict",
+            doc_id: "periodic_SD0075",
+            section_path: ["III. 재무에 관한 사항"],
+            row_label: "매출액",
+          },
+        ],
+      }),
+    ),
+  );
+  ui.input.value = "삼성전자 2025년 매출 알려줘";
+
+  await ui.form.listeners.submit({ preventDefault() {} });
+
+  const html = ui.elements["#evidence-list"].innerHTML;
+
+  // 충돌한 metadata로 합성한 문서명이 화면에 나오지 않는다.
+  assert.equal(html.includes("삼성전자 2025년 사업보고서"), false);
+  assert.equal(html.includes("2025년 사업보고서"), false);
+  // 질문 문자열("삼성전자 2025년 매출")로부터 보고서명을 추측하지도 않는다.
+  assert.equal(html.includes("사업보고서"), false);
+  // 기존 legacy documentLabel fallback이 쓰인다.
+  assert.match(html, /관련 공시 문서/);
+  // raw periodic_* doc_id는 여전히 노출되지 않는다.
+  assert.equal(html.includes("periodic_SD0075"), false);
+  // Evidence panel과 section_path는 그대로 유지된다.
+  assert.equal(ui.elements["#evidence-panel"].hidden, false);
+  assert.match(html, /III\. 재무에 관한 사항/);
 });
 
 // ---------------------------------------------------------------------------

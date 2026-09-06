@@ -38,6 +38,38 @@ PROTECTED_XML_PATTERN = re.compile(
 MALFORMED_PERCENT_COMPARISON_PATTERN = re.compile(
     r"<(?=[ \t](?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?[ \t]*%)"
 )
+MALFORMED_NUMERIC_LT_TEXT_PATTERN = re.compile(
+    r"<(?=[ \t]*"
+    r"\d+(?:\.\d+)?"
+    r"(?:[kKmMbB][ \t]*(?:€|\$|₩|원))?"
+    r"(?:%|\)|이다|이하|이상|미만|초과)"
+    r")"
+)
+MALFORMED_REGULATION_HEADING_LT_PATTERN = re.compile(
+    r"<(?=주요법령[ \t]*및[ \t]*감독규정〉)"
+)
+MALFORMED_TCF_LT_TEXT_PATTERN = re.compile(
+    r"<(?=[ \t]+tcf(?:[ \t]|</P>))"
+)
+MALFORMED_TCF_LT_ALLOWED_PREFIXES = {
+    "1일",
+    "1M",
+    "3M",
+    "6M",
+    "9M",
+    "1Y",
+    "1.5Y",
+    "2Y",
+    "3Y",
+    "4Y",
+    "5Y",
+    "6Y",
+    "7Y",
+    "8Y",
+    "9Y",
+    "10Y",
+    "15Y",
+}
 
 # 제공된 dart3/dart4 XML의 실제 구조 tag vocabulary다. 이 목록 밖의
 # ``<프로젝트>``/``<Connected Work>`` 같은 token은 원문 본문으로 보존한다.
@@ -238,6 +270,26 @@ def _repair_malformed_attribute_syntax(fragment: str) -> str:
     return "".join(parts)
 
 
+def _is_dart_structural_markup_start(
+    fragment: str,
+    position: int,
+) -> bool:
+    """현재 ``<``가 실제 DART structural tag 시작인지 확인한다."""
+    cursor = position + 1
+    if cursor < len(fragment) and fragment[cursor] == "/":
+        cursor += 1
+
+    tag_name_match = XML_ATTRIBUTE_NAME_PATTERN.match(fragment, cursor)
+    if tag_name_match is None:
+        return False
+
+    tag_name = tag_name_match.group(0)
+    return (
+        tag_name in DART_STRUCTURAL_TAGS
+        or SECTION_PATTERN.fullmatch(tag_name) is not None
+    )
+
+
 def _repair_malformed_literal_lt_in_text(fragment: str) -> str:
     """Element text의 audit-confirmed malformed literal ``<``만 escape한다.
 
@@ -262,6 +314,26 @@ def _repair_malformed_literal_lt_in_text(fragment: str) -> str:
                 fragment,
                 position,
             )
+            numeric_less_than = MALFORMED_NUMERIC_LT_TEXT_PATTERN.match(
+                fragment,
+                position,
+            )
+            regulation_heading = MALFORMED_REGULATION_HEADING_LT_PATTERN.match(
+                fragment,
+                position,
+            )
+            tcf_less_than = MALFORMED_TCF_LT_TEXT_PATTERN.match(
+                fragment,
+                position,
+            )
+            if tcf_less_than is not None:
+                tcf_prefix_allowed = any(
+                    position >= len(prefix)
+                    and fragment[position - len(prefix) : position] == prefix
+                    for prefix in MALFORMED_TCF_LT_ALLOWED_PREFIXES
+                )
+                if not tcf_prefix_allowed:
+                    tcf_less_than = None
             incomplete_korean_text = (
                 MALFORMED_INCOMPLETE_KOREAN_TEXT_PATTERN.match(
                     fragment,
@@ -271,6 +343,9 @@ def _repair_malformed_literal_lt_in_text(fragment: str) -> str:
             bare_lt = MALFORMED_BARE_LT_TEXT_PATTERN.match(fragment, position)
             if (
                 comparison is not None
+                or numeric_less_than is not None
+                or regulation_heading is not None
+                or tcf_less_than is not None
                 or incomplete_korean_text is not None
                 or bare_lt is not None
             ):
@@ -278,6 +353,10 @@ def _repair_malformed_literal_lt_in_text(fragment: str) -> str:
                 parts.append("&lt;")
                 position += 1
                 unchanged_start = position
+                continue
+
+            if not _is_dart_structural_markup_start(fragment, position):
+                position += 1
                 continue
 
             in_markup = True

@@ -998,3 +998,93 @@ test("insertKoreanWonBreakdown converts plain KRW integers in the answer sentenc
   assert.equal(run("매출액은 17조 5,806억원입니다."), "매출액은 17조 5,806억원입니다.");
   assert.equal(run("매출액은 1,000억원입니다."), "매출액은 1,000억원입니다.");
 });
+
+// ---------------------------------------------------------------------------
+// 21. insertKoreanWonBreakdown — 천원/백만원 단위 확장, BigInt 정밀도, XSS 방어.
+// ---------------------------------------------------------------------------
+
+test("insertKoreanWonBreakdown converts 백만원/천원-denominated amounts, exactly and without precision loss", () => {
+  const ui = createUi(async () => okResponse(answerableBody()));
+
+  const run = (text) =>
+    evalInContext(ui.context, "insertKoreanWonBreakdown(__text)", { __text: text });
+
+  // 쉼표가 있는 백만원.
+  assert.equal(run("333,605,938백만원"), "333조 6,059억 3,800만 원");
+
+  // 쉼표가 없는 백만원.
+  assert.equal(run("758900백만원"), "7,589억 원");
+
+  // "백만 원" 띄어쓰기(숫자-단위 사이, 단위 내부 모두).
+  assert.equal(run("333,605,938 백만원"), "333조 6,059억 3,800만 원");
+  assert.equal(run("333,605,938 백만 원"), "333조 6,059억 3,800만 원");
+
+  // 천원 및 "천 원" 띄어쓰기.
+  assert.equal(run("28,533,520천원"), "285억 3,352만 원");
+  assert.equal(run("28,533,520 천 원"), "285억 3,352만 원");
+  assert.equal(run("28,533,520 천원"), "285억 3,352만 원");
+
+  // 원 단위 기존 동작 회귀 없음.
+  assert.equal(run("758900000000원"), "7,589억 원");
+
+  // 조/억/만 혼합 — acceptance 문장 그대로.
+  assert.equal(
+    run("삼성전자의 2025년 연결 기준 매출액은 333,605,938백만원입니다."),
+    "삼성전자의 2025년 연결 기준 매출액은 333조 6,059억 3,800만 원입니다.",
+  );
+
+  // 음수 부호 보존 — 백만원/천원 단위에도 적용된다.
+  assert.equal(run("-758900백만원"), "-7,589억 원");
+  assert.equal(run("증감액은 -28,533,520천원입니다."), "증감액은 -285억 3,352만 원입니다.");
+
+  // 1만원 미만은 백만원/천원 환산 후에도 변환할 굵은 단위가 없으면 원문 그대로 둔다.
+  assert.equal(run("5천원"), "5천원");
+  assert.equal(run("9원"), "9원");
+
+  // 이미 한국식 단위로 변환된 표현은 다시 변환하지 않는다(조/억/만 혼합 포함).
+  assert.equal(run("매출액은 333조 6,059억 3,800만 원입니다."), "매출액은 333조 6,059억 3,800만 원입니다.");
+  assert.equal(run("매출액은 285억 3,352만 원입니다."), "매출액은 285억 3,352만 원입니다.");
+
+  // 일반 숫자·연도·비율·주식 수·접수번호는 원화 단위가 없으므로 변환되지 않는다.
+  assert.equal(run("접수번호 20250101000123입니다."), "접수번호 20250101000123입니다.");
+  assert.equal(run("2025년 매출액은 12.34%입니다."), "2025년 매출액은 12.34%입니다.");
+  assert.equal(run("보유주식 수는 1,237,964,708주입니다."), "보유주식 수는 1,237,964,708주입니다.");
+  assert.equal(run("총 333,605,938개입니다."), "총 333,605,938개입니다.");
+
+  // 큰 정수에서 Number 곱셈이라면 잃을 수 있는 정밀도를 BigInt로 유지한다. 기대값도
+  // BigInt 연산으로 직접 계산해(구현과 같은 조/억/만/원 분해) 부동소수점 경로를
+  // 거치지 않는다.
+  const hugeMillions = "999,999,999,999백만원";
+  const expectedWon = 999999999999n * 1000000n; // 999,999,999,999,000,000원
+  const expectedTrillion = expectedWon / 1_000_000_000_000n;
+  const afterTrillion = expectedWon % 1_000_000_000_000n;
+  const expectedEok = afterTrillion / 100_000_000n;
+  const afterEok = afterTrillion % 100_000_000n;
+  const expectedMan = afterEok / 10_000n;
+  assert.equal(
+    run(hugeMillions),
+    `${expectedTrillion.toLocaleString("ko-KR")}조 ${expectedEok.toLocaleString("ko-KR")}억 ${expectedMan.toLocaleString("ko-KR")}만 원`,
+  );
+});
+
+test("the answer summary is rendered via textContent, so HTML in the answer is shown as literal text (no XSS)", async () => {
+  const maliciousAnswer =
+    "삼성전자의 매출액은 <script>alert(1)</script> 758,900,000,000원입니다.";
+
+  const ui = createUi(async () =>
+    okResponse(answerableBody({ answer: maliciousAnswer })),
+  );
+  ui.input.value = "삼성전자 매출 알려줘";
+
+  await ui.form.listeners.submit({ preventDefault() {} });
+
+  // textContent에는 태그가 문자 그대로 남아 있어야 한다(innerHTML로 바뀌어
+  // 파싱되지 않는다). 원화 단위 변환은 그대로 동작해야 한다.
+  assert.equal(
+    ui.elements["#answer-summary"].textContent,
+    "삼성전자의 매출액은 <script>alert(1)</script> 7,589억 원입니다.",
+  );
+
+  // app.js 소스 자체가 답변 렌더링에 innerHTML을 쓰지 않는지도 함께 확인한다.
+  assert.equal(/fields\.answer\.innerHTML/.test(appSource), false);
+});

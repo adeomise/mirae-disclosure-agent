@@ -1311,66 +1311,105 @@ const cleanAnswerText = (answer = "") =>
     .trim();
 
 
-// 답변 문장 안에서 "758,900,000,000원"처럼 숫자 바로 뒤에 "원"이 붙은 원화 정수만
+// 답변 문장 안에서 "758,900,000,000원"처럼 숫자 바로 뒤에 원화 단위가 붙은 정수를
 // 조/억/만 단위로 풀어 쓴다. formatMoneyKorean(조/억까지만, fact 카드 보조 표기용)과
-// 달리 이 함수는 답변 문장 자체에 끼워 넣는 값이라 만 단위까지 남긴다("285억 3,352만
-// 원"처럼 억 밑에 남는 값도 버리지 않아야 문장이 정확하다).
+// 달리 이 함수는 답변 문장 자체에 끼워 넣는 값이라 만 단위, 그리고 만 단위로도 나눠
+// 떨어지지 않는 원 단위 잔액까지 그대로 남긴다 — 반올림·절사를 하지 않는다.
 //
-// 1만원 미만은 더 굵은 단위로 묶을 게 없어 원본 그대로 둔다("100원"을 그대로 유지).
-const koreanWonBreakdown = (numeric) => {
-  if (!Number.isFinite(numeric) || Math.abs(numeric) < 10000) {
+// 인자는 이미 "환산된 원 금액"(BigInt)이어야 한다 — 천원/백만원 등 원문 단위 배수는
+// 호출부(insertKoreanWonBreakdown)에서 곱해서 넘긴다. 1만원 미만은 더 굵은 단위로
+// 묶을 게 없어 null을 돌려주고, 호출부는 이때 원문 매치를 그대로 둔다("100원" 유지).
+const koreanWonBreakdown = (wonAmount) => {
+  const isNegative = wonAmount < 0n;
+  const absValue = isNegative ? -wonAmount : wonAmount;
+
+  if (absValue < 10000n) {
     return null;
   }
 
-  const sign = numeric < 0 ? "-" : "";
-  const absValue = Math.abs(numeric);
-
-  const trillion = Math.floor(absValue / 1e12);
-  const afterTrillion = absValue - trillion * 1e12;
-  const eok = Math.floor(afterTrillion / 1e8);
-  const afterEok = afterTrillion - eok * 1e8;
-  const man = Math.floor(afterEok / 1e4);
+  const trillion = absValue / 1_000_000_000_000n;
+  const afterTrillion = absValue % 1_000_000_000_000n;
+  const eok = afterTrillion / 100_000_000n;
+  const afterEok = afterTrillion % 100_000_000n;
+  const man = afterEok / 10_000n;
+  const won = afterEok % 10_000n;
 
   const parts = [];
 
-  if (trillion > 0) {
+  if (trillion > 0n) {
     parts.push(`${trillion.toLocaleString("ko-KR")}조`);
   }
 
-  if (eok > 0) {
+  if (eok > 0n) {
     parts.push(`${eok.toLocaleString("ko-KR")}억`);
   }
 
-  if (man > 0) {
+  if (man > 0n) {
     parts.push(`${man.toLocaleString("ko-KR")}만`);
+  }
+
+  // 만 단위로도 나눠 떨어지지 않는 원 미만 잔액은 버리지 않고 "N원" 조각으로 남긴다
+  // (예: "1,234만 5,000원"). 부호는 함수 끝에서 한 번만 붙인다.
+  if (won > 0n) {
+    parts.push(`${won.toLocaleString("ko-KR")}원`);
   }
 
   if (!parts.length) {
     return null;
   }
 
-  return sign + parts.join(" ");
+  const joined = parts.join(" ");
+  const sign = isNegative ? "-" : "";
+
+  // 마지막 조각이 이미 "원"으로 끝나면(원 미만 잔액이 있던 경우) 그대로 두고, 조/억/만
+  // 단위까지만 있으면 문장에서 읽히도록 "원"을 한 번 덧붙인다.
+  return parts[parts.length - 1].endsWith("원")
+    ? sign + joined
+    : `${sign}${joined} 원`;
 };
 
 
-// 숫자 바로 뒤에 "원"이 붙은 자리만 잡는다. 연도("2025년")·비율("12.34%")·주식
-// 수("1,237,964,708주")는 접미사가 달라 애초에 매칭되지 않는다. 앞에 "."/숫자/","가
-// 오면(소수점의 뒷부분이거나 더 긴 숫자의 일부이면) 시작점으로 잡지 않아, 숫자를
-// 조각내 잘못 변환하지 않는다. "17조 5,806억원"처럼 이미 조/억/만 단위가 붙은
-// 표현은 숫자와 "원" 사이에 그 단위 글자가 끼어 있어 애초에 이 패턴과 맞지 않으므로
-// 다시 변환되지 않는다.
-const WON_AMOUNT_PATTERN = /(?<![.\d,])(\d{1,3}(?:,\d{3})+|\d+)원/g;
+// 숫자 바로 뒤에 원화 단위가 붙은 자리만 잡는다. 지원 단위는 "원"/"천원"/"천 원"/
+// "백만원"/"백만 원"이며, 숫자-단위 사이와 "백만"/"천"-"원" 사이의 공백은 선택적이다.
+// 연도("2025년")·비율("12.34%")·주식 수("1,237,964,708주")는 접미사가 달라 애초에
+// 매칭되지 않는다. 앞에 "."/숫자/","가 오면(소수점의 뒷부분이거나 더 긴 숫자의
+// 일부이면) 시작점으로 잡지 않아, 숫자를 조각내 잘못 변환하지 않는다. "17조
+// 5,806억원"·"285억 3,352만 원"처럼 이미 조/억/만 단위가 붙은 표현은 숫자와 이
+// 패턴의 단위 사이에 "조"/"억"/"만" 글자가 끼어 있어 애초에 맞지 않으므로 다시
+// 변환되지 않는다. 단위 대체(alternation)는 "백만원" → "천원" → "원" 순으로 긴
+// 단위부터 판정한다 — 순서를 반대로 두면 "백만원"의 마지막 "원"만 별도 단위로
+// 잘못 매칭될 위험이 있다.
+const WON_AMOUNT_PATTERN =
+  /(?<![.\d,])(\d{1,3}(?:,\d{3})+|\d+) ?(백만 ?원|천 ?원|원)/g;
+
+// 각 원문 단위를 정확히 원 단위로 환산하는 배수. 내부 공백을 지운 단위 텍스트
+// ("백만 원" → "백만원")를 키로 쓴다.
+const WON_UNIT_MULTIPLIERS = {
+  원: 1n,
+  천원: 1000n,
+  백만원: 1000000n,
+};
 
 
+// 숫자를 JavaScript Number로 곱하면 333,605,938백만원처럼 큰 금액에서 정밀도를
+// 잃을 수 있으므로, 쉼표를 뗀 정수 문자열을 BigInt로 바꾸고 단위 배수도 BigInt로
+// 곱한다. 음수 부호("-758,900,000,000원")는 정규식이 애초에 캡처하지 않으므로
+// 매치 앞에 그대로 남아 있다가 결과 문자열 앞에 자연스럽게 이어붙는다.
 const insertKoreanWonBreakdown = (text) => {
   if (typeof text !== "string" || !text) {
     return text;
   }
 
-  return text.replace(WON_AMOUNT_PATTERN, (match, digits) => {
-    const numeric = Number(digits.replace(/,/g, ""));
-    const breakdown = koreanWonBreakdown(numeric);
+  return text.replace(WON_AMOUNT_PATTERN, (match, digits, unitRaw) => {
+    const multiplier = WON_UNIT_MULTIPLIERS[unitRaw.replace(/ /g, "")];
 
-    return breakdown ? `${breakdown} 원` : match;
+    if (multiplier === undefined) {
+      return match;
+    }
+
+    const wonAmount = BigInt(digits.replace(/,/g, "")) * multiplier;
+    const breakdown = koreanWonBreakdown(wonAmount);
+
+    return breakdown || match;
   });
 };

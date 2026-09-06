@@ -153,6 +153,7 @@ from disclosure_agent.common.schemas import (
 from disclosure_agent.retrieval.metadata_filter import (
     DOCUMENT_CLASS_EVENT,
     DOCUMENT_CLASS_PERIODIC,
+    FilingRef,
 )
 
 __all__ = [
@@ -163,6 +164,7 @@ __all__ = [
     "CrossEntityCompareResult",
     "CrossEntityShape",
     "EntityDerivedValue",
+    "EntityFilings",
     "build_cross_entity_compare_result",
     "handle_cross_entity_compare",
     "resolve_shape",
@@ -228,6 +230,25 @@ class EntityDerivedValue:
 
 
 @dataclass(frozen=True)
+class EntityFilings:
+    """
+    한 기업이 실제로 확보한 문서(FilingRef) 목록.
+
+    CrossEntityCompareResult.entity_filings가 이 자리를 쓰는 이유는 source_documents 변환이
+    기업마다 다른 canonical_company를 요구하기 때문이다(agent.source_documents의
+    collect_source_documents는 canonical_company 하나만 받는다). 기업별로 나눠 두면
+    normalization이 기업마다 따로 부른 뒤 merge_source_documents로 합칠 수 있다.
+
+    company는 계획에 담긴 표기(plan.companies의 원소)를 그대로 쓴다. 이 값이 곧
+    확보된 Fact.company와 같다 — collect_period_facts가 같은 표기를 canonical_company로
+    넘기기 때문이다(agent.period_retrieval.collect_period_facts).
+    """
+
+    company: str
+    filings: tuple[FilingRef, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class CrossEntityCompareResult:
     """
     Pattern D의 구조화 결과.
@@ -242,6 +263,10 @@ class CrossEntityCompareResult:
 
     facts와 evidence는 blocked여도 남는다. 확보 자체는 정상이었고, 어느 값이 견줄 수 없다고
     판정됐는지 보려면 그 값이 있어야 한다.
+
+    entity_filings는 최종 우열 판정까지 끝난 성공 결과에만 채운다. blocked나 답변 가능성만
+    판정한 결과(NOT_COMPARABLE 등)에는 채우지 않는다 — source_documents는 "정상 답"의
+    Evidence만 join하면 되고, Pattern A/B/Q02도 같은 경계를 쓴다(agent.normalization).
     """
 
     plan: QueryPlan
@@ -250,6 +275,7 @@ class CrossEntityCompareResult:
     calculations: tuple[CalculationResult, ...] = field(default_factory=tuple)
     comparisons: tuple[ComparisonResult, ...] = field(default_factory=tuple)
     conversion_gaps: tuple[ConversionGap, ...] = field(default_factory=tuple)
+    entity_filings: tuple[EntityFilings, ...] = field(default_factory=tuple)
     answerability_status: AnswerabilityStatus | None = None
     answerability_reason: AnswerabilityReason | None = None
     answerability_detail: BlockedInfo | None = None
@@ -571,7 +597,10 @@ def _collect_by_company(
     *,
     corpus_root: str | Path,
     manifest_path: str | Path | None,
-) -> tuple[tuple[tuple[str, tuple[Fact, ...], tuple[Evidence, ...]], ...], BlockedInfo | None]:
+) -> tuple[
+    tuple[tuple[str, tuple[Fact, ...], tuple[Evidence, ...], tuple[FilingRef, ...]], ...],
+    BlockedInfo | None,
+]:
     """
     기업마다 원천 Fact를 확보한다. 하나라도 막히면 아무것도 담지 않는다.
 
@@ -588,8 +617,14 @@ def _collect_by_company(
 
     어느 기업에서 막혔는지는 detail에만 덧붙인다. stage와 reason은 확보 계층이 내린 판정의
     정본이고, agent.normalization의 대응표가 그 값으로 답변 가능성을 판정한다.
+
+    filings도 함께 담는다. collection.period_facts는 이 기업이 실제로 선택한 FilingRef를
+    들고 있으며(agent.period_retrieval.PeriodFactCollection), source_documents를 만들 때
+    manifest를 다시 조회하지 않고 이 값을 그대로 쓴다.
     """
-    collected: list[tuple[str, tuple[Fact, ...], tuple[Evidence, ...]]] = []
+    collected: list[
+        tuple[str, tuple[Fact, ...], tuple[Evidence, ...], tuple[FilingRef, ...]]
+    ] = []
 
     for company in plan.companies:
         collection = collect_period_facts(
@@ -610,7 +645,13 @@ def _collect_by_company(
                 detail=f"{company}: {collection.blocked.detail}",
             )
 
-        collected.append((company, collection.facts, collection.evidence))
+        filings = tuple(
+            period_fact.filing
+            for period_fact in collection.period_facts
+            if period_fact.filing is not None
+        )
+
+        collected.append((company, collection.facts, collection.evidence, filings))
 
     return tuple(collected), None
 
@@ -663,14 +704,21 @@ def _execute_derived_metric_comparison(
     if blocked is not None:
         return CrossEntityCompareResult(plan=plan, blocked=blocked)
 
-    facts = tuple(fact for _, company_facts, _ in collected for fact in company_facts)
+    facts = tuple(fact for _, company_facts, _, _ in collected for fact in company_facts)
 
-    evidence = tuple(item for _, _, company_evidence in collected for item in company_evidence)
+    evidence = tuple(
+        item for _, _, company_evidence, _ in collected for item in company_evidence
+    )
+
+    entity_filings = tuple(
+        EntityFilings(company=company, filings=filings)
+        for company, _, _, filings in collected
+    )
 
     try:
         left, right = (
             _build_entity_value(plan, spec=spec, company=company, facts=company_facts)
-            for company, company_facts, _ in collected
+            for company, company_facts, _, _ in collected
         )
 
         validate_cross_entity_comparability(
@@ -689,10 +737,16 @@ def _execute_derived_metric_comparison(
 
     except CalculationBlockedError as error:
         # 확보한 Fact와 Evidence는 남기고 파생값과 우열 판정은 하나도 남기지 않는다.
+        #
+        # entity_filings는 남긴다. guard②가 막은 것은 "두 기업의 값을 함께 견줄 수 없다"이며,
+        # 그 판정은 두 기업의 문서를 모두 열어 확보를 끝낸 뒤에 내려졌다. normalize가 이
+        # 값으로 UNANSWERABLE 판정에도 source_documents를 실을지 정한다(guard②가 실제로
+        # 대응표에 매핑된 사유일 때만 — normalization._stopped_execution 참조).
         return CrossEntityCompareResult(
             plan=plan,
             facts=facts,
             evidence=evidence,
+            entity_filings=entity_filings,
             blocked=BlockedInfo(
                 stage=STAGE_COMPARABILITY,
                 reason=error.reason,
@@ -706,6 +760,7 @@ def _execute_derived_metric_comparison(
         evidence=evidence,
         calculations=(left.calculation, right.calculation),
         comparisons=(comparison,),
+        entity_filings=entity_filings,
     )
 
 
@@ -748,9 +803,16 @@ def _execute_source_metric_comparison(
     if blocked is not None:
         return CrossEntityCompareResult(plan=plan, blocked=blocked)
 
-    facts = tuple(fact for _, company_facts, _ in collected for fact in company_facts)
+    facts = tuple(fact for _, company_facts, _, _ in collected for fact in company_facts)
 
-    evidence = tuple(item for _, _, company_evidence in collected for item in company_evidence)
+    evidence = tuple(
+        item for _, _, company_evidence, _ in collected for item in company_evidence
+    )
+
+    entity_filings = tuple(
+        EntityFilings(company=company, filings=filings)
+        for company, _, _, filings in collected
+    )
 
     # 확보를 요청한 지표를 그대로 다시 읽는다. 계획에서 두 번 읽으면 요청과 판정이 서로 다른
     # 값을 볼 수 있고, 그 어긋남은 결과에 드러나지 않는다.
@@ -759,7 +821,7 @@ def _execute_source_metric_comparison(
     try:
         left, right = (
             _require_fact(company_facts, company=company, metric=metric)
-            for company, company_facts, _ in collected
+            for company, company_facts, _, _ in collected
         )
 
         validate_cross_entity_fact_comparability(
@@ -776,10 +838,13 @@ def _execute_source_metric_comparison(
         )
 
     except CalculationBlockedError as error:
+        # entity_filings를 남기는 이유는 _execute_derived_metric_comparison의 같은 자리와
+        # 같다: guard②는 두 기업의 문서를 모두 연 뒤에 내린 판정이다.
         return CrossEntityCompareResult(
             plan=plan,
             facts=facts,
             evidence=evidence,
+            entity_filings=entity_filings,
             blocked=BlockedInfo(
                 stage=STAGE_COMPARABILITY,
                 reason=error.reason,
@@ -792,6 +857,7 @@ def _execute_source_metric_comparison(
         facts=facts,
         evidence=evidence,
         comparisons=(comparison,),
+        entity_filings=entity_filings,
     )
 
 
@@ -801,8 +867,18 @@ def _facility_failure_result(
     facts: tuple[Fact, ...],
     evidence: tuple[Evidence, ...],
     failures: tuple[FacilityInvestmentFailure, ...],
+    entity_filings: tuple[EntityFilings, ...] = (),
 ) -> CrossEntityCompareResult:
-    """해소하지 못한 Q12 root를 기존 답변 가능성 어휘로 옮긴다."""
+    """
+    해소하지 못한 Q12 root를 기존 답변 가능성 어휘로 옮긴다.
+
+    entity_filings는 그대로 실어 보낸다. facts/evidence와 마찬가지로 이 함수는 어느 문서가
+    실제로 쓰였는지 새로 판정하지 않는다 — 실패한 root와 무관하게 이미 성공한 root의
+    FilingRef는 호출자(_execute_facility_event_aggregate)가 collection 단위로 옮긴 값이다.
+    execution_failure 갈래(아래)로 가면 normalize가 BLOCKED로 처리하므로 결과적으로
+    source_documents는 비워지지만, 그 판단은 여기서 내리지 않는다
+    (agent.normalization._stopped_execution 참조).
+    """
     gaps = tuple(failure.to_gap() for failure in failures)
 
     execution_failure = next(
@@ -825,6 +901,7 @@ def _facility_failure_result(
             facts=facts,
             evidence=evidence,
             conversion_gaps=gaps,
+            entity_filings=entity_filings,
             blocked=BlockedInfo(
                 stage=execution_failure.stage,
                 reason=execution_failure.reason,
@@ -870,6 +947,7 @@ def _facility_failure_result(
         facts=facts,
         evidence=evidence,
         conversion_gaps=gaps,
+        entity_filings=entity_filings,
         answerability_status=status,
         answerability_reason=reason,
         answerability_detail=BlockedInfo(
@@ -902,12 +980,22 @@ def _execute_facility_event_aggregate(
         failure for collection in collections for failure in collection.failures
     )
 
+    # 실패한 root가 있어도 다른 root의 Fact/Evidence는 collection별로 이미 보존돼 있다
+    # (collect_facility_investment_facts는 root 단위로 실패 경계를 나눈다). 그 Fact/Evidence가
+    # 가리키는 실제 FilingRef도 같은 자리에서 함께 옮긴다 — 실패 갈래로 가도 이 값 자체는
+    # 버릴 이유가 없다.
+    entity_filings = tuple(
+        EntityFilings(company=company, filings=collection.source_filings)
+        for company, collection in zip(plan.companies, collections, strict=True)
+    )
+
     if failures:
         return _facility_failure_result(
             plan,
             facts=facts,
             evidence=evidence,
             failures=failures,
+            entity_filings=entity_filings,
         )
 
     calculations: list[CalculationResult] = []
@@ -944,10 +1032,13 @@ def _execute_facility_event_aggregate(
             right=right,
         )
     except CalculationBlockedError as error:
+        # entity_filings를 남기는 이유는 Q10/Q11의 같은 이름 분기와 같다: guard②는 두
+        # 기업의(root까지 확정한) 문서를 모두 연 뒤에 내린 판정이다.
         return CrossEntityCompareResult(
             plan=plan,
             facts=facts,
             evidence=evidence,
+            entity_filings=entity_filings,
             blocked=BlockedInfo(
                 stage=STAGE_COMPARABILITY,
                 reason=error.reason,
@@ -961,6 +1052,7 @@ def _execute_facility_event_aggregate(
         evidence=evidence,
         calculations=tuple(calculations),
         comparisons=(comparison,),
+        entity_filings=entity_filings,
     )
 
 

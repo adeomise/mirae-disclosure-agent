@@ -57,7 +57,7 @@ from disclosure_agent.agent.handlers.temporal_compare import (
     build_temporal_compare_result,
     handle_temporal_compare,
 )
-from disclosure_agent.agent.period_retrieval import PeriodFactCollection
+from disclosure_agent.agent.period_retrieval import PeriodFact, PeriodFactCollection
 from disclosure_agent.agent.query_analyzer import (
     INTENT_TEMPORAL_COMPARE,
     QueryPlan,
@@ -73,6 +73,7 @@ from disclosure_agent.common.enums import (
     ResultInputType,
 )
 from disclosure_agent.common.schemas import Evidence, Fact
+from disclosure_agent.retrieval.metadata_filter import FilingRef
 
 CORPUS_ROOT_ENV = "DISCLOSURE_CORPUS_ROOT"
 
@@ -1101,3 +1102,320 @@ def test_q08_source_facts_share_one_company_and_one_accounting_scope() -> None:
     assert {fact.fiscal_year for fact in result.facts} == {2024, 2025}
 
     assert REAL_COMPANY in next(iter({fact.company for fact in result.facts}))
+
+
+# --------------------------------------------------------------------------
+# 8. source_documents — 실제 선택된 두 기간의 FilingRef만 전달된다
+#
+# API service가 manifest를 다시 조회하지 않고, 확보 계층이 이미 선택한 FilingRef
+# (PeriodFactCollection.period_facts)를 그대로 옮기는지를 본다.
+# --------------------------------------------------------------------------
+
+
+def _synthetic_filing(fiscal_year: int) -> FilingRef:
+    """Q07 evidence의 doc_id(periodic_SYNTHETIC_{fiscal_year})와 짝이 맞는 FilingRef."""
+    doc_id = f"periodic_SYNTHETIC_{fiscal_year}"
+
+    return FilingRef(
+        doc_id=doc_id,
+        corp_name=f"{SYNTHETIC_COMPANY}(주)",
+        corp_code="00000001",
+        stock_code="000001",
+        report_name="사업보고서",
+        receipt_no=doc_id,
+        receipt_date=f"{fiscal_year + 1}0315",
+        document_class="periodic",
+        doc_group="periodic",
+        document_subtype="annual",
+        base_year=fiscal_year,
+        base_month=12,
+        is_correction=False,
+        directory=Path("corpus") / doc_id,
+        main_document=Path("corpus") / doc_id / f"{doc_id}.xml",
+    )
+
+
+# 실제 비교에 쓰이지 않은 후보 문서. source_documents에 새지 않아야 한다.
+_UNUSED_CANDIDATE_FILING = FilingRef(
+    doc_id="periodic_SYNTHETIC_2023",
+    corp_name=f"{SYNTHETIC_COMPANY}(주)",
+    corp_code="00000001",
+    stock_code="000001",
+    report_name="사업보고서",
+    receipt_no="periodic_SYNTHETIC_2023",
+    receipt_date="20240315",
+    document_class="periodic",
+    doc_group="periodic",
+    document_subtype="annual",
+    base_year=2023,
+    base_month=12,
+    is_correction=False,
+    directory=Path("corpus") / "periodic_SYNTHETIC_2023",
+    main_document=Path("corpus") / "periodic_SYNTHETIC_2023" / "periodic_SYNTHETIC_2023.xml",
+)
+
+
+def _q07_collection_with_period_facts() -> PeriodFactCollection:
+    """
+    Q07 확보 결과에 실제 선택 FilingRef(period_facts)까지 채운다.
+
+    fact/evidence 값 자체는 _q07_collection과 같다. period_facts는 normalize가 filing만
+    읽으므로 다른 필드는 채우지 않는다(PeriodFact의 fact/document/evidence 기본값 None).
+    """
+    base = _q07_collection()
+
+    return PeriodFactCollection(
+        facts=base.facts,
+        evidence=base.evidence,
+        period_facts=(
+            PeriodFact(filing=_synthetic_filing(2024)),
+            PeriodFact(filing=_synthetic_filing(2025)),
+        ),
+    )
+
+
+def test_source_documents_cover_both_selected_periods(
+    q07_plan: QueryPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    nfd_corpus_root: Path,
+) -> None:
+    monkeypatch.setattr(
+        temporal_compare,
+        "collect_period_facts",
+        lambda **_: _q07_collection_with_period_facts(),
+    )
+
+    result = handle_temporal_compare(q07_plan, corpus_root=nfd_corpus_root)
+
+    assert {doc.doc_id for doc in result.source_documents} == {
+        "periodic_SYNTHETIC_2024",
+        "periodic_SYNTHETIC_2025",
+    }
+
+
+def test_every_evidence_doc_id_joins_a_source_document(
+    q07_plan: QueryPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    nfd_corpus_root: Path,
+) -> None:
+    """
+    UI가 쓰는 exact join(Evidence.doc_id -> source_documents[].doc_id)이 성립해야 한다.
+
+    invariant: set(evidence[*].doc_id) == set(source_documents[*].doc_id).
+    한쪽이 크면 근거 없는 문서가 실렸거나(후보 유출) 근거의 문서 metadata가 빠진 것이다.
+    """
+    monkeypatch.setattr(
+        temporal_compare,
+        "collect_period_facts",
+        lambda **_: _q07_collection_with_period_facts(),
+    )
+
+    result = handle_temporal_compare(q07_plan, corpus_root=nfd_corpus_root)
+
+    assert result.evidence
+    assert {item.doc_id for item in result.evidence} == {
+        doc.doc_id for doc in result.source_documents
+    }
+
+
+def test_source_documents_carry_the_actual_filing_metadata(
+    q07_plan: QueryPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    nfd_corpus_root: Path,
+) -> None:
+    monkeypatch.setattr(
+        temporal_compare,
+        "collect_period_facts",
+        lambda **_: _q07_collection_with_period_facts(),
+    )
+
+    result = handle_temporal_compare(q07_plan, corpus_root=nfd_corpus_root)
+
+    by_doc_id = {doc.doc_id: doc for doc in result.source_documents}
+
+    document_2024 = by_doc_id["periodic_SYNTHETIC_2024"]
+    assert document_2024.fiscal_year == 2024
+    assert document_2024.document_subtype == "annual"
+    assert document_2024.base_month == 12
+    assert document_2024.report_name == "사업보고서"
+    assert document_2024.receipt_no == "periodic_SYNTHETIC_2024"
+
+    # canonical_company: Fact.company와 같은 표기여야 같은 회사가 두 표기로 갈리지 않는다.
+    assert document_2024.company == SYNTHETIC_COMPANY
+
+
+def test_unused_candidate_document_never_appears_in_source_documents(
+    q07_plan: QueryPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    nfd_corpus_root: Path,
+) -> None:
+    """비교에 쓰이지 않은 후보 연도의 문서는 실제 확보 결과에 없으므로 새지 않는다."""
+    monkeypatch.setattr(
+        temporal_compare,
+        "collect_period_facts",
+        lambda **_: _q07_collection_with_period_facts(),
+    )
+
+    result = handle_temporal_compare(q07_plan, corpus_root=nfd_corpus_root)
+
+    assert _UNUSED_CANDIDATE_FILING.doc_id not in {
+        doc.doc_id for doc in result.source_documents
+    }
+
+
+def test_source_documents_order_is_deterministic_across_runs(
+    q07_plan: QueryPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    nfd_corpus_root: Path,
+) -> None:
+    monkeypatch.setattr(
+        temporal_compare,
+        "collect_period_facts",
+        lambda **_: _q07_collection_with_period_facts(),
+    )
+
+    first = handle_temporal_compare(q07_plan, corpus_root=nfd_corpus_root)
+    second = handle_temporal_compare(q07_plan, corpus_root=nfd_corpus_root)
+
+    first_order = [doc.doc_id for doc in first.source_documents]
+    second_order = [doc.doc_id for doc in second.source_documents]
+
+    assert first_order == second_order == [
+        "periodic_SYNTHETIC_2024",
+        "periodic_SYNTHETIC_2025",
+    ]
+
+
+def test_blocked_temporal_compare_has_no_source_documents(
+    plan: QueryPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    nfd_corpus_root: Path,
+) -> None:
+    """
+    실제 선택 FilingRef를 확보하지 못한 결과에는 문서 metadata를 지어내지 않는다.
+
+    이 테스트의 _synthetic_collection은 period_facts(FilingRef)를 채우지 않으므로 여기서
+    source_documents가 비는 것은 guard②(NOT_COMPARABLE)라는 status 때문이 아니라 실제
+    FilingRef가 없기 때문이다 — 아래 test_not_comparable_result_still_carries_source_documents
+    가 같은 status에서 FilingRef가 있으면 채워진다는 것을 대조로 보여준다.
+    """
+    monkeypatch.setattr(
+        temporal_compare,
+        "collect_period_facts",
+        lambda **_: _synthetic_collection(
+            scope_by_year={
+                2024: FactAccountingScope.CONSOLIDATED,
+                2025: FactAccountingScope.SEPARATE,
+            }
+        ),
+    )
+
+    result = _run(plan, corpus_root=nfd_corpus_root)
+
+    assert result.answerability_reason is AnswerabilityReason.NOT_COMPARABLE
+    assert result.source_documents == []
+
+
+def _q07_collection_with_period_facts_and_scope(
+    scope_by_year: dict[int, FactAccountingScope],
+) -> PeriodFactCollection:
+    """
+    _q07_collection_with_period_facts와 같지만 연도별 회계기준을 어긋나게 둘 수 있다.
+
+    guard②(비교 가능성)를 실제로 걸리게 하면서도 period_facts(FilingRef)는 정상적으로
+    채운, "확보는 끝났고 견줄 수 없다고 판정됐다"는 실제 경로를 재현한다.
+    """
+    facts = tuple(
+        fact.model_copy(update={"accounting_scope": scope_by_year[fact.fiscal_year]})
+        for fact in _q07_collection().facts
+    )
+
+    return PeriodFactCollection(
+        facts=facts,
+        evidence=_q07_collection().evidence,
+        period_facts=(
+            PeriodFact(filing=_synthetic_filing(2024)),
+            PeriodFact(filing=_synthetic_filing(2025)),
+        ),
+    )
+
+
+def test_not_comparable_result_still_carries_source_documents(
+    q07_plan: QueryPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    nfd_corpus_root: Path,
+) -> None:
+    """
+    COMPLETED + UNANSWERABLE + NOT_COMPARABLE이어도 실제 FilingRef가 있으면 채운다.
+
+    guard②는 두 기간의 문서를 모두 열어 확보를 끝낸 뒤에 내린 판정이다. status가
+    ANSWERABLE이 아니라는 사실만으로 문서 metadata를 지울 근거가 되지 않는다 — Evidence는
+    여전히 실제 문서를 가리키고 있다.
+    """
+    monkeypatch.setattr(
+        temporal_compare,
+        "collect_period_facts",
+        lambda **_: _q07_collection_with_period_facts_and_scope(
+            {2024: FactAccountingScope.CONSOLIDATED, 2025: FactAccountingScope.SEPARATE}
+        ),
+    )
+
+    result = handle_temporal_compare(q07_plan, corpus_root=nfd_corpus_root)
+
+    # 기존 판정은 그대로다.
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.NOT_COMPARABLE
+    assert len(result.facts) == 2
+    assert len(result.evidence) == 2
+    assert result.calculations == []
+
+    # evidence_doc_ids == source_document_ids: 후보 문서가 새지 않고 정확히 일치한다.
+    evidence_doc_ids = {item.doc_id for item in result.evidence}
+    source_document_ids = {doc.doc_id for doc in result.source_documents}
+    assert evidence_doc_ids == source_document_ids == {
+        "periodic_SYNTHETIC_2024",
+        "periodic_SYNTHETIC_2025",
+    }
+
+    by_doc_id = {doc.doc_id: doc for doc in result.source_documents}
+    document_2024 = by_doc_id["periodic_SYNTHETIC_2024"]
+    assert document_2024.company == SYNTHETIC_COMPANY
+    assert document_2024.report_name == "사업보고서"
+    assert document_2024.receipt_no == "periodic_SYNTHETIC_2024"
+    assert document_2024.filing_date is not None
+
+
+def test_unusable_calculation_input_still_has_no_source_documents(
+    q07_plan: QueryPlan,
+    monkeypatch: pytest.MonkeyPatch,
+    nfd_corpus_root: Path,
+) -> None:
+    """
+    BLOCKED(unusable_calculation_input)는 FilingRef가 있어도 source_documents를 싣지 않는다.
+
+    이 정지는 ANSWERABILITY_BY_STOP에 없어 "판정에 이르지 못하고 멈췄다"로 남는다. 코퍼스에
+    답이 있는지조차 판정하지 못했으므로, 문서를 실제로 열었다는 사실만으로 완결된 판단이
+    생기지 않는다.
+    """
+    zeroed = _q07_collection_with_period_facts()
+
+    facts = (
+        zeroed.facts[0].model_copy(update={"normalized_value": "0", "raw_value": "0"}),
+        zeroed.facts[1],
+    )
+
+    monkeypatch.setattr(
+        temporal_compare,
+        "collect_period_facts",
+        lambda **_: PeriodFactCollection(
+            facts=facts,
+            evidence=zeroed.evidence,
+            period_facts=zeroed.period_facts,
+        ),
+    )
+
+    result = handle_temporal_compare(q07_plan, corpus_root=nfd_corpus_root)
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.source_documents == []

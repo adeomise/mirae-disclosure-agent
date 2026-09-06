@@ -212,6 +212,12 @@ class EventSummaryResult:
     state가 없는데 history가 있는 경우가 있다. 최신 유효 상태를 요구했으나 체인을 끝까지
     확정하지 못한 경우이며, 그때 확보한 것은 '어디까지 이어지는 이력을 봤는가'뿐이다.
     원공시 값을 최신값 자리에 놓지 않는다.
+
+    filings를 따로 들고 다니는 이유:
+        event/state는 이미 공통 Contract 타입이지만 그 안에는 FilingRef가 없다.
+        source_documents를 만들려면 evidence가 실제로 가리키는 문서(원공시일 수도, 필드를
+        갱신한 정정공시일 수도 있다)의 FilingRef가 필요하다. 값은 evidence와 정확히 같은
+        doc_id 집합만 담는다 — 체인의 다른 문서까지 넓히지 않는다.
     """
 
     plan: QueryPlan
@@ -226,6 +232,7 @@ class EventSummaryResult:
     root_candidate_doc_ids: tuple[str, ...] = field(default_factory=tuple)
     missing_fields: tuple[str, ...] = field(default_factory=tuple)
     withheld_fields: tuple[str, ...] = field(default_factory=tuple)
+    filings: tuple[FilingRef, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
     blocked: BlockedInfo | None = None
 
@@ -510,6 +517,10 @@ def _summarize_selected_event(
         if candidate.filing.document_subtype == root.filing.document_subtype
     )
 
+    # evidence가 가리키는 doc_id로 실제 선택된 FilingRef를 되짚을 때 쓴다. manifest를 다시
+    # 조회하지 않고 이미 연 chain_candidates 안에서만 찾는다.
+    filing_by_doc_id = {candidate.doc_id: candidate.filing for candidate in chain_candidates}
+
     chain_filings = [candidate.filing for candidate in chain_candidates]
 
     parsed_by_receipt_no = {
@@ -586,6 +597,8 @@ def _summarize_selected_event(
             evidence=_state_evidence_for_document(adapted, root.doc_id),
             conversion_gaps=conversion.conversion_gaps,
             root_candidate_doc_ids=(root.doc_id,),
+            # 이 경로의 evidence는 root 문서 하나에서만 나온다(_state_evidence_for_document).
+            filings=(root.filing,),
             warnings=warnings,
         )
 
@@ -650,6 +663,13 @@ def _summarize_selected_event(
         available_evidence_ids={item.evidence_id for item in evidence},
     )
 
+    # evidence가 실제로 가리키는 doc_id만 문서로 옮긴다. 값을 갱신한 정정공시가 있으면 그
+    # 문서도 여기 포함된다 — root 하나로 좁히지 않는다. 순서는 evidence에 처음 나온 순서다.
+    used_doc_ids = dict.fromkeys(item.doc_id for item in evidence)
+    filings = tuple(
+        filing_by_doc_id[doc_id] for doc_id in used_doc_ids if doc_id in filing_by_doc_id
+    )
+
     return EventSummaryResult(
         plan=plan,
         status=status,
@@ -662,6 +682,7 @@ def _summarize_selected_event(
         root_candidate_doc_ids=(root.doc_id,),
         missing_fields=missing,
         withheld_fields=withheld,
+        filings=filings,
         warnings=warnings,
     )
 

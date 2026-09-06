@@ -405,6 +405,84 @@ def test_correction_is_the_same_event_chain(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# B-1. source_documents — evidence가 실제로 가리키는 문서만 전달된다
+# --------------------------------------------------------------------------
+
+
+def test_latest_valid_source_documents_cover_the_root_and_the_amount_correction(
+    tmp_path: Path,
+) -> None:
+    """
+    investment_amount만 정정이 갱신했다. 나머지 필수 항목(투자대상 등)은 원공시 값 그대로다.
+
+    그래서 evidence는 원공시(root)와 정정공시 둘 다를 가리키고, source_documents도 둘 다
+    담아야 한다 — root 하나로 좁히지 않는다.
+    """
+    corpus = corrected_chain(tmp_path)
+
+    result = handle_event_summary(
+        plan(chain_policy=ChainPolicy.LATEST_VALID), corpus_root=corpus
+    )
+
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert {doc.doc_id for doc in result.source_documents} == {
+        ROOT_DOC_ID,
+        "exchange_SYNTHETIC90010009",
+    }
+
+
+def test_every_evidence_doc_id_joins_a_source_document(tmp_path: Path) -> None:
+    """
+    UI가 쓰는 exact join(Evidence.doc_id -> source_documents[].doc_id)이 성립해야 한다.
+
+    invariant: set(evidence[*].doc_id) == set(source_documents[*].doc_id).
+    이 경로의 filings는 evidence의 doc_id에서 되짚어 만들므로(체인 전체가 아니다) 두 집합이
+    구조적으로 같아야 하고, 어긋나면 doc_id로 FilingRef를 확정하지 못한 문서가 있다는 뜻이다.
+    """
+    corpus = corrected_chain(tmp_path)
+
+    result = handle_event_summary(
+        plan(chain_policy=ChainPolicy.LATEST_VALID), corpus_root=corpus
+    )
+
+    assert result.evidence
+    assert {item.doc_id for item in result.evidence} == {
+        doc.doc_id for doc in result.source_documents
+    }
+
+
+def test_source_documents_preserve_report_name_and_receipt_no(tmp_path: Path) -> None:
+    corpus = corrected_chain(tmp_path)
+
+    result = handle_event_summary(
+        plan(chain_policy=ChainPolicy.LATEST_VALID), corpus_root=corpus
+    )
+
+    by_doc_id = {doc.doc_id: doc for doc in result.source_documents}
+
+    correction = by_doc_id["exchange_SYNTHETIC90010009"]
+    assert correction.report_name == "[기재정정]신규시설투자등"
+    assert correction.receipt_no == "SYNTHETIC90010009"
+    assert correction.filing_date == date(2025, 6, 20)
+
+    root = by_doc_id[ROOT_DOC_ID]
+    assert root.receipt_no == ROOT_RECEIPT_NO
+    assert root.filing_date == date(2025, 1, 10)
+
+
+def test_original_only_source_documents_cover_just_the_root(tmp_path: Path) -> None:
+    """original_only는 정정을 아예 보지 않으므로 그 문서를 근거로 싣지 않는다."""
+    corpus = corrected_chain(tmp_path)
+
+    result = handle_event_summary(
+        plan(chain_policy=ChainPolicy.ORIGINAL_ONLY), corpus_root=corpus
+    )
+
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert {doc.doc_id for doc in result.source_documents} == {ROOT_DOC_ID}
+
+
+# --------------------------------------------------------------------------
 # D. 요약과 무관한 유보는 판정을 낮추지 않는다
 # --------------------------------------------------------------------------
 
@@ -752,6 +830,11 @@ def test_incomplete_chain_does_not_fall_back_to_stale_root_values(tmp_path: Path
     assert not execution.resolved_event_states
     assert execution.event_histories
     assert execution.event_histories[0].chain_complete is False
+
+    # 최신 상태를 확정하지 못했으므로 근거는 root 문서 하나뿐이다(정정본은 담지 않는다).
+    assert {doc.doc_id for doc in execution.source_documents} == {ROOT_DOC_ID}
+    assert execution.evidence
+    assert all(item.doc_id == ROOT_DOC_ID for item in execution.evidence)
 
 
 def test_original_state_survives_an_incomplete_chain(tmp_path: Path) -> None:

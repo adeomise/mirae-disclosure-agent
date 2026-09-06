@@ -35,6 +35,7 @@ __all__ = [
     "ConflictingSourceDocumentError",
     "build_source_document",
     "collect_source_documents",
+    "merge_source_documents",
 ]
 
 
@@ -117,5 +118,41 @@ def collect_source_documents(
 
         if existing != document:
             raise ConflictingSourceDocumentError(document.doc_id, existing, document)
+
+    return ordered
+
+
+def merge_source_documents(*groups: Iterable[SourceDocument]) -> list[SourceDocument]:
+    """
+    이미 만든 SourceDocument 묶음 여러 개를 doc_id 기준으로 합친다.
+
+    왜 필요한가:
+        collect_source_documents는 canonical_company 하나를 모든 FilingRef에 적용한다.
+        기업이 여럿인 Pattern(D)은 기업마다 다른 canonical_company로 build_source_document
+        (또는 기업별 collect_source_documents)를 따로 부른 뒤, 그 결과들을 순서대로 이어야
+        한다. 그 이어붙이는 규칙이 여기다.
+
+    collect_source_documents와 같은 중복 규칙을 쓴다: 같은 doc_id가 같은 metadata로 다시
+    나오면 처음 자리에만 남기고, 다른 metadata로 나오면 조용히 하나를 고르지 않고 멈춘다
+    (ConflictingSourceDocumentError). 입력이 FilingRef가 아니라 이미 만든 SourceDocument라는
+    점만 collect_source_documents와 다르다.
+
+    정렬하지 않는다. 인자로 받은 묶음의 순서, 그리고 묶음 안의 순서를 그대로 따른다 — 호출자가
+    이미 기업 순서(plan.companies)와 문서 순서를 정했다는 뜻이다.
+    """
+    ordered: list[SourceDocument] = []
+    by_doc_id: dict[str, SourceDocument] = {}
+
+    for group in groups:
+        for document in group:
+            existing = by_doc_id.get(document.doc_id)
+
+            if existing is None:
+                by_doc_id[document.doc_id] = document
+                ordered.append(document)
+                continue
+
+            if existing != document:
+                raise ConflictingSourceDocumentError(document.doc_id, existing, document)
 
     return ordered

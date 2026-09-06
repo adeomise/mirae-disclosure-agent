@@ -16,6 +16,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import unicodedata
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -691,6 +692,226 @@ def test_normalization_keeps_the_contract_objects_untouched(complete_chain) -> N
     assert result.event_histories == [internal.history]
     assert result.event_links == list(internal.links)
     assert result.evidence == list(internal.evidence)
+
+
+def test_complete_chain_source_documents_cover_every_chain_document(
+    complete_chain,
+) -> None:
+    """
+    원공시(E0001) + 정정 2건(E0002, E0003) 전부가 실제 chain.entries다.
+
+    후보에 없던 문서가 새지 않는지, 그리고 각 정정이 별도 SourceDocument로 남는지를 본다.
+    """
+    manifest_path, corpus_root = complete_chain
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    assert [doc.doc_id for doc in result.source_documents] == [
+        "exchange_E0001",
+        "exchange_E0002",
+        "exchange_E0003",
+    ]
+
+
+def test_every_evidence_doc_id_joins_a_source_document(complete_chain) -> None:
+    """UI가 쓰는 exact join(Evidence.doc_id -> source_documents[].doc_id)이 성립해야 한다."""
+    manifest_path, corpus_root = complete_chain
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    known = {doc.doc_id for doc in result.source_documents}
+
+    assert result.evidence
+    assert all(item.doc_id in known for item in result.evidence)
+
+
+def test_chain_entries_are_exactly_the_documents_the_evidence_references(
+    complete_chain,
+) -> None:
+    """
+    chain.entries 전체를 싣는 것이 곧 '실제 사용 문서 전체'라는 근거를 고정한다.
+
+    build_event_evidence는 chain.entries의 모든 문서마다 문서 단위 Evidence
+    (evidence_{doc_id}_document)를 예외 없이 하나 만든다 — 원공시는 변경 항목이 없어서,
+    변경 근거만 만들면 이력의 출발점이 근거 없이 남기 때문이다. 그래서 chain에 귀속을
+    확정한 문서는 전부 Evidence가 참조하며, 여기서는 따로 걸러 낼 후보 문서가 없다.
+
+    invariant:
+        set(evidence[*].doc_id) == set(source_documents[*].doc_id)
+
+    이 성질이 깨지면(예: 문서 단위 Evidence를 없애 일부 entry가 Evidence에서 사라지면)
+    chain.entries를 그대로 싣던 이 경로도 함께 좁혀야 한다는 뜻이며, 그 사실이 여기서 잡힌다.
+    """
+    manifest_path, corpus_root = complete_chain
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    evidence_doc_ids = {item.doc_id for item in result.evidence}
+    source_document_ids = {doc.doc_id for doc in result.source_documents}
+
+    assert evidence_doc_ids == source_document_ids
+
+
+def test_resolved_event_links_join_source_documents_but_candidates_do_not(
+    complete_chain,
+) -> None:
+    """
+    연결이 확정된 EventLink의 두 doc_id는 모두 문서로 join된다.
+
+    resolution_status가 RESOLVED인 링크는 "이 정정이 저 원공시를 고쳤다"가 확정된 것이고,
+    그 두 문서는 모두 chain.entries에 들어 있다. 반대로 확정되지 않은 링크의 후보 문서는
+    이력에 귀속되지 않았으므로 문서로 싣지 않는다(아래 incomplete chain 테스트가 그 쪽을
+    본다).
+    """
+    manifest_path, corpus_root = complete_chain
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    known = {doc.doc_id for doc in result.source_documents}
+
+    resolved = [
+        link
+        for link in result.event_links
+        if link.resolution_status is EventLinkResolutionStatus.RESOLVED
+    ]
+
+    assert resolved
+
+    for link in resolved:
+        assert link.source_doc_id in known
+        assert link.resolved_doc_id in known
+
+
+def test_source_documents_preserve_report_name_filing_date_and_receipt_no(
+    complete_chain,
+) -> None:
+    manifest_path, corpus_root = complete_chain
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    by_doc_id = {doc.doc_id: doc for doc in result.source_documents}
+
+    original = by_doc_id["exchange_E0001"]
+    assert original.report_name == "단일판매ㆍ공급계약체결"
+    assert original.receipt_no == "E0001"
+    assert original.filing_date == date(2025, 6, 1)
+
+    first_correction = by_doc_id["exchange_E0002"]
+    assert first_correction.report_name == "[기재정정]단일판매ㆍ공급계약체결"
+    assert first_correction.receipt_no == "E0002"
+    assert first_correction.filing_date == date(2025, 10, 8)
+
+    second_correction = by_doc_id["exchange_E0003"]
+    assert second_correction.report_name == "[기재정정]단일판매ㆍ공급계약체결"
+    assert second_correction.receipt_no == "E0003"
+    assert second_correction.filing_date == date(2025, 12, 18)
+
+
+def test_incomplete_chain_source_documents_only_cover_linked_documents(
+    make_event_corpus,
+    stub_parser,
+) -> None:
+    """
+    체인에서 확정된 문서만 담는다. 후보였지만 chain.entries에 들지 못한 문서는 새지 않는다.
+
+    test_incomplete_chain_keeps_its_partial_meaning과 같은 corpus다: E0002·E0003은 원공시
+    E0001의 정정으로 각각 확정되지만, E0004는 그 둘이 같은 날 제출돼(20251008) 어느 쪽의
+    정정인지 좁히지 못하고 unresolved_links에 남는다 — 그래서 이 root의 chain_complete는
+    False이고, E0004만 후보 문서로 남아 담기지 않아야 한다.
+    """
+    manifest_path, corpus_root = make_event_corpus(
+        [
+            _record("E0001", "20250601", is_correction=False),
+            _record("E0002", "20251008", is_correction=True),
+            _record("E0003", "20251008", is_correction=True),
+            _record("E0004", "20251218", is_correction=True),
+        ]
+    )
+
+    stub_parser(
+        {
+            "E0001": {},
+            "E0002": {
+                "original_filing_date": "2025-06-01",
+                "correction_date": "2025-10-08",
+            },
+            "E0003": {
+                "original_filing_date": "2025-06-01",
+                "correction_date": "2025-10-08",
+            },
+            "E0004": {
+                "original_filing_date": "2025-10-08",
+                "correction_date": "2025-12-18",
+            },
+        }
+    )
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    assert result.answerability_status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+
+    known = {doc.doc_id for doc in result.source_documents}
+
+    assert result.evidence
+
+    # invariant: 두 집합이 정확히 일치한다(후보 문서가 없고, 빠진 근거 문서도 없다).
+    assert {item.doc_id for item in result.evidence} == known
+
+    # E0004는 E0002/E0003 중 어느 쪽의 정정인지 확정하지 못해(같은 원공시 제출일)
+    # unresolved_links에 남는다(EventLink.resolution_status == AMBIGUOUS). chain.entries에
+    # 들지 못했으므로 후보 문서로 새지 않는다 — 확정되지 않은 EventLink의 doc_id는 join되지
+    # 않는 것이 규약이다.
+    assert result.event_links[-1].resolution_status is EventLinkResolutionStatus.AMBIGUOUS
+    assert result.event_links[-1].source_doc_id == "exchange_E0004"
+    assert "exchange_E0004" not in known
+
+
+def test_ambiguous_root_has_no_source_documents(
+    make_event_corpus,
+    stub_parser,
+) -> None:
+    """대상 문서를 하나로 확정하지 못한 결과에는 후보 문서를 담지 않는다."""
+    manifest_path, corpus_root = make_event_corpus(
+        [
+            _record("E0001", "20250601", is_correction=False),
+            _record("E0002", "20250612", is_correction=False),
+        ]
+    )
+
+    stub_parser({"E0001": {}, "E0002": {}})
+
+    plan = build_query_plan(QUESTION, known_companies=KNOWN_COMPANIES)
+
+    result = handle_event_history(
+        plan, corpus_root=corpus_root, manifest_path=manifest_path
+    )
+
+    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
+    assert result.source_documents == []
 
 
 def test_incomplete_chain_keeps_its_partial_meaning(

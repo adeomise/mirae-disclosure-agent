@@ -59,8 +59,13 @@ def _require_actual_corpus() -> Path:
     return manifest_path
 
 
-def _expected_q04_doc_id(manifest_path: Path) -> str:
-    """Read only Q04's public document identity from the selected manifest."""
+def _expected_q04_record(manifest_path: Path) -> dict:
+    """Read Q04's selected manifest record.
+
+    doc_id뿐 아니라 source_documents가 실어야 할 값(보고서 정식 명칭, 회계기간, 접수번호,
+    공시일)도 같은 레코드에서 나온다. 그 값을 코드에 적지 않고(AGENTS.md) manifest에서 읽어
+    견주기 위해 레코드를 통째로 돌려준다.
+    """
     records = []
 
     with manifest_path.open(encoding="utf-8") as manifest:
@@ -83,6 +88,10 @@ def _expected_q04_doc_id(manifest_path: Path) -> str:
 
     assert "사업보고서" in str(record.get("report_nm", ""))
 
+    return record
+
+
+def _expected_q04_doc_id(record: dict) -> str:
     return str(record.get("doc_id") or f"periodic_{record['rcept_no']}")
 
 
@@ -122,8 +131,27 @@ def test_q04_runs_through_actual_corpus_http_api() -> None:
     assert all(evidence_ids)
     assert len(evidence_ids) == len(set(evidence_ids))
 
-    expected_doc_id = _expected_q04_doc_id(manifest_path)
+    expected_record = _expected_q04_record(manifest_path)
+    expected_doc_id = _expected_q04_doc_id(expected_record)
     assert {evidence.doc_id for evidence in actual.evidence} == {expected_doc_id}
+
+    # 근거가 가리키는 문서 집합과 source_documents의 문서 집합이 정확히 같다.
+    assert {document.doc_id for document in actual.source_documents} == {
+        evidence.doc_id for evidence in actual.evidence
+    }
+    assert len(actual.source_documents) == 1
+
+    # 값은 실제로 선택된 공시의 manifest 레코드에서 그대로 옮겨 온 것이어야 한다.
+    source_document = actual.source_documents[0]
+
+    assert source_document.company == EXPECTED_COMPANY
+    assert source_document.report_name == expected_record["report_nm"]
+    assert source_document.fiscal_year == EXPECTED_FISCAL_YEAR
+    assert source_document.document_subtype == DOC_SUBTYPE_ANNUAL
+    assert source_document.base_month == expected_record["base_month"]
+    assert source_document.receipt_no == expected_record["rcept_no"]
+    assert source_document.filing_date is not None
+    assert source_document.filing_date.strftime("%Y%m%d") == expected_record["rcept_dt"]
 
     section_paths = {tuple(evidence.section_path) for evidence in actual.evidence}
     assert len(section_paths) == 1

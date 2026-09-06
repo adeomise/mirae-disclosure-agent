@@ -9,6 +9,7 @@
     - 범위 하나라도 확정하지 못하면 부분 답을 내지 않고 전부 멈추는가
     - 이 경로는 정정본을 후보에 포함해 원본·정정본이 함께 있으면 어느 것도 고르지 않는가
     - 범위 하나의 경로(Q04)의 조회 규칙은 그대로인가
+    - 실제로 선택된 FilingRef의 문서 metadata가 source_documents로 그대로 따라오는가
 
 합성 요약 문서(summary_document)에는 주요 제품 Section만 있고 사업의 개요 Section이 없다.
 성공 경로는 그 Section을 더한 복제본(profile_document)을 쓰고, 실패 경로는 원본을 그대로 쓴다.
@@ -19,6 +20,7 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -417,3 +419,207 @@ def test_non_canonical_bundles_do_not_inherit_the_q05_filing_policy(
     assert result.execution_issue.reason == "unsupported_summary_section_scope"
     assert result.document_summaries == []
     assert result.evidence == []
+
+
+# --------------------------------------------------------------------------
+# 5. source_documents — 실제로 선택된 FilingRef의 문서 metadata
+#
+# 범위 묶음 경로는 범위마다 결과를 만들어 이어 붙인다. 그 이어 붙이는 자리에서 문서
+# metadata가 빠지면 Evidence.doc_id를 join할 상대가 없어지고, 화면은 문서 이름 대신 일반
+# 문구로 물러난다(응답만 봐서는 정상과 구분되지 않는다).
+# --------------------------------------------------------------------------
+
+# 합성 manifest의 FY2025 사업보고서 레코드가 담고 있는 값(tests/conftest.py).
+EXPECTED_CANONICAL_COMPANY = "테스트반도체"
+EXPECTED_REPORT_NAME = "사업보고서 (2025.12)"
+EXPECTED_FISCAL_YEAR = 2025
+EXPECTED_DOCUMENT_SUBTYPE = "annual"
+EXPECTED_BASE_MONTH = 12
+EXPECTED_FILING_DATE = date(2026, 3, 12)
+EXPECTED_RECEIPT_NO = "SYNTHETIC0001"
+
+
+def _assert_selected_filing_metadata(document) -> None:
+    """manifest 레코드가 담고 있는 값이 그대로 왔는지 본다.
+
+    corp_name은 manifest 원 표기("테스트반도체(주)")가 아니라 질의 해석이 확정한 canonical
+    표기여야 한다. DocumentSummary.company가 쓰는 값과 같아야 같은 응답 안에서 같은 회사가
+    두 표기로 나뉘지 않는다.
+    """
+    assert document.company == EXPECTED_CANONICAL_COMPANY
+    assert document.report_name == EXPECTED_REPORT_NAME
+    assert document.fiscal_year == EXPECTED_FISCAL_YEAR
+    assert document.document_subtype == EXPECTED_DOCUMENT_SUBTYPE
+    assert document.base_month == EXPECTED_BASE_MONTH
+    assert document.filing_date == EXPECTED_FILING_DATE
+    assert document.receipt_no == EXPECTED_RECEIPT_NO
+
+
+def test_two_scopes_carry_the_selected_filing_as_one_source_document(
+    plan: QueryPlan,
+    profile_document: dict[str, Any],
+    manifest_without_correction: Path,
+    nfd_corpus_root: Path,
+    parsed_document_stub,
+) -> None:
+    """
+    두 범위가 한 문서를 보므로 source_documents는 1건이고, 값은 manifest 레코드 그대로다.
+
+    근거는 범위 수보다 많다(범위마다 항목이 여럿이다). 그 근거 전부가 같은 문서를 가리키므로
+    doc_id 집합이 정확히 일치하고, 문서는 1건으로 접힌다 — 근거마다 한 건씩 쌓이면
+    AgentExecutionResult의 doc_id 중복 검사가 거절한다.
+    """
+    parsed_document_stub(profile_document)
+
+    result = handle_document_summary(
+        plan,
+        corpus_root=nfd_corpus_root,
+        manifest_path=manifest_without_correction,
+    )
+
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+
+    # 같은 문서를 가리키는 근거가 여럿인데 문서는 1건으로 접힌다.
+    assert len(result.evidence) > 1
+    assert len(result.source_documents) == 1
+
+    evidence_doc_ids = {evidence.doc_id for evidence in result.evidence}
+    source_doc_ids = {document.doc_id for document in result.source_documents}
+
+    assert evidence_doc_ids == source_doc_ids == {ORIGINAL_DOC_ID}
+
+    _assert_selected_filing_metadata(result.source_documents[0])
+
+
+def test_public_answer_response_carries_the_source_document(
+    plan: QueryPlan,
+    profile_document: dict[str, Any],
+    manifest_without_correction: Path,
+    nfd_corpus_root: Path,
+    parsed_document_stub,
+) -> None:
+    """공개 응답까지 같은 값이 그대로 간다 — 화면이 join하는 것은 이 값이다."""
+    parsed_document_stub(profile_document)
+
+    result = handle_document_summary(
+        plan,
+        corpus_root=nfd_corpus_root,
+        manifest_path=manifest_without_correction,
+    )
+
+    response = build_answer_response(result)
+
+    assert [document.doc_id for document in response.source_documents] == [ORIGINAL_DOC_ID]
+    assert {evidence.doc_id for evidence in response.evidence} == {
+        document.doc_id for document in response.source_documents
+    }
+    assert response.source_documents == result.source_documents
+
+
+def test_single_scope_path_carries_the_selected_filing_as_a_source_document(
+    summary_document: dict[str, Any],
+    manifest_without_correction: Path,
+    nfd_corpus_root: Path,
+    parsed_document_stub,
+) -> None:
+    """
+    범위 하나의 경로(Q04)도 같은 값을 싣는다.
+
+    이 경로는 원래부터 normalize_document_summary_result를 그대로 지나가므로 배선이 있었다.
+    범위 묶음 경로를 고치면서 이쪽이 흔들리지 않았는지 함께 못박는다.
+    """
+    parsed_document_stub(summary_document)
+
+    plan = build_query_plan(Q04_SHAPED_QUESTION, known_companies=SYNTHETIC_COMPANIES)
+
+    result = handle_document_summary(
+        plan,
+        corpus_root=nfd_corpus_root,
+        manifest_path=manifest_without_correction,
+    )
+
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert len(result.source_documents) == 1
+
+    evidence_doc_ids = {evidence.doc_id for evidence in result.evidence}
+    source_doc_ids = {document.doc_id for document in result.source_documents}
+
+    assert evidence_doc_ids == source_doc_ids == {ORIGINAL_DOC_ID}
+
+    _assert_selected_filing_metadata(result.source_documents[0])
+
+
+def test_a_missing_scope_leaves_no_source_document_behind(
+    plan: QueryPlan,
+    summary_document: dict[str, Any],
+    manifest_without_correction: Path,
+    nfd_corpus_root: Path,
+    parsed_document_stub,
+) -> None:
+    """
+    범위 하나를 확정하지 못해 전부 멈춘 결과에는 문서 metadata도 남지 않는다.
+
+    공시는 확정했고 문서도 열었으므로 FilingRef 자체는 있다. 그래도 싣지 않는다 — 근거가
+    나가지 않는 응답에 문서 metadata만 실리면 join할 상대가 없는 문서가 화면에 남는다.
+    """
+    parsed_document_stub(summary_document)
+
+    result = handle_document_summary(
+        plan,
+        corpus_root=nfd_corpus_root,
+        manifest_path=manifest_without_correction,
+    )
+
+    assert result.answerability_status is AnswerabilityStatus.UNANSWERABLE
+    assert result.evidence == []
+    assert result.source_documents == []
+
+
+def test_unresolved_filing_leaves_no_source_document_behind(
+    plan: QueryPlan,
+    profile_document: dict[str, Any],
+    synthetic_manifest_path: Path,
+    nfd_corpus_root: Path,
+    parsed_document_stub,
+) -> None:
+    """공시를 1건으로 좁히지 못하면 후보 어느 쪽도 문서 metadata로 싣지 않는다."""
+    parsed_document_stub(profile_document)
+
+    result = handle_document_summary(
+        plan,
+        corpus_root=nfd_corpus_root,
+        manifest_path=synthetic_manifest_path,
+    )
+
+    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
+    assert result.evidence == []
+    assert result.source_documents == []
+
+
+@pytest.mark.parametrize(
+    "section_scopes",
+    [
+        (SectionScope.FACILITY_INVESTMENT,),
+        (SectionScope.FACILITY_INVESTMENT, SectionScope.PRODUCTS),
+    ],
+)
+def test_unsupported_scope_bundles_leave_no_source_document_behind(
+    plan: QueryPlan,
+    profile_document: dict[str, Any],
+    manifest_without_correction: Path,
+    nfd_corpus_root: Path,
+    parsed_document_stub,
+    section_scopes: tuple[SectionScope, ...],
+) -> None:
+    """입구에서 막힌 계획은 공시를 찾기도 전에 멈추므로 실을 문서 metadata가 없다."""
+    parsed_document_stub(profile_document)
+
+    result = handle_document_summary(
+        replace(plan, section_scopes=section_scopes),
+        corpus_root=nfd_corpus_root,
+        manifest_path=manifest_without_correction,
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.evidence == []
+    assert result.source_documents == []

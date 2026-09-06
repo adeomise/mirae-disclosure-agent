@@ -246,7 +246,17 @@ def test_summary_over_two_periods_is_blocked() -> None:
     assert error.value.reason == "unsupported_summary_period"
 
 
-def test_summary_without_a_section_scope_is_blocked() -> None:
+@pytest.mark.parametrize(
+    "question",
+    [
+        "테스트바이오 2025년 사업보고서 내용 정리해줘",
+        # 연도가 앞에 오고 "내용" 없이 곧바로 요약을 요청하는 어순. 문서 전체 요약을
+        # 요청하는 대표 모양이며, 이 판정은 Pattern B의 source_documents 배선과 무관하게
+        # 그대로 유지된다.
+        "2025년 테스트바이오 사업보고서 요약해줘.",
+    ],
+)
+def test_summary_without_a_section_scope_is_blocked(question: str) -> None:
     """
     범위를 읽지 못하면 문서 전체 요약으로 대체하지 않는다.
 
@@ -257,7 +267,7 @@ def test_summary_without_a_section_scope_is_blocked() -> None:
     이 테스트가 고정하는 것은 그 사실이다.
     """
     with pytest.raises(UnsupportedQuestionError) as error:
-        plan_for("테스트바이오 2025년 사업보고서 내용 정리해줘")
+        plan_for(question)
 
     assert error.value.reason == "unsupported_metric"
 

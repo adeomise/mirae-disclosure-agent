@@ -84,12 +84,13 @@ from disclosure_agent.agent.query_analyzer import (
     DOCUMENT_SUBTYPE_ANNUAL,
     QueryPlan,
 )
+from disclosure_agent.agent.source_documents import merge_source_documents
 from disclosure_agent.common.enums import (
     AnswerabilityStatus,
     ExecutionStatus,
     SectionScope,
 )
-from disclosure_agent.common.schemas import AgentExecutionResult
+from disclosure_agent.common.schemas import AgentExecutionResult, SourceDocument
 from disclosure_agent.periodic.sections import (
     REASON_AMBIGUOUS_SECTION,
     SectionContentItem,
@@ -237,6 +238,10 @@ def _handle_multi_scope_summary(
     범위마다의 확정·수집·변환은 범위 하나의 경로(build_result_from_document,
     normalize_document_summary_result)를 그대로 쓴다. 여기서 같은 일을 다시 적으면 두 벌이
     된다. 범위별 계획은 원래 계획의 section_scope 자리에 그 범위 하나를 넣은 복제본이다.
+
+    source_documents도 그 범위별 결과에서 그대로 이어 붙인다. 범위 하나의 경로가 실제로
+    선택된 FilingRef에서 이미 만들어 두었으므로, 이 자리가 manifest를 다시 찾거나
+    Evidence.doc_id에서 metadata를 지을 이유가 없다. 이어 붙이는 규칙은 아래 return에 있다.
     """
     entry_block = _reject_unsupported_plan(plan)
 
@@ -283,6 +288,7 @@ def _handle_multi_scope_summary(
 
     summaries = []
     evidence = []
+    source_documents: list[SourceDocument] = []
     warnings: list[str] = []
 
     # 범위별로 확정한 Section과 실은 근거의 식별자.
@@ -338,16 +344,34 @@ def _handle_multi_scope_summary(
 
         summaries.extend(normalized.document_summaries)
         evidence.extend(normalized.evidence)
+        source_documents.extend(normalized.source_documents)
 
         for warning in normalized.warnings:
             if warning not in warnings:
                 warnings.append(warning)
 
+    # 범위마다의 source_documents를 그대로 이어 붙인다.
+    #
+    # 범위별 결과는 이미 범위 하나의 경로(normalize_document_summary_result)가 실제로 선택된
+    # FilingRef 하나에서 만든 것이다. 여기서 manifest를 다시 찾지도, Evidence.doc_id나 질문
+    # 문자열에서 metadata를 짓지도 않는다 — 이 경로는 문서를 한 번만 확정하므로(위 _select_filing)
+    # 모든 범위가 같은 FilingRef를 본다.
+    #
+    # merge_source_documents를 쓰는 이유:
+    #     그 하나의 문서가 범위 수만큼 반복해 들어온다. AgentExecutionResult는 doc_id 중복을
+    #     거절하므로(common.schemas._require_unique_source_document_doc_ids) 그대로 이으면
+    #     실행이 멈춘다. 중복 제거 규칙을 여기서 다시 적는 대신 Pattern D가 쓰는 것과 같은
+    #     함수를 쓴다 — 같은 doc_id가 서로 다른 metadata로 나오면 조용히 하나를 고르지 않고
+    #     ConflictingSourceDocumentError로 멈추는 fail-close도 함께 물려받는다.
+    #
+    # 정렬하지 않는다. plan.section_scopes 차례가 곧 문서가 처음 등장한 차례이고, 그 차례는
+    # summaries·evidence가 실리는 차례와 같다.
     return AgentExecutionResult(
         execution_status=ExecutionStatus.COMPLETED,
         answerability_status=AnswerabilityStatus.ANSWERABLE,
         document_summaries=summaries,
         evidence=evidence,
+        source_documents=merge_source_documents(source_documents),
         warnings=warnings,
     )
 

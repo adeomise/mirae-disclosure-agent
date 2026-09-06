@@ -86,6 +86,35 @@ def test_document_summary_success_includes_the_selected_filing_as_a_source_docum
     assert document.receipt_no == filing.receipt_no
 
 
+def test_document_summary_without_a_filing_ref_invents_no_source_document(
+    summary_document: dict[str, Any],
+) -> None:
+    """FilingRef가 없으면 문서 metadata를 지어내지 않는다.
+
+    막히지 않았고 범위도 항목도 확보한 결과인데 filing만 없는 모양이다. 이 모양은 Pattern B의
+    정상 경로가 만들지 않지만(공시를 확정해야 문서를 연다), 결과를 직접 만드는 호출자에게는
+    그 보장이 없다. metadata의 출처는 실제로 선택된 FilingRef 하나뿐이므로, 그것이 없으면
+    Evidence.doc_id에서 되짚어 만들지 않고 source_documents를 비운 채로 내보낸다.
+    """
+    selection, items = collect_scope_content(
+        summary_document, section_scope=SectionScope.FACILITY_INVESTMENT
+    )
+
+    result = normalize_document_summary_result(
+        DocumentSummaryResult(
+            plan=_plan(),
+            filing=None,
+            document=summary_document,
+            selection=selection,
+            items=tuple(items),
+        )
+    )
+
+    # 근거는 문서에서 나오므로 그대로 있다. 없는 것은 문서 metadata뿐이다.
+    assert result.evidence
+    assert result.source_documents == []
+
+
 def test_blocked_document_summary_result_has_no_source_documents() -> None:
     from disclosure_agent.agent.answer_builder import (
         REASON_NO_MATCHING_FILING,

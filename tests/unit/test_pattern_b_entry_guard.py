@@ -20,6 +20,7 @@ from disclosure_agent.agent.handlers.document_summary import (
     REASON_UNSUPPORTED_SUMMARY_DOCUMENT_CLASS,
     REASON_UNSUPPORTED_SUMMARY_PERIOD,
     REASON_UNSUPPORTED_SUMMARY_SECTION_SCOPE,
+    SUPPORTED_SECTION_SCOPE_BUNDLES,
     handle_document_summary,
 )
 from disclosure_agent.agent.query_analyzer import (
@@ -224,3 +225,73 @@ def test_scalar_scope_plan_still_passes_the_entry_guard() -> None:
 
     assert result.execution_status is ExecutionStatus.BLOCKED
     assert result.execution_issue.stage == "filing_discovery"
+
+
+# --------------------------------------------------------------------------
+# 실행하는 범위 묶음은 둘뿐이다
+# --------------------------------------------------------------------------
+#
+# 부분집합으로 두면 (주요 제품,) 하나짜리 묶음이 통과한다. 사업 개요 없이 제품 절만 요약하는
+# 모양은 이 구현에서 확인된 적이 없고, 질의 해석 계층도 그 계획을 만들지 않는다. 계획을 직접
+# 만드는 호출자를 막는 것이 입구 가드의 몫이므로 받는 묶음을 열거한다.
+
+
+def test_business_overview_only_bundle_passes_the_entry_guard() -> None:
+    """사업만 물은 질문의 묶음은 입구를 지나 공시 조회 단계까지 간다."""
+    result = run(
+        summary_plan(section_scope=None, section_scopes=(SectionScope.BUSINESS_OVERVIEW,))
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "filing_discovery"
+
+
+def test_products_only_bundle_is_blocked_at_the_entry() -> None:
+    """
+    제품 범위 하나짜리 묶음은 받지 않는다.
+
+    Q05의 범위에 속한다는 것만으로 열면 이 묶음이 통과한다. 사업 개요 없이 제품 절만
+    요약하는 모양은 확인된 적이 없으므로 fail-closed로 남긴다.
+    """
+    result = run(summary_plan(section_scope=None, section_scopes=(SectionScope.PRODUCTS,)))
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "pattern_entry"
+    assert result.execution_issue.reason == REASON_UNSUPPORTED_SUMMARY_SECTION_SCOPE
+    assert result.document_summaries == []
+    assert result.evidence == []
+
+
+@pytest.mark.parametrize(
+    "section_scopes",
+    [
+        # 차례가 다르다. 이 경로가 만든 묶음이 아니다.
+        (SectionScope.PRODUCTS, SectionScope.BUSINESS_OVERVIEW),
+        # Q05의 범위가 아닌 것이 섞였다.
+        (SectionScope.BUSINESS_OVERVIEW, SectionScope.FACILITY_INVESTMENT),
+        (SectionScope.FACILITY_INVESTMENT, SectionScope.BUSINESS_OVERVIEW),
+        (SectionScope.FINANCIAL_STATEMENT,),
+    ],
+)
+def test_unrelated_or_mixed_bundles_stay_blocked(
+    section_scopes: tuple[SectionScope, ...],
+) -> None:
+    result = run(summary_plan(section_scope=None, section_scopes=section_scopes))
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue.stage == "pattern_entry"
+    assert result.execution_issue.reason == REASON_UNSUPPORTED_SUMMARY_SECTION_SCOPE
+
+
+def test_supported_bundles_are_exactly_the_two_shapes() -> None:
+    """
+    받는 묶음을 값으로 고정한다.
+
+    부분집합 판정으로 되돌아가면 이 단언이 깨진다. 그 되돌림은 결과의 형식으로는 드러나지
+    않으므로(제품 절만 실은 요약도 정상적인 DocumentSummary다) 여기서 값으로 못 박는다.
+    """
+    assert SUPPORTED_SECTION_SCOPE_BUNDLES == (
+        (SectionScope.BUSINESS_OVERVIEW,),
+        (SectionScope.BUSINESS_OVERVIEW, SectionScope.PRODUCTS),
+    )
+    assert BUSINESS_PROFILE_SECTION_SCOPES in SUPPORTED_SECTION_SCOPE_BUNDLES

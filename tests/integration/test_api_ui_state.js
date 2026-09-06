@@ -327,6 +327,54 @@ for (const [status, reason, answer] of [
 }
 
 // ---------------------------------------------------------------------------
+// 6b. PARTIALLY_ANSWERABLE도 UNANSWERABLE/UNRESOLVED와 동일하게 오류 상태가
+//     아니라 정상 결과로 렌더링되고, status/reason 문구가 production 정본
+//     (STATUS_META/REASON_LABELS)과 정확히 일치해야 한다.
+// ---------------------------------------------------------------------------
+
+test("a PARTIALLY_ANSWERABLE response renders as a normal result with the correct status badge and reason text, not an error state", async () => {
+  const ui = createUi(async () =>
+    okResponse(
+      answerableBody({
+        status: "PARTIALLY_ANSWERABLE",
+        reason: "partial_source_support",
+        answer: "확인된 근거 범위에서 일부 답변합니다.",
+      }),
+    ),
+  );
+  ui.input.value = "테스트 질문";
+
+  await ui.form.listeners.submit({ preventDefault() {} });
+
+  assert.equal(
+    ui.elements["#state-card"].hidden,
+    true,
+    "PARTIALLY_ANSWERABLE must not render the #state-card error/blocked state",
+  );
+  assert.equal(
+    ui.elements["#result-card"].hidden,
+    false,
+    "PARTIALLY_ANSWERABLE must render inside #result-card",
+  );
+  assert.equal(
+    ui.elements["#result-card"].dataset.status,
+    "PARTIALLY_ANSWERABLE",
+  );
+  // app.js의 STATUS_META.PARTIALLY_ANSWERABLE.label 정본과 정확히 일치해야 한다.
+  assert.equal(ui.elements["#status-badge"].textContent, "일부 답변 가능");
+  // app.js의 REASON_LABELS.partial_source_support 정본과 정확히 일치해야 한다.
+  assert.equal(
+    ui.elements["#reason-message"].textContent,
+    "질문의 일부 항목에 대해서만 공시 근거를 확보했습니다.",
+  );
+  assert.equal(ui.elements["#reason-message"].hidden, false);
+  assert.equal(
+    ui.elements["#answer-summary"].textContent,
+    "확인된 근거 범위에서 일부 답변합니다.",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // 7. BLOCKED(422)와 5xx는 사용자 친화적 오류 상태로, raw 내용을 노출하지 않는다.
 // ---------------------------------------------------------------------------
 

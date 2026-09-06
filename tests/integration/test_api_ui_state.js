@@ -846,7 +846,7 @@ test("footnote reference numbers are stripped from row_label/field_name, but not
 
   // "위치" dd 안에는 주석 번호가 남아 있지 않아야 한다. raw_text에는 "주30"이
   // 의도적으로 그대로 남으므로(아래에서 검증), html 전체가 아니라 <dd> 값만 본다.
-  const positionValues = [...html.matchAll(/<dt>위치<\/dt>\s*<dd>([\s\S]*?)<\/dd>/g)].map(
+  const positionValues = [...html.matchAll(/<dt>근거 항목<\/dt>\s*<dd>([\s\S]*?)<\/dd>/g)].map(
     (match) => match[1],
   );
 
@@ -864,7 +864,7 @@ test("footnote reference numbers are stripped from row_label/field_name, but not
   const articles = html.match(/<article class="evidence-item">[\s\S]*?<\/article>/g);
 
   assert.equal(articles.length, 4);
-  assert.equal(articles[2].includes("<dt>위치</dt>"), false);
+  assert.equal(articles[2].includes("<dt>근거 항목</dt>"), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -1008,7 +1008,7 @@ test("an internal snake_case field_name is hidden from the position whenever a h
   assert.match(articles[1], /<dd>투자금액 항목<\/dd>/);
   assert.equal(articles[1].includes("investment_amount"), false);
 
-  assert.equal(articles[2].includes("<dt>위치</dt>"), false);
+  assert.equal(articles[2].includes("<dt>근거 항목</dt>"), false);
   assert.equal(articles[2].includes("some_unmapped_internal_key"), false);
 });
 
@@ -1431,9 +1431,11 @@ test("an evidence item whose source document has a non-allowlisted subtype+base_
 });
 
 // ---------------------------------------------------------------------------
-// 24. report_name의 날짜 suffix("(2025.12)")는 fiscal_year가 있을 때만 표준
-//     형식으로 재구성하며, fiscal_year가 없으면 backend가 준 report_name을 그대로
-//     보존한다(UI가 backend 정보를 임의로 버리지 않는다).
+// 24. report_name의 날짜 suffix("(2025.12)")는 fiscal_year가 있고 그 연도가
+//     suffix의 연도와 정확히 일치할 때만 표준 형식으로 재구성한다. fiscal_year가
+//     없으면 backend가 준 report_name을 그대로 보존하고, 두 연도가 어긋나면
+//     충돌을 감춘 문서명을 합성하는 대신 fail-close(null)한다
+//     (UI가 backend 정보를 임의로 버리거나 덮어쓰지 않는다).
 // ---------------------------------------------------------------------------
 
 test("the report_name date suffix is only reconstructed away when fiscal_year is present; without it, the suffix is preserved verbatim", () => {
@@ -1506,4 +1508,327 @@ test("an evidence item whose source document has report_name with a date suffix 
 
   assert.match(html, /삼성전자 사업보고서 \(2025\.12\)/);
   assert.equal(html.includes("periodic_SD0063"), false);
+});
+
+test("a report_name date suffix whose year conflicts with fiscal_year fails closed instead of synthesizing a document name", () => {
+  const ui = createUi(async () => okResponse(answerableBody()));
+
+  const label = (sourceDoc) =>
+    evalInContext(ui.context, "sourceDocumentLabel(__doc)", { __doc: sourceDoc });
+
+  // 일치: fiscal_year=2025 + "(2025.12)" → 기존 동작 그대로 표준 형식으로 재구성.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0070",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      report_name: "사업보고서 (2025.12)",
+    }),
+    "삼성전자 2025년 사업보고서",
+  );
+
+  // 불일치: fiscal_year=2025인데 report_name suffix는 2024 — backend metadata가
+  // 충돌한 상태다. suffix의 2024를 조용히 버리고 "2025년 사업보고서"를 만들거나,
+  // 연도만 지운 "사업보고서"를 만들지 않고 라벨 생성 자체를 포기한다.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0071",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      report_name: "사업보고서 (2024.12)",
+    }),
+    null,
+  );
+
+  // subtype 매핑이 함께 와도 마찬가지다 — 충돌한 report_name을 우회해 subtype으로
+  // 그럴듯한 라벨을 만들어내지 않는다(SourceDocument 기반 생성 전체를 fail-close).
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0072",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      report_name: "사업보고서 (2024.12)",
+      document_subtype: "annual",
+      base_month: 12,
+    }),
+    null,
+  );
+
+  // suffix가 없는 report_name은 비교 대상 자체가 없으므로 기존 동작을 유지한다.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0073",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      report_name: "사업보고서",
+    }),
+    "삼성전자 2025년 사업보고서",
+  );
+
+  // 연도.월 형식이 아닌 괄호는 지원 범위 밖이라 비교하지 않고 원문을 보존한다.
+  assert.equal(
+    label({
+      doc_id: "periodic_SD0074",
+      company: "삼성전자",
+      fiscal_year: 2025,
+      report_name: "사업보고서 (수정)",
+    }),
+    "삼성전자 2025년 사업보고서 (수정)",
+  );
+});
+
+test("evidence whose source document has a conflicting fiscal_year/report_name year falls back to the legacy label without leaking the raw doc_id", async () => {
+  const ui = createUi(async () =>
+    okResponse(
+      answerableBody({
+        source_documents: [
+          {
+            doc_id: "periodic_SD0075",
+            company: "삼성전자",
+            fiscal_year: 2025,
+            report_name: "사업보고서 (2024.12)",
+            filing_date: "2026-03-15",
+          },
+        ],
+        evidence: [
+          {
+            evidence_id: "e-year-conflict",
+            doc_id: "periodic_SD0075",
+            section_path: ["III. 재무에 관한 사항"],
+            row_label: "매출액",
+          },
+        ],
+      }),
+    ),
+  );
+  ui.input.value = "삼성전자 2025년 매출 알려줘";
+
+  await ui.form.listeners.submit({ preventDefault() {} });
+
+  const html = ui.elements["#evidence-list"].innerHTML;
+
+  // 충돌한 metadata로 합성한 문서명이 화면에 나오지 않는다.
+  assert.equal(html.includes("삼성전자 2025년 사업보고서"), false);
+  assert.equal(html.includes("2025년 사업보고서"), false);
+  // 질문 문자열("삼성전자 2025년 매출")로부터 보고서명을 추측하지도 않는다.
+  assert.equal(html.includes("사업보고서"), false);
+  // 기존 legacy documentLabel fallback이 쓰인다.
+  assert.match(html, /관련 공시 문서/);
+  // raw periodic_* doc_id는 여전히 노출되지 않는다.
+  assert.equal(html.includes("periodic_SD0075"), false);
+  // Evidence panel과 section_path는 그대로 유지된다.
+  assert.equal(ui.elements["#evidence-panel"].hidden, false);
+  assert.match(html, /III\. 재무에 관한 사항/);
+});
+
+// ---------------------------------------------------------------------------
+// 25. formatFilingDate — 백엔드 ISO "YYYY-MM-DD"를 화면 표기 "YYYY.MM.DD"로
+//     바꾼다. 정확히 그 형식이고 실재하는 달력 날짜일 때만 값을 돌려주고, 그 외는
+//     null이다(오늘 날짜나 질문 연도로 추측하지 않는다 — 호출부가 행을 숨긴다).
+// ---------------------------------------------------------------------------
+
+test("formatFilingDate converts a valid ISO date and rejects anything else", () => {
+  const ui = createUi(async () => okResponse(answerableBody()));
+
+  const run = (value) =>
+    evalInContext(ui.context, "formatFilingDate(__value)", { __value: value });
+
+  assert.equal(run("2026-03-10"), "2026.03.10");
+
+  // null/undefined — 값 자체가 없다.
+  assert.equal(run(null), null);
+  assert.equal(run(undefined), null);
+
+  // 형식이 다른 경우(구분자, 자릿수, 순서 등).
+  assert.equal(run("2026/03/10"), null);
+  assert.equal(run("2026-3-10"), null);
+  assert.equal(run("10-03-2026"), null);
+  assert.equal(run("2026-03-10T00:00:00Z"), null);
+  assert.equal(run(""), null);
+  assert.equal(run("not-a-date"), null);
+
+  // 형식은 맞지만 실재하지 않는 달력 날짜(윤년 아닌 해의 2/29, 2월 30일, 13월).
+  assert.equal(run("2024-02-30"), null);
+  assert.equal(run("2025-02-29"), null);
+  assert.equal(run("2026-13-01"), null);
+
+  // 실재하는 윤년 2/29는 통과한다.
+  assert.equal(run("2024-02-29"), "2024.02.29");
+});
+
+// ---------------------------------------------------------------------------
+// 26. SourceDocument join 성공 — 문서명/section_path/근거 항목/제출일이 모두
+//     명세대로 표시되고, raw periodic_* doc_id와 내부 provenance는 노출되지 않는다.
+// ---------------------------------------------------------------------------
+
+test("a full SourceDocument join renders document name, section_path, evidence item label, and filing date, without leaking raw doc_id or provenance", async () => {
+  const ui = createUi(async () =>
+    okResponse(
+      answerableBody({
+        source_documents: [
+          {
+            doc_id: "periodic_SD0070",
+            company: "삼성전자",
+            report_name: "사업보고서 (2025.12)",
+            fiscal_year: 2025,
+            filing_date: "2026-03-10",
+          },
+        ],
+        evidence: [
+          {
+            evidence_id: "e-full-join",
+            doc_id: "periodic_SD0070",
+            section_path: ["III. 재무에 관한 사항", "2. 연결재무제표"],
+            row_label: "매출액 (주30)",
+            raw_text: "매출액 758,900,000,000원",
+          },
+        ],
+      }),
+    ),
+  );
+  ui.input.value = "삼성전자 2025년 매출 알려줘";
+
+  await ui.form.listeners.submit({ preventDefault() {} });
+
+  const html = ui.elements["#evidence-list"].innerHTML;
+
+  // 카드 제목: report_name 우선, 날짜 suffix는 fiscal_year로 대체된다.
+  assert.match(html, /삼성전자 2025년 사업보고서/);
+
+  // section_path — 배열 순서를 그대로, hierarchy가 읽히게(" › " 구분).
+  assert.match(html, /III\. 재무에 관한 사항 › 2\. 연결재무제표/);
+
+  // raw_text 원문은 그대로.
+  assert.match(html, /매출액 758,900,000,000원/);
+
+  // 근거 항목 — 주석 번호("(주30)")는 떼고 사람이 읽게 표시한다.
+  assert.match(html, /<dt>근거 항목<\/dt>\s*<dd>매출액 항목<\/dd>/);
+
+  // 제출일 — ISO를 화면 표기로 변환.
+  assert.match(html, /<dt>제출일<\/dt>\s*<dd>2026\.03\.10<\/dd>/);
+
+  // 내부 provenance/raw doc_id는 어디에도 없어야 한다.
+  assert.equal(html.includes("periodic_SD0070"), false);
+  assert.equal(html.includes("table_id="), false);
+  assert.equal(html.includes("row_index="), false);
+  assert.equal(html.includes("col_index="), false);
+});
+
+// ---------------------------------------------------------------------------
+// 27. 제출일 — 값이 없거나 형식이 유효하지 않으면 그 행 자체가 렌더링되지 않는다
+//     (join은 성공했지만 filing_date 자체가 문제인 경우).
+// ---------------------------------------------------------------------------
+
+for (const [label, filingDate] of [
+  ["missing (undefined)", undefined],
+  ["null", null],
+  ["invalid format", "2026/03/10"],
+  ["invalid calendar date", "2024-02-30"],
+]) {
+  test(`filing date row is hidden when filing_date is ${label}`, async () => {
+    const ui = createUi(async () =>
+      okResponse(
+        answerableBody({
+          source_documents: [
+            {
+              doc_id: "periodic_SD0080",
+              company: "삼성전자",
+              fiscal_year: 2025,
+              document_subtype: "annual",
+              base_month: 12,
+              ...(filingDate === undefined ? {} : { filing_date: filingDate }),
+            },
+          ],
+          evidence: [
+            {
+              evidence_id: "e-filing-date-hidden",
+              doc_id: "periodic_SD0080",
+              row_label: "매출액",
+            },
+          ],
+        }),
+      ),
+    );
+    ui.input.value = "삼성전자 2025년 매출 알려줘";
+
+    await ui.form.listeners.submit({ preventDefault() {} });
+
+    const html = ui.elements["#evidence-list"].innerHTML;
+
+    assert.equal(html.includes("<dt>제출일</dt>"), false);
+    // join 자체는 성공했으므로 문서명은 여전히 정확히 표시된다.
+    assert.match(html, /삼성전자 2025년 사업보고서/);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 28. 제출일 — source_documents join이 실패하면(doc_id 불일치, 배열 없음/빈
+//     배열) filing_date가 있어도 절대 표시하지 않는다 — join되지 않은 다른
+//     문서의 제출일을 잘못 붙이면 안 된다.
+// ---------------------------------------------------------------------------
+
+test("filing date is never shown when the evidence doc_id does not join to source_documents", async () => {
+  const ui = createUi(async () =>
+    okResponse(
+      answerableBody({
+        source_documents: [
+          {
+            doc_id: "periodic_SD0090",
+            company: "삼성전자",
+            fiscal_year: 2025,
+            document_subtype: "annual",
+            base_month: 12,
+            filing_date: "2026-03-10",
+          },
+        ],
+        evidence: [
+          {
+            evidence_id: "e-no-join",
+            // source_documents에 없는 doc_id.
+            doc_id: "periodic_SD_UNMATCHED_2",
+            row_label: "매출액",
+          },
+        ],
+      }),
+    ),
+  );
+  ui.input.value = "매출 알려줘";
+
+  await ui.form.listeners.submit({ preventDefault() {} });
+
+  const html = ui.elements["#evidence-list"].innerHTML;
+
+  assert.equal(html.includes("<dt>제출일</dt>"), false);
+  assert.equal(html.includes("2026.03.10"), false);
+  assert.equal(html.includes("periodic_SD0090"), false);
+  assert.equal(html.includes("periodic_SD_UNMATCHED_2"), false);
+});
+
+test("filing date is hidden when source_documents is missing or empty entirely", async () => {
+  for (const overrides of [{}, { source_documents: [] }]) {
+    const ui = createUi(async () =>
+      okResponse(
+        answerableBody({
+          ...overrides,
+          evidence: [
+            {
+              evidence_id: "e-no-source-documents",
+              doc_id: "periodic_SD0091",
+              row_label: "매출액",
+            },
+          ],
+        }),
+      ),
+    );
+    ui.input.value = "매출 알려줘";
+
+    await ui.form.listeners.submit({ preventDefault() {} });
+
+    const html = ui.elements["#evidence-list"].innerHTML;
+
+    assert.equal(html.includes("<dt>제출일</dt>"), false);
+    assert.equal(html.includes("periodic_SD0091"), false);
+    // join 실패 시의 기존 안전한 fallback 라벨은 유지된다.
+    assert.match(html, /관련 공시 문서/);
+  }
 });

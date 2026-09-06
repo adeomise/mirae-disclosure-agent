@@ -38,6 +38,7 @@ from disclosure_agent.common.schemas import (
     ResolvedEventState,
     ResolvedFieldValue,
     ResultInputReference,
+    SourceDocument,
 )
 from disclosure_agent.event.identity import make_event_id
 
@@ -316,6 +317,90 @@ def test_answer_response_preserves_reason_and_event_link() -> None:
     assert unresolved.reason is AnswerabilityReason.AMBIGUOUS_LINK
 
 
+def test_source_document_requires_only_doc_id_company_and_report_name() -> None:
+    """나머지 필드는 기본값 None. 값을 지어내지 않는 optional 규약이다."""
+    document = SourceDocument(
+        doc_id="doc_dummy_periodic",
+        company="dummy-company",
+        report_name="dummy-report",
+    )
+
+    assert document.fiscal_year is None
+    assert document.document_subtype is None
+    assert document.base_month is None
+    assert document.filing_date is None
+    assert document.receipt_no is None
+
+
+def test_source_document_serializes_filing_date_as_an_iso_string() -> None:
+    document = SourceDocument(
+        doc_id="doc_dummy_periodic",
+        company="dummy-company",
+        report_name="dummy-report",
+        fiscal_year=2025,
+        document_subtype="annual",
+        base_month=12,
+        filing_date=date(2026, 3, 10),
+        receipt_no="20260310002820",
+    )
+
+    assert document.model_dump(mode="json")["filing_date"] == "2026-03-10"
+
+
+def test_execution_result_accepts_source_documents_and_defaults_to_empty_list() -> None:
+    document = SourceDocument(
+        doc_id="doc_dummy_periodic",
+        company="dummy-company",
+        report_name="dummy-report",
+        fiscal_year=2025,
+    )
+    with_document = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        source_documents=[document],
+    )
+    without_document = AgentExecutionResult(execution_status=ExecutionStatus.COMPLETED)
+
+    assert with_document.model_dump(mode="json")["source_documents"] == [
+        document.model_dump(mode="json")
+    ]
+    assert without_document.source_documents == []
+
+
+def test_execution_result_rejects_duplicate_source_document_doc_ids() -> None:
+    """같은 doc_id가 두 번 실리면 그 문서를 몇 건으로 셀지 모호해진다. 조용히 합치지 않는다."""
+    document = SourceDocument(
+        doc_id="doc_dummy_periodic",
+        company="dummy-company",
+        report_name="dummy-report",
+    )
+
+    with pytest.raises(ValidationError):
+        AgentExecutionResult(
+            execution_status=ExecutionStatus.COMPLETED,
+            source_documents=[document, document],
+        )
+
+
+def test_answer_response_accepts_source_documents_and_defaults_to_empty_list() -> None:
+    document = SourceDocument(
+        doc_id="doc_dummy_periodic",
+        company="dummy-company",
+        report_name="dummy-report",
+    )
+    with_document = AnswerResponse(
+        answer="dummy answer",
+        status=AnswerabilityStatus.ANSWERABLE,
+        source_documents=[document],
+    )
+    without_document = AnswerResponse(
+        answer="dummy answer",
+        status=AnswerabilityStatus.ANSWERABLE,
+    )
+
+    assert with_document.source_documents == [document]
+    assert without_document.source_documents == []
+
+
 def test_ambiguous_event_link_preserves_candidate_doc_ids() -> None:
     link = EventLink(
         link_id="link_dummy_ambiguous",
@@ -542,6 +627,7 @@ def test_not_comparable_is_completed_unanswerable_canonical_reason() -> None:
         "resolved_event_states": [],
         "document_summaries": [],
         "evidence": [],
+        "source_documents": [],
         "calculations": [],
         "comparisons": [],
         "narrative_comparisons": [],
@@ -697,6 +783,7 @@ def test_execution_result_default_lists_are_not_shared() -> None:
         "event_histories",
         "resolved_event_states",
         "evidence",
+        "source_documents",
         "calculations",
         "comparisons",
         "warnings",

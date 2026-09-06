@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any
 
 # '20240830' / '2024-08-30' / '2024.08.30' / '2024/08/30'을 모두 받는다.
@@ -44,3 +45,22 @@ def normalize_filing_date(value: Any) -> str | None:
         return None
 
     return "".join(match.groups())
+
+
+def parse_filing_date(value: Any) -> date | None:
+    """
+    공시일 표기를 date 객체로 맞춘다.
+
+    normalize_filing_date와 같은 이유로 여기 둔다. 해석할 수 없으면 추측하지 않고 None을
+    돌려준다 — 날짜를 지어내지 않는 규칙은 문자열 표기와 date 표기가 같아야 한다.
+
+    Contract 필드가 date 타입을 요구하는 자리(예: ResolvedEventState.as_of,
+    SourceDocument.filing_date)에서 쓴다. 문자열 표기(YYYYMMDD)만 필요한 자리는
+    normalize_filing_date를 그대로 쓴다.
+    """
+    normalized = normalize_filing_date(value)
+
+    if normalized is None:
+        return None
+
+    return date(int(normalized[:4]), int(normalized[4:6]), int(normalized[6:]))

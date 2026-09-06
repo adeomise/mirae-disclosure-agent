@@ -85,6 +85,7 @@ from disclosure_agent.agent.safety import (
     CATEGORY_INVESTMENT_ADVICE,
     CATEGORY_OUT_OF_CORPUS_PERIOD,
 )
+from disclosure_agent.agent.source_documents import collect_source_documents
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
@@ -637,11 +638,23 @@ def normalize_single_fact_result(result: SingleFactResult) -> AgentExecutionResu
             warnings=warnings,
         )
 
+    # result.filing은 blocked가 아닌 SingleFactResult에서 항상 채워져 있다
+    # (SingleFactResult.to_dict가 같은 불변식을 확인한다). 이 문서의 metadata를 다시
+    # manifest에서 찾지 않고 실제 선택된 FilingRef에서 그대로 옮긴다.
+    #
+    # canonical_company를 함께 넘기는 이유는 위 adapt_financial_fact가 Fact.company에
+    # 쓰는 것과 같다. 그러지 않으면 같은 응답 안에서 회사명이 두 표기로 갈린다.
+    source_documents = collect_source_documents(
+        [result.filing] if result.filing is not None else [],
+        canonical_company=result.plan.company,
+    )
+
     return AgentExecutionResult(
         execution_status=ExecutionStatus.COMPLETED,
         answerability_status=AnswerabilityStatus.ANSWERABLE,
         facts=[fact],
         evidence=[evidence],
+        source_documents=source_documents,
         warnings=warnings,
     )
 
@@ -703,11 +716,20 @@ def normalize_document_summary_result(
             warnings=warnings,
         )
 
+    # 이 문서의 metadata는 manifest를 다시 찾지 않고 실제 선택된 FilingRef에서 옮긴다.
+    # canonical_company는 위 adapt_section_summary가 DocumentSummary.company에 쓰는 것과
+    # 같은 값이다.
+    source_documents = collect_source_documents(
+        [result.filing] if result.filing is not None else [],
+        canonical_company=result.plan.company,
+    )
+
     return AgentExecutionResult(
         execution_status=ExecutionStatus.COMPLETED,
         answerability_status=AnswerabilityStatus.ANSWERABLE,
         document_summaries=[summary],
         evidence=list(evidence),
+        source_documents=source_documents,
         warnings=warnings,
     )
 
@@ -739,11 +761,23 @@ def normalize_contract_fact_result(result: ContractFactResult) -> AgentExecution
             conversion_gaps=_contract_candidate_gaps(result),
         )
 
+    # 이 문서의 metadata는 manifest를 다시 찾지 않고 실제 선택된 FilingRef에서 옮긴다.
+    #
+    # canonical_company를 넘기지 않는다. Q02의 Fact.company도 마찬가지로 plan.company가
+    # 아니라 filing.corp_name을 그대로 쓴다(handlers.contract_fact.build_contract_fact_result
+    # "거래소공시 본문은 회사명을 담지 않는다. manifest가 확정한 값을 넘긴다."). 여기서
+    # canonical_company를 넘기면 같은 응답 안에서 Fact.company와 source_documents.company가
+    # 서로 다른 표기로 갈린다.
+    source_documents = collect_source_documents(
+        [result.filing] if result.filing is not None else []
+    )
+
     return AgentExecutionResult(
         execution_status=ExecutionStatus.COMPLETED,
         answerability_status=AnswerabilityStatus.ANSWERABLE,
         facts=list(result.facts),
         evidence=list(result.evidence),
+        source_documents=source_documents,
         warnings=warnings,
     )
 

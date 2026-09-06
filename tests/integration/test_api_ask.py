@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,7 @@ from disclosure_agent.common.schemas import (
     ExecutionIssue,
     Fact,
     ResultInputReference,
+    SourceDocument,
 )
 
 client = TestClient(app)
@@ -265,6 +267,67 @@ def test_completed_answerable_agent_result_returns_200() -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "ANSWERABLE"
     assert len(response.json()["facts"]) == 1
+
+
+def test_completed_answerable_agent_result_surfaces_source_documents() -> None:
+    """source_documents는 additive Contract 필드다.
+
+    새 필드가 없던 기존 소비자를 깨지 않으면서(다른 필드는 이전과 동일), Evidence.doc_id가
+    가리키는 문서의 metadata를 /api/ask 응답에서 그대로 확인할 수 있어야 한다.
+    """
+    evidence = Evidence(
+        evidence_id="synthetic-evidence-1",
+        doc_id="synthetic-doc-1",
+        location_type=EvidenceLocationType.TABLE,
+    )
+    fact = Fact(
+        fact_id="synthetic-fact-1",
+        company="Synthetic Company",
+        metric=MetricConcept.REVENUE,
+        fiscal_year=2025,
+        accounting_scope=FactAccountingScope.CONSOLIDATED,
+        raw_value="1000",
+        raw_unit="synthetic-currency",
+        evidence_ids=[evidence.evidence_id],
+    )
+    source_document = SourceDocument(
+        doc_id="synthetic-doc-1",
+        company="Synthetic Company",
+        report_name="사업보고서",
+        fiscal_year=2025,
+        document_subtype="annual",
+        base_month=12,
+        filing_date=date(2026, 3, 10),
+        receipt_no="20260310002820",
+    )
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        facts=[fact],
+        evidence=[evidence],
+        source_documents=[source_document],
+    )
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "synthetic answerable"})
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["source_documents"] == [source_document.model_dump(mode="json")]
+    assert payload["evidence"][0]["doc_id"] == payload["source_documents"][0]["doc_id"]
+
+
+def test_agent_result_without_source_documents_defaults_to_an_empty_list() -> None:
+    """이 필드를 채우지 않는 기존 producer는 지금까지와 똑같이 빈 목록을 받는다."""
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(
+        answerable_execution_result()
+    )
+
+    response = client.post("/api/ask", json={"question": "synthetic answerable"})
+
+    assert response.status_code == 200
+    assert response.json()["source_documents"] == []
 
 
 def test_completed_partial_holding_shares_result_returns_200() -> None:
@@ -1102,6 +1165,14 @@ def test_q01_runs_through_actual_corpus_http_api() -> None:
 
     response_evidence_ids = {item.evidence_id for item in actual.evidence}
     assert set(fact.evidence_ids) <= response_evidence_ids
+
+    assert len(actual.source_documents) == 1
+    source_document = actual.source_documents[0]
+    assert source_document.doc_id == actual.evidence[0].doc_id
+    assert source_document.fiscal_year == 2025
+    assert source_document.document_subtype == "annual"
+    assert source_document.base_month == 12
+    assert source_document.report_name
 
 
 @pytest.mark.corpus

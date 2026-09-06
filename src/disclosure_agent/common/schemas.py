@@ -91,6 +91,55 @@ class Evidence(BaseModel):
     provenance: EvidenceProvenance | None = None
 
 
+class SourceDocument(BaseModel):
+    """Document-level metadata for one selected filing that Evidence.doc_id points to.
+
+    Evidence는 원문 안의 근거 위치만 나타낸다(section_path·table·row/column 등). 문서
+    자체의 metadata(정식 명칭, 회계기간, 접수번호, 공시일)는 여기 한 번만 싣는다. 같은
+    문서에서 여러 Evidence가 나와도 Evidence마다 이 metadata를 반복해 담지 않는다 —
+    반복해 담으면 어느 필드가 문서 단위 값이고 어느 필드가 근거 위치인지가 Evidence
+    스키마 안에서 섞인다.
+
+    doc_id로 Evidence와 연결한다:
+        AgentExecutionResult.evidence의 각 항목이 가리키는 문서는 doc_id가 같은
+        source_documents 항목 하나와 대응한다. 실제로 선택되지 않은 후보 문서는 담지
+        않는다 — 답변이 실제로 근거로 삼은 문서만 담는다.
+
+    metadata의 출처는 검색이 실제로 선택한 FilingRef다. 이 값을 다시 만들려고 manifest를
+    조회하지 않으며, 질문·Fact.metric·section_path·doc_id 문자열에서 문서 종류나 날짜를
+    추측해 채우지도 않는다.
+    """
+
+    doc_id: str
+    company: str
+    report_name: str
+    fiscal_year: int | None = None
+    document_subtype: str | None = None
+    base_month: int | None = None
+    filing_date: date | None = None
+    receipt_no: str | None = None
+
+
+def _require_unique_source_document_doc_ids(
+    source_documents: list[SourceDocument],
+) -> None:
+    """source_documents 안에서 doc_id가 중복되지 않는지 본다.
+
+    같은 doc_id가 두 번 실리면(값이 같든 다르든) 그 문서를 몇 건으로 셀지가 모호해진다.
+    조용히 하나로 합치지 않고 여기서 멈춘다.
+    """
+    seen: set[str] = set()
+
+    for document in source_documents:
+        if document.doc_id in seen:
+            raise ValueError(
+                f"source_documents에 doc_id {document.doc_id!r}가 두 번 이상 있습니다. "
+                "문서마다 한 번만 실어야 합니다."
+            )
+
+        seen.add(document.doc_id)
+
+
 class Fact(BaseModel):
     """A source value with separate raw and normalized representations."""
 
@@ -377,6 +426,9 @@ class AgentExecutionResult(BaseModel):
     resolved_event_states: list[ResolvedEventState] = Field(default_factory=list)
     document_summaries: list[DocumentSummary] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
+    # 문서 단위 metadata. Evidence.doc_id로 연결한다(SourceDocument docstring 참조). 이
+    # 필드를 채우지 않는 기존 producer는 빈 목록을 그대로 갖는다.
+    source_documents: list[SourceDocument] = Field(default_factory=list)
     calculations: list[CalculationResult] = Field(default_factory=list)
     comparisons: list[ComparisonResult] = Field(default_factory=list)
     # 서술 비교(Q09)의 결과. comparisons와 나눠 둔다. ComparisonResult는 두 값의 우열이고
@@ -392,6 +444,11 @@ class AgentExecutionResult(BaseModel):
     operations: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     conversion_gaps: list[ConversionGap] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def reject_duplicate_source_documents(self) -> "AgentExecutionResult":
+        _require_unique_source_document_doc_ids(self.source_documents)
+        return self
 
 
 class AskRequest(BaseModel):
@@ -418,3 +475,11 @@ class AnswerResponse(BaseModel):
     event_histories: list[EventHistory] = Field(default_factory=list)
     resolved_event_states: list[ResolvedEventState] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
+    # 문서 단위 metadata. Evidence.doc_id로 연결한다(SourceDocument docstring 참조).
+    # 기존 소비자는 이 필드를 모르는 채로도 그대로 동작한다(additive, 기본값 []).
+    source_documents: list[SourceDocument] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def reject_duplicate_source_documents(self) -> "AnswerResponse":
+        _require_unique_source_document_doc_ids(self.source_documents)
+        return self

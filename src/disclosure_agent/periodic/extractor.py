@@ -275,9 +275,13 @@ class FactLocation:
     row_index: int
     column_index: int
     label_text: str
+    column_label: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if self.column_label is None:
+            data.pop("column_label")
+        return data
 
 
 @dataclass(frozen=True)
@@ -297,6 +301,7 @@ class FinancialFact:
     base_unit: str
     acontext: str | None
     location: FactLocation
+    fiscal_period: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -304,6 +309,7 @@ class FinancialFact:
             "acode": self.acode,
             "accounting_scope": self.accounting_scope,
             "fiscal_year": self.fiscal_year,
+            **({"fiscal_period": self.fiscal_period} if self.fiscal_period else {}),
             "raw_value": self.raw_value,
             "value": str(self.value),
             "unit_text": self.unit_text,
@@ -577,6 +583,8 @@ def unit_declaration_sources(
 def resolve_table_unit(
     table: dict[str, Any],
     table_group: dict[str, Any] | None = None,
+    *,
+    include_header_tables: bool = False,
 ) -> tuple[UnitSpec | None, tuple[UnitSpec, ...]]:
     """
     표에 적용할 신뢰 가능한 단위를 고른다.
@@ -591,7 +599,25 @@ def resolve_table_unit(
     """
     rejected: list[UnitSpec] = []
 
-    for raw in unit_declaration_sources(table, table_group):
+    sources = list(unit_declaration_sources(table, table_group))
+    if include_header_tables and table_group:
+        # Interim organizer groups put period and unit declarations in a separate
+        # one-column header table. Read intact cells, not the concatenated unit.
+        declarations = []
+        for header in table_group.get("tables", []):
+            if header.get("table_id") == table.get("table_id"):
+                break
+            rows = header.get("rows", [])
+            if rows and all(len(row) == 1 for row in rows):
+                declarations.extend(cell_text(row[0]) for row in rows
+                                    if CLEAN_UNIT_PATTERN.fullmatch(cell_text(row[0])))
+        if len(set(declarations)) > 1:
+            raise ExtractionBlockedError(
+                "untrusted_table_unit", "그룹 헤더의 단위 선언이 충돌합니다."
+            )
+        sources.extend(declarations)
+
+    for raw in sources:
         unit = parse_unit(raw)
 
         if unit is None:
@@ -611,19 +637,121 @@ class _Candidate:
     row_index: int
     column_index: int
     cell: dict[str, Any]
-    context: AccountingContext
+    context: AccountingContext | None
     label: str
     # 표가 속한 TABLE-GROUP. 단위 선언과 ACLASS가 여기에 있다. 독립 표이면 None.
     table_group: dict[str, Any] | None = None
+    column_label: str | None = None
 
     @property
     def table_class(self) -> str | None:
         return classify_table(self.table, self.table_group)
 
 
+# Observed in organizer Samsung FY2025 Q1/H1/Q3 main statements, paired with
+# current/prior merged headers and explicit 3개월/누적 subheaders.
+_INTERIM_CONTEXT_PERIODS = {
+    "dFQA": (3, True), "dFQQ": (3, False),
+    "dHYA": (6, True), "dHYQ": (6, False),
+    "dTQA": (9, True), "dTQQ": (9, False),
+}
+
+
+def _matches_interim_period(
+    cell: dict[str, Any],
+    context: AccountingContext | None,
+    column_label: str,
+    table: dict[str, Any],
+    table_group: dict[str, Any] | None,
+    *,
+    fiscal_year: int | None,
+    accounting_scope: str | None,
+    base_month: int,
+) -> bool:
+    """Cross-check observed contexts and existing merged-header signals.
+
+    Missing contexts require primary-statement scope, a header year (including
+    TABLE-GROUP term/year mapping), and an explicit cumulative header. Never
+    synthesize an ACONTEXT from these signals.
+    """
+    header_year, _ = infer_period(column_label, fiscal_term_years(table_group), None)
+    header_scope = infer_accounting_scope(table, table_group).value
+    cumulative = "누적" in column_label
+    discrete = "3개월" in column_label
+    header_months = {month for label, month in (("1분기", 3), ("반기", 6), ("3분기", 9))
+                     if label in column_label}
+
+    def blocked(detail: str) -> None:
+        raise ExtractionBlockedError("no_matching_context", f"{table.get('table_id')}: {detail}")
+
+    scope_text = " ".join(str(part) for part in (
+        *table.get("section_path", []), (table_group or {}).get("title", ""),
+        (table_group or {}).get("raw_context", ""), table.get("raw_context", ""),
+    ))
+    aclass = str(
+        (table_group or {}).get("aclass") or table.get("attributes", {}).get("aclass") or ""
+    )
+    has_consolidated = "연결" in scope_text or bool(re.search(r"_C(?:_|\d|$)", aclass))
+    has_separate = any(token in scope_text for token in ("별도", "개별")) or bool(
+        re.search(r"_S(?:_|\d|$)", aclass)
+    )
+    if has_consolidated and has_separate:
+        blocked("표의 연결/별도 근거가 충돌합니다.")
+    if len(set(YEAR_PATTERN.findall(column_label))) > 1:
+        blocked("열 헤더에 여러 회계연도가 중첩되어 있습니다.")
+
+    if context is not None:
+        if context.accounting_scope != accounting_scope or context.fiscal_year != fiscal_year:
+            return False
+        if context.prefix != "C":
+            return False
+        if any(token in column_label for token in ("전기", "전분기", "전반기")):
+            blocked("당기 ACONTEXT와 전기 헤더가 충돌합니다.")
+        if header_year is not None and header_year != context.fiscal_year:
+            blocked("ACONTEXT와 헤더의 회계연도가 충돌합니다.")
+        if header_scope not in ("unknown", accounting_scope):
+            blocked("ACONTEXT와 표의 회계기준이 충돌합니다.")
+        period = _INTERIM_CONTEXT_PERIODS.get(context.period_code)
+        if period is None:
+            blocked("관찰된 누적/단일기간 컨텍스트로 확정할 수 없습니다.")
+        month, is_cumulative = period
+        if header_months and header_months != {month}:
+            blocked("ACONTEXT와 헤더의 보고기간이 충돌합니다.")
+        if (cumulative and not is_cumulative) or (discrete and is_cumulative):
+            blocked("ACONTEXT와 3개월/누적 헤더가 충돌합니다.")
+        return month == base_month and is_cumulative
+
+    # Unknown/nonempty contexts are not treated as absent: their meaning could
+    # contradict the header. Header-only selection is confined to primary tables.
+    if classify_table(table, table_group) != TABLE_CLASS_PRIMARY_STATEMENT:
+        return False
+    if header_scope != accounting_scope:
+        return False
+    if header_year is not None and header_year != fiscal_year:
+        return False
+    if cell.get("acontext"):
+        blocked("해석할 수 없는 ACONTEXT가 있습니다.")
+    if header_year is None:
+        blocked("당기/전기 회계연도를 확정할 수 없습니다.")
+    if header_months and header_months != {base_month}:
+        blocked("헤더와 요청의 보고기간이 충돌합니다.")
+    if cumulative and discrete:
+        blocked("3개월/누적 헤더가 중첩되어 있습니다.")
+    if discrete:
+        return False
+    if not cumulative:
+        blocked("누적 열을 확정할 수 없습니다.")
+    return True
+
+
 def _collect_candidates(
     document: dict[str, Any],
     acodes: tuple[str, ...],
+    *,
+    metric: str | None = None,
+    base_month: int | None = None,
+    fiscal_year: int | None = None,
+    accounting_scope: str | None = None,
 ) -> tuple[list[_Candidate], int]:
     """
     지정된 ACODE를 가진 셀을 모은다.
@@ -641,19 +769,46 @@ def _collect_candidates(
         table_group = group_index.get(str(table.get("table_id")))
 
         rows = table.get("rows") or []
+        logical_rows = build_logical_rows(rows) if base_month else []
 
         for row_index, row in enumerate(rows):
             label = _row_label(row)
 
             for column_index, cell in enumerate(row):
                 if cell.get("acode") not in acodes:
-                    continue
+                    # Exact bulk metric labels may identify an untagged main
+                    # statement row. Never reinterpret unknown/composite ACODEs.
+                    label_metric = match_metric(label) if base_month else None
+                    if not (
+                        label_metric is not None and label_metric.value == metric
+                        and not any(item.get("acode") for item in row)
+                        and classify_table(table, table_group) == TABLE_CLASS_PRIMARY_STATEMENT
+                        and column_index > 0 and parse_raw_number(cell_text(cell)) is not None
+                    ):
+                        continue
 
                 acode_hits += 1
 
                 context = parse_accounting_context(cell.get("acontext") or "")
 
-                if context is None:
+                column_label = None
+                if base_month is not None:
+                    columns = [column for column, item in logical_rows[row_index].items()
+                               if item is cell]
+                    if len(columns) != 1:
+                        raise ExtractionBlockedError(
+                            "ambiguous_candidates", "수치 셀의 열 위치가 불명확합니다."
+                        )
+                    column_label = header_labels_by_column(logical_rows, row_index).get(
+                        columns[0], ""
+                    )
+                    if not _matches_interim_period(
+                        cell, context, column_label, table, table_group,
+                        fiscal_year=fiscal_year, accounting_scope=accounting_scope,
+                        base_month=base_month,
+                    ):
+                        continue
+                elif context is None:
                     continue
 
                 candidates.append(
@@ -665,6 +820,7 @@ def _collect_candidates(
                         context=context,
                         label=label,
                         table_group=table_group,
+                        column_label=column_label,
                     )
                 )
 
@@ -703,10 +859,13 @@ def _select_candidate(
     실제 사업보고서에는 본표와 주석 합계가 같은 ACONTEXT와 같은 행 번호로 동시에
     존재하는 경우가 있었고, 그때 순서로 고르면 근거 없이 주석 값을 정답으로 답하게 된다.
     """
-    min_depth = min(candidate.context.axis_depth for candidate in matched)
+    min_depth = min(
+        candidate.context.axis_depth if candidate.context else 0 for candidate in matched
+    )
 
-    shortlist = [
-        candidate for candidate in matched if candidate.context.axis_depth == min_depth
+    shortlist = matched if any(candidate.context is None for candidate in matched) else [
+        candidate for candidate in matched
+        if candidate.context is not None and candidate.context.axis_depth == min_depth
     ]
 
     if len(shortlist) == 1:
@@ -746,6 +905,8 @@ def extract_financial_fact(
     metric: str,
     fiscal_year: int,
     accounting_scope: str,
+    document_subtype: str = "annual",
+    base_month: int | None = None,
 ) -> FinancialFact:
     """
     parsed document에서 단일 재무 수치를 추출한다.
@@ -753,11 +914,19 @@ def extract_financial_fact(
     선택 규칙:
     1. metric에 대응하는 ACODE를 가진 셀만 본다.
     2. ACONTEXT의 회계연도와 연결/별도 구분이 요청과 일치해야 한다.
-    3. 연간 기간(dFY) 컨텍스트만 쓴다.
+    3. annual은 기존 dFY를, 명시적 interim은 검증된 당기 누적 기간을 쓴다.
     4. 부가 축이 가장 적은(가장 집계된) 후보만 남긴다.
     5. 남은 후보가 여럿이면 표 분류로 본표를 우선하고, 구분할 수 없으면 막는다.
     6. 단위는 표와 TABLE-GROUP의 선언에서만 고른다. 신뢰 가능한 선언이 없으면 막는다.
     """
+
+    interim = document_subtype != "annual"
+    if (document_subtype, base_month) not in {
+        ("annual", None), ("annual", 12), ("quarter", 3), ("half", 6), ("quarter", 9),
+    }:
+        raise ExtractionBlockedError(
+            "no_matching_context", "지원하지 않거나 불완전한 정기공시 기간입니다."
+        )
 
     if accounting_scope not in SCOPE_MEMBERS:
         raise ExtractionBlockedError(
@@ -768,7 +937,7 @@ def extract_financial_fact(
     acodes = METRIC_ACODES.get(metric)
 
     if acodes is None:
-        if metric in LABEL_FALLBACK_METRICS:
+        if metric in LABEL_FALLBACK_METRICS and not interim:
             return _extract_financial_fact_from_label_fallback(
                 document,
                 metric=metric,
@@ -781,10 +950,13 @@ def extract_financial_fact(
             detail=f"지원하지 않는 지표입니다: {metric}",
         )
 
-    candidates, acode_hits = _collect_candidates(document, acodes)
+    candidates, acode_hits = _collect_candidates(
+        document, acodes, metric=metric, base_month=base_month if interim else None,
+        fiscal_year=fiscal_year, accounting_scope=accounting_scope,
+    )
 
     if acode_hits == 0:
-        if metric in LABEL_FALLBACK_METRICS:
+        if metric in LABEL_FALLBACK_METRICS and not interim:
             return _extract_financial_fact_from_label_fallback(
                 document,
                 metric=metric,
@@ -799,6 +971,9 @@ def extract_financial_fact(
             ),
         )
 
+    if not candidates and interim:
+        raise ExtractionBlockedError("no_matching_context", "요청한 당기 누적 후보가 없습니다.")
+
     if not candidates:
         raise ExtractionBlockedError(
             reason="missing_acontext",
@@ -809,10 +984,11 @@ def extract_financial_fact(
             ),
         )
 
-    matched = [
+    matched = candidates if interim else [
         candidate
         for candidate in candidates
-        if candidate.context.fiscal_year == fiscal_year
+        if candidate.context is not None
+        and candidate.context.fiscal_year == fiscal_year
         and candidate.context.accounting_scope == accounting_scope
         and candidate.context.is_full_year_duration
     ]
@@ -834,7 +1010,9 @@ def extract_financial_fact(
         accounting_scope=accounting_scope,
     )
 
-    unit, rejected_units = resolve_table_unit(selected.table, selected.table_group)
+    unit, rejected_units = resolve_table_unit(
+        selected.table, selected.table_group, include_header_tables=interim,
+    )
 
     if unit is None and rejected_units:
         raise ExtractionBlockedError(
@@ -873,7 +1051,7 @@ def extract_financial_fact(
 
     return FinancialFact(
         metric=metric,
-        acode=str(selected.cell.get("acode")),
+        acode=selected.cell.get("acode"),
         accounting_scope=accounting_scope,
         fiscal_year=fiscal_year,
         raw_value=raw_value,
@@ -883,7 +1061,8 @@ def extract_financial_fact(
         unit_multiplier=unit.multiplier,
         value_in_base_unit=value * unit.multiplier,
         base_unit=BASE_CURRENCY_UNIT,
-        acontext=selected.context.raw,
+        acontext=selected.context.raw if selected.context else None,
+        fiscal_period=f"{base_month}M YTD" if interim else None,
         location=FactLocation(
             section_id=selected.table.get("section_id"),
             section_path=section_path,
@@ -891,6 +1070,7 @@ def extract_financial_fact(
             row_index=selected.row_index,
             column_index=selected.column_index,
             label_text=selected.label,
+            column_label=selected.column_label,
         ),
     )
 
@@ -944,7 +1124,7 @@ METRIC_ALIASES: dict[MetricConcept, set[str]] = {
 NOTE_PATTERN = re.compile(r"\s*\(주\s*\d[^)]*\)\s*$")
 NUMBER_PATTERN = re.compile(r"^-?\d+(?:\.\d+)?$")
 FISCAL_YEAR_PATTERN = re.compile(
-    r"제\s*(?P<term>\d+)\s*기(?:\s*(?:반기|분기))?\s*(?P<year>20\d{2})"
+    r"제\s*(?P<term>\d+)\s*기(?:\s*(?:반기|[13]?분기))?\s*(?P<year>20\d{2})"
 )
 TERM_PATTERN = re.compile(r"제\s*(?P<term>\d+)\s*기")
 YEAR_PATTERN = re.compile(r"(?<!\d)(20\d{2})(?!\d)")
@@ -1251,6 +1431,9 @@ def infer_period(
     column_label: str,
     term_years: dict[str, int],
     report_name: str | None,
+    *,
+    document_subtype: str | None = None,
+    base_month: int | None = None,
 ) -> tuple[int | None, str | None]:
     year_match = YEAR_PATTERN.search(column_label)
     fiscal_year = int(year_match.group(1)) if year_match else None
@@ -1261,7 +1444,16 @@ def infer_period(
     if "3개월" in column_label:
         fiscal_period = "quarter"
     elif "누적" in column_label:
-        fiscal_period = "half-year"
+        if (document_subtype, base_month) in {("quarter", 3), ("half", 6), ("quarter", 9)}:
+            fiscal_period = f"{base_month}M YTD"
+        elif "1분기" in column_label:
+            fiscal_period = "3M YTD"
+        elif "3분기" in column_label:
+            fiscal_period = "9M YTD"
+        elif "반기" in column_label or (report_name and "반기" in report_name):
+            fiscal_period = "half-year"
+        else:
+            fiscal_period = None
     elif report_name and "반기" in report_name:
         fiscal_period = "half-year"
     elif report_name and "분기" in report_name:
@@ -1374,6 +1566,8 @@ def extract_financial_facts_with_evidence(
                     column_label,
                     term_years,
                     report_name,
+                    document_subtype=metadata.get("document_subtype"),
+                    base_month=metadata.get("base_month"),
                 )
                 # Contract상 optional이지만, 이번 financial MVP는 값-기간 연결이
                 # 확인된 경우에만 Fact로 확정한다.

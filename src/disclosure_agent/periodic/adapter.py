@@ -102,18 +102,29 @@ def adapt_financial_fact(
         section_path=list(location.section_path),
         table_name=None,
         row_label=location.label_text,
+        column_label=location.column_label,
         field_name=(
             f"table_id={location.table_id};row_index={location.row_index};"
             f"col_index={location.column_index}"
         ),
         raw_text=financial_fact.raw_value,
+        provenance=EvidenceProvenance(
+            table_id=location.table_id,
+            row_index=location.row_index,
+            column_index=location.column_index,
+            acode=financial_fact.acode,
+            acontext=financial_fact.acontext,
+            unit_declaration=financial_fact.unit_text,
+            unit_multiplier=financial_fact.unit_multiplier,
+            unit_trusted=True,
+        ) if financial_fact.fiscal_period else None,
     )
     fact = Fact(
         fact_id=fact_id,
         company=company,
         metric=metric,
         fiscal_year=financial_fact.fiscal_year,
-        fiscal_period=None,
+        fiscal_period=financial_fact.fiscal_period,
         accounting_scope=accounting_scope,
         raw_value=financial_fact.raw_value,
         raw_unit=financial_fact.unit_token,

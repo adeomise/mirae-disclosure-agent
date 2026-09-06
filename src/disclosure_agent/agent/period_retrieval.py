@@ -155,6 +155,8 @@ def extract_period_fact_from_document(
             metric=metric,
             fiscal_year=fiscal_year,
             accounting_scope=accounting_scope,
+            document_subtype=filing.document_subtype,
+            base_month=filing.base_month,
         )
 
     except ExtractionBlockedError as error:
@@ -200,9 +202,13 @@ def fetch_period_fact(
     document_subtype: str | None,
     corpus_root: str | Path,
     manifest_path: str | Path | None = None,
+    base_month: int | None = None,
 ) -> PeriodFact:
     """
     회계연도 하나와 지표 하나를 공시 선택부터 Evidence까지 처리한다.
+
+    Team2 호출 경계: quarter는 base_month=3/9, half는 6을 명시한다.
+    annual은 기존처럼 생략하거나 12를 전달할 수 있다.
 
     실패 시 예외를 올리지 않고 blocked를 채운 결과를 돌려준다. 어느 단계에서 왜 막혔는지
     호출자가 그대로 볼 수 있게 하기 위해서다.
@@ -212,6 +218,13 @@ def fetch_period_fact(
     비교 열에서 과거 연도를 대신 읽는 경로는 두지 않는다. 그 선택은 미결정 사항(D4)이고,
     아무것도 하지 않으면 "각 연도의 원 보고서를 각각 본다"가 된다.
     """
+    if document_subtype in ("quarter", "half") and base_month is None:
+        return PeriodFact(blocked=BlockedInfo(
+            stage=STAGE_FILING_DISCOVERY,
+            reason="no_matching_filing",
+            detail="정기공시 누적 조회에는 명시적 base_month가 필요합니다.",
+        ))
+
     corpus_root = Path(corpus_root)
 
     manifest_path = Path(manifest_path) if manifest_path else corpus_root / "manifest.jsonl"
@@ -224,6 +237,7 @@ def fetch_period_fact(
             document_class=document_class,
             document_subtype=document_subtype,
             year=fiscal_year,
+            base_month=base_month,
         )
 
     except FilingNotFoundError as error:
@@ -291,6 +305,7 @@ def collect_period_facts(
     document_subtype: str | None,
     corpus_root: str | Path,
     manifest_path: str | Path | None = None,
+    base_month: int | None = None,
 ) -> PeriodFactCollection:
     """
     요청한 회계연도 전부에서 요청한 지표 전부를 확보한다.
@@ -325,6 +340,7 @@ def collect_period_facts(
                 document_subtype=document_subtype,
                 corpus_root=corpus_root,
                 manifest_path=manifest_path,
+                base_month=base_month,
             )
 
             if not found.is_found:

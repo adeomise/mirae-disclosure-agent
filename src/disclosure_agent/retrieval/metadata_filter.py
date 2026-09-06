@@ -432,6 +432,7 @@ def filter_filings(
     document_class: str,
     document_subtype: str | None = None,
     year: int | None = None,
+    base_month: int | None = None,
     period_kind: str | None = None,
     date_range: tuple[str, str] | None = None,
     include_corrections: bool = False,
@@ -443,6 +444,7 @@ def filter_filings(
     - document_subtype이 None이면 세부유형을 거르지 않는다. 거래소공시처럼 질문이 유형을
       지정하지 않는 경우가 있다.
     - year의 의미는 period_kind가 정하며, 지정하지 않으면 문서군 기본값을 쓴다.
+    - base_month가 주어지면 정확히 일치해야 한다. quarter의 3월/9월을 구분한다.
     - include_corrections는 호출자가 명시한다. Pattern E는 정정본이 대상 자체이므로
       제외하면 안 된다.
 
@@ -464,6 +466,9 @@ def filter_filings(
             continue
 
         if document_subtype is not None and record.get("doc_subtype") != document_subtype:
+            continue
+
+        if base_month is not None and record.get("base_month") != base_month:
             continue
 
         if not _matches_period(
@@ -674,6 +679,7 @@ def locate_filing(
     document_class: str,
     document_subtype: str | None = None,
     year: int | None = None,
+    base_month: int | None = None,
     period_kind: str | None = None,
     date_range: tuple[str, str] | None = None,
     include_corrections: bool = False,
@@ -692,6 +698,7 @@ def locate_filing(
         document_class=document_class,
         document_subtype=document_subtype,
         year=year,
+        base_month=base_month,
         period_kind=period_kind,
         date_range=date_range,
         include_corrections=include_corrections,
@@ -719,6 +726,7 @@ def list_filings(
     document_class: str,
     document_subtype: str | None = None,
     year: int | None = None,
+    base_month: int | None = None,
     period_kind: str | None = None,
     date_range: tuple[str, str] | None = None,
     include_corrections: bool = False,
@@ -740,6 +748,7 @@ def list_filings(
         document_class=document_class,
         document_subtype=document_subtype,
         year=year,
+        base_month=base_month,
         period_kind=period_kind,
         date_range=date_range,
         include_corrections=include_corrections,

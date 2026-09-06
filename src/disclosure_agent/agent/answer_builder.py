@@ -1,31 +1,83 @@
 """최종 답변 조립 모듈.
 
 역할:
-- 검색 결과, Fact, 계산 결과, Evidence를 하나의 응답 구조로 묶는다.
+- Pattern 내부 결과를 진단용 dict로 조립한다(내부 표현).
+- 공통 실행 Contract(AgentExecutionResult)를 공개 응답 Contract(AnswerResponse)로 옮긴다.
 
-현재 구현 범위:
-- 자연어 문장을 만들지 않는다. 구조화된 결과 dict만 조립한다.
-- 자연어 생성은 이후 LLM 단계의 책임이며 이번 슬라이스 범위 밖이다.
+두 가지를 한 모듈에 두는 이유:
+- 둘 다 "확정된 결과를 받는 쪽이 읽을 형태로 옮기는" 일이고, 값을 새로 만들지 않는다.
+- 정지 단계·사유 어휘(STAGE_*/REASON_*)를 이미 이 모듈이 들고 있다. 그 어휘를 사용자 문장으로
+  옮기는 대응표가 같은 파일에 있어야 어느 정지 사유가 어떤 문장이 되는지 대조할 수 있다.
+- docs/agent_design/pattern_f_safety.md §8이 자연어 생성의 자리를 이 모듈로 지목한다.
+
+공개 경계:
+    AgentExecutionResult -> build_answer_response -> AnswerResponse
+
+    검색·파싱·계산·연결·정책 판정은 하지 않는다. 이미 확정된 결과를 표현만 한다.
+    HTTP 상태 결정과 예외 변환은 API 계층의 몫이다.
 
 입력:
-- QueryPlan, FilingRef, FinancialFact, Evidence
+- QueryPlan, FilingRef, FinancialFact, Evidence (내부 조립)
+- AgentExecutionResult (공개 변환)
 
 출력:
-- 직렬화 가능한 결과 dict
+- 직렬화 가능한 결과 dict (내부 조립)
+- AnswerResponse (공개 변환)
 
 TODO:
 - 계산 결과와 다중 Fact 응답 형태 확장
 - 경고 정책 정리
+- Pattern E 변경 전/후 값까지 담는 narrative (P1)
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from disclosure_agent.agent.derived_metrics import (
+    OPERATION_RATIO,
+    UNIT_PERCENT,
+    DerivedMetric,
+    get_derived_metric_spec,
+)
 from disclosure_agent.agent.evidence import Evidence
 from disclosure_agent.agent.query_analyzer import QueryPlan
-from disclosure_agent.periodic.extractor import FinancialFact
+from disclosure_agent.agent.query_vocabulary import OPERATION_CHANGE_COUNT
+from disclosure_agent.agent.safety import (
+    REASON_FORWARD_LOOKING_PREDICTION,
+    REASON_INVESTMENT_ADVICE,
+)
+from disclosure_agent.common.enums import (
+    AnswerabilityReason,
+    AnswerabilityStatus,
+    ComparisonRelation,
+    EventType,
+    ExecutionStatus,
+    FactAccountingScope,
+    MetricConcept,
+    ResultInputType,
+    SectionScope,
+    SummaryItemType,
+)
+from disclosure_agent.common.schemas import (
+    AgentExecutionResult,
+    AnswerResponse,
+    CalculationResult,
+    DocumentSummary,
+    EventHistory,
+    Fact,
+    FieldChange,
+    ResolvedEventState,
+    ResolvedFieldValue,
+    ResultInputReference,
+)
+from disclosure_agent.event.correction_fields import (
+    CORRECTION_FIELD_ALIASES,
+    HISTORY_CANONICAL_FIELDS,
+)
+from disclosure_agent.periodic.extractor import BASE_CURRENCY_UNIT, FinancialFact
 from disclosure_agent.retrieval.metadata_filter import FilingRef
 
 STATUS_OK = "ok"
@@ -42,6 +94,31 @@ STAGE_PARSING = "parsing"
 STAGE_EXTRACTION = "extraction"
 STAGE_EVIDENCE = "evidence"
 
+# 질문이 지정한 범위를 문서 안의 Section 하나로 옮기는 단계(C4 Section Navigation).
+#
+# extraction과 나누는 이유:
+#     extraction은 확정된 위치에서 값을 읽지 못한 것이고, 이 단계는 읽을 위치 자체를 정하지
+#     못한 것이다. 후속 작업이 다르다. 앞쪽은 추출 규칙을, 뒤쪽은 Section 대응 규칙을 고쳐야
+#     한다. 같은 사유로 뭉개면 결과만 보고 어느 쪽인지 알 수 없다.
+STAGE_SECTION_NAVIGATION = "section_navigation"
+
+# handler가 계획을 받아 들고 "이 모양은 내가 실행할 수 없다"고 판정한 단계.
+#
+# routing과 나누는 이유:
+#     routing/unimplemented_intent는 "그 intent를 맡을 handler가 없다"이다. handler가 등록된
+#     뒤에는 그 진술이 거짓이 된다. Pattern C는 등록되어 있고, 다만 계획의 모양이 이번
+#     구현 범위 밖일 뿐이다. 같은 사유로 뭉개면 "Pattern C를 구현하면 풀린다"와 "Pattern C의
+#     어느 부분을 더 구현해야 풀린다"가 구분되지 않는다.
+#
+# 코퍼스를 열기 전이므로 답변 가능성을 판정하지 않는다. 그 성질은 routing과 같다.
+STAGE_PATTERN_ENTRY = "pattern_entry"
+
+# 두 값을 함께 써도 되는지 판정하는 단계(C9 Comparability Validation).
+#
+# 계산 입력 검증(guard①)과 비교 가능성 검증(guard②)이 모두 여기에 적힌다. 둘은 적용 시점이
+# 다를 뿐 같은 판정이며(agent_patterns.md), 무엇이 어긋났는지는 reason이 나눈다.
+STAGE_COMPARABILITY = "comparability"
+
 # 내부 결과를 공통 Contract 타입으로 옮기는 단계.
 #
 # 다른 stage와 달리 원문을 더 읽지 않는다. 확정된 값을 옮기지 못한 경우이므로 값을 추측해
@@ -57,6 +134,13 @@ STAGE_CONTRACT_ADAPTATION = "contract_adaptation"
 REASON_NO_MATCHING_FILING = "no_matching_filing"
 REASON_PARSE_FAILED = "parse_failed"
 
+# 조건에 맞는 공시가 여럿이라 1건으로 확정하지 못한 경우.
+#
+# Pattern E의 ambiguous_root와 나눈다. 그쪽은 이력 체인의 뿌리를 고르지 못한 것이고, 이쪽은
+# 요약·조회 대상 문서 자체를 고르지 못한 것이다. canonical 사유는 둘 다 AMBIGUOUS_MATCH로
+# 모이므로, 어느 판정이었는지는 이 값으로만 구분된다.
+REASON_AMBIGUOUS_FILING = "ambiguous_filing"
+
 # periodic.extractor가 올리는 ExtractionBlockedError.reason 중 agent가 다시 해석하는 것.
 REASON_NO_METRIC_ACODE = "no_metric_acode"
 REASON_NO_MATCHING_CONTEXT = "no_matching_context"
@@ -65,6 +149,76 @@ REASON_AMBIGUOUS_CANDIDATES = "ambiguous_candidates"
 # Pattern E가 자체 판정으로 만드는 사유.
 REASON_NO_ORIGINAL_FILING = "no_original_filing"
 REASON_AMBIGUOUS_ROOT = "ambiguous_root"
+
+# 질문이 계약 상대방을 지목했는데 그 이름을 대조할 수 없어 원공시 1건을 확정하지 못한 경우.
+#
+# ambiguous_root와 나눈다. 그쪽은 후보가 여럿이라 못 고른 것이고, 이쪽은 후보가 하나인데 그
+# 하나가 질문이 가리킨 계약인지 확인할 수 없는 것이다. 후보 개수가 1과 N으로 다르므로 같은
+# 사유로 묶으면 진단이 사실과 어긋난다("후보가 1건이라 특정할 수 없습니다"는 말이 안 된다).
+#
+# canonical 사유는 ambiguous_root와 같은 AMBIGUOUS_MATCH다. 둘 다 대상 문서를 확정하지 못한
+# 판정이고, 새 공개 사유를 만들 만큼 다른 것이 아니다. 어느 판정이었는지는 이 값으로 구분된다.
+#
+# 계약상대방 기반 문서 확정(C3)이 들어오면 이 사유는 사라진다. 그때는 이름을 대조해 후보를
+# 좁히므로, 맞으면 답하고 틀리면 no_matching_counterparty가 된다.
+REASON_UNVERIFIED_COUNTERPARTY = "unverified_counterparty"
+
+# Pattern E가 계획 입구에서 만드는 사유.
+#
+# 계획이 지목한 공시 세부유형에 대응하는 이벤트 유형이 없다. 위의 두 사유와 달리 코퍼스를
+# 보기 전이므로 답변 가능성을 판정하지 않는다. 가까운 유형으로 대신 처리하면 정정 항목이
+# 다른 유형의 어휘로 조회되어 변경이 전부 이름 없이 남고, 그 결과는 "바뀐 것이 없다"와
+# 구분되지 않는다.
+REASON_UNSUPPORTED_EVENT_TYPE = "unsupported_event_type"
+
+# Pattern C가 계획 입구에서 만드는 사유.
+#
+# 넷으로 나눈 이유는 후속 작업이 서로 다르기 때문이다. 비교 대상이 하나가 아닌 것과, 기간이
+# 둘이 아닌 것과, 파생 개념이 아닌 것과, 대응표의 연산을 아직 만들 수 없는 것은 각각 다른
+# 구현을 요구한다. 하나로 묶으면 결과만 보고 무엇을 구현하면 풀리는지 알 수 없다.
+REASON_UNSUPPORTED_COMPARISON_SUBJECT = "unsupported_comparison_subject"
+REASON_UNSUPPORTED_COMPARISON_PERIOD = "unsupported_comparison_period"
+REASON_UNSUPPORTED_COMPARISON_METRIC = "unsupported_comparison_metric"
+REASON_UNSUPPORTED_DERIVED_OPERATION = "unsupported_derived_operation"
+
+# agent.calculator가 계산을 거부한 사유.
+#
+# 앞의 셋과 마지막을 나누는 이유는 성질이 다르기 때문이다. 앞쪽은 "값은 읽었지만 함께 쓸 수
+# 없다"는 판정이고, 뒤쪽은 "그 값으로는 산술 자체가 성립하지 않는다"이다. 전자만 답변 가능성
+# 판정(NOT_COMPARABLE)으로 나가고, 후자는 대응표에 없어 실행 중단으로 남는다.
+#
+# 함께 쓸 수 없다는 판정을 다시 셋으로 나누는 이유는 어긋난 축이 다르기 때문이다.
+#     incomparable_calculation_inputs  한 파생값의 분자와 분모가 어긋났다(guard①).
+#     incomparable_periods             같은 기업의 두 기간이 어긋났다(guard②, Pattern C).
+#     incomparable_entities            같은 기간의 두 기업이 어긋났다(guard②, Pattern D).
+# canonical 사유는 셋 다 NOT_COMPARABLE 하나로 모이므로, 어느 축이었는지는 이 값으로만
+# 구분된다. 하나로 묶으면 결과만 보고 무엇을 고쳐야 하는지 알 수 없다.
+REASON_INCOMPARABLE_CALCULATION_INPUTS = "incomparable_calculation_inputs"
+REASON_INCOMPARABLE_PERIODS = "incomparable_periods"
+REASON_INCOMPARABLE_ENTITIES = "incomparable_entities"
+REASON_UNUSABLE_CALCULATION_INPUT = "unusable_calculation_input"
+
+# 서술 비교(Q09)가 두 연도의 Section을 모두 확보한 뒤 내리는 판정.
+#
+# 위 세 사유와 같은 STAGE_COMPARABILITY에 두고 canonical 사유도 같은 NOT_COMPARABLE로
+# 모으지만, 어긋난 축은 다르다. 위쪽은 확보한 '값'이 함께 쓸 수 없다는 판정이고, 이쪽은
+# 값을 하나도 만들지 않은 채 두 서술 Section의 '내부 구조'를 짝지을 수 없다는 판정이다.
+#
+# 이 사유를 따로 두는 이유:
+#     문서를 찾지 못한 것도(NOT_FOUND), 변화가 없다는 것도(변화 항목 0건) 아니다. 셋을
+#     구분하지 못하는 것이 이 문항의 주요 실패 모드이며
+#     (docs/agent_design/representative_questions.md Q09), 사유를 나눠야 결과만 보고
+#     무엇이 없어서 답하지 못했는지 알 수 있다.
+REASON_INCOMPARABLE_NARRATIVE_SECTIONS = "incomparable_narrative_sections"
+
+# Section 탐색 단계(STAGE_SECTION_NAVIGATION)의 사유는 여기 적지 않는다.
+#
+# 그 판정을 내리는 곳은 periodic.sections이고, 값도 그 모듈이 정본으로 가지고 있다
+# (REASON_UNSUPPORTED_SECTION_SCOPE / REASON_NO_MATCHING_SECTION / REASON_AMBIGUOUS_SECTION /
+# REASON_EMPTY_SECTION). 같은 문자열을 여기에 한 벌 더 적으면 한쪽만 고쳤을 때
+# agent.normalization의 대응표가 조용히 빗나가고, 그때 정지 사유는 "실행 중단"으로 떨어진다.
+# 위쪽 사유들이 여기 모여 있는 이유는 그 값을 만드는 계층이 여럿이라 대조할 자리가 필요해서인데,
+# Section 탐색 사유는 만드는 계층이 하나뿐이라 그 자리가 필요하지 않다.
 
 # 확정된 내부 값을 공통 Contract 타입으로 옮기지 못한 경우.
 REASON_UNCONVERTIBLE_FACT = "unconvertible_fact"
@@ -165,3 +319,3130 @@ def build_blocked_result(
         },
         "warnings": combined_warnings,
     }
+
+
+# ==========================================================================
+# 공개 응답 경계 — AgentExecutionResult -> AnswerResponse
+#
+# 이 아래는 값을 새로 만들지 않는다. 확정된 실행 결과를 사용자가 읽을 형태로 옮기기만 한다.
+# 검색·파싱·계산·연결·정책 판정은 위쪽 계층에서 이미 끝났다.
+#
+# 문장을 대응표로 두는 이유:
+#     사유 하나가 어떤 문장이 되는지 한곳에서 대조할 수 있어야 한다. 문자열이 분기문 안에
+#     흩어지면 "이 사유에는 문장이 없다"가 조용한 fallback으로 나타나고, 서로 다른 판정이
+#     같은 문장으로 뭉개져도 테스트가 잡지 못한다.
+# ==========================================================================
+
+
+class AnswerBuildError(RuntimeError):
+    """공개 응답으로 옮길 수 없는 실행 결과를 받은 경우.
+
+    normalization.UnmappedPolicyCategoryError와 같은 자리의 예외다. 값을 추측해 채우거나
+    그럴듯한 기본 문장으로 덮지 않고, 대응을 정하는 쪽이 먼저 고치게 한다.
+    """
+
+
+class UnsupportedExecutionStatusError(AnswerBuildError):
+    """COMPLETED가 아닌 실행 결과를 받은 경우.
+
+    BLOCKED/FAILED는 답변 가능성 판정 자체가 없다. AnswerResponse.status는 필수이므로
+    억지로 채우면 "코퍼스에 답이 없다"거나 "정책상 거부했다"는 없던 진술이 생긴다.
+    두 상태를 어떻게 사용자에게 전할지는 AskService/API 계층이 정한다
+    (docs/agent_design/pattern_f_safety.md §8 원칙 5).
+    """
+
+    def __init__(self, execution_status: ExecutionStatus) -> None:
+        super().__init__(
+            f"execution_status가 {execution_status.value}입니다. "
+            "Answer Builder는 COMPLETED 결과만 옮깁니다. "
+            "BLOCKED/FAILED 처리는 AskService/API 계층의 몫입니다."
+        )
+
+        self.execution_status = execution_status
+
+
+class MissingAnswerabilityStatusError(AnswerBuildError):
+    """COMPLETED인데 답변 가능성 판정이 비어 있는 경우.
+
+    AgentExecutionResult Contract 위반이다. 판정이 없는데 status를 고르면 그 선택이
+    판정으로 둔갑한다.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "COMPLETED 결과에 answerability_status가 없습니다. 판정을 대신 고르지 않습니다."
+        )
+
+
+class MissingAnswerSupportError(AnswerBuildError):
+    """답할 수 있다고 판정됐는데 그 근거가 결과 안에 없는 경우.
+
+    Pattern A의 최소 불변식은 ANSWERABLE + facts >= 1이다. 근거 없이 문장을 만들면
+    형식만 맞고 내용이 없는 답이 된다.
+    """
+
+
+class UnsupportedResultShapeError(AnswerBuildError):
+    """표현 방법이 정해지지 않은 결과 모양을 받은 경우.
+
+    첫 항목만 골라 답하거나 영문 enum 값을 그대로 문장에 넣지 않는다. 새 Pattern을 붙이는
+    쪽이 문장 형태를 먼저 정하게 한다. Router가 미등록 intent를 가장 가까운 handler로
+    대신 처리하지 않는 것과 같은 이유다.
+    """
+
+
+# --------------------------------------------------------------------------
+# 표기 어휘
+#
+# Contract enum을 사용자 문장에 쓰는 한글 표기로 옮긴다. 새 값이 늘면 대응표를 먼저 고치게
+# 한다. 영문 enum 값으로 조용히 되돌아가면 한국어 문장 안에 revenue가 섞여도 테스트가
+# 잡지 못한다.
+# --------------------------------------------------------------------------
+
+# 단일 Fact 문장이 지원하는 metric.
+#
+# MetricConcept 전체를 채우지 않는다. _single_fact_sentence의 문장은
+#
+#     {company}의 {fiscal_year}년 {accounting_scope} 기준 {metric}은 {value}입니다.
+#
+# 즉 재무제표 축(회계연도 × 연결/별도)을 전제한 손익 지표 템플릿이다. 계약금액·보유
+# 주식수 같은 거래소공시·지분공시 지표는 이 축을 갖지 않고, 대신 "어느 계약인지",
+# "어느 보유 내역인지"라는 식별자를 요구한다.
+#
+# 그런 지표에 표기만 미리 붙여 두면 fiscal_year와 scope가 생략된 채
+# "{회사}의 계약금액은 X원입니다"처럼 형식은 자연스럽고 대상이 특정되지 않은 문장이
+# 나간다. Router가 미등록 intent를 가장 가까운 handler로 대신 처리하지 않는 것과 같은
+# 실패 모드다.
+#
+# 그래서 표기를 비워 두고 _metric_label에서 멈춘다. 해당 Pattern을 붙이는 쪽이 표기가
+# 아니라 문장 템플릿부터 정하게 하기 위해서다.
+METRIC_LABELS: dict[MetricConcept, str] = {
+    MetricConcept.REVENUE: "매출액",
+    MetricConcept.OPERATING_INCOME: "영업이익",
+}
+
+# 계약 조회(Q02) 문장이 쓸 거래소공시 필드 표기.
+#
+# METRIC_LABELS와 합치지 않는다. 저쪽은 재무제표 축(회계연도·연결기준)을 전제한 단일 Fact
+# 템플릿이 쓰는 표기이고, 계약금액과 계약기간에는 그 축이 없다. 한 표에 담으면 계약 지표가
+# 그 템플릿으로도 흘러 들어가 "2025년 연결 기준 계약금액" 같은 문장이 만들어진다.
+# DERIVED_METRIC_LABELS를 따로 둔 것과 같은 자리다.
+# 표기가 문장에 그대로 쓰이는 것은 계약금액뿐이다. 시작일·종료일은 "계약기간은 A부터
+# B까지"로 묶여 나가므로 낱개 표기가 문장에 나타나지 않는다. 그래도 표에 두는 이유는 이 표가
+# "어떤 지표가 거래소공시 계약 필드인가"를 정하는 자리이기도 하기 때문이다
+# (_is_contract_fact_bundle).
+CONTRACT_METRIC_LABELS: dict[MetricConcept, str] = {
+    MetricConcept.CONTRACT_AMOUNT: "계약금액",
+    MetricConcept.CONTRACT_START_DATE: "계약 시작일",
+    MetricConcept.CONTRACT_END_DATE: "계약 종료일",
+}
+
+ACCOUNTING_SCOPE_LABELS: dict[FactAccountingScope, str] = {
+    FactAccountingScope.CONSOLIDATED: "연결",
+    FactAccountingScope.SEPARATE: "별도",
+}
+
+# 문장에서 기준 표기를 생략하는 scope.
+#
+# UNKNOWN은 "확인하지 못했다"이고 NOT_APPLICABLE은 "해당 없음"이다. 둘 다 연결/별도 중
+# 하나로 단정할 수 없으므로 '... 기준' 구절 자체를 넣지 않는다. 임의로 연결로 적으면
+# Q01의 주요 실패 모드(연결·별도 혼동)를 문장 단계에서 다시 만든다.
+SCOPE_OMITTED_IN_ANSWER: frozenset[FactAccountingScope] = frozenset(
+    {FactAccountingScope.UNKNOWN, FactAccountingScope.NOT_APPLICABLE}
+)
+
+# 연도만 적어도 되는 fiscal_period 표기.
+#
+# 사업보고서의 연간 값이 이 자리다. 연도 하나로 그 값의 기간이 전부 불리므로 덧붙일 구간
+# 표기가 없다. fiscal_period가 None인 Fact도 같은 자리에 있다(연간 경로가 이 필드를 채우지
+# 않는다).
+FULL_YEAR_FISCAL_PERIODS: frozenset[str] = frozenset({"FY"})
+
+
+# 연간이 아닌 fiscal_period의 누적 구간 표기.
+#
+# periodic.extractor가 분기·반기보고서에서 확정하는 값이며(f"{base_month}M YTD"), 그 값이
+# 뜻하는 것은 '기초부터 그 시점까지의 누적'이다. 3M/6M/9M은 각각 1분기·반기·3분기 누적이고,
+# 그 셋이 지금 추출 경로가 만드는 값의 전부다.
+#
+# 연도만 적으면 이 구간이 문장에서 사라진다. 1~3월 누적 매출액이 "2025년 매출액"으로 적히면
+# 그 답은 한 해 전체의 값으로 읽히고, 그것이 이 대응표가 있는 이유다. 표기를 붙이는 일과
+# 기간을 생략하는 일은 다르다.
+#
+# 여기에 없는 값은 채우지 않고 막는다. 3개월 단독 값("quarter")처럼 누적이 아닌 기간이
+# 섞이면 같은 "1분기"라는 말이 누적과 단독 두 가지를 뜻하게 되고, 문장만 보고는 어느 쪽인지
+# 알 수 없다. 그런 값은 문장 형태를 먼저 정한 뒤에 연다.
+INTERIM_FISCAL_PERIOD_LABELS: dict[str, str] = {
+    "3M YTD": "1분기 누적",
+    "6M YTD": "반기 누적",
+    "9M YTD": "3분기 누적",
+}
+
+
+# 우열 판정 문장이 쓸 파생 개념 표기.
+#
+# 정의(분자·분모·연산)는 agent.derived_metrics가 정본이고 여기에는 한국어 표기만 둔다. 정의를
+# 여기에 다시 적으면 같은 개념이 두 벌이 되고 한쪽만 바뀌는 날이 온다. METRIC_LABELS가 원천
+# 지표에 대해 하는 일과 같은 자리이며, 표기가 없는 개념에서 멈추는 것도 같다.
+#
+# CalculationResult에는 어떤 파생 개념이었는지가 남지 않는다. 남는 것은 operation과 입력
+# 참조뿐이라 그 둘로 대응표를 되짚어 개념을 찾는다(_derived_metric_label).
+# 요약 범위의 한글 표기.
+#
+# SectionScope enum 값을 그대로 문장에 넣지 않는다. 한국어 문장에 facility_investment가
+# 섞이고, 그 상태로도 테스트가 통과한다. 표기가 없는 값은 문장으로 옮기지 않고 막는다.
+SECTION_SCOPE_LABELS: dict[SectionScope, str] = {
+    SectionScope.FINANCIAL_STATEMENT: "재무제표",
+    SectionScope.BUSINESS_OVERVIEW: "사업 개요",
+    SectionScope.PRODUCTS: "주요 제품 및 서비스",
+    SectionScope.FACILITY_INVESTMENT: "설비 투자",
+}
+
+# 요약 항목 종류의 한글 표기. 같은 이유로 대응표를 둔다.
+SUMMARY_ITEM_TYPE_LABELS: dict[SummaryItemType, str] = {
+    SummaryItemType.PARAGRAPH: "본문",
+    SummaryItemType.TABLE: "표",
+}
+
+# 요약 항목을 나열할 때의 구분자.
+#
+# 쉼표를 쓰지 않는다. 항목 이름에는 금액의 천단위 쉼표와 표 머리글의 구분자가 그대로 들어
+# 있어(예: "사업부문 | 매출유형 | 품 목"), 쉼표로 이으면 어디까지가 한 항목인지 갈리지 않는다.
+SUMMARY_ITEM_SEPARATOR = " / "
+
+# 집계 합계 옆에 적는 개별 금액의 구분자.
+AGGREGATE_COMPONENT_SEPARATOR = ", "
+
+# 이벤트 공시 유형의 한글 표기. SECTION_SCOPE_LABELS와 같은 이유로 둔다. enum 값을 그대로
+# 문장에 넣으면 한국어 답변에 facility_investment가 섞인다.
+EVENT_TYPE_LABELS: dict[EventType, str] = {
+    EventType.SUPPLY_CONTRACT: "단일판매·공급계약",
+    EventType.FACILITY_INVESTMENT: "신규 시설투자",
+}
+
+# 이벤트 단건 요약(Q06) 문장이 적는 항목과 그 순서.
+#
+# 순서가 규약이다. 원문의 항목 순서(투자구분 -> 투자내역 -> 투자목적 -> 투자기간)를 따르며,
+# 같은 결과는 언제 문장으로 옮겨도 같은 차례로 적힌다. dict 정의 순서가 그 차례다.
+#
+# 여기 없는 필드는 문장에 적지 않는다. ResolvedEventState에는 문서에 있던 필드가 전부
+# 담기지만, 그중 무엇이 질문의 답인지는 handler의 필수 요약 집합이 정한다
+# (agent.handlers.event_summary.REQUIRED_SUMMARY_FIELDS_BY_EVENT_TYPE). 두 곳이 어긋나면
+# 문장은 적을 것이 없는 쪽으로, 즉 답을 만들지 않는 쪽으로 실패한다.
+EVENT_STATE_FIELD_LABELS: dict[str, str] = {
+    "investment_target": "투자 대상",
+    "investment_amount": "투자 금액",
+    "investment_purpose": "투자 목적",
+    "investment_start_date": "투자 시작일",
+    "investment_end_date": "투자 종료일",
+}
+
+# 정정 이력이 바꾼 항목의 이름.
+#
+# FieldChange.field_name은 canonical 영문 식별자이고, production에서 raw_field는 항상 비어
+# 있다(event.contract_adapter의 raw_field_name gap). 영문 식별자를 한국어 문장에 그대로 넣을
+# 수는 없으므로 표기가 필요하다.
+#
+# 표기를 여기서 새로 짓지 않는다. 추출 계층이 원문 라벨을 canonical 이름으로 옮길 때 쓰는
+# 어휘(event.correction_fields.CORRECTION_FIELD_ALIASES)가 이미 그 대응을 들고 있고, 각
+# 항목의 첫 별칭이 원문에 적힌 이름이다. 그것을 읽어 만들면 대응표가 한 벌로 남는다. 손으로
+# 다시 적으면 추출이 아는 이름과 답변이 부르는 이름이 갈리고, 한쪽만 고쳐지는 날이 온다.
+#
+# EventHistory가 나를 수 있는 필드(HISTORY_CANONICAL_FIELDS)만 담는다. 그 밖의 필드가 이력에
+# 실려 오면 표기를 지어내지 않고 변경 내역을 문장에서 뺀다(field_change_clause).
+
+# 변경 전/후를 가리키는 표기. 조사 대신 이 표기를 쓴다.
+#
+# "A에서 B로"는 앞말의 받침에 따라 '로'와 '으로'가 갈리고, 날짜·금액·기호가 그대로 오는
+# 자리라 받침을 판정할 수 없는 값이 흔하다(원문이 '-'를 그대로 적는 경우가 있다). 표기를
+# 앞에 두면 값이 무엇이든 문장이 성립하고, 어느 값이 변경 전인지도 값 옆에 남는다.
+CHANGE_BEFORE_LABEL = "변경 전"
+CHANGE_AFTER_LABEL = "변경 후"
+
+CHANGE_ITEM_SEPARATOR = " / "
+
+
+def _readable_correction_alias(alias: str) -> str:
+    """원문 라벨의 계층 구분(' - ')만 공백으로 편다. 이름 자체는 바꾸지 않는다."""
+    return " ".join(alias.replace(" - ", " ").split())
+
+
+def _build_correction_field_labels() -> dict[str, str]:
+    """추출 어휘에서 이력 변경 항목의 표기를 만든다. 이름이 갈리면 멈춘다."""
+    labels: dict[str, str] = {}
+
+    for vocabulary in CORRECTION_FIELD_ALIASES.values():
+        for canonical_field, aliases in vocabulary.items():
+            if canonical_field not in HISTORY_CANONICAL_FIELDS:
+                continue
+
+            label = _readable_correction_alias(aliases[0])
+
+            existing = labels.get(canonical_field)
+
+            if existing is not None and existing != label:
+                raise AnswerBuildError(
+                    f"정정 필드 {canonical_field!r}의 표기가 공시 유형마다 다릅니다: "
+                    f"{existing!r} / {label!r}."
+                )
+
+            labels[canonical_field] = label
+
+    return labels
+
+
+CORRECTION_FIELD_LABELS: dict[str, str] = _build_correction_field_labels()
+
+
+def correction_field_label(field_name: str) -> str:
+    """이력 변경 항목의 표기. 대응표에 없으면 멈춘다."""
+    label = CORRECTION_FIELD_LABELS.get(field_name)
+
+    if label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 정정 변경 항목입니다: {field_name!r}. "
+            "event.correction_fields의 어휘에 없는 필드는 문장으로 옮기지 않습니다."
+        )
+
+    return label
+
+
+def change_value_display(value: str | float | None) -> str | None:
+    """변경 전/후 값의 표기. 값이 없으면 None.
+
+    자릿수도 형식도 바꾸지 않는다. 원문이 적은 문자열이 그대로 답변에 실려야 정정 표의 값과
+    답변의 값이 같은 것으로 대조된다.
+    """
+    if value is None:
+        return None
+
+    text = str(value).strip()
+
+    return text or None
+
+
+def field_change_display(change: FieldChange) -> str | None:
+    """변경 1건의 표기. 표기를 확정하지 못하면 None."""
+    try:
+        label = correction_field_label(change.field_name)
+
+    except UnsupportedResultShapeError:
+        return None
+
+    before = change_value_display(change.before)
+
+    after = change_value_display(change.after)
+
+    if before is None or after is None:
+        return None
+
+    return f"{label} {CHANGE_BEFORE_LABEL} {before}, {CHANGE_AFTER_LABEL} {after}"
+
+
+def field_change_clause(changes: list[FieldChange]) -> str | None:
+    """변경 전부를 한 구절로 옮긴다. 한 건이라도 옮기지 못하면 None.
+
+    일부만 적지 않는다. 적힌 것만 보면 그것이 변경의 전부로 읽히고, 빠진 항목이 있었다는
+    사실은 문장 어디에도 남지 않는다. 옮기지 못하는 값이 섞이면 건수만 말하던 이전 문장으로
+    돌아간다(구조화 결과에는 변경 전부가 그대로 실려 나간다).
+    """
+    if not changes:
+        return None
+
+    rendered = [field_change_display(change) for change in changes]
+
+    if any(item is None for item in rendered):
+        return None
+
+    return CHANGE_ITEM_SEPARATOR.join(item for item in rendered if item is not None)
+
+
+DERIVED_METRIC_LABELS: dict[DerivedMetric, str] = {
+    DerivedMetric.OPERATING_MARGIN: "영업이익률",
+}
+
+# 이력이 세는 것의 이름과 그 셈의 단위.
+#
+# 이력에는 셈이 둘 있고(확인한 공시, 확인된 변경) 문장에서는 둘 다 "N건"으로 적힌다. 숫자만
+# 보면 어느 셈인지 알 수 없으므로 무엇을 센 것인지를 이름으로 남긴다.
+#
+# 대응표로 두는 이유는 이 이름이 두 곳에서 쓰이기 때문이다. 아래 _event_history_sentence가
+# 문장을 만들 때 쓰고, grounded_payload가 검증기에 넘길 표기를 만들 때 읽는다. 문장에 직접
+# 적어 두면 검증기가 같은 한국어를 따로 한 벌 더 갖게 되고, 한쪽만 바뀌는 날 검증기는 문장에
+# 없는 이름을 찾게 된다.
+EVENT_COUNT_DOCUMENT = "document"
+EVENT_COUNT_CHANGE = "change"
+
+EVENT_COUNT_LABELS: dict[str, str] = {
+    EVENT_COUNT_DOCUMENT: "공시",
+    EVENT_COUNT_CHANGE: "변경 항목",
+}
+
+EVENT_COUNT_UNIT = "건"
+
+# 정정 이력의 셈. "몇 번 바뀌었어?"가 묻는 값이다.
+#
+# 위 두 셈과 다른 축이라 EVENT_COUNT_LABELS에 넣지 않는다. 공시 건수는 이력에 속한 문서의
+# 수이고, 변경 항목 건수는 그 문서들이 바꾼 필드의 수다. 사용자가 "몇 번"으로 묻는 것은
+# 정정이 몇 차례 있었는가이며 그 값은 EventLink의 개수다. 실측 Q15가 공시 4건·변경 항목
+# 4건·정정 3회이고, 세 값이 모두 다르다.
+#
+# 단위가 '건'이 아니라 '회'인 이유도 같다. 앞의 둘은 세는 대상이 있는 셈이고 이쪽은 횟수다.
+CORRECTION_COUNT_UNIT = "회"
+
+# 그 셈의 이름. EVENT_COUNT_LABELS와 나란한 자리이며, 검증 계층이 "이 수가 무엇의 셈인가"를
+# 문장에서 확인할 때 쓴다(verbalizer의 COUNT 축). 이름이 없으면 3회를 공시 건수 옆에 적은
+# 문장과 정정 횟수 옆에 적은 문장이 구별되지 않는다.
+CORRECTION_COUNT_LABEL = "정정"
+
+
+def correction_count_display(count: int) -> str:
+    """정정 횟수가 문장에 적히는 표기."""
+    return f"{count}{CORRECTION_COUNT_UNIT}"
+
+
+def event_count_display(count: int) -> str:
+    """이력의 셈이 문장에 적히는 표기.
+
+    단위를 붙인 문자열이다. 맨 숫자로 두면 금액이나 연도의 자릿수와 구별되지 않는다.
+    """
+    return f"{count}{EVENT_COUNT_UNIT}"
+
+# 변화량의 결과 단위. 백분율 두 건의 차이는 %가 아니라 percentage point다.
+#
+# agent.calculator가 정본이며 아래 OPERATION_DELTA 주석이 적어 둔 순환 import 때문에 그쪽에서
+# 가져오지 않는다. 이름이 갈려도 조용히 틀리지 않는다. 표기를 찾지 못한 단위는
+# _calculation_value가 막으므로, 문장이 다른 단위로 나가는 쪽이 아니라 만들어지지 않는 쪽으로
+# 실패한다. 두 이름이 붙어 있는지는 tests/unit/test_answer_builder.py가 함께 고정한다.
+UNIT_PERCENTAGE_POINT = "percentage_point"
+
+# 변화량의 방향을 한 낱말로 옮긴 표기.
+#
+# 새 판정이 아니다. 방향은 이미 계산 결과의 부호에 들어 있고, 여기서 하는 일은 그 부호를
+# 한국어 낱말로 적는 것뿐이다. 결정론 문장이 부호를 그대로 적는 것과 같은 사실을 말한다.
+#
+# 이 표기가 필요한 이유는 부호 없는 크기 표기(magnitude) 때문이다. "-2.1017%p 감소했습니다"는
+# 부호를 두 번 말하는 문장이고, 그렇다고 부호만 지우면 방향이 사라진다. 크기와 방향을 나눠
+# 두면 "2.1017%p 감소했습니다"가 되고 잃는 것이 없다.
+DELTA_DIRECTION_INCREASE = "증가"
+DELTA_DIRECTION_DECREASE = "감소"
+
+
+def delta_direction_label(value: float | str | None) -> str | None:
+    """변화량의 방향 표기. 0이거나 수로 읽지 못하면 None."""
+    if value is None:
+        return None
+
+    try:
+        amount = Decimal(str(value).strip())
+
+    except (InvalidOperation, ValueError):
+        return None
+
+    if not amount.is_finite() or amount == 0:
+        return None
+
+    return DELTA_DIRECTION_DECREASE if amount < 0 else DELTA_DIRECTION_INCREASE
+
+
+def unsigned_display(display_value: str) -> str | None:
+    """부호를 뗀 표기. 부호가 없으면 None(뗄 것이 없다).
+
+    문자열에서만 뗀다. 값을 다시 읽어 절댓값을 만들면 자릿수 규칙을 지난 표기와 그러지 않은
+    표기가 갈린다. 여기서 하는 일은 이미 확정된 표기의 맨 앞 글자 하나를 보는 것뿐이다.
+    """
+    if not display_value.startswith("-"):
+        return None
+
+    return display_value[1:]
+
+# 계산 결과 단위의 한국어 표기.
+#
+# CalculationResult.unit은 계산 계층의 어휘("percent")다. 그대로 문장에 넣으면 한국어 문장에
+# 영문 식별자가 섞인다(METRIC_LABELS 주석과 같은 실패 모드).
+#
+# %와 %p를 함께 담되 같은 표기로 뭉개지 않는다. 영업이익률 45.69%와 그 변화량 -2.10%p는 서로
+# 다른 축의 값이고, 변화량에 %를 붙이면 비율 자체가 2.10% 달라졌다는 뜻으로 읽힌다.
+CALCULATION_UNIT_LABELS: dict[str, str] = {
+    UNIT_PERCENT: "%",
+    UNIT_PERCENTAGE_POINT: "%p",
+}
+
+# Pattern C가 만드는 Calculation의 연산 이름. Q07은 앞의 둘을, Q08은 비율과 diff_pp를 쓴다.
+#
+# agent.calculator에서 가져오지 않는다. 그쪽이 이 모듈의 정지 사유 상수를 이미 가져가고 있어
+# 반대 방향을 열면 순환 import가 된다. 비율(OPERATION_RATIO)만 예외로 agent.derived_metrics에서
+# 가져온다. 그 이름의 정본이 파생지표 대응표이고(_derived_metric_label이 같은 값을 대조한다)
+# 그쪽에는 순환이 없다.
+#
+# 같은 문자열이 두 곳에 있지만 어긋나도 조용히 틀리지 않는다. 이름이 갈리면
+# _is_temporal_delta_shape·_is_temporal_derived_delta_shape이 그 모양을 알아보지 못하고,
+# 결과는 아래 단일 Fact 경로로 내려가 Fact 여러 건에서 멈춘다. 틀린 문장이 나가는 쪽이 아니라
+# 문장을 만들지 않는 쪽으로 실패한다.
+# 세 이름이 붙어 있는지는 tests/unit/test_answer_builder.py가 함께 고정한다.
+OPERATION_DELTA = "delta"
+OPERATION_DELTA_PCT = "delta_pct"
+OPERATION_DIFF_PP = "diff_pp"
+
+# Pattern C가 만드는 계산의 개념 표기.
+#
+# _derived_metric_label이 쓰는 DERIVED_METRIC_LABELS와 나란히 두되 합치지 않는다. 열쇠의
+# 성질이 다르다:
+#     DERIVED_METRIC_LABELS   파생 개념 자체의 이름(영업이익률). 분자·분모 조합이 정의이며
+#                             agent.derived_metrics가 정본이다.
+#     이 표                   두 기간 사이의 변화를 부르는 이름(증감액·증감률·차이). 어느
+#                             지표의 변화인지와 무관하게 연산 이름만으로 정해진다.
+#
+# 합치면 "매출액의 증감액"과 "영업이익률" 두 종류의 이름이 한 표에 섞이고, 대응을 찾지 못했을
+# 때 어느 쪽 대응표를 고쳐야 하는지 알 수 없게 된다.
+#
+# 문장 안의 리터럴로 두지 않는 이유:
+#     grounded_payload가 같은 이름을 읽어야 한다. 그쪽이 자기 표를 만들면 같은 계산이 결정론
+#     문장과 HCX payload에서 다른 이름으로 불리고, 어느 쪽이 정본인지 알 수 없게 된다
+#     (grounded_payload 모듈 docstring "표기의 정본은 answer_builder다").
+#
+#     문장 구절이 아니라 개념 이름만 담는다. "두 연도의 차이는"에서 표에 있는 것은 "차이"뿐이며,
+#     앞뒤의 "두 연도의"와 조사는 문장 조립이 붙인다. 구절째 담으면 payload가 쓰려면 잘라내야
+#     하고, 그 가공이 문장 조립 규칙을 payload 계층으로 옮겨 오는 일이 된다.
+TEMPORAL_OPERATION_LABELS: dict[str, str] = {
+    OPERATION_DELTA: "증감액",
+    OPERATION_DELTA_PCT: "증감률",
+    OPERATION_DIFF_PP: "차이",
+}
+
+# Q12가 만드는 기업별 합계 연산 이름. calculator가 이 모듈의 정지 사유를 import하므로 같은
+# 순환 import 제약이 있으며, 테스트에서 calculator의 정본 이름과 함께 고정한다. 이 이름을
+# 지원한다고 해서 generic aggregate 문장을 여는 것은 아니다. 아래 Q12 전용 shape 검증을 모두
+# 통과한 investment_amount 집계 비교에만 사용한다.
+OPERATION_AGGREGATE = "aggregate"
+
+# Fact 정규화 단위의 한국어 표기.
+#
+# 아래 표와 짝을 이루지만 합치지 않는다. 열쇠의 출처가 다르기 때문이다:
+#     이 표          추출 계층이 Fact에 적는 어휘. periodic.extractor가 정한다.
+#     위 표          agent가 계산 결과에 적는 어휘. agent.derived_metrics가 정한다.
+#
+# 합치면 한 계층이 단위를 늘릴 때 다른 계층의 문장이 함께 바뀐다. 실제로 두 어휘에는 같은
+# 문자열이 이미 있다. "percent"는 이쪽에서 원문에 적힌 비율이고 저쪽에서 agent가 만든 비율이며,
+# 한 표에 담으면 그 구분이 사라진다.
+#
+# 원문 단위(raw_unit)는 이 표를 지나지 않는다. 그쪽은 공시에 적힌 표기("백만원")를 그대로 쓰며,
+# 사용자가 원문과 대조하는 값이므로 옮기면 대조가 불가능해진다. 옮기는 것은 정규화 단위뿐이다.
+#
+# 통화 표기를 두 개 싣는 이유:
+#     같은 재무 Fact인데 만든 쪽에 따라 값이 다르다.
+#         "KRW"  periodic.extractor.normalize_value_and_unit. Contract 수준 Fact producer이며
+#                event 계층과 Contract 예제도 같은 값을 쓴다.
+#         "원"   periodic.extractor.BASE_CURRENCY_UNIT. periodic.adapter.adapt_financial_fact가
+#                FinancialFact.base_unit을 그대로 실어 만드는 값이며, 현재 Pattern D가 지나는
+#                경로다(agent.period_retrieval.collect_period_facts).
+#
+#     어느 쪽을 정본으로 둘지는 추출 계층이 정할 일이다. 표현 계층은 그 결정을 기다리는 동안
+#     양쪽을 모두 옮길 수 있어야 하며, 한쪽만 받으면 producer가 바뀌는 날 사용자 문장에 "KRW"가
+#     그대로 실린다. 여기서 Fact의 값을 고쳐 어휘를 하나로 맞추지 않는다. 그것은 추출 계층의
+#     결정을 표현 계층이 대신 내리는 일이다.
+#
+# "shares"·"percent"는 싣지 않는다. normalize_value_and_unit이 만들지만, 그 단위를 갖는 지표는
+# METRIC_LABELS에 표기가 없어 문장이 그 앞에서 먼저 멈춘다. 도달하지 않는 표기를 미리 열면
+# 문장 템플릿을 정하지 않은 지표가 조용히 통과한다.
+FACT_NORMALIZED_UNIT_LABELS: dict[str, str] = {
+    "KRW": "원",
+    BASE_CURRENCY_UNIT: "원",
+}
+
+# 우열 관계 문장.
+#
+# ComparisonResult.relation이 정본이다. Builder는 두 값을 다시 견주지 않고 관계 이름을 문장으로
+# 옮기기만 한다(agent_patterns.md "Agent computes and judges. Builder presents.").
+#
+# 질문별 분기가 없다. Q10과 Q11은 견준 대상이 Fact인지 Calculation인지만 다르고, 그 차이는 대상
+# 표기를 만드는 자리에서 끝난다. 여기에 질문을 알아보는 분기를 두면 새 비교 질문마다 문장이 한
+# 벌씩 늘고, 관계 어휘가 어느 표를 정본으로 삼는지 알 수 없게 된다.
+#
+# equal에 이름을 넣지 않는다. 어느 쪽도 크지 않은 판정이라 한쪽을 가리키면 없는 우열이 생긴다.
+COMPARISON_RELATION_TEMPLATES: dict[ComparisonRelation, str] = {
+    ComparisonRelation.LEFT_GREATER: "{left} 쪽이 더 큽니다.",
+    ComparisonRelation.RIGHT_GREATER: "{right} 쪽이 더 큽니다.",
+    ComparisonRelation.EQUAL: "두 값은 같습니다.",
+}
+
+
+# --------------------------------------------------------------------------
+# 사유별 문장
+#
+# 원칙은 docs/agent_design/pattern_f_safety.md §8을 따른다.
+#     - NOT_FOUND는 "찾지 못했습니다"(시스템 한계 가능성을 남김)
+#     - 기간 밖은 "보유하고 있지 않습니다"(확정)
+#     - 거부 사유를 대체 답변으로 바꾸지 않는다(다른 연도 값을 제시하지 않는다)
+#     - 투자 판단 질문에 지표를 제시하지 않는다
+# --------------------------------------------------------------------------
+
+UNAVAILABLE_MESSAGE_BY_REASON: dict[AnswerabilityReason, str] = {
+    # 문서는 봤지만 그 안에서 찾지 못했다. 검색 품질 문제일 수 있어 확정하지 않는다.
+    AnswerabilityReason.NOT_FOUND: "요청하신 정보를 공시에서 찾지 못했습니다.",
+    AnswerabilityReason.INSUFFICIENT_EVIDENCE: (
+        "요청하신 항목의 근거를 원문에서 확인하지 못해 답변하지 않습니다."
+    ),
+    # 값은 확보했지만 함께 쓸 수 없다고 판정한 결과다(normalization의 STAGE_COMPARABILITY 행).
+    # "찾지 못했다"와 다르다. 계산 입력이 어긋난 것인지 기간이 어긋난 것인지는
+    # answerability_detail.reason이 구분하며, 문장은 그 구분을 담지 않는다. detail로 문장을
+    # 갈라 쓰면 사용자 문구가 진단 어휘를 따라가고 같은 뜻의 문장이 여러 벌이 된다.
+    AnswerabilityReason.NOT_COMPARABLE: (
+        "확보한 값들의 기준, 단위 또는 개념이 서로 달라 직접 비교할 수 없습니다."
+    ),
+    # 문서 목록이라는 완전한 집합과 대조한 결과다. 확정 표현을 쓴다.
+    AnswerabilityReason.OUT_OF_DATA_RANGE: (
+        "요청하신 기간의 공시 데이터를 보유하고 있지 않습니다."
+    ),
+    AnswerabilityReason.OUT_OF_SCOPE_DATA: (
+        "요청하신 종류의 데이터는 보유한 공시 문서 범위에 없습니다."
+    ),
+    # 아래 값은 F1~F4가 공유한다. 무엇을 막았는지는 answerability_detail.reason이 구분하며
+    # POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON이 그 구분을 문장으로 옮긴다.
+    AnswerabilityReason.OUT_OF_SCOPE_POLICY: (
+        "정책상 답변 범위 밖인 요청이라 답변하지 않습니다."
+    ),
+    # 후보가 여러 건이라 하나로 좁히지 못했다. "정보가 없다"와 다르다.
+    AnswerabilityReason.AMBIGUOUS_MATCH: (
+        "조건에 맞는 후보가 여러 건이어서 하나로 확정할 수 없습니다. "
+        "질문을 더 좁혀 주시면 다시 확인할 수 있습니다."
+    ),
+    AnswerabilityReason.AMBIGUOUS_LINK: (
+        "정정 대상 문서를 1건으로 확정할 수 없어 이력을 확정하지 못했습니다."
+    ),
+    AnswerabilityReason.INCOMPLETE_CHAIN: (
+        "정정 이력의 일부를 확정하지 못해 답변을 확정할 수 없습니다."
+    ),
+    AnswerabilityReason.PARTIAL_SOURCE_SUPPORT: (
+        "질문에 필요한 일부 항목의 원문 근거를 확인하지 못해 전체 답변을 확정할 수 없습니다."
+    ),
+    # 공시는 찾았고 항목도 있는데 값만 원문에서 공개되지 않았다. "찾지 못했다"(NOT_FOUND)와
+    # 다르므로 질문을 좁히라고 안내하지 않는다. 좁혀도 원문에 값이 없다.
+    #
+    # 유보된 값을 0·미공개·없음으로 바꾸지 않는다. 그렇게 쓰면 원문에 없는 값을 만든 것이 되고,
+    # 뒤에 정정공시로 값이 공개됐을 때 앞선 답변이 틀린 사실을 말한 것이 된다.
+    AnswerabilityReason.WITHHELD_IN_SOURCE: (
+        "공시는 확인했지만 질문에 필요한 정보가 원문에서 공개되지 않았습니다."
+    ),
+}
+
+# Contract에는 있지만 사용자 문구가 아직 확정되지 않아 Answer Builder가 지원하지 않는 사유.
+# 문구가 확정되면 UNAVAILABLE_MESSAGE_BY_REASON으로 옮기고 이 집합에서 제거한다.
+#
+# 현재는 비어 있다. 마지막 항목이었던 NOT_COMPARABLE의 문구가 확정돼 대응표로 옮겨졌다.
+# 그래도 집합 자체는 남긴다. 이 자리는 "Contract에 사유가 늘었는데 문구가 아직 없다"를 담는
+# 곳이고, ALLOWED_REASONS_BY_STATUS의 뺄셈과 대응표 완전성 검사가 그 자리를 전제로 서 있다.
+# 지웠다가 다음 사유가 생길 때 다시 만들면, 그 사이에 문구 없는 사유가 UNANSWERABLE로 조용히
+# 통과해 영문 enum 값이 그대로 응답에 실릴 수 있다.
+UNMAPPED_ANSWERABILITY_REASONS: frozenset[AnswerabilityReason] = frozenset()
+
+# 정책 거부 문장. answerability_detail.reason이 고른다.
+#
+# safety.py가 만든 detail 원문을 그대로 노출하지 않는다. 그 문자열에는 어떤 규칙과 어떤
+# 표현에 걸렸는지가 진단용으로 들어 있어 탐지 규칙이 그대로 드러난다. 문장의 뜻은 같게
+# 두고 진단 부분만 뺀다.
+POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON: dict[str, str] = {
+    REASON_INVESTMENT_ADVICE: (
+        "투자 판단·추천 요청은 답변 범위 밖입니다. 공시에 기재된 사실 조회는 계속 지원합니다."
+    ),
+    REASON_FORWARD_LOOKING_PREDICTION: (
+        "아직 공시되지 않은 결과에 대한 예측 요청은 답변 범위 밖입니다. "
+        "공시에 기재된 확정 사실·일정 조회는 계속 지원합니다."
+    ),
+}
+
+# NOT_COMPARABLE 중 문장을 따로 쓰는 경우. answerability_detail.reason이 고른다.
+#
+# 대응표에 없는 detail은 UNAVAILABLE_MESSAGE_BY_REASON의 기본 문장을 그대로 쓴다. 수치
+# 경로(guard①·guard②)의 세 사유가 그쪽이며, 이 표가 생겨도 그 문장은 달라지지 않는다.
+#
+# 기본 문장을 나눠 쓰는 이유:
+#     기본 문장은 "확보한 값들의 기준·단위·개념이 서로 달라"라고 말한다. 서술 비교는 값을
+#     하나도 만들지 않으므로 그 문장은 일어나지 않은 일을 설명한다. 사용자는 어떤 값이
+#     어긋났는지 찾게 되고, 찾을 값이 없다.
+#
+#     POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON이 OUT_OF_SCOPE_POLICY 하나를 detail로 나눠
+#     쓰는 것과 같은 구조다. 한 canonical 사유가 성질이 다른 상황을 함께 담을 때 쓰는 자리이며,
+#     뜻이 같은 상황을 문구만 달리 적기 위한 자리가 아니다.
+#
+# 문장이 지켜야 하는 것:
+#     "변화가 없었다"고 말하지 않는다. 두 Section을 모두 찾았지만 짝지을 기준이 없었을
+#     뿐이다. 변화가 없다고 적으면 확인하지 않은 사실을 단정하는 것이 되고, 그것이 이 문항의
+#     주요 실패 모드다(representative_questions.md Q09). 두 문서가 같다고도 말하지 않는다.
+#     원인도 적지 않는다.
+#
+#     두 기재가 서로 다르다고도 말하지 않는다. 짝짓기 기준이 없어 견주지 못한 것이지, 두
+#     기재를 견줘 보고 구성이 다르다고 판정한 것이 아니다. 그렇게 적으면 하지 않은 판정을
+#     한 것처럼 말하게 되며, 진단(detail)이 말하는 것과도 어긋난다.
+NOT_COMPARABLE_MESSAGE_BY_DETAIL_REASON: dict[str, str] = {
+    REASON_INCOMPARABLE_NARRATIVE_SECTIONS: (
+        "두 사업연도의 사업 개요 부분은 모두 공시에서 찾았습니다. "
+        "다만 두 기재를 같은 항목끼리 짝지어 견줄 수 있는 기준이 아직 마련되지 않아 "
+        "무엇이 달라졌는지 단정하지 않습니다. "
+        "변화가 없었다는 뜻은 아니며, 확인한 범위는 두 보고서의 해당 서술 부분에 한정됩니다."
+    ),
+}
+
+# 사유 없이 UNRESOLVED만 남은 결과의 문장.
+#
+# Pattern E가 루트를 확정하지 못한 경로다(execution_result_mapping.md §3). 없는 사유를 골라
+# 채우지 않고, 사유를 단정하지 않는 문장을 쓴다.
+#
+# UNANSWERABLE에는 같은 문장을 두지 않는다. 사유 없는 UNANSWERABLE은 producer가 만들지
+# 않으므로 _require_compatible_reason이 먼저 막는다.
+UNRESOLVED_WITHOUT_REASON_MESSAGE = "대상을 하나로 확정하지 못해 답변을 확정할 수 없습니다."
+
+# 일부만 답할 수 있을 때 확보분 뒤에 붙는 한계 문장.
+#
+# UNAVAILABLE_MESSAGE_BY_REASON과 뜻은 같고 자리가 다르다. 이쪽은 확보분 문장 뒤에 붙는
+# 종속절이라 "다만"으로 시작해야 하고, 저쪽은 답변 전체가 되는 독립 문장이다. 한 문자열을
+# 두 자리에 함께 쓰면 둘 중 한쪽의 문장이 어그러진다. INCOMPLETE_CHAIN이 이미 같은 사유를
+# 두 표현으로 나눠 들고 있고, 여기서도 그 방식을 따른다.
+LIMITATION_MESSAGE_BY_REASON: dict[AnswerabilityReason, str] = {
+    AnswerabilityReason.INCOMPLETE_CHAIN: (
+        "다만 이력의 일부를 보유 공시 안에서 확정하지 못해 전체 이력은 확인하지 못했습니다."
+    ),
+    AnswerabilityReason.WITHHELD_IN_SOURCE: (
+        "다만 질문에 필요한 일부 항목은 원문에서 공개되지 않아 확인하지 못했습니다."
+    ),
+    AnswerabilityReason.PARTIAL_SOURCE_SUPPORT: (
+        "다만 질문에 필요한 일부 항목은 원문 근거를 확보하지 못해 확인하지 못했습니다."
+    ),
+}
+
+LIMITATION_WITHOUT_REASON_MESSAGE = "다만 요청하신 내용의 일부는 확인하지 못했습니다."
+
+
+# --------------------------------------------------------------------------
+# 결과 정합성
+#
+# Contract는 pydantic 모델이라 서로 모순되는 조합도 만들어진다. UNRESOLVED + NOT_FOUND는
+# 스키마상 유효하지만 "후보를 좁히지 못했다"와 "찾지 못했다"를 동시에 말한다. 그런 입력을
+# 문장으로 옮기면 두 판정 중 하나가 조용히 사라진다.
+#
+# 여기서 걸러내지 않고 문장만 고르면, 잘못된 조합이 형식상 정상인 AnswerResponse로 나가
+# 어느 단계에서 어긋났는지 되짚을 수 없게 된다. 값을 고쳐 맞추지 않고 멈춘다.
+# --------------------------------------------------------------------------
+
+# 판정 상태별로 실릴 수 있는 canonical 사유.
+#
+# 각 줄의 근거:
+#     ANSWERABLE            사유를 싣지 않는다. evaluation.runner의 GoldAnswer 검증이
+#                           "ANSWERABLE cases must not define a failure reason"으로
+#                           같은 규칙을 이미 고정하고 있다.
+#     PARTIALLY_ANSWERABLE  INCOMPLETE_CHAIN / WITHHELD_IN_SOURCE. 앞은
+#                           execution_result_mapping.md §3의 체인 미완결 행이 producer다.
+#                           뒤는 open_decisions.md D9가 정한 "필요한 field 일부만 유보"
+#                           경로이며, 체인 완결 여부와 독립된 축이다.
+#     UNRESOLVED            AMBIGUOUS_MATCH / AMBIGUOUS_LINK. 둘 다 "후보를 하나로 좁히지
+#                           못했다"이며, normalization의 ANSWERABILITY_BY_STOP이 만드는
+#                           것은 AMBIGUOUS_MATCH다. AMBIGUOUS_LINK는
+#                           evidence_and_answerability.md가 "정정 대상 문서를 1건으로
+#                           확정할 수 없음"으로 정의한 같은 계열이라 함께 허용한다.
+#     UNANSWERABLE          위 사유들 중 다른 상태에만 속하는 것을 뺀 나머지. 그 사유들이
+#                           UNANSWERABLE로 실리면 "답이 없다"와 "확정하지 못했다"가 한
+#                           지표로 묶인다(normalization의 AMBIGUOUS_MATCH 주석 참조).
+#                           WITHHELD_IN_SOURCE는 빼지 않는다. 핵심 field 전체가 유보되면
+#                           확보분이 없어 UNANSWERABLE이고, 일부만 유보되면
+#                           PARTIALLY_ANSWERABLE이다(D9). 두 상태에 모두 실릴 수 있는
+#                           유일한 사유이며, 어느 쪽인지는 유보 범위가 정한다.
+_UNRESOLVED_REASONS: frozenset[AnswerabilityReason] = frozenset(
+    {AnswerabilityReason.AMBIGUOUS_MATCH, AnswerabilityReason.AMBIGUOUS_LINK}
+)
+
+# PARTIALLY_ANSWERABLE에만 실리는 사유. UNANSWERABLE 집합을 만들 때 뺀다.
+#
+# 이것은 "PARTIALLY_ANSWERABLE에서 허용되는 사유"가 아니라 "PARTIALLY_ANSWERABLE에서만
+# 허용되는 사유"다. 허용 집합은 아래에서 WITHHELD_IN_SOURCE를 더해 만든다. 두 집합이 다른
+# 이유는 WITHHELD_IN_SOURCE가 두 상태에 걸쳐 있기 때문이고, 이 파일에서 배타성과 허용이
+# 갈리는 유일한 자리다.
+#
+# 그래서 WITHHELD_IN_SOURCE를 여기 넣지 않는 것이 요점이다. 넣으면 "핵심 field 전체가 유보"
+# (D9 case B)가 UNANSWERABLE로 나가지 못하고 Builder에서 멈춘다.
+_PARTIAL_ONLY_REASONS: frozenset[AnswerabilityReason] = frozenset(
+    {
+        AnswerabilityReason.INCOMPLETE_CHAIN,
+        AnswerabilityReason.PARTIAL_SOURCE_SUPPORT,
+    }
+)
+
+ALLOWED_REASONS_BY_STATUS: dict[AnswerabilityStatus, frozenset[AnswerabilityReason]] = {
+    AnswerabilityStatus.ANSWERABLE: frozenset(),
+    AnswerabilityStatus.PARTIALLY_ANSWERABLE: _PARTIAL_ONLY_REASONS
+    | {AnswerabilityReason.WITHHELD_IN_SOURCE},
+    AnswerabilityStatus.UNRESOLVED: _UNRESOLVED_REASONS,
+    AnswerabilityStatus.UNANSWERABLE: frozenset(AnswerabilityReason)
+    - _UNRESOLVED_REASONS
+    - _PARTIAL_ONLY_REASONS
+    - UNMAPPED_ANSWERABILITY_REASONS,
+}
+
+# 사유를 비운 채로 나올 수 있는 판정 상태.
+#
+# "언젠가 생길 수 있다"가 아니라 지금 producer가 실제로 그렇게 만드는 것만 넣는다. 현재
+# canonical shape를 고정해 두고, 새 capability가 붙을 때 이 집합을 명시적으로 넓히는 편이
+# 낫다. 미리 열어 두면 사유를 채우지 않은 새 경로가 조용히 통과한다.
+#
+#     ANSWERABLE   사유를 싣지 않는 것이 정상이다. normalize_single_fact_result의 성공
+#                  경로와 normalize_event_history_result의 체인 완결 경로가 모두 그렇다.
+#     UNRESOLVED   normalize_event_history_result에서 history도 blocked도 없는 경로가
+#                  사유 없이 UNRESOLVED만 남긴다(execution_result_mapping.md §3의
+#                  "conversion.history is None ... answerability_reason 없음" 행).
+#
+# 빠진 두 상태의 근거:
+#     PARTIALLY_ANSWERABLE  구조적으로 불가능하다. handlers.event_history._judge_answerability와
+#                           normalization._chain_reason이 같은 boolean(FilingChain.is_complete,
+#                           event.contract_adapter가 EventHistory.chain_complete에 그대로
+#                           옮긴 값)에서 갈리므로, PARTIALLY라면 INCOMPLETE_CHAIN이 반드시
+#                           함께 나온다.
+#     UNANSWERABLE          producer가 없다. refused_execution은 answerability_reason을
+#                           필수 키워드로 받고, _stopped_execution은 ANSWERABILITY_BY_STOP의
+#                           모든 항목이 사유를 채우고 있다.
+STATUSES_ALLOWING_NO_REASON: frozenset[AnswerabilityStatus] = frozenset(
+    {AnswerabilityStatus.ANSWERABLE, AnswerabilityStatus.UNRESOLVED}
+)
+
+# 근거를 붙이면 안 되는 거부 사유.
+#
+# pattern_f_safety.md §3 "F1~F4는 facts와 evidence가 비어 있어야 합니다"와
+# evidence_and_answerability.md 원칙 7이 근거다. 거부 응답에 원문 근거가 붙으면 부분 답변으로
+# 읽히고, 투자 판단 질문에 지표를 제시한 것과 같아진다(§8 원칙 4).
+#
+# events / event_links / event_histories는 넣지 않았다. 위 두 문서가 명시한 것은 facts와
+# evidence뿐이고, 나머지까지 막을 근거를 문서에서 찾지 못했다. 실제로 Pattern E의
+# no_matching_filing 경로는 UNANSWERABLE 결과에 event_links를 실어 보낼 수 있는 구조다
+# (normalization._stopped_execution). 추측으로 범위를 넓히면 그 경로가 함께 막힌다.
+REFUSAL_REASONS_WITHOUT_SUPPORTING_PAYLOAD: frozenset[AnswerabilityReason] = frozenset(
+    {
+        AnswerabilityReason.OUT_OF_DATA_RANGE,
+        AnswerabilityReason.OUT_OF_SCOPE_DATA,
+        AnswerabilityReason.OUT_OF_SCOPE_POLICY,
+    }
+)
+
+# EventHistory를 실은 결과에서 판정 상태가 요구하는 chain_complete 값.
+#
+# handlers.event_history._judge_answerability가 chain.is_complete 하나로 두 상태를 가르고,
+# normalization._chain_reason이 같은 값으로 INCOMPLETE_CHAIN을 붙인다. 그래서 상태와
+# chain_complete는 서로를 결정한다. 어긋나면 둘 중 하나가 틀린 것이고, 문장은 그 틀린 쪽을
+# 따라간다.
+CHAIN_COMPLETE_BY_STATUS: dict[AnswerabilityStatus, bool] = {
+    AnswerabilityStatus.ANSWERABLE: True,
+    AnswerabilityStatus.PARTIALLY_ANSWERABLE: False,
+}
+
+
+def build_answer_response(result: AgentExecutionResult) -> AnswerResponse:
+    """
+    정상적으로 끝난 실행 결과 하나를 공개 응답 Contract로 옮긴다.
+
+    답변 가능성 판정(status/reason)은 그대로 싣는다. 두 필드의 어휘가 실행 Contract와 같아서
+    새로 고를 것이 없고, 새로 고르면 평가가 대조하는 canonical 값이 두 벌이 된다.
+
+    구조화 결과는 AnswerResponse에 자리가 있는 것만 손실 없이 옮긴다. calculations와
+    comparisons, warnings는 현재 AnswerResponse에 자리가 없어 실리지 않는다. 우열 판정은
+    자리가 생기기 전까지 문장으로만 나가고, 그 문장은 실행 결과에 적힌 relation을 그대로
+    옮긴 것이다(_comparison_sentence).
+
+    resolved_event_states는 자리를 만들어 싣는다. 이벤트 단건 요약(Q06)의 답이 그 상태
+    자체이기 때문이다. 우열 판정처럼 문장으로만 내보내면 어느 항목이 어느 문서에서 왔는지가
+    응답에서 사라지고, 값과 근거를 잇는 evidence_ids도 가리킬 대상을 잃는다.
+
+    Evidence를 실행 결과에서 지우지 않는다. 거부 응답에 Evidence를 붙이지 않는 원칙
+    (evidence_and_answerability.md 원칙 7)은 producer가 이미 지킨다. 여기서 다시 걸러내면
+    같은 판정이 두 곳에 생기고, 정상 응답의 provenance까지 함께 지울 위험이 남는다.
+
+    source_documents도 그대로 옮긴다. Evidence.doc_id가 가리키는 문서의 metadata이므로
+    Evidence와 분리해 실으면 근거는 있는데 문서 이름을 알 수 없는 응답이 된다. 이 값을
+    새로 만들지 않는다 — producer(agent.normalization)가 이미 실제 선택된 FilingRef에서
+    채워 왔다.
+
+    Raises:
+        UnsupportedExecutionStatusError: execution_status가 COMPLETED가 아닌 경우.
+        MissingAnswerabilityStatusError: COMPLETED인데 판정이 비어 있는 경우.
+        MissingAnswerSupportError: 답할 수 있다고 판정됐는데 근거가 없는 경우.
+        UnsupportedResultShapeError: 서로 모순되는 조합이거나 표현 방법이 정해지지 않은
+            결과 모양인 경우.
+    """
+    if result.execution_status is not ExecutionStatus.COMPLETED:
+        raise UnsupportedExecutionStatusError(result.execution_status)
+
+    status = result.answerability_status
+
+    if status is None:
+        raise MissingAnswerabilityStatusError
+
+    _require_compatible_reason(status, result.answerability_reason)
+    _require_empty_refusal_payload(result, status)
+    _require_consistent_chain(result, status)
+
+    return AnswerResponse(
+        answer=_build_answer(result, status),
+        status=status,
+        reason=result.answerability_reason,
+        facts=list(result.facts),
+        events=list(result.events),
+        event_links=list(result.event_links),
+        event_histories=list(result.event_histories),
+        resolved_event_states=list(result.resolved_event_states),
+        evidence=list(result.evidence),
+        source_documents=list(result.source_documents),
+    )
+
+
+def _require_compatible_reason(
+    status: AnswerabilityStatus,
+    reason: AnswerabilityReason | None,
+) -> None:
+    """
+    판정 상태와 canonical 사유가 같은 것을 말하는지 확인한다.
+
+    UNRESOLVED + NOT_FOUND처럼 서로 다른 판정을 동시에 담은 결과는 문장으로 옮기지 않는다.
+    사유 쪽 문장을 고르면 "후보를 좁히지 못했다"가 사라지고, 상태 쪽 문장을 고르면 사유가
+    사라진다. 어느 쪽을 골라도 판정 하나가 조용히 없어진다.
+
+    사유가 비어 있는 경우도 상태별로 나눈다. 현재 producer가 사유 없이 만들지 않는 상태는
+    허용하지 않는다(STATUSES_ALLOWING_NO_REASON 참조).
+    """
+    allowed = ALLOWED_REASONS_BY_STATUS.get(status)
+
+    if allowed is None:
+        raise UnsupportedResultShapeError(
+            f"허용 사유가 정해지지 않은 answerability_status입니다: {status!r}. "
+            "ALLOWED_REASONS_BY_STATUS에 추가하십시오."
+        )
+
+    if reason is None:
+        if status in STATUSES_ALLOWING_NO_REASON:
+            return
+
+        permitted = ", ".join(sorted(item.value for item in allowed))
+
+        raise UnsupportedResultShapeError(
+            f"{status.value} 결과에는 canonical 사유가 있어야 합니다. "
+            f"현재 producer가 만드는 사유: {permitted}. "
+            "사유를 비우면 무엇 때문에 답하지 못했는지가 응답에서 사라집니다."
+        )
+
+    if reason in allowed:
+        return
+
+    permitted = ", ".join(sorted(item.value for item in allowed)) or "없음(사유를 싣지 않음)"
+
+    raise UnsupportedResultShapeError(
+        f"{status.value}에 실릴 수 없는 answerability_reason입니다: {reason.value!r}. "
+        f"허용되는 사유: {permitted}. "
+        "두 판정이 어긋난 결과이므로 문장으로 옮기지 않습니다."
+    )
+
+
+def _require_empty_refusal_payload(
+    result: AgentExecutionResult,
+    status: AnswerabilityStatus,
+) -> None:
+    """
+    거부 응답에 근거가 붙어 있지 않은지 확인한다.
+
+    걸러내지 않고 멈춘다. 여기서 facts/evidence를 비워 응답을 만들면 producer가 원칙을
+    어긴 사실이 사라지고, 같은 판정이 두 곳에 생긴다. 원칙을 지키는 자리는 producer이고
+    이곳은 그것을 확인하는 자리다.
+    """
+    if status is not AnswerabilityStatus.UNANSWERABLE:
+        return
+
+    reason = result.answerability_reason
+
+    if reason not in REFUSAL_REASONS_WITHOUT_SUPPORTING_PAYLOAD:
+        return
+
+    if not result.facts and not result.evidence:
+        return
+
+    raise UnsupportedResultShapeError(
+        f"{reason.value} 거부 결과에 facts {len(result.facts)}건, "
+        f"evidence {len(result.evidence)}건이 붙어 있습니다. "
+        "거부 응답에 근거를 붙이면 부분 답변으로 읽힙니다"
+        "(evidence_and_answerability.md 원칙 7). 지우지 않고 여기서 멈춥니다."
+    )
+
+
+def _require_consistent_chain(
+    result: AgentExecutionResult,
+    status: AnswerabilityStatus,
+) -> None:
+    """
+    EventHistory를 실은 결과의 판정과 chain_complete가 서로 맞는지 확인한다.
+
+    체인 완결 여부가 판정을 정하므로 둘은 같은 사실의 두 표현이다. 어긋난 결과로 문장을
+    만들면 미완결 체인을 완결로 말하거나 그 반대가 된다.
+
+    EventHistory가 없는 결과는 보지 않는다. 이 불변식의 근거는 Pattern E의
+    _judge_answerability 하나이며, Fact 기반 PARTIALLY 같은 다른 조합은 아직 producer도
+    문서도 없어 여기서 판정하지 않는다.
+
+    WITHHELD_IN_SOURCE도 보지 않는다. 체인 완결과 원문 유보는 서로 독립된 축이라
+    (open_decisions.md D9) 체인이 완결된 채로 일부 field만 유보된 결과가 성립한다. 그런
+    결과에 chain_complete=False를 요구하면, 완결된 체인을 미완결로 적어야 판정을 통과하게
+    된다.
+    """
+    if not result.event_histories:
+        return
+
+    if result.answerability_reason is AnswerabilityReason.WITHHELD_IN_SOURCE:
+        return
+
+    expected = CHAIN_COMPLETE_BY_STATUS.get(status)
+
+    if expected is None:
+        return
+
+    mismatched = [
+        history for history in result.event_histories if history.chain_complete is not expected
+    ]
+
+    if mismatched:
+        raise UnsupportedResultShapeError(
+            f"{status.value} 결과인데 chain_complete가 {not expected}인 EventHistory가 "
+            f"{len(mismatched)}건 있습니다. 체인 완결 여부와 판정이 어긋났습니다"
+            "(execution_result_mapping.md §3)."
+        )
+
+    # PARTIALLY_ANSWERABLE의 사유가 무엇인지는 여기서 보지 않는다.
+    # ALLOWED_REASONS_BY_STATUS가 그 상태에 INCOMPLETE_CHAIN과 WITHHELD_IN_SOURCE만
+    # 허용하고 STATUSES_ALLOWING_NO_REASON이 사유를 비우는 것도 막으므로, 위의 유보 예외를
+    # 지나 이 지점에 도달한 결과는 INCOMPLETE_CHAIN을 달고 있다.
+
+
+def _build_answer(result: AgentExecutionResult, status: AnswerabilityStatus) -> str:
+    """판정 상태별로 문장을 만든다. 네 상태를 하나로 뭉개지 않는다."""
+    if status is AnswerabilityStatus.ANSWERABLE:
+        return _supported_answer(result, partial=False)
+
+    if status is AnswerabilityStatus.PARTIALLY_ANSWERABLE:
+        return _supported_answer(result, partial=True)
+
+    if status is AnswerabilityStatus.UNANSWERABLE:
+        return _unavailable_answer(result)
+
+    if status is AnswerabilityStatus.UNRESOLVED:
+        return _unresolved_answer(result)
+
+    raise UnsupportedResultShapeError(
+        f"문장 형태가 정해지지 않은 answerability_status입니다: {status!r}."
+    )
+
+
+# --------------------------------------------------------------------------
+# 답할 수 있다고 판정된 경우
+# --------------------------------------------------------------------------
+
+
+def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
+    """
+    확보한 구조화 결과를 문장으로 옮긴다.
+
+    무엇을 확보했는지에 따라 Pattern이 갈린다. 표현 방법을 정하지 않은 조합은 현재 producer가
+    만들지 않는 모양이고, 조용히 한쪽을 고르지 않는다.
+
+    우열 판정을 가장 먼저 본다:
+        ComparisonResult가 실린 결과는 "어느 쪽이 큰가"를 물은 질문의 답이다(Pattern D). 그
+        결과에는 견준 값이 Fact로 함께 실리므로(Q10은 2건, Q11은 4건), Fact를 먼저 보면 값
+        하나를 말하는 단일 Fact 문장이 여러 건 앞에서 멈춘다. 그 정지가 API에서 500이 된다.
+
+        순서만 바꾸고 단일 Fact 경로는 그대로 둔다. 우열 판정이 없는 결과(Pattern A)는 이 분기를
+        지나가지 않으므로, 값 하나를 물은 질문의 문장은 달라지지 않는다.
+
+        판정이 있는데도 Fact 문장을 고르면 질문이 요구한 판정이 사라진 채 값 하나만 답하게 되고,
+        형식은 정상인 응답이 나간다. Router가 미등록 intent를 가장 가까운 handler로 대신
+        처리하지 않는 것과 같은 이유로, 여기서도 대신 고르지 않는다.
+    """
+    # 누적 기간 Fact를 표현할 수 있는 모양인지 먼저 본다.
+    #
+    # 모양을 고르기 전에 둔다. 아래 분기 중 어느 것을 고르든 그 문장은 _period_phrase를 지나며,
+    # 그 구절은 이제 누적 기간을 적는다. 분기 뒤에 두면 경로마다 같은 검사를 적어야 하고, 새
+    # Pattern이 늘 때 하나를 빠뜨리는 자리가 생긴다.
+    _require_supported_interim_shape(result)
+
+    if result.document_summaries and (
+        result.facts or result.comparisons or result.event_histories
+    ):
+        raise UnsupportedResultShapeError(
+            f"DocumentSummary {len(result.document_summaries)}건이 Fact "
+            f"{len(result.facts)}건 / ComparisonResult {len(result.comparisons)}건 / "
+            f"EventHistory {len(result.event_histories)}건과 함께 있습니다. "
+            "단일 문서 요약은 Fact도 계산도 만들지 않으므로 이 조합을 만드는 producer가 "
+            "없습니다(evidence_and_answerability.md 유형별 최소 요건)."
+        )
+
+    if result.document_summaries:
+        return _join(
+            _document_summary_sentence(result.document_summaries),
+            _limitation(result, partial=partial),
+        )
+
+    # 이벤트 단건 요약(Q06)을 이력 경로보다 먼저 본다.
+    #
+    # 두 결과는 서로 다른 질문의 답이다. ResolvedEventState는 "지금(또는 원공시 시점) 그
+    # 공시의 내용이 무엇인가"이고 EventHistory는 "그동안 무엇이 바뀌었는가"다. 뒤에 두면
+    # 요약 질문이 이력 문장으로 답해지고, 그 문장에는 사용자가 물은 항목이 하나도 나오지
+    # 않는다.
+    #
+    # 아래 가드는 다른 Pattern의 결과와 섞인 조합을 막는다. 현재 그런 producer는 없으며,
+    # 생기면 표현 방법을 먼저 정하라는 뜻으로 멈춘다. document_summaries와의 조합은 위
+    # 첫 가드가 이미 막는다.
+    if result.resolved_event_states and (
+        result.facts or result.comparisons or result.calculations
+    ):
+        raise UnsupportedResultShapeError(
+            f"ResolvedEventState {len(result.resolved_event_states)}건이 Fact "
+            f"{len(result.facts)}건 / ComparisonResult {len(result.comparisons)}건 / "
+            f"CalculationResult {len(result.calculations)}건과 함께 있습니다. "
+            "이벤트 단건 요약은 Fact도 계산도 만들지 않으므로 이 조합을 만드는 producer가 "
+            "없습니다."
+        )
+
+    if result.resolved_event_states:
+        return _join(
+            _event_state_summary_sentence(result.resolved_event_states),
+            _limitation(result, partial=partial),
+        )
+
+    if result.comparisons and result.event_histories:
+        raise UnsupportedResultShapeError(
+            f"ComparisonResult {len(result.comparisons)}건과 "
+            f"EventHistory {len(result.event_histories)}건이 함께 있습니다. "
+            "두 결과를 한 문장으로 잇는 형태가 정해지지 않았습니다."
+        )
+
+    if result.comparisons:
+        return _join(
+            _comparison_sentence(result),
+            _limitation(result, partial=partial),
+        )
+
+    if result.facts and result.event_histories:
+        raise UnsupportedResultShapeError(
+            f"Fact {len(result.facts)}건과 EventHistory {len(result.event_histories)}건이 "
+            "함께 있습니다. 두 결과를 한 문장으로 잇는 형태가 정해지지 않았습니다."
+        )
+
+    # 시계열 증감 결과를 단일 Fact 경로보다 먼저 본다.
+    #
+    # Q07은 두 기간의 원천 Fact 2건과 그 둘에서 나온 Calculation 2건을 함께 싣는다. 아래 단일
+    # Fact 경로는 여러 건에서 멈추도록 만들어졌고 그 가드는 그대로 두어야 하므로, 여기서 먼저
+    # 가르지 않으면 답할 수 있는 결과가 그 가드에 걸린다.
+    #
+    # 가드를 넓히지 않고 이 모양만 연다. _is_temporal_delta_shape은 Fact 2건과 Calculation
+    # 2건의 연산 이름, 그리고 두 Calculation이 그 Fact 2건만 참조한다는 것까지 본다. 조건 하나라도
+    # 어긋나면 아래로 내려가 멈추므로, 임의의 다중 Fact 결과가 이 경로로 답이 되지 않는다.
+    if result.facts and _is_temporal_delta_shape(result):
+        return _join(
+            _temporal_delta_sentence(result),
+            _limitation(result, partial=partial),
+        )
+
+    # 기간별 파생지표의 변화 결과도 같은 이유로 먼저 본다(Q08).
+    #
+    # 위 Q07 모양과 따로 둔다. 두 모양은 개수도(Fact 4건/Calculation 3건) 참조 구조도
+    # 다르다. Q07의 두 Calculation은 원천 Fact를 직접 참조하지만, Q08의 변화량은 기간별 비율
+    # Calculation 2건을 참조한다. 한 가드로 합치려면 "Fact 2건 또는 4건, Calculation 2건
+    # 또는 3건"처럼 개수를 느슨하게 열어야 하고, 그렇게 열면 두 모양 중 어느 쪽도 아닌 결과가
+    # 함께 통과한다.
+    #
+    # _is_temporal_derived_delta_shape은 연산 이름의 순서와 세 Calculation의 참조 배선까지
+    # 본다. 조건 하나라도 어긋나면 아래로 내려가 단일 Fact 경로에서 멈추므로, 계산 3건을 실은
+    # 임의의 결과가 이 경로로 답이 되지 않는다.
+    if result.facts and _is_temporal_derived_delta_shape(result):
+        return _join(
+            _temporal_derived_delta_sentence(result),
+            _limitation(result, partial=partial),
+        )
+
+    # 계약 조회 결과를 단일 Fact 경로보다 먼저 본다.
+    #
+    # Q02는 한 계약을 서술하는 여러 값을 함께 확보한다. 아래 단일 Fact 경로는 여러 건에서
+    # 멈추도록 만들어졌고 그 가드는 그대로 두어야 한다. 여기서 먼저 가르지 않으면 계약
+    # 질문이 그 가드에 걸려 답이 사라진다.
+    if result.facts and _is_contract_fact_bundle(result.facts):
+        return _join(
+            _contract_fact_sentence(result.facts),
+            _limitation(result, partial=partial),
+        )
+
+    holding_metrics = {MetricConcept.HOLDING_SHARES, MetricConcept.HOLDING_RATIO}
+    fact_metrics = {fact.metric for fact in result.facts}
+    if result.facts and fact_metrics == holding_metrics:
+        by_metric = {fact.metric: fact for fact in result.facts}
+        shares = by_metric[MetricConcept.HOLDING_SHARES]
+        ratio = by_metric[MetricConcept.HOLDING_RATIO]
+        if len(result.facts) != 2 or shares.company != ratio.company:
+            raise UnsupportedResultShapeError("지분공시 Fact 묶음의 회사·지표가 일치하지 않습니다.")
+        return _join(
+            f"{shares.company}의 이번 보고 시점 보유주식 수는 "
+            f"{shares.raw_value}주이고, 보유비율은 {ratio.raw_value}%입니다.",
+            _limitation(result, partial=partial),
+        )
+
+    # 지분공시 일부 항목만 원문 근거를 확보한 결과도 재무제표 단일 Fact 문장으로 보내지 않는다.
+    # 그 문장은 회계연도·연결기준 축을 전제하며, 지분 지표를 METRIC_LABELS에 넣어 우회하면
+    # 어느 보유 내역인지 특정하지 않은 문장이 된다. singleton은 Q03 handler가 만드는 canonical
+    # partial 조합에서만 열고, 그 밖의 단일 지분 Fact는 기존처럼 fail-closed 한다.
+    if (
+        len(result.facts) == 1
+        and fact_metrics <= holding_metrics
+        and partial
+        and result.answerability_reason is AnswerabilityReason.PARTIAL_SOURCE_SUPPORT
+    ):
+        fact = result.facts[0]
+        if fact.metric is MetricConcept.HOLDING_SHARES:
+            sentence = (
+                f"{fact.company}의 이번 보고 시점 보유주식 수는 "
+                f"{fact.raw_value}주입니다."
+            )
+        else:
+            sentence = (
+                f"{fact.company}의 이번 보고 시점 보유비율은 "
+                f"{fact.raw_value}%입니다."
+            )
+        return _join(sentence, _limitation(result, partial=partial))
+
+    if result.facts:
+        return _join(
+            _single_fact_sentence(result.facts),
+            _limitation(result, partial=partial),
+        )
+
+    if result.event_histories:
+        # partial은 _limitation에만 넘긴다. 완결 여부는 _event_history_sentence가
+        # history.chain_complete에서 직접 읽는다.
+        return _join(
+            _event_history_sentence(
+                result.event_histories,
+                # 세는 일은 여기서 한다. 질문이 요청했는지는 계획이 정했고
+                # (query_analyzer의 이력 계획) 그 요청은 결과가 날라 왔다.
+                correction_count=(
+                    len(result.event_links)
+                    if OPERATION_CHANGE_COUNT in result.operations
+                    else None
+                ),
+            ),
+            _limitation(result, partial=partial),
+        )
+
+    if result.events:
+        raise UnsupportedResultShapeError(
+            f"Event {len(result.events)}건만 있는 결과의 문장 형태가 정해지지 않았습니다. "
+            "현재 Pattern A는 Fact를, Pattern E는 EventHistory를 만듭니다."
+        )
+
+    raise MissingAnswerSupportError(
+        "답할 수 있다고 판정됐지만 facts/events/event_histories/document_summaries가 모두 "
+        "비어 있습니다. 근거 없이 문장을 만들지 않습니다."
+    )
+
+
+def _event_state_summary_sentence(states: list[ResolvedEventState]) -> str:
+    """
+    ResolvedEventState 1건을 문장으로 옮긴다(Q06).
+
+    여러 건이면 막는다. 이벤트 단건 요약은 공시 1건을 대상으로 하고, 여러 이벤트의 상태를
+    한 문장으로 잇는 형태는 정해지지 않았다. 첫 건만 고르면 나머지를 요약했다는 사실이
+    사라진다(_document_summary_sentence와 같은 이유).
+
+    구조화 결과에 적힌 것만 말한다:
+        값도 단위도 상태가 정한 것을 옮기기만 하고, 여기서 계산하거나 다시 반올림하지 않는다.
+
+    시점을 문장에 적는 이유:
+        같은 공시라도 원공시 시점의 내용과 정정을 반영한 내용이 다를 수 있다. ``as_of``는
+        그 상태가 어느 공시일까지 반영한 것인지를 말하며, 이 값이 없으면 사용자는 자기가
+        받은 것이 최신인지 알 수 없다.
+
+    필수 항목이 하나도 없으면 문장을 만들지 않는다:
+        답할 수 있다고 판정됐는데 적을 항목이 없는 결과는 판정과 내용이 어긋난 것이다.
+        빈 문장을 만들어 형식만 맞추지 않는다.
+    """
+    if len(states) > 1:
+        raise UnsupportedResultShapeError(
+            f"ResolvedEventState가 {len(states)}건입니다. 이벤트 단건 요약은 공시 1건을 "
+            "대상으로 하며, 여러 이벤트를 한 문장으로 잇는 형태는 정해지지 않았습니다."
+        )
+
+    state = states[0]
+
+    type_label = EVENT_TYPE_LABELS.get(state.event_type)
+
+    if type_label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 event_type입니다: {state.event_type.value!r}. "
+            "EVENT_TYPE_LABELS에 추가하십시오."
+        )
+
+    entries = [
+        f"{label}{_topic_particle(label)} {_event_state_value(state.fields[field_name])}"
+        for field_name, label in EVENT_STATE_FIELD_LABELS.items()
+        if field_name in state.fields and state.fields[field_name].value is not None
+    ]
+
+    if not entries:
+        raise MissingAnswerSupportError(
+            f"ResolvedEventState {state.event_id!r}에 적을 수 있는 요약 항목이 없습니다. "
+            "항목 없이 요약 문장을 만들지 않습니다."
+        )
+
+    headline = f"{state.company}의 {type_label} 공시 내용입니다."
+
+    body = f"{', '.join(entries)}입니다."
+
+    basis = f"{state.as_of.isoformat()}자 공시까지 반영한 내용입니다."
+
+    return _join(headline, body, basis)
+
+
+def _event_state_value(field: ResolvedFieldValue) -> str:
+    """
+    확정된 필드 값 하나를 문장에 적을 표현으로 옮긴다.
+
+    단위가 있으면 붙이고, 없으면 값만 적는다. Fact와 달리 원문 표기(raw_value)를 담지 않는
+    타입이라 정규화 값을 그대로 쓴다. 여기서 자릿수를 다시 매기지 않는다. 그것은 새 수치를
+    만드는 일이다.
+
+    표기를 정하지 않은 단위에서는 멈춘다. generic 표기를 만들면 대응표가 두 벌이 되고,
+    한국어 문장에 추출 계층의 어휘("KRW")가 그대로 실린다(_normalized_value_with_unit와
+    같은 규약).
+    """
+    value = _event_state_number(field.value)
+
+    if value is None:
+        raise MissingAnswerSupportError(
+            "값이 없는 필드를 문장에 적지 않습니다. 호출부가 먼저 걸러야 합니다."
+        )
+
+    if field.unit is None:
+        return str(value).strip()
+
+    label = FACT_NORMALIZED_UNIT_LABELS.get(field.unit)
+
+    if label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 정규화 단위입니다: {field.unit!r}. "
+            "FACT_NORMALIZED_UNIT_LABELS에 추가하십시오."
+        )
+
+    rendered = _value_with_unit(value, label)
+
+    if rendered is None:
+        raise MissingAnswerSupportError(
+            f"값과 단위를 함께 적을 수 없습니다: value={value!r}, unit={field.unit!r}."
+        )
+
+    return rendered
+
+
+def _event_state_number(value: float | str | None) -> float | str | int | None:
+    """
+    소수부가 없는 실수를 정수 표기로 옮긴다. 그 밖의 값은 그대로 둔다.
+
+    값을 바꾸지 않는다. 표기만 고른다. Contract의 ResolvedFieldValue.value가
+    ``str | float | None``이라, 추출 계층이 정수로 만든 금액(615600000000)이 Contract를
+    지나면서 실수가 된다. 그대로 적으면 "615600000000.0원"이 되어 원문과 대조되지 않는
+    표기가 문장에 실린다.
+
+    소수부가 있는 값은 건드리지 않는다. 자리를 맞추거나 반올림하면 그것은 새 수치다.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+
+    return value
+
+
+def _document_summary_sentence(summaries: list[DocumentSummary]) -> str:
+    """
+    DocumentSummary를 문장으로 옮긴다.
+
+    문서 1건의 범위 여러 건은 허용한다(Q05):
+        같은 doc_id의 DocumentSummary가 서로 다른 범위를 담고 있으면, 범위마다 같은 형태의
+        문장을 만들어 원문 Section 순서(결과에 실린 순서)대로 잇는다. 범위별 문장을 하나로
+        녹이지 않는다. 녹이려면 두 범위의 내용을 함께 서술하는 새 문장이 필요하고, 그것은
+        확정된 결과를 표현만 하는 이 모듈의 일이 아니다.
+
+    여러 문서면 막는다. Pattern B는 문서 1건의 지정 범위를 정리하는 Pattern이고, 여러 문서를
+    한 문장으로 잇는 형태는 정해지지 않았다. 첫 건만 고르면 나머지 문서를 요약했다는 사실이
+    사라진다(_single_fact_sentence와 같은 이유).
+
+    같은 문서의 같은 범위가 거듭 실린 결과도 막는다. 그런 결과를 만드는 producer가 없으며,
+    한 건만 고르면 나머지가 왜 있었는지가 사라진다.
+
+    구조화 결과에 적힌 것만 말한다:
+        문서와 범위는 DocumentSummary가, 항목 수는 items가 정한다. 요약문을 여기서 새로
+        쓰지 않는다. 이 모듈은 확정된 결과를 표현만 하며, 원문에서 새 서술을 만드는 일은
+        이 경계 밖이다.
+
+    항목을 고르지 않고 전부 원문 순서로 나열한다:
+        앞의 몇 건만 적으면 그 몇 건이 나머지보다 중요하다는 뜻이 된다. 항목 순서는 원문
+        배치일 뿐 중요도가 아니므로 그 주장은 결과가 보장하지 않는다. Q04의 해당 Section이
+        실제로 그렇다. 앞쪽에 원재료 관련 본문이 오고 투자 내용은 뒤에 있다.
+
+        그래서 고르는 대신 전부 적는다. 전부 적으면 무엇이 더 중요하다는 주장을 하지 않으면서도
+        범위 안에 무엇이 있는지가 답변에 남는다. 어느 항목이 질문에 더 가까운지 판정하는 일은
+        여전히 하지 않으며, 그 판정이 필요한 자리는 질문을 함께 보는 표현 계층이다
+        (agent.verbalizer).
+
+        건수만 적던 이전 문장은 "무슨 사업을 하느냐"에 "본문 6건입니다"로 답했다. 형식은
+        정상이고 근거도 맞지만 질문에 답하지 않는다. 나열할 이름은 DocumentSummary.items가
+        이미 확정해 싣고 있으므로 여기서 만드는 것이 없다.
+
+    범위와 내용을 한 문장으로 붙이지 않는다:
+        "설비 투자 관련 내용 15건"이라고 적으면 15건 전부가 설비 투자 내용이라는 뜻이 된다.
+        확보 단위는 Section이고 그 Section에는 요청 범위 밖의 내용도 함께 들어 있다
+        (periodic.sections의 TODO). 그래서 "어느 범위를 골랐는가"와 "그 범위에 무엇이 얼마나
+        있는가"를 나눠 적는다.
+    """
+    if len({summary.doc_id for summary in summaries}) > 1:
+        raise UnsupportedResultShapeError(
+            f"DocumentSummary가 {len(summaries)}건입니다. 단일 문서 요약은 문서 1건을 "
+            "대상으로 하며, 여러 문서를 한 문장으로 잇는 형태는 정해지지 않았습니다."
+        )
+
+    scopes = [summary.section_scope for summary in summaries]
+
+    if len(set(scopes)) != len(scopes):
+        listed = ", ".join(scope.value for scope in scopes)
+
+        raise UnsupportedResultShapeError(
+            f"같은 문서의 DocumentSummary {len(summaries)}건이 범위를 거듭 담고 있습니다: "
+            f"{listed}. 같은 범위를 두 번 실은 결과를 만드는 producer가 없습니다."
+        )
+
+    return _join(*(_single_document_summary_sentence(summary) for summary in summaries))
+
+
+def _single_document_summary_sentence(summary: DocumentSummary) -> str:
+    """DocumentSummary 1건을 '어느 범위를 골랐는가'와 '무엇이 얼마나 있는가'로 옮긴다."""
+    scope_label = SECTION_SCOPE_LABELS.get(summary.section_scope)
+
+    if scope_label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 section_scope입니다: {summary.section_scope.value!r}. "
+            "SECTION_SCOPE_LABELS에 추가하십시오."
+        )
+
+    counts = _summary_item_counts(summary)
+
+    location = " > ".join(summary.section_path) if summary.section_path else summary.report_name
+
+    selected = (
+        f"{scope_label} 범위에 해당하는 부분은 "
+        f"{summary.company} {summary.report_name}의 '{location}'입니다."
+    )
+
+    listing = SUMMARY_ITEM_SEPARATOR.join(item.label for item in summary.items)
+
+    collected = (
+        f"이 범위의 내용은 {len(summary.items)}건({counts})이며, "
+        f"확인한 내용은 다음과 같습니다: {listing}"
+    )
+
+    return _join(selected, collected)
+
+
+def _summary_item_counts(summary: DocumentSummary) -> str:
+    """요약 항목을 종류별로 세어 '본문 9건, 표 6건' 형태로 적는다."""
+    parts: list[str] = []
+
+    for item_type, label in SUMMARY_ITEM_TYPE_LABELS.items():
+        count = sum(1 for item in summary.items if item.item_type is item_type)
+
+        if count:
+            parts.append(f"{label} {count}건")
+
+    unknown = sorted(
+        {
+            item.item_type.value
+            for item in summary.items
+            if item.item_type not in SUMMARY_ITEM_TYPE_LABELS
+        }
+    )
+
+    if unknown:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 요약 항목 종류입니다: {unknown}. "
+            "SUMMARY_ITEM_TYPE_LABELS에 추가하십시오."
+        )
+
+    return ", ".join(parts)
+
+
+def _is_temporal_delta_shape(result: AgentExecutionResult) -> bool:
+    """
+    같은 기업 두 기간의 증감 결과인가(Q07, Pattern C의 원천 지표 모양).
+
+    좁게 본다. 개수만 맞는 결과를 통과시키면 다른 Pattern이 우연히 Fact 2건과 Calculation
+    2건을 실었을 때 그것이 증감 문장으로 나간다. 그래서 네 가지를 함께 본다.
+
+        Fact 2건 / Calculation 2건
+        두 Calculation의 연산이 증감액과 증감률이고 그 순서다
+        두 Calculation의 입력 참조가 순서까지 같다
+        그 참조가 결과에 실린 Fact 2건이고 둘 다 Fact 참조다
+
+    셋째 조건을 집합이 아니라 순서로 보는 이유:
+        아래 문장 조립은 이전·이후를 증감액의 inputs에서 읽고, 증감률은 값을 그대로 옮긴다.
+        두 Calculation이 같은 Fact 2건을 쓰되 순서가 서로 반대이면, 집합으로는 같으므로
+        통과하지만 증감액은 A->B의 값이고 증감률은 B->A의 값이 된다. 그 둘을 한 문장에 적으면
+        부호가 서로 어긋난 수치가 나란히 실리고, 받는 쪽은 어느 쪽이 맞는지 알 수 없다.
+
+        순서까지 같은지 보면 그 결과는 문장이 되지 않고 아래 단일 Fact 경로로 내려가 멈춘다.
+        조용히 틀린 문장이 나가는 쪽이 아니라 문장을 만들지 않는 쪽으로 실패한다.
+
+    Fact 목록의 순서는 보지 않는다. 확보 순서일 뿐 시간 순서라는 보장이 없고, 시간 순서는
+    증감액의 inputs가 정한다(_temporal_delta_sentence).
+
+    ComparisonResult는 보지 않는다. 이 함수에 닿기 전에 우열 판정 분기가 먼저 갈라지므로
+    여기까지 온 결과에는 판정이 없다.
+    """
+    if len(result.facts) != 2 or len(result.calculations) != 2:
+        return False
+
+    if tuple(item.operation for item in result.calculations) != (
+        OPERATION_DELTA,
+        OPERATION_DELTA_PCT,
+    ):
+        return False
+
+    amount, rate = result.calculations
+
+    ordered = [(item.input_type, item.input_id) for item in amount.inputs]
+
+    if ordered != [(item.input_type, item.input_id) for item in rate.inputs]:
+        return False
+
+    if [input_type for input_type, _ in ordered] != [
+        ResultInputType.FACT,
+        ResultInputType.FACT,
+    ]:
+        return False
+
+    # 같은 Fact를 두 번 가리키는 참조는 여기서 걸린다. 그 경우 아래 집합의 크기가 1이 되어
+    # Fact 2건의 식별자 집합과 같아지지 않는다.
+    return {input_id for _, input_id in ordered} == {
+        fact.fact_id for fact in result.facts
+    }
+
+
+def _temporal_delta_sentence(result: AgentExecutionResult) -> str:
+    """
+    두 기간의 값과 그 증감을 문장으로 옮긴다(Q07).
+
+    값을 만들지 않는다. 두 기간의 값은 Fact에서, 증감액과 증감률은 Calculation에서 그대로
+    읽는다. 여기서 빼거나 나누면 응답에 실린 수치와 문장의 수치가 어긋날 수 있고, 그 어긋남은
+    검산하는 쪽에서만 드러난다.
+
+    이전·이후를 Fact 목록의 순서에서 읽지 않는다. 순서는 확보 요청 순서일 뿐 시간 순서라는
+    보장이 없다. 증감액 Calculation의 inputs가 previous, current 순서라는 것이 계산 계층의
+    계약이므로(calculator.delta) 그 참조를 따라 읽는다.
+
+    늘었다/줄었다를 적지 않는다. 방향은 증감액의 부호에 이미 담겨 있고, 그 부호를 말로 옮기는
+    것은 결과가 담고 있지 않은 판정을 문장이 새로 만드는 일이다. 우열 판정은 ComparisonResult가
+    있는 결과에서만 한다(agent_patterns.md "Agent computes and judges. Builder presents.").
+    """
+    amount, rate = result.calculations
+
+    previous = _referenced_fact(result, amount.inputs[0].input_id)
+
+    current = _referenced_fact(result, amount.inputs[1].input_id)
+
+    sources = [previous, current]
+
+    company = _single_source_attribute(amount, sources, attribute="company")
+
+    metric = _single_source_attribute(amount, sources, attribute="metric")
+
+    scope = _single_source_attribute(amount, sources, attribute="accounting_scope")
+
+    label = _metric_label(metric)
+
+    amount_label = TEMPORAL_OPERATION_LABELS[OPERATION_DELTA]
+
+    rate_label = TEMPORAL_OPERATION_LABELS[OPERATION_DELTA_PCT]
+
+    return _join(
+        f"{company}의 {_scope_phrase(scope)}{label}{_topic_particle(label)} "
+        f"{_period_phrase(previous)}{_fact_value(previous)}, "
+        f"{_period_phrase(current)}{_fact_value(current)}입니다.",
+        f"{amount_label}{_topic_particle(amount_label)} {_delta_amount(amount)}, "
+        f"{rate_label}{_topic_particle(rate_label)} {_calculation_value(rate)}입니다.",
+    )
+
+
+def _delta_amount(calculation: CalculationResult) -> str:
+    """
+    증감액 표기.
+
+    _calculation_value를 쓰지 않는다. 그쪽이 보는 것은 파생지표의 결과 단위 어휘(percent)이고,
+    증감액의 단위는 원천 Fact의 정규화 단위를 그대로 물려받은 값이다
+    (calculator._shared_normalized_unit). 두 어휘를 한 대응표에 합치면 "percent"와 "KRW"가
+    같은 자리에 놓이고, 어느 쪽 어휘로 적힌 단위인지 받는 쪽이 알 수 없게 된다.
+
+    표기가 없으면 멈춘다. 정규화 단위를 그대로 문장에 적으면 한국어 문장에 추출 계층의 어휘가
+    실린다(_normalized_value_with_unit과 같은 자리).
+
+    값은 _grouped_amount가 정한다. 계산 계층이 넘기는 문자열을 그대로 적지 않는 이유는 아래
+    그 함수의 docstring에 있다.
+    """
+    label = (
+        FACT_NORMALIZED_UNIT_LABELS.get(calculation.unit)
+        if calculation.unit is not None
+        else None
+    )
+
+    if calculation.unit is not None and label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 증감액 단위입니다: {calculation.unit!r}. "
+            "FACT_NORMALIZED_UNIT_LABELS에 추가하십시오."
+        )
+
+    rendered = _value_with_unit(_grouped_amount(calculation), label)
+
+    if rendered is None:
+        raise MissingAnswerSupportError(
+            f"Calculation {calculation.calculation_id!r}에 값과 단위가 모두 갖춰진 표현이 "
+            "없습니다. 값만 있거나 단위만 있는 상태로는 문장을 만들지 않습니다."
+        )
+
+    return rendered
+
+
+def _grouped_amount(calculation: CalculationResult, *, subject: str = "증감액") -> str | None:
+    """
+    금액 계산의 수치 표기. 세 자리마다 쉼표를 넣고 의미 없는 소수점 이하 0을 지운다.
+
+    계산 계층의 문자열을 그대로 적지 않는 이유:
+        calculator.delta는 저장 자릿수로 quantize한 값을 문자열로 넘긴다. 원 단위 금액에서
+        그 결과는 17767427980.0000처럼 쉼표가 없고 뜻 없는 소수 네 자리가 붙은 표기가 된다.
+        같은 문장의 원천 Fact 값은 공시 원문 표기라 558,917,191,547처럼 쉼표가 있으므로, 한
+        문장 안에 같은 축의 금액이 두 방식으로 적힌다.
+
+        그 불일치가 외부 모델 경로에서 실패로 나타났다. HCX-007은 세 번의 실측 호출에서 모두
+        증감액을 17,767,427,980원으로 다시 적었고, 그 응답은 근거에 없는 수치로 거절됐다
+        (verbalizer._require_grounded_numbers). 지시문을 두 차례 좁혀도 같았다. 모델이 한 일은
+        반올림이 아니라 같은 문장 안의 표기를 맞춘 것이며, 사람이 읽어도 그쪽이 자연스럽다.
+
+        그래서 지시문을 더 조이는 대신 표기를 하나로 만든다. 결정론 문장과 payload가 같은
+        함수를 지나므로(_delta_amount의 호출자는 이 두 곳뿐이다) 두 경로의 문자열이 갈릴 수
+        없고, 검증기가 화이트리스트로 쓰는 값도 같은 것이 된다.
+
+    값을 바꾸지 않는다:
+        CalculationResult.value도 unit도 손대지 않는다. 여기서 정하는 것은 그 값을 문장에 어떻게
+        적는가뿐이며, 응답에 실리는 구조화 결과는 계산 계층이 넘긴 그대로다.
+
+        지우는 것은 소수점 이하의 뜻 없는 0뿐이다. 17767427980.0000의 네 자리는 quantize가
+        만든 자리이고 값이 아니다. 0이 아닌 소수부는 그대로 둔다. 반올림하면 답변에 실린
+        Calculation.value와 문장의 수치가 어긋나고, 그 어긋남은 검산하는 쪽에서만 드러난다.
+
+        부호도 그대로 둔다. 감소를 뜻하는 -를 지우면 방향이 사라지고, 그 사실은 문장 어디에도
+        남지 않는다.
+
+    읽지 못하는 값에서 멈춘다:
+        수로 읽히지 않는 문자열을 그대로 흘리면 이 함수를 지나고도 표기가 갈린 값이 남는다.
+        그때 갈리는 쪽은 결정론 문장과 payload가 아니라 이 규칙을 따른 값과 따르지 않은 값이며,
+        어느 쪽이 규칙을 지난 것인지 문장만 보고는 알 수 없다.
+
+    같은 축의 다른 금액도 이 규칙을 지난다. 시설투자 집계(Q12)가 그 자리이며, 원 단위 합계를
+    그대로 적으면 758900000000원처럼 자릿수를 셀 수 없는 문자열이 나가고 같은 문장의 원천
+    금액 표기(383,000,000,000원)와도 어긋난다. subject는 읽지 못한 값에서 멈출 때 무엇을
+    읽지 못했는지 남기는 이름이다.
+
+    파생지표의 비율과 변화량은 건드리지 않는다. 백분율 축이라 자릿수 구분이 필요 없고,
+    그쪽 표기는 _calculation_value가 정본이다.
+    """
+    if calculation.value is None:
+        return None
+
+    text = str(calculation.value).strip()
+
+    if not text:
+        return None
+
+    try:
+        amount = Decimal(text)
+
+    except InvalidOperation as error:
+        raise UnsupportedResultShapeError(
+            f"수로 읽지 못한 {subject}입니다: {calculation.value!r}. "
+            "표기 규칙을 지나지 않은 값을 문장에 적지 않습니다."
+        ) from error
+
+    if not amount.is_finite():
+        raise UnsupportedResultShapeError(
+            f"유한하지 않은 {subject}입니다: {calculation.value!r}."
+        )
+
+    # 지수 표기를 거치지 않는다. Decimal.normalize()는 뜻 없는 0을 지우면서 큰 값을
+    # 1.776742798E+10으로 바꾸고, 그 표기는 문장에 적을 것이 못 된다.
+    digits = format(abs(amount), "f")
+
+    integer, _, fraction = digits.partition(".")
+
+    fraction = fraction.rstrip("0")
+
+    grouped = f"{int(integer):,}"
+
+    # 부호는 값에서 읽는다. -0.0000처럼 0으로 정리되는 값에 -를 붙이지 않기 위해서다.
+    sign = "-" if amount < 0 else ""
+
+    return f"{sign}{grouped}.{fraction}" if fraction else f"{sign}{grouped}"
+
+
+def _is_temporal_derived_delta_shape(result: AgentExecutionResult) -> bool:
+    """
+    같은 기업 두 기간의 파생지표 변화 결과인가(Q08, Pattern C의 파생지표 모양).
+
+    Q07 모양과 같은 방식으로 좁게 본다. 개수만 맞는 결과를 통과시키면 다른 Pattern이 우연히
+    Fact 4건과 Calculation 3건을 실었을 때 그것이 파생지표 변화 문장으로 나간다. 그래서
+    다섯 가지를 함께 본다.
+
+        Fact 4건 / Calculation 3건
+        세 Calculation의 연산이 비율, 비율, 변화량이고 그 순서다
+        앞의 두 비율이 서로 다른 Calculation이다
+        변화량의 입력이 그 두 비율이고 순서까지 같다
+        두 비율의 입력이 각각 Fact 2건이고, 넷을 합치면 결과에 실린 Fact 4건이다
+
+    셋째·넷째 조건이 필요한 이유:
+        아래 문장 조립은 이전·이후를 Calculation 목록의 앞 두 건에서 읽고, 변화량은 값을
+        그대로 옮긴다. 변화량이 다른 값을 참조하거나 순서가 반대이면, 문장에 적힌 두 비율과
+        변화량의 부호가 서로 어긋난다. 받는 쪽은 어느 쪽이 맞는지 알 수 없다.
+
+        두 비율의 식별자가 같으면 변화량의 두 참조가 같은 값을 가리켜도 순서 검사를 통과한다.
+        그때 참조를 따라가면 한 기간의 비율이 두 번 나오고, 문장은 같은 해를 두 번 적으면서
+        그 둘의 변화량을 말하게 된다.
+
+    Calculation 목록의 순서를 시간 순서로 읽는 근거:
+        변화량의 inputs가 old, new 순서라는 것이 계산 계층의 계약이고(calculator.diff),
+        그 두 참조가 앞의 두 비율과 순서까지 같은지를 여기서 확인한다. 확인을 통과한 뒤에는
+        목록 앞이 이전 기간, 뒤가 이후 기간이다.
+
+    Fact 목록의 순서는 보지 않는다. 확보 순서일 뿐이고, 어느 Fact가 어느 기간의 것인지는
+    비율 Calculation의 참조가 정한다(_temporal_derived_delta_sentence).
+
+    ComparisonResult는 보지 않는다. Q07 모양과 같은 이유로, 이 함수에 닿기 전에 우열 판정
+    분기가 먼저 갈라진다.
+    """
+    if len(result.facts) != 4 or len(result.calculations) != 3:
+        return False
+
+    if tuple(item.operation for item in result.calculations) != (
+        OPERATION_RATIO,
+        OPERATION_RATIO,
+        OPERATION_DIFF_PP,
+    ):
+        return False
+
+    previous, current, change = result.calculations
+
+    if previous.calculation_id == current.calculation_id:
+        return False
+
+    if [(item.input_type, item.input_id) for item in change.inputs] != [
+        (ResultInputType.CALCULATION, previous.calculation_id),
+        (ResultInputType.CALCULATION, current.calculation_id),
+    ]:
+        return False
+
+    referenced: list[tuple[ResultInputType, str]] = []
+
+    for ratio in (previous, current):
+        if len(ratio.inputs) != 2:
+            return False
+
+        referenced.extend((item.input_type, item.input_id) for item in ratio.inputs)
+
+    if [input_type for input_type, _ in referenced] != [ResultInputType.FACT] * 4:
+        return False
+
+    # 같은 Fact를 두 번 가리키는 참조는 여기서 걸린다. 그 경우 아래 집합의 크기가 4보다 작아져
+    # Fact 4건의 식별자 집합과 같아지지 않는다.
+    return {input_id for _, input_id in referenced} == {
+        fact.fact_id for fact in result.facts
+    }
+
+
+@dataclass(frozen=True)
+class _DerivedPeriodValue:
+    """
+    한 회계연도의 파생값 표기.
+
+        company  그 값이 누구의 것인가.
+        scope    연결/별도 중 어느 기준인가.
+        label    파생 개념의 이름. 대응표에서 되짚은 값이며 여기서 짓지 않는다.
+        period   회계기간 구절("2024년 ").
+        value    계산 계층이 확정한 값. 여기서 만들지 않는다.
+
+    다섯을 함께 담는 이유는 두 기간이 같은 대상의 값인지 확인해야 하기 때문이다. 값만 들고
+    다니면 기업·기준·개념이 갈린 두 값을 한 문장에 나란히 적게 된다.
+    """
+
+    company: str
+    scope: FactAccountingScope
+    label: str
+    period: str
+    value: str
+
+
+def _derived_period_value(
+    result: AgentExecutionResult,
+    calculation: CalculationResult,
+) -> _DerivedPeriodValue:
+    """
+    비율 Calculation 1건을 '누구의 어느 기간 무엇'과 그 값으로 옮긴다.
+
+    _calculation_operand(Q11)와 같은 방식으로 읽는다. 참조를 따라가는 것은 대상을 부르기
+    위해서이고, 수치는 계산 계층이 확정한 calculation.value를 그대로 쓴다. 여기서 비율을 다시
+    만들면 반올림 자릿수가 계산 계층과 달라질 수 있고, 그러면 문장의 두 비율을 빼서 검산했을
+    때 변화량과 맞지 않는다.
+
+    회계연도가 없으면 멈춘다. Q08은 어느 두 해가 달라졌는지를 묻는 질문이므로, 연도를 적지
+    못하면 답이 질문에 대응하지 않는다. 기간 구절은 원천 Fact 양쪽에서 읽어 두 Fact가 모두
+    연간 표기인지까지 확인한다(_period_phrase). 한쪽만 보면 분기 값이 섞인 비율이 연간 비율로
+    적힐 수 있다.
+    """
+    sources = [_referenced_fact(result, item.input_id) for item in calculation.inputs]
+
+    company = _single_source_attribute(calculation, sources, attribute="company")
+
+    scope = _single_source_attribute(calculation, sources, attribute="accounting_scope")
+
+    fiscal_year = _single_source_attribute(calculation, sources, attribute="fiscal_year")
+
+    if fiscal_year is None:
+        raise MissingAnswerSupportError(
+            f"Calculation {calculation.calculation_id!r}의 입력에 회계연도가 없습니다. "
+            "어느 해의 값인지 적지 못하면 기간 변화 질문의 답이 되지 않습니다."
+        )
+
+    periods = {_period_phrase(fact) for fact in sources}
+
+    if len(periods) != 1:
+        raise UnsupportedResultShapeError(
+            f"Calculation {calculation.calculation_id!r}의 입력이 서로 다른 기간 구절을 "
+            f"만듭니다: {sorted(periods)}. 어느 기간의 값인지 정해지지 않아 표기를 만들지 "
+            "않습니다."
+        )
+
+    return _DerivedPeriodValue(
+        company=company,
+        scope=scope,
+        label=_derived_metric_label(calculation, sources),
+        period=periods.pop(),
+        value=_calculation_value_in_unit(
+            calculation, expected_unit=UNIT_PERCENT, subject="기간별 비율"
+        ),
+    )
+
+
+def _calculation_value_in_unit(
+    calculation: CalculationResult,
+    *,
+    expected_unit: str,
+    subject: str,
+) -> str:
+    """
+    계산 결과의 단위가 그 자리의 계약과 같은지 확인한 뒤 문장 표기로 옮긴다.
+
+    표기 대응표만으로는 부족하다:
+        CALCULATION_UNIT_LABELS는 "이 단위를 어떻게 적는가"만 정하고 "이 자리에 어떤 단위가
+        와야 하는가"는 정하지 않는다. 백분율 두 건의 차이는 percentage point이고 백분율 자체와
+        축이 다르다. 대응표만 보면 percent가 실린 변화량도 %로 적혀 나가고, 그 문장은 형식이
+        정상인 데다 수치도 계산 계층의 값 그대로라서 축이 바뀐 사실이 어디에도 남지 않는다.
+
+        영업이익률이 2.1017% 달라졌다는 말과 2.1017%p 달라졌다는 말은 서로 다른 사실이다.
+        앞의 것은 45.69%가 46.65%가 됐다는 뜻이고, 뒤의 것은 43.59%가 됐다는 뜻이다.
+
+    그래서 자리마다 기대 단위를 적어 두고 어긋나면 멈춘다. 계산 계층이 단위를 바꾸는 날
+    문장이 조용히 다른 뜻이 되는 대신, 문장이 만들어지지 않는다.
+
+    단위를 여기서 고쳐 맞추지 않는다. 그것은 계산 계층의 결정을 표현 계층이 대신 내리는 일이며,
+    응답에 실린 Calculation과 문장이 서로 다른 단위를 말하게 된다.
+    """
+    if calculation.unit != expected_unit:
+        raise UnsupportedResultShapeError(
+            f"{subject} {calculation.calculation_id!r}의 단위가 {expected_unit!r}가 아닙니다: "
+            f"{calculation.unit!r}. 계산 계층이 정한 것과 다른 축의 표기로 옮기지 않습니다."
+        )
+
+    return _calculation_value(calculation)
+
+
+def _temporal_derived_delta_sentence(result: AgentExecutionResult) -> str:
+    """
+    두 기간의 파생지표 값과 그 변화량을 문장으로 옮긴다(Q08).
+
+    값을 만들지 않는다. 두 기간의 비율과 그 변화량은 모두 Calculation에서 그대로 읽는다.
+    원천 Fact는 대상을 부르는 데에만 쓴다(_derived_period_value). 여기서 나누거나 빼면 응답에
+    실린 수치와 문장의 수치가 어긋날 수 있고, 그 어긋남은 검산하는 쪽에서만 드러난다.
+
+    세 수치를 한 문장에 담되 단위 축은 나눈다. 기간별 비율은 %, 두 비율의 차이는 %p다. 셋을
+    같은 표기로 적으면 "영업이익률이 2.1017% 달라졌다"가 되어 계산 계층이 만든 값과 다른
+    사실을 말하게 된다. 두 자리 모두 기대 단위를 적어 두고 확인한다
+    (_calculation_value_in_unit).
+
+    늘었다/줄었다도, 왜 달라졌는지도 적지 않는다. 방향은 변화량의 부호에 이미 담겨 있고,
+    원인은 결과가 담고 있지 않다. 둘 다 결과에 없는 판정을 문장이 새로 만드는 일이다
+    (_temporal_delta_sentence와 같은 자리).
+
+    두 기간이 같은 대상의 값인지 확인한다. 기업·기준·개념이 갈리면 멈춘다. 정상 경로에서는
+    guard②가 같은 것을 이미 확인하므로(calculator.validate_temporal_comparability) 새로 걸릴
+    일이 없고, 그래도 확인하는 이유는 한쪽을 골라 적으면 나머지가 문장에서 사라지기 때문이다.
+
+    두 기간이 같은 해이면 멈춘다. 같은 해끼리는 변화량이 정의되지 않으며, 그대로 적으면 한 해가
+    자기 자신과 달라졌다는 문장이 나간다.
+    """
+    previous_calculation, current_calculation, change = result.calculations
+
+    previous = _derived_period_value(result, previous_calculation)
+
+    current = _derived_period_value(result, current_calculation)
+
+    if (previous.company, previous.scope, previous.label) != (
+        current.company,
+        current.scope,
+        current.label,
+    ):
+        raise UnsupportedResultShapeError(
+            f"변화량 {change.calculation_id!r}이 서로 다른 대상의 값을 잇습니다: "
+            f"{previous.company}/{previous.scope.value}/{previous.label} vs "
+            f"{current.company}/{current.scope.value}/{current.label}. "
+            "한 대상의 두 기간이 아니면 변화량 문장을 만들지 않습니다."
+        )
+
+    if previous.period == current.period:
+        raise UnsupportedResultShapeError(
+            f"변화량 {change.calculation_id!r}의 두 입력이 같은 기간({previous.period.strip()})"
+            "입니다. 같은 기간끼리는 변화량이 정의되지 않습니다."
+        )
+
+    difference = _calculation_value_in_unit(
+        change, expected_unit=UNIT_PERCENTAGE_POINT, subject="변화량"
+    )
+
+    # 두 비율과 그 차이를 한 문장으로 잇는다. 차이를 별도 문장으로 떼면 그 수치가 어느 두 값
+    # 사이의 것인지가 문장 구조에서 사라지고, %와 %p가 서로 다른 문장에 흩어져 같은 축의
+    # 값처럼 읽힌다.
+    change_label = TEMPORAL_OPERATION_LABELS[OPERATION_DIFF_PP]
+
+    return (
+        f"{previous.company}의 {_scope_phrase(previous.scope)}{previous.label}"
+        f"{_topic_particle(previous.label)} "
+        f"{previous.period}{previous.value}, "
+        f"{current.period}{current.value}이며, "
+        f"두 연도의 {change_label}{_topic_particle(change_label)} {difference}입니다."
+    )
+
+
+def _is_contract_fact_bundle(facts: list[Fact]) -> bool:
+    """거래소공시 계약 필드만으로 이루어진 결과인가.
+
+    전부일 때만 참이다. 계약 필드와 재무 지표가 섞인 결과는 이 문장 형태가 정해지지 않았고,
+    한쪽을 골라 적으면 나머지를 물었다는 사실이 사라진다. 그런 결과는 아래 단일 Fact 경로로
+    내려가 거기서 멈춘다.
+    """
+    return all(fact.metric in CONTRACT_METRIC_LABELS for fact in facts)
+
+
+def _contract_fact_sentence(facts: list[Fact]) -> str:
+    """
+    한 계약에서 확보한 값들을 문장 하나로 옮긴다.
+
+    값을 만들지 않는다. 확보한 Fact에 적힌 것만 옮기며, 없는 필드는 문장에 나타나지 않는다.
+    요청했는데 없는 필드는 여기까지 오지 않는다. adapt_contract_facts가 전부 아니면 하나도
+    만들지 않으므로, 이 자리의 Fact 묶음은 이미 요청한 값을 전부 담고 있다.
+
+    시작일과 종료일을 기간 하나로 적는다:
+        "계약 시작일은 A입니다. 계약 종료일은 B입니다"로 나누어 적으면 두 값이 같은 계약의
+        양 끝이라는 관계가 문장에서 사라진다. 한쪽만 있는 결과는 아래에서 막는다. 없는 쪽을
+        추측해 기간을 만들지 않는다.
+
+    회계연도와 연결/별도 구절을 붙이지 않는다:
+        계약금액과 계약기간은 회계기간의 값이 아니고 거래소공시에는 연결·별도 구분이 없다.
+        Fact도 그렇게 담겨 있으므로(fiscal_year=None, accounting_scope=not_applicable)
+        여기서 덧붙일 것이 없다.
+    """
+    companies = {fact.company for fact in facts}
+
+    if len(companies) > 1:
+        raise UnsupportedResultShapeError(
+            f"계약 문장에 기업이 {len(companies)}곳 실려 있습니다: "
+            f"{', '.join(sorted(companies))}. 한 계약을 서술하는 문장이므로 기업은 한 곳이어야 "
+            "하며, 한 곳을 골라 적지 않습니다."
+        )
+
+    by_metric = {fact.metric: fact for fact in facts}
+
+    if len(by_metric) != len(facts):
+        raise UnsupportedResultShapeError(
+            "같은 계약 필드가 여러 건 실려 있습니다. 어느 값이 정본인지 정해지지 않아 "
+            "하나를 골라 적지 않습니다."
+        )
+
+    start = by_metric.get(MetricConcept.CONTRACT_START_DATE)
+    end = by_metric.get(MetricConcept.CONTRACT_END_DATE)
+
+    # 계약기간이 없으면 어느 계약인지 문장이 밝히지 못한다.
+    #
+    # 한 기업은 한 해에 여러 건의 공급계약을 공시한다. "{회사}의 계약금액은 X원입니다"는
+    # 형식은 자연스럽지만 어느 계약인지 특정되지 않은 문장이고, 읽는 쪽은 그 기업의 유일한
+    # 계약으로 읽는다. 계약기간은 Fact에 이미 실려 있는 값이면서 그 계약을 다른 계약과
+    # 구분해 준다.
+    #
+    # 상대방으로 밝히는 편이 더 낫지만 그 값은 여기까지 오지 않는다. 계약 상대방은
+    # QueryPlan에 있고 AgentExecutionResult에는 자리가 없다. 자리를 만드는 것은 공유
+    # Contract 개정이므로 이 범위에서 하지 않는다.
+    if start is None or end is None:
+        listed = ", ".join(sorted(metric.value for metric in by_metric))
+
+        raise UnsupportedResultShapeError(
+            f"계약기간 없이 계약 값을 문장으로 옮기지 않습니다: {listed}. "
+            "어느 계약인지 문장에서 특정되지 않아, 그 기업의 유일한 계약으로 읽히는 답이 "
+            "나갑니다. 계약을 식별하는 표현을 먼저 정하십시오."
+        )
+
+    clauses: list[str] = []
+
+    amount = by_metric.get(MetricConcept.CONTRACT_AMOUNT)
+
+    if amount is not None:
+        label = CONTRACT_METRIC_LABELS[MetricConcept.CONTRACT_AMOUNT]
+
+        clauses.append(f"{label}{_topic_particle(label)} {_fact_value(amount)}")
+
+    clauses.append(
+        f"계약기간은 {_contract_date_value(start)}부터 {_contract_date_value(end)}까지"
+    )
+
+    return f"{facts[0].company}의 {', '.join(clauses)}입니다."
+
+
+def _contract_date_value(fact: Fact) -> str:
+    """
+    계약 일자 Fact의 값.
+
+    단위를 요구하지 않는 것이 _fact_value와 다른 점이다. 저쪽은 수량을 적으므로 단위가 없으면
+    자릿수를 알 수 없어 멈춘다. 날짜는 수량이 아니라 그 자체로 완결된 표기이며, 단위를
+    요구하면 정상적인 Fact가 답하지 못하고 멈춘다.
+
+    원문 표기를 먼저 쓴다. 공시 대조에 맞는 것은 문서에 적힌 표기다.
+    """
+    for candidate in (fact.raw_value, fact.normalized_value):
+        if candidate is None:
+            continue
+
+        rendered = str(candidate).strip()
+
+        if rendered:
+            return rendered
+
+    raise MissingAnswerSupportError(
+        f"Fact {fact.fact_id!r}에 적을 일자 값이 없습니다. "
+        "값이 비어 있는 상태로는 문장을 만들지 않습니다."
+    )
+
+
+def _single_fact_sentence(facts: list[Fact]) -> str:
+    """
+    Fact 1건을 문장으로 옮긴다.
+
+    여러 건이면 막는다. 첫 건만 고르면 여러 값을 물은 질문에 한 값만 답하고도 완전한 답으로
+    읽힌다. 다중 Fact를 다루는 Pattern(B/C/D)을 붙이는 쪽이 문장 형태를 먼저 정한다.
+    """
+    if len(facts) > 1:
+        raise UnsupportedResultShapeError(
+            f"Fact가 {len(facts)}건입니다. 이번 구현은 단일 Fact 질문만 문장으로 옮깁니다. "
+            "첫 건만 골라 답하지 않습니다."
+        )
+
+    fact = facts[0]
+    metric_label = _metric_label(fact.metric)
+    value = _fact_value(fact)
+
+    return (
+        f"{fact.company}의 {_period_phrase(fact)}"
+        f"{_scope_phrase(fact.accounting_scope)}"
+        f"{metric_label}{_topic_particle(metric_label)} {value}입니다."
+    )
+
+
+def _metric_label(metric: MetricConcept) -> str:
+    """
+    단일 Fact 문장에 쓸 지표 표기.
+
+    표기가 없으면 generic label을 만들어 문장을 완성하지 않고 멈춘다. 지원하지 않는 지표에
+    표기만 붙이면 재무제표 축을 전제한 템플릿이 그 지표에도 적용돼, 대상이 특정되지 않은
+    문장이 나간다(METRIC_LABELS 주석 참조).
+    """
+    label = METRIC_LABELS.get(metric)
+
+    if label is None:
+        raise UnsupportedResultShapeError(
+            f"단일 Fact 문장이 지원하지 않는 metric입니다: {metric.value!r}. "
+            f"현재 지원하는 지표: {', '.join(sorted(item.value for item in METRIC_LABELS))}. "
+            "표기만 추가하지 말고 이 지표에 맞는 문장 템플릿을 먼저 정하십시오."
+        )
+
+    return label
+
+
+def interim_period_label(fiscal_period: str | None) -> str | None:
+    """
+    누적 구간 표기. 연간 값에는 붙일 구간이 없으므로 None.
+
+    표기가 정해진 값만 지난다. 대응표에 없는 fiscal_period는 여기서 멈추며, 그 정지가
+    "이 기간의 문장 형태가 아직 없다"는 뜻이다. 임의로 표기를 만들면 기간이 틀린 답이 나간다
+    (INTERIM_FISCAL_PERIOD_LABELS 주석 참조).
+
+    공개 함수인 이유는 근거 payload도 같은 판정을 해야 하기 때문이다. 그쪽은 이 대응표를 읽되
+    자기 오류형으로 멈춘다(grounded_payload._period_label). 판정을 두 곳에 적으면 한쪽만
+    넓어지는 날이 오고, 그때 같은 Fact가 경로에 따라 다른 기간으로 불린다.
+
+    Raises:
+        UnsupportedResultShapeError: 표기가 정해지지 않은 fiscal_period인 경우.
+    """
+    if fiscal_period is None or fiscal_period in FULL_YEAR_FISCAL_PERIODS:
+        return None
+
+    label = INTERIM_FISCAL_PERIOD_LABELS.get(fiscal_period)
+
+    if label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 fiscal_period입니다: {fiscal_period!r}. "
+            f"현재 표기가 정해진 기간: "
+            f"{', '.join(sorted(FULL_YEAR_FISCAL_PERIODS | set(INTERIM_FISCAL_PERIOD_LABELS)))}. "
+            "표기만 추가하지 말고 그 기간의 문장 형태를 먼저 정하십시오."
+        )
+
+    return label
+
+
+def supports_interim_fiscal_period(result: AgentExecutionResult) -> bool:
+    """
+    누적 기간 Fact를 표현할 수 있는 결과 모양인가.
+
+    #137/#138이 연 것은 '단일 Fact 조회'(Pattern A) 하나다. 그 계약이 다루는 것은 한 보고서에서
+    한 값을 꺼내 그 값의 기간과 함께 적는 일이며, 여러 값을 견주거나 계산하는 경로의 기간 표기는
+    아직 정해지지 않았다.
+
+    구절 함수가 아니라 여기서 가르는 이유:
+        _period_phrase는 Fact 하나를 받아 그 Fact의 기간을 적는다. 어느 문장의 어느 자리에
+        쓰이는지 모르고, 알아야 할 이유도 없다. 거기에 "이 자리에서는 누적을 적지 말라"를 넣으면
+        구절 함수가 호출자의 모양을 알게 되고, 그때부터 같은 Fact가 부르는 쪽에 따라 다른 기간으로
+        불린다. 모양을 아는 자리는 모양을 고르는 자리다(_supported_answer).
+
+    무엇을 보는가:
+        Fact 1건뿐이고, 계산도 우열 판정도 없는 결과. 그것이 단일 Fact 조회의 모양이다.
+        계산이 있으면 그 값은 여러 기간·여러 지표에서 나왔고, 우열 판정이 있으면 견준 값이
+        2건 이상 실린다. 어느 쪽도 "이 값의 기간은 무엇인가"가 한 구절로 끝나지 않는다.
+
+    이 판정을 근거 payload도 읽는다(grounded_payload). 두 경로가 같은 모양에서 열리고 같은
+    모양에서 멈춰야 하며, 판정을 두 곳에 적으면 한쪽만 넓어지는 날이 온다.
+    """
+    return (
+        len(result.facts) == 1
+        and not result.calculations
+        and not result.comparisons
+    )
+
+
+def _require_supported_interim_shape(result: AgentExecutionResult) -> None:
+    """
+    누적 기간 Fact가 실렸다면 그것을 표현할 수 있는 모양인지 확인한다.
+
+    표현할 수 없는 모양이면 이 변경 이전과 같이 멈춘다. 구절 함수가 연간 외 기간을 전부
+    거절하던 동안 Q07·Q08·Q11의 누적 입력은 여기서 멈췄고, 그 정지는 계약이 다루기로 한 범위
+    밖이라는 뜻이지 결함이 아니다. 구절이 열렸다고 해서 그 경로들이 함께 열리지는 않는다.
+
+    표기가 정해지지 않은 기간(예: "quarter")은 모양과 무관하게 여기서 멈춘다.
+    interim_period_label이 그 판정을 하며, 단일 Fact 조회에서도 예외가 아니다.
+
+    Raises:
+        UnsupportedResultShapeError: 표기가 정해지지 않은 기간이거나, 누적 기간 Fact가 단일
+            Fact 조회가 아닌 모양에 실린 경우.
+    """
+    interim = [
+        fact for fact in result.facts if interim_period_label(fact.fiscal_period) is not None
+    ]
+
+    if not interim or supports_interim_fiscal_period(result):
+        return
+
+    raise UnsupportedResultShapeError(
+        f"누적 기간 Fact {len(interim)}건이 단일 Fact 조회가 아닌 결과에 실렸습니다"
+        f"(Fact {len(result.facts)}건 / CalculationResult {len(result.calculations)}건 / "
+        f"ComparisonResult {len(result.comparisons)}건): "
+        f"{sorted({fact.fiscal_period for fact in interim if fact.fiscal_period})}. "
+        "기간 비교·파생값의 누적 기간 표기가 아직 정해지지 않았습니다. "
+        "표기를 여기서 만들지 말고 그 모양의 문장 형태를 먼저 정하십시오."
+    )
+
+
+def _period_phrase(fact: Fact) -> str:
+    """
+    회계기간 구절. 확정된 값만 적는다.
+
+    연간 값은 연도만 적는다. 그 값의 기간이 연도 하나로 전부 불리기 때문이다.
+
+    누적 값은 구간까지 적는다("2025년 반기 누적 "). 연도만 적으면 1~6월 누적 매출액이 그 해
+    전체의 매출액으로 읽히고, 그것이 이 구절이 막아야 하는 실패다. 표기가 정해지지 않은
+    기간은 아예 문장으로 옮기지 않는다(interim_period_label).
+
+    누적 값에 회계연도가 없으면 멈춘다. 연간 값이라면 연도를 생략해도 "연결 기준 매출액"이
+    기간을 주장하지 않는 문장으로 남지만, 누적 값에서 연도를 빼면 "반기 누적"이 어느 해의
+    반기인지 없이 적힌다. 구절을 통째로 생략하는 쪽은 더 나쁘다. 그 문장은 누적 값을 기간
+    없이 말하게 되고, 읽는 사람이 그것을 한 해의 값으로 읽을 자리가 다시 생긴다.
+    """
+    period_label = interim_period_label(fact.fiscal_period)
+
+    if period_label is None:
+        if fact.fiscal_year is None:
+            return ""
+
+        return f"{fact.fiscal_year}년 "
+
+    if fact.fiscal_year is None:
+        raise MissingAnswerSupportError(
+            f"Fact {fact.fact_id!r}는 {fact.fiscal_period!r} 누적 값인데 회계연도가 없습니다. "
+            "어느 해의 누적인지 적지 못하면 기간이 없는 값이 되므로 문장을 만들지 않습니다."
+        )
+
+    return f"{fact.fiscal_year}년 {period_label} "
+
+
+def _scope_phrase(scope: FactAccountingScope) -> str:
+    """연결/별도 기준 구절. 확정하지 못한 scope는 구절 자체를 넣지 않는다."""
+    if scope in SCOPE_OMITTED_IN_ANSWER:
+        return ""
+
+    label = ACCOUNTING_SCOPE_LABELS.get(scope)
+
+    if label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 accounting_scope입니다: {scope.value!r}. "
+            "ACCOUNTING_SCOPE_LABELS에 추가하거나 생략 대상으로 정하십시오."
+        )
+
+    return f"{label} 기준 "
+
+
+def _fact_value(fact: Fact) -> str:
+    """
+    문장에 적을 값.
+
+    값과 단위는 짝으로 다룬다. 한쪽만 있으면 그 표현을 쓰지 않는다:
+        값만 쓰면 "매출액은 1,234입니다"처럼 단위 없는 금액이 되어 자릿수를 알 수 없다.
+        단위만 있는 쪽은 애초에 적을 값이 없다.
+
+    원문 짝(raw_value/raw_unit)을 먼저 쓴다. 정규화 값은 배수를 곱해 만든 파생값이므로,
+    원문에 적힌 표기가 있으면 그것이 공시 대조에 맞다. 값을 여기서 다시 계산하지 않는다.
+
+    짝이 하나도 완전하지 않으면 멈춘다. 남은 한쪽을 섞어 쓰면(원문 값 + 정규화 단위) 배수가
+    맞지 않는 수치가 나간다.
+    """
+    raw = _value_with_unit(fact.raw_value, fact.raw_unit)
+
+    if raw is not None:
+        return raw
+
+    # 원문 짝이 완전할 때는 정규화 쪽을 보지 않는다. 정규화 단위의 표기가 정해지지 않았다는
+    # 사실이 원문으로 답할 수 있는 Fact까지 멈추게 하면, 쓰지도 않을 값 때문에 답이 사라진다.
+    normalized = _normalized_value_with_unit(fact)
+
+    if normalized is not None:
+        return normalized
+
+    raise MissingAnswerSupportError(
+        f"Fact {fact.fact_id!r}에 값과 단위가 모두 갖춰진 표현이 없습니다. "
+        "값만 있거나 단위만 있는 상태로는 문장을 만들지 않습니다."
+    )
+
+
+def _normalized_value_with_unit(fact: Fact) -> str | None:
+    """
+    Fact의 정규화 표현. 단위는 사용자 표기로 옮겨서 적는다.
+
+    정규화 단위는 추출 계층이 붙인 canonical 어휘이고 사용자 문장의 말이 아니다. 그대로 적으면
+    한국어 문장에 "2000000000KRW"가 실린다. 영문 enum 값을 문장에 넣지 않는 것과 같은 자리이며,
+    다른 점은 열쇠가 Contract enum이 아니라 추출 계층의 문자열이라는 것뿐이다.
+
+    값을 바꾸지 않는다. Fact.normalized_unit은 그대로 두고 문장에 적을 표기만 고른다. 여기서
+    Fact를 고쳐 쓰면 응답의 구조화 결과와 문장이 서로 다른 단위를 말하게 된다.
+
+    두 경우를 나눈다:
+        정규화 표현이 없음(None)      Fact가 정규화되지 않았다. 원문으로 답할 수 있으면 답한다.
+        표기가 정해지지 않음(예외)     추출 계층이 새 단위를 만들었는데 표기를 정하지 않았다.
+                                      generic 표기를 만들지 않고 멈춘다.
+    """
+    if fact.normalized_unit is None:
+        return None
+
+    label = FACT_NORMALIZED_UNIT_LABELS.get(fact.normalized_unit)
+
+    if label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 정규화 단위입니다: {fact.normalized_unit!r}. "
+            "FACT_NORMALIZED_UNIT_LABELS에 추가하십시오. 표기를 정하지 않은 채로 적으면 "
+            "사용자 문장에 추출 계층의 어휘가 그대로 실립니다."
+        )
+
+    return _value_with_unit(fact.normalized_value, label)
+
+
+def _value_with_unit(value: float | str | None, unit: str | None) -> str | None:
+    """값과 단위가 모두 있을 때만 붙여서 돌려준다. 하나라도 없으면 None."""
+    if value is None or unit is None:
+        return None
+
+    rendered_value = str(value).strip()
+    rendered_unit = unit.strip()
+
+    if not rendered_value or not rendered_unit:
+        return None
+
+    return f"{rendered_value}{rendered_unit}"
+
+
+# --------------------------------------------------------------------------
+# 우열 판정을 실은 결과
+#
+# Pattern D가 만드는 모양이다. Agent가 이미 확정한 관계를 읽어 옮기기만 하며, 값을 다시 견주지도
+# 다시 계산하지도 않는다(agent_patterns.md "Agent와 Answer Builder의 책임 경계").
+#
+# 그 경계를 지키는 방법은 "계산하지 않기로 한다"가 아니라 "계산할 것이 남아 있지 않게 읽는다"에
+# 가깝다. relation은 ComparisonResult에서, 수치는 Fact와 CalculationResult에서 그대로 온다.
+# 이 구획에 비교 연산자도 산술 연산자도 두지 않는 것이 그 확인 방법이다.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ComparisonOperand:
+    """
+    견준 대상 한쪽의 표기.
+
+        name     관계 문장이 가리키는 이름. 현재는 기업이다.
+        subject  값 문장의 주어("<기업>의 2025년 연결 기준 매출액").
+        value    그 주어의 값. 결과에 적힌 것을 옮긴 문자열이며 여기서 만들지 않는다.
+
+    Fact와 CalculationResult를 하나의 모양으로 좁힌다. 견준 대상이 원천 값인지 파생값인지는 표기를
+    만드는 자리에서 끝나고, 관계 문장은 그 차이를 알 필요가 없다. 알게 두면 Q10과 Q11이 서로 다른
+    관계 문장을 갖게 되고 관계 어휘가 두 벌이 된다.
+    """
+
+    name: str
+    subject: str
+    value: str
+
+
+def _comparison_sentence(result: AgentExecutionResult) -> str:
+    """
+    우열 판정 1건을 문장으로 옮긴다.
+
+    관계를 다시 판정하지 않는다. ComparisonResult.relation이 정본이며, 이 함수가 값을 견주면 같은
+    판정이 두 곳에 생긴다. 두 판정이 갈리는 날 결과에 적힌 것과 다른 문장이 나가고, 그 어긋남은
+    응답 어디에도 남지 않는다. 값이 관계와 맞는지도 확인하지 않는다. 확인하려면 여기서 값을 견줘야
+    하고, 그 순간 판정이 두 곳에 생기는 것은 같다.
+
+    값도 다시 만들지 않는다. Q11의 비율을 Fact에서 다시 계산하지 않는 것이 특히 그렇다. 다시
+    계산하면 반올림 자릿수가 계산 계층과 달라질 수 있고, 그러면 답변에 실린 수치와 우열 판정의
+    근거가 된 수치가 서로 다른 값이 된다(calculator.compare_calculations).
+    """
+    if any(
+        calculation.operation == OPERATION_AGGREGATE
+        for calculation in result.calculations
+    ):
+        return _facility_investment_aggregate_comparison_sentence(result)
+
+    if len(result.comparisons) > 1:
+        raise UnsupportedResultShapeError(
+            f"ComparisonResult가 {len(result.comparisons)}건입니다. "
+            "이번 구현은 1건만 문장으로 옮깁니다. 첫 건만 골라 답하지 않습니다."
+        )
+
+    comparison = result.comparisons[0]
+
+    if comparison.left.input_type is not comparison.right.input_type:
+        # 원천 값과 파생값을 견준 판정이다. 한 문장에서 두 대상을 같은 축으로 말할 방법이 정해지지
+        # 않았고, 한쪽 표기에 맞추면 다른 쪽이 무엇인지가 문장에서 사라진다.
+        raise UnsupportedResultShapeError(
+            f"우열 판정 {comparison.comparison_id!r}이 서로 다른 종류를 견줍니다: "
+            f"{comparison.left.input_type.value!r} vs {comparison.right.input_type.value!r}. "
+            "원천 값과 파생값을 한 문장으로 견주는 형태가 정해지지 않았습니다."
+        )
+
+    if comparison.left == comparison.right:
+        # 같은 대상을 두 번 가리킨 판정이다. 개수만 맞고 견준 것이 없으며, 그대로 문장을 만들면
+        # 한 값이 자기보다 크다는 진술이 나간다.
+        raise UnsupportedResultShapeError(
+            f"우열 판정 {comparison.comparison_id!r}의 left와 right가 같은 대상"
+            f"({comparison.left.input_id!r})을 가리킵니다. 견준 것이 없는 판정입니다."
+        )
+
+    left = _comparison_operand(result, comparison.left)
+    right = _comparison_operand(result, comparison.right)
+
+    return _join(
+        f"{left.subject}{_topic_particle(left.subject)} {left.value}, "
+        f"{right.subject}{_topic_particle(right.subject)} {right.value}입니다.",
+        _relation_clause(comparison.relation, left=left, right=right),
+    )
+
+
+def _facility_investment_aggregate_comparison_sentence(
+    result: AgentExecutionResult,
+) -> str:
+    """Q12의 기업별 시설투자 합계 두 건과 확정된 우열을 문장으로 옮긴다.
+
+    ``aggregate`` 일반 문장이 아니다. 두 Calculation이 결과의 모든 investment_amount Fact를
+    기업별로 나누어 직접 참조하고, 유일한 Comparison이 그 두 Calculation을 정확히 가리키는
+    모양만 받는다. 값은 CalculationResult에서, 관계는 ComparisonResult에서 읽으며 이 함수는
+    합산이나 대소 판정을 수행하지 않는다.
+    """
+    if len(result.comparisons) != 1:
+        raise UnsupportedResultShapeError(
+            f"시설투자 집계 비교에는 ComparisonResult가 1건이어야 합니다: "
+            f"{len(result.comparisons)}건."
+        )
+
+    if len(result.calculations) != 2:
+        raise UnsupportedResultShapeError(
+            f"시설투자 집계 비교에는 aggregate Calculation이 2건이어야 합니다: "
+            f"{len(result.calculations)}건."
+        )
+
+    operations = [calculation.operation for calculation in result.calculations]
+
+    if any(operation != OPERATION_AGGREGATE for operation in operations):
+        raise UnsupportedResultShapeError(
+            "시설투자 집계 비교에 aggregate가 아닌 Calculation이 섞여 있습니다: "
+            f"{operations}."
+        )
+
+    calculation_ids = [
+        calculation.calculation_id for calculation in result.calculations
+    ]
+
+    if len(set(calculation_ids)) != len(calculation_ids):
+        raise UnsupportedResultShapeError(
+            "시설투자 집계 Calculation의 식별자가 중복되어 비교 참조를 하나로 "
+            "해소할 수 없습니다."
+        )
+
+    comparison = result.comparisons[0]
+
+    if (
+        comparison.left.input_type is not ResultInputType.CALCULATION
+        or comparison.right.input_type is not ResultInputType.CALCULATION
+    ):
+        raise UnsupportedResultShapeError(
+            f"시설투자 집계 우열 판정 {comparison.comparison_id!r}은 aggregate "
+            "Calculation 두 건을 참조해야 합니다."
+        )
+
+    if comparison.left == comparison.right:
+        raise UnsupportedResultShapeError(
+            f"시설투자 집계 우열 판정 {comparison.comparison_id!r}의 left와 right가 "
+            f"같은 Calculation({comparison.left.input_id!r})을 가리킵니다."
+        )
+
+    compared_ids = {comparison.left.input_id, comparison.right.input_id}
+
+    if compared_ids != set(calculation_ids):
+        raise UnsupportedResultShapeError(
+            f"시설투자 집계 우열 판정 {comparison.comparison_id!r}이 결과의 aggregate "
+            f"Calculation 두 건을 정확히 참조하지 않습니다: {sorted(compared_ids)}."
+        )
+
+    fact_ids = [fact.fact_id for fact in result.facts]
+
+    if len(set(fact_ids)) != len(fact_ids):
+        raise UnsupportedResultShapeError(
+            "시설투자 Fact 식별자가 중복되어 aggregate 입력을 하나로 해소할 수 없습니다."
+        )
+
+    left_calculation = _referenced_calculation(
+        result, comparison.left.input_id
+    )
+    right_calculation = _referenced_calculation(
+        result, comparison.right.input_id
+    )
+    left, left_fact_ids, left_components = _facility_investment_aggregate_operand(
+        result, left_calculation
+    )
+    right, right_fact_ids, right_components = _facility_investment_aggregate_operand(
+        result, right_calculation
+    )
+
+    if left.name == right.name:
+        raise UnsupportedResultShapeError(
+            f"시설투자 aggregate 두 건이 같은 company {left.name!r}를 가리킵니다. "
+            "서로 다른 두 기업의 비교가 아닙니다."
+        )
+
+    referenced_fact_ids = left_fact_ids | right_fact_ids
+
+    if referenced_fact_ids != set(fact_ids):
+        raise UnsupportedResultShapeError(
+            "시설투자 aggregate 두 건이 결과의 investment_amount Fact 전체를 정확히 "
+            "참조하지 않습니다. 참조되지 않거나 결과 밖인 Fact를 무시하지 않습니다."
+        )
+
+    if left_calculation.unit != right_calculation.unit:
+        raise UnsupportedResultShapeError(
+            "시설투자 aggregate 두 건의 단위가 다릅니다: "
+            f"{left_calculation.unit!r} / {right_calculation.unit!r}."
+        )
+
+    return _join(
+        f"{left.subject}{_topic_particle(left.subject)} "
+        f"{left.value}{_aggregate_components_phrase(left_components)}이고, "
+        f"{right.subject}{_topic_particle(right.subject)} "
+        f"{right.value}{_aggregate_components_phrase(right_components)}입니다.",
+        _relation_clause(comparison.relation, left=left, right=right),
+    )
+
+
+def _aggregate_components_phrase(components: tuple[str, ...]) -> str:
+    """합계를 이룬 개별 투자 건의 금액을 괄호로 덧붙인다.
+
+    2건 이상일 때만 적는다. 1건짜리 합계에서는 괄호 안의 값이 합계와 같은 수라, 적으면 같은
+    금액을 두 번 말하면서 무언가 더 있는 것처럼 읽힌다.
+
+    값은 원천 Fact가 적은 그대로다. 여기서 더하지도 다시 세지도 않으며, 합계는 여전히
+    CalculationResult의 값이다. 개별 건을 밝히는 이유는 "다 합치면"이라는 질문이 무엇을 합친
+    것인지까지 묻기 때문이다.
+    """
+    if len(components) < 2:
+        return ""
+
+    return f"({AGGREGATE_COMPONENT_SEPARATOR.join(components)} 합산)"
+
+
+def _facility_investment_aggregate_operand(
+    result: AgentExecutionResult,
+    calculation: CalculationResult,
+) -> tuple[_ComparisonOperand, set[str], tuple[str, ...]]:
+    """한 aggregate가 직접 참조하는 investment_amount Fact에서 기업명과 개별 금액을 읽는다.
+
+    개별 금액은 큰 것부터 적는다. 참조 순서를 따르지 않는 이유는 합계의 입력에 순서가 없기
+    때문이다. aggregate는 집합을 더한 값이고, inputs의 배열 순서는 producer가 담은 차례일 뿐
+    결과가 말하는 것이 아니다. 그 순서를 문장에 옮기면 같은 결과가 담긴 차례에 따라 다른
+    문장이 되고, 그 차이는 결과 어디에도 근거가 없다.
+
+    크기 순으로 적는 것은 순위 주장이 아니다. 그 순서는 함께 적히는 수에서 그대로 읽히므로
+    문장이 더 말하는 것이 없고, 같은 결과가 언제나 같은 차례로 적힌다.
+    """
+    input_ids: list[str] = []
+    sources: list[Fact] = []
+
+    for item in calculation.inputs:
+        if item.input_type is not ResultInputType.FACT:
+            raise UnsupportedResultShapeError(
+                f"시설투자 aggregate {calculation.calculation_id!r}이 원천 Fact가 아닌 "
+                f"{item.input_type.value!r} 입력 {item.input_id!r}을 참조합니다."
+            )
+
+        input_ids.append(item.input_id)
+        sources.append(_referenced_fact(result, item.input_id))
+
+    if len(set(input_ids)) != len(input_ids):
+        raise UnsupportedResultShapeError(
+            f"시설투자 aggregate {calculation.calculation_id!r}이 같은 Fact를 여러 번 "
+            "참조합니다. 중복 합산 여부를 문장 계층에서 추측하지 않습니다."
+        )
+
+    unsupported_metrics = sorted(
+        {
+            fact.metric.value
+            for fact in sources
+            if fact.metric is not MetricConcept.INVESTMENT_AMOUNT
+        }
+    )
+
+    if unsupported_metrics:
+        raise UnsupportedResultShapeError(
+            f"시설투자 aggregate {calculation.calculation_id!r}에 investment_amount가 "
+            f"아닌 지표가 있습니다: {unsupported_metrics}. generic aggregate 문장은 "
+            "지원하지 않습니다."
+        )
+
+    company = _single_source_attribute(
+        calculation, sources, attribute="company"
+    )
+
+    if not str(company).strip():
+        raise UnsupportedResultShapeError(
+            f"시설투자 aggregate {calculation.calculation_id!r}의 company가 비어 있습니다."
+        )
+
+    return (
+        _ComparisonOperand(
+            name=company,
+            subject=f"{company}의 시설투자 합계",
+            value=_aggregate_calculation_value(calculation),
+        ),
+        set(input_ids),
+        _ordered_component_values(sources),
+    )
+
+
+def _ordered_component_values(sources: list[Fact]) -> tuple[str, ...]:
+    """합계를 이룬 금액을 큰 것부터 적는다. 수로 읽지 못한 값은 표기 순으로 뒤에 둔다."""
+
+    def sort_key(fact: Fact) -> tuple[int, Decimal, str]:
+        rendered = _fact_value(fact)
+
+        try:
+            amount = Decimal(str(fact.normalized_value))
+
+        except (InvalidOperation, ValueError, TypeError):
+            return (1, Decimal(0), rendered)
+
+        if not amount.is_finite():
+            return (1, Decimal(0), rendered)
+
+        return (0, -amount, rendered)
+
+    return tuple(_fact_value(fact) for fact in sorted(sources, key=sort_key))
+
+
+def _aggregate_calculation_value(calculation: CalculationResult) -> str:
+    """aggregate의 저장된 값을 산술 없이 사용자 단위 표기로 옮긴다.
+
+    자릿수 구분은 _grouped_amount가 정한다. 저장 문자열을 그대로 적으면 758900000000원이
+    되어 자릿수를 셀 수 없고, 같은 문장에 나란히 놓이는 원천 금액(383,000,000,000원)과 표기가
+    어긋난다. 값도 단위도 바꾸지 않으며 바뀌는 것은 적는 방법뿐이다.
+    """
+    label = (
+        FACT_NORMALIZED_UNIT_LABELS.get(calculation.unit)
+        if calculation.unit is not None
+        else None
+    )
+
+    if calculation.unit is not None and label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 시설투자 aggregate 단위입니다: "
+            f"{calculation.unit!r}. FACT_NORMALIZED_UNIT_LABELS에 추가하십시오."
+        )
+
+    rendered = _value_with_unit(
+        _grouped_amount(calculation, subject="시설투자 합계"), label
+    )
+
+    if rendered is None:
+        raise MissingAnswerSupportError(
+            f"시설투자 aggregate {calculation.calculation_id!r}에 값과 단위가 모두 "
+            "갖춰진 표현이 없습니다."
+        )
+
+    return rendered
+
+
+def _relation_clause(
+    relation: ComparisonRelation,
+    *,
+    left: _ComparisonOperand,
+    right: _ComparisonOperand,
+) -> str:
+    """
+    관계 이름을 문장으로 옮긴다. 두 값을 보지 않는다.
+
+    값을 인자로 받지 않는 것이 이 함수의 계약이다. 받으면 "값이 관계와 맞는지" 같은 검사가 언제든
+    들어올 수 있고, 그 검사는 곧 두 번째 판정이다.
+    """
+    template = COMPARISON_RELATION_TEMPLATES.get(relation)
+
+    if template is None:
+        raise UnsupportedResultShapeError(
+            f"문장이 정해지지 않은 ComparisonRelation입니다: {relation.value!r}. "
+            "COMPARISON_RELATION_TEMPLATES에 추가하십시오."
+        )
+
+    return template.format(left=left.name, right=right.name)
+
+
+def _comparison_operand(
+    result: AgentExecutionResult,
+    reference: ResultInputReference,
+) -> _ComparisonOperand:
+    """
+    참조가 가리키는 대상을 결과 안에서 찾아 표기를 만든다.
+
+    참조를 따라가기만 하고 대상을 새로 만들지 않는다. 결과에 없는 참조를 만나면 비슷한 값을 골라
+    채우지 않는다. 그 순간 답변이 가리키는 값과 판정이 참조한 값이 달라진다.
+    """
+    if reference.input_type is ResultInputType.FACT:
+        return _fact_operand(_referenced_fact(result, reference.input_id))
+
+    if reference.input_type is ResultInputType.CALCULATION:
+        return _calculation_operand(result, _referenced_calculation(result, reference.input_id))
+
+    raise UnsupportedResultShapeError(
+        f"표기 방법이 정해지지 않은 비교 대상 종류입니다: {reference.input_type!r}."
+    )
+
+
+def _referenced_fact(result: AgentExecutionResult, fact_id: str) -> Fact:
+    """결과에 실린 Fact 중 참조가 가리키는 것. 없으면 멈춘다."""
+    for fact in result.facts:
+        if fact.fact_id == fact_id:
+            return fact
+
+    raise MissingAnswerSupportError(
+        f"참조가 가리키는 Fact {fact_id!r}가 결과에 없습니다. "
+        "근거가 끊긴 참조로 문장을 만들지 않습니다."
+    )
+
+
+def _referenced_calculation(
+    result: AgentExecutionResult,
+    calculation_id: str,
+) -> CalculationResult:
+    """결과에 실린 CalculationResult 중 참조가 가리키는 것. 없으면 멈춘다."""
+    for calculation in result.calculations:
+        if calculation.calculation_id == calculation_id:
+            return calculation
+
+    raise MissingAnswerSupportError(
+        f"참조가 가리키는 Calculation {calculation_id!r}가 결과에 없습니다. "
+        "근거가 끊긴 참조로 문장을 만들지 않습니다."
+    )
+
+
+def _fact_operand(fact: Fact) -> _ComparisonOperand:
+    """
+    원천 Fact 한 건의 표기(Q10 계열).
+
+    원문 표기와 정규화 값을 함께 적는다. 우열은 정규화 값에서 판정되고(calculator.compare_facts),
+    사용자가 공시와 대조하는 것은 원문 표기다. 한쪽만 적으면 둘 중 하나가 불가능해진다
+    (evidence_and_answerability.md Q10 "원문 단위 값과 정규화 값을 병기").
+
+    단위 표기가 다른 두 기업이 그 규칙의 이유다. 원문만 적으면 900,000천원이 1,000백만원보다 커
+    보이고, 그때 판정 문장이 값과 어긋나 읽힌다. 정규화 값만 적으면 어느 쪽도 공시에 적힌 그대로가
+    아니어서 대조할 수 없다.
+
+    두 표기가 같은 문자열이면 한 번만 적는다. 같은 값을 괄호로 한 번 더 적어 읽는 사람이 다른 값이
+    있다고 오해할 이유가 없다.
+
+    정규화 단위는 사용자 표기로 옮겨 적는다(_normalized_value_with_unit). 원문 표기는 공시에
+    적힌 그대로 두고, 옮기는 것은 정규화 쪽뿐이다.
+
+    지표·기간·기준 표기는 단일 Fact 문장과 같은 대응표를 쓴다. 같은 재무제표 축(회계연도 ×
+    연결/별도)을 전제한 문장이라 표기가 갈릴 이유가 없고, 갈리면 같은 Fact가 질문에 따라 다른
+    이름으로 불린다.
+    """
+    metric_label = _metric_label(fact.metric)
+
+    subject = (
+        f"{fact.company}의 {_period_phrase(fact)}"
+        f"{_scope_phrase(fact.accounting_scope)}{metric_label}"
+    )
+
+    normalized = _normalized_value_with_unit(fact)
+
+    if normalized is None:
+        raise MissingAnswerSupportError(
+            f"Fact {fact.fact_id!r}에 정규화 값과 단위가 갖춰져 있지 않습니다. "
+            "우열 판정은 정규화 값에서 나오므로, 그 값 없이 판정 문장을 만들지 않습니다."
+        )
+
+    raw = _value_with_unit(fact.raw_value, fact.raw_unit)
+
+    value = normalized if raw is None or raw == normalized else f"{raw}(정규화 {normalized})"
+
+    return _ComparisonOperand(name=fact.company, subject=subject, value=value)
+
+
+def _calculation_operand(
+    result: AgentExecutionResult,
+    calculation: CalculationResult,
+) -> _ComparisonOperand:
+    """
+    파생값 한 건의 표기(Q11 계열).
+
+    원천 Fact를 읽되 값을 다시 만들지 않는다. 참조를 따라가는 이유는 대상을 부르기 위해서다.
+    파생값이 어느 기업의 어느 기간·기준 값인지는 CalculationResult에 없고 입력 참조를 따라가야만
+    나온다. 참조를 따라가 이름을 읽는 것과 그 값으로 비율을 다시 만드는 것은 다른 일이다. 여기서
+    Fact에서 읽는 것은 company·fiscal_year·accounting_scope·metric뿐이고, 수치는 계산 계층이
+    확정한 calculation.value를 그대로 쓴다.
+
+    입력이 하나의 기업·기간·기준으로 모이지 않으면 멈춘다. 그런 파생값은 "누구의 무엇"인지를 한
+    구절로 부를 수 없고, 한쪽을 골라 적으면 나머지가 문장에서 사라진다. 정상 경로에서는 guard①과
+    guard②가 같은 것을 이미 확인하므로 여기서 새로 걸릴 일은 없다.
+
+    sources[0]의 구절을 그대로 쓰는 것이 안전한 이유는 여기 오는 Fact가 전부 연간 값이기
+    때문이다. 누적 기간 Fact는 파생값을 실은 결과에 들어오지 못한다
+    (_require_supported_interim_shape). 그 경계가 열리는 날에는 여기서도 기간을 모아야 한다 —
+    기업 축 guard②는 회계기간 구분을 보지 않는다
+    (calculator.validate_cross_entity_fact_comparability).
+    """
+    sources: list[Fact] = []
+
+    for item in calculation.inputs:
+        if item.input_type is not ResultInputType.FACT:
+            # 파생값을 다시 입력으로 쓴 계산이다. 개념 이름을 대응표에서 되짚는 방법이 원천 지표
+            # 조합을 전제하므로, 여러 단계를 거친 값에는 붙일 이름이 없다.
+            raise UnsupportedResultShapeError(
+                f"Calculation {calculation.calculation_id!r}이 {item.input_id!r}을 입력으로 "
+                "씁니다. 원천 Fact가 아닌 입력을 가진 파생값의 표기가 정해지지 않았습니다."
+            )
+
+        sources.append(_referenced_fact(result, item.input_id))
+
+    company = _single_source_attribute(calculation, sources, attribute="company")
+
+    scope = _single_source_attribute(calculation, sources, attribute="accounting_scope")
+
+    _single_source_attribute(calculation, sources, attribute="fiscal_year")
+
+    subject = (
+        f"{company}의 {_period_phrase(sources[0])}"
+        f"{_scope_phrase(scope)}{_derived_metric_label(calculation, sources)}"
+    )
+
+    return _ComparisonOperand(
+        name=company,
+        subject=subject,
+        value=_calculation_value(calculation),
+    )
+
+
+def _single_source_attribute(
+    calculation: CalculationResult,
+    sources: list[Fact],
+    *,
+    attribute: str,
+) -> Any:
+    """
+    파생값의 입력 Fact들이 한 값으로 모이는 속성을 읽는다. 갈리면 멈춘다.
+
+    첫 입력의 값을 그냥 쓰지 않는다. 입력이 갈려 있는데 첫 건을 고르면 그 파생값이 실제로
+    무엇에서 나왔는지가 문장에서 사라지고, 사라진 사실은 결과 어디에도 남지 않는다.
+    """
+    values = [getattr(fact, attribute) for fact in sources]
+
+    if len(set(values)) != 1:
+        raise UnsupportedResultShapeError(
+            f"Calculation {calculation.calculation_id!r}의 입력 {attribute}가 한 값으로 모이지 "
+            f"않습니다: {values}. 어느 것의 값인지 정해지지 않아 표기를 만들지 않습니다."
+        )
+
+    return values[0]
+
+
+def _derived_metric_label(calculation: CalculationResult, sources: list[Fact]) -> str:
+    """
+    파생값의 개념 표기.
+
+    CalculationResult에는 어떤 파생 개념이었는지가 남지 않는다. 연산 이름과 입력 지표의 순서로
+    대응표(agent.derived_metrics)를 되짚어 개념을 찾는다. 그 대응표가 정의의 정본이므로
+    분자·분모 조합을 이 파일에 다시 적지 않는다.
+
+    찾지 못하면 "비율" 같은 generic 표기를 만들지 않고 멈춘다. 정의를 모르는 값에 이름을 붙이면
+    다른 개념의 수치가 영업이익률로 읽힐 수 있고, 그것이 틀렸다는 사실은 문장 어디에도 남지 않는다.
+    """
+    source_metrics = tuple(fact.metric for fact in sources)
+
+    for metric in DerivedMetric:
+        spec = get_derived_metric_spec(metric)
+
+        if spec.operation != calculation.operation:
+            continue
+
+        if (spec.numerator, spec.denominator) != source_metrics:
+            continue
+
+        label = DERIVED_METRIC_LABELS.get(metric)
+
+        if label is None:
+            raise UnsupportedResultShapeError(
+                f"표기가 정해지지 않은 파생지표입니다: {metric.value!r}. "
+                "DERIVED_METRIC_LABELS에 추가하십시오."
+            )
+
+        return label
+
+    listed = ", ".join(item.value for item in source_metrics) or "없음"
+
+    raise UnsupportedResultShapeError(
+        f"대응표에 없는 파생값입니다: operation={calculation.operation!r}, 입력 지표={listed}. "
+        "이름을 확인할 수 없는 값에 표기를 붙이지 않습니다."
+    )
+
+
+def _calculation_value(calculation: CalculationResult) -> str:
+    """
+    문장에 적을 파생값. 계산 계층이 확정한 값을 그대로 옮긴다.
+
+    반올림하지도 다시 계산하지도 않는다. 저장된 값이 우열 판정의 근거이므로
+    (calculator.compare_calculations), 문장에 다른 자릿수를 적으면 답변에 실린 두 수치로
+    검산했을 때 관계가 뒤집혀 보일 수 있다.
+
+    값과 단위는 Fact와 같이 짝으로 다룬다. 단위 없는 비율은 백분율인지 배수인지 알 수 없다.
+    """
+    label = CALCULATION_UNIT_LABELS.get(calculation.unit) if calculation.unit else None
+
+    if calculation.unit is not None and label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 계산 결과 단위입니다: {calculation.unit!r}. "
+            "CALCULATION_UNIT_LABELS에 추가하십시오."
+        )
+
+    rendered = _value_with_unit(calculation.value, label)
+
+    if rendered is None:
+        raise MissingAnswerSupportError(
+            f"Calculation {calculation.calculation_id!r}에 값과 단위가 모두 갖춰진 표현이 "
+            "없습니다. 값만 있거나 단위만 있는 상태로는 문장을 만들지 않습니다."
+        )
+
+    return rendered
+
+
+def _event_history_sentence(
+    histories: list[EventHistory],
+    *,
+    correction_count: int | None = None,
+) -> str:
+    """
+    EventHistory 1건을 문장으로 옮긴다.
+
+    완결 여부는 history.chain_complete만 본다. 판정 상태(PARTIALLY_ANSWERABLE)는 보지
+    않는다:
+        둘은 다른 축이다. 체인 완결은 "이력을 끝까지 봤는가"이고, 판정의 부분성은
+        "질문에 다 답했는가"다. WITHHELD_IN_SOURCE가 그 둘을 갈라 놓는다. 체인은 끝까지
+        확보했는데 그 안의 일부 field만 원문에서 유보된 결과가 성립하고(open_decisions.md
+        D9), 그것이 PARTIALLY_ANSWERABLE + chain_complete=True다.
+
+        상태로 완결 여부를 정하면 그 결과가 "관련 공시 N건까지 확인했습니다"로 나간다.
+        끝까지 확인한 이력을 중간에서 멈춘 것처럼 말하는 문장이며, 같은 응답에 실려 나가는
+        chain_complete=True와도 어긋난다. 무엇이 남았는지는 _limitation이 사유로 말한다.
+
+    구조화 결과에 적힌 것만 말한다. 공시 건수는 document_ids에서, 변경 건수는 changes에서
+    센다.
+
+    correction_count는 "몇 번 바뀌었어?"에 답할 값이다:
+        질문이 횟수를 물었을 때만 온다. None이면 묻지 않은 것이고, 그때 이 문장은 지금까지와
+        같다. 묻지 않은 질문에 횟수를 덧붙이면 결과에 없는 것을 말하는 것이 아니라 사용자가
+        묻지 않은 것을 답의 일부로 만든다.
+
+        값은 EventLink의 개수다. 변경 항목 건수가 아니다. 두 값은 다르며(실측 Q15가 변경 항목
+        4건에 정정 3회) 변경 항목 쪽으로 답하면 "네 번 바뀌었다"가 되어 틀린다. 변경 항목은
+        정정 한 건이 여러 필드를 바꿀 수 있어 정정 횟수보다 많아진다.
+
+        세는 일은 호출부가 한다. 이 함수는 EventLink를 받지 않으며, 받아서 세면 무엇을 셀지를
+        정하는 자리가 둘로 갈린다.
+
+    변경 항목의 이름과 변경 전/후 값을 함께 적는다:
+        사용자가 "바뀐 내용 있어?"로 묻는 것은 무엇이 어떻게 바뀌었는가이고, 건수만 적은
+        문장은 그 질문에 답하지 않는다. 값은 FieldChange가 이미 확정해 싣고 있으므로 여기서
+        만드는 것이 없다.
+
+        이름은 추출 계층의 어휘에서 읽는다(CORRECTION_FIELD_LABELS). FieldChange.field_name은
+        canonical 영문 식별자(contract_amount 등)이고 production에서 raw_field는 비어 있으므로
+        표기가 필요한데, 그 표기를 여기서 새로 지으면 event.extractor가 이미 들고 있는 라벨
+        어휘가 두 벌이 된다. 그래서 같은 어휘를 읽어 만든 대응표 하나만 쓴다.
+
+        한 건이라도 표기를 확정하지 못하면 변경 내역 전체를 적지 않고 건수만 말한다
+        (field_change_clause). 옮길 수 있는 것만 적으면 적힌 것이 변경의 전부로 읽힌다.
+    """
+    if len(histories) > 1:
+        raise UnsupportedResultShapeError(
+            f"EventHistory가 {len(histories)}건입니다. 이번 구현은 1건만 문장으로 옮깁니다."
+        )
+
+    history = histories[0]
+    document_count = len(history.document_ids)
+
+    if document_count == 0:
+        raise MissingAnswerSupportError(
+            f"EventHistory {history.event_id!r}에 document_ids가 없습니다. "
+            "확인한 공시가 없는 이력을 문장으로 만들지 않습니다."
+        )
+
+    incomplete = not history.chain_complete
+
+    if incomplete:
+        # 체인을 다 보지 못했다. "변경이 없었다"는 확정 진술을 붙이지 않는다.
+        sentence = (
+            f"관련 {EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT]} "
+            f"{event_count_display(document_count)}까지 확인했습니다."
+        )
+
+    elif document_count == 1:
+        return (
+            f"관련 {EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT]} "
+            f"{event_count_display(document_count)}을 확인했으며, "
+            "이후 변경된 내용은 확인되지 않았습니다."
+        )
+
+    else:
+        sentence = (
+            f"관련 {EVENT_COUNT_LABELS[EVENT_COUNT_DOCUMENT]} "
+            f"{event_count_display(document_count)}으로 이어지는 이력을 확인했습니다."
+        )
+
+    if correction_count is not None:
+        # 문서 문장 바로 뒤에 둔다. 아래 변경 항목 건수와 나란히 놓여야 두 셈이 다른 것을
+        # 세고 있다는 것이 문장에서 드러난다.
+        sentence = f"{sentence} 이후 {correction_count_display(correction_count)} 정정되었습니다."
+
+    change_count = len(history.changes)
+
+    if change_count:
+        counted = (
+            f"{sentence} 확인된 {EVENT_COUNT_LABELS[EVENT_COUNT_CHANGE]}은 "
+            f"{event_count_display(change_count)}입니다."
+        )
+
+        detail = field_change_clause(history.changes)
+
+        if detail is None:
+            return counted
+
+        return f"{counted} {detail}."
+
+    if incomplete:
+        return sentence
+
+    return f"{sentence} 확인된 {EVENT_COUNT_LABELS[EVENT_COUNT_CHANGE]}은 없습니다."
+
+
+def _limitation(result: AgentExecutionResult, *, partial: bool) -> str:
+    """
+    일부만 답한 경우 무엇이 남았는지 밝히는 문장.
+
+    사유가 비어 있는 경우는 보지 않는다. _require_compatible_reason이
+    PARTIALLY_ANSWERABLE에 사유를 요구하므로 여기 도달한 결과는 사유를 달고 있다.
+    """
+    if not partial:
+        return ""
+
+    return LIMITATION_MESSAGE_BY_REASON.get(
+        result.answerability_reason,
+        LIMITATION_WITHOUT_REASON_MESSAGE,
+    )
+
+
+# --------------------------------------------------------------------------
+# 답할 수 없다고 판정된 경우
+# --------------------------------------------------------------------------
+
+
+def _unavailable_answer(result: AgentExecutionResult) -> str:
+    """
+    답변 불가 판정을 사유별 문장으로 옮긴다.
+
+    사유를 하나의 문장으로 뭉개지 않는다. 사유가 다르면 사용자가 할 수 있는 다음 행동이
+    다르고, 평가도 두 실패를 따로 센다.
+    """
+    # 사유가 비어 있는 UNANSWERABLE은 _require_compatible_reason이 이미 막았다.
+    reason = result.answerability_reason
+
+    if reason is AnswerabilityReason.OUT_OF_SCOPE_POLICY:
+        return _policy_refusal_answer(result)
+
+    if reason is AnswerabilityReason.NOT_COMPARABLE:
+        return _not_comparable_answer(result)
+
+    return _message_for_reason(reason)
+
+
+def _not_comparable_answer(result: AgentExecutionResult) -> str:
+    """
+    비교 불가 판정의 문장.
+
+    detail에 따로 정해 둔 문장이 있으면 그것을 쓰고, 없으면 기본 문장을 쓴다. 수치 경로의
+    세 사유는 대응표에 없으므로 기존 문장 그대로다.
+
+    detail이 통째로 비어 있는 경우도 기본 문장으로 간다. 그 상태는 producer가 만들지 않지만
+    (normalization._stopped_execution이 항상 detail을 채운다), 여기서 속성을 확인하지 않으면
+    그 가정이 깨졌을 때 문장이 아니라 AttributeError가 나간다.
+    """
+    detail = result.answerability_detail
+
+    if detail is not None:
+        message = NOT_COMPARABLE_MESSAGE_BY_DETAIL_REASON.get(detail.reason)
+
+        if message is not None:
+            return message
+
+    return _message_for_reason(AnswerabilityReason.NOT_COMPARABLE)
+
+
+def _policy_refusal_answer(result: AgentExecutionResult) -> str:
+    """
+    정책 거부 문장.
+
+    OUT_OF_SCOPE_POLICY 하나에 F1~F4가 모인다(normalization의 대응표). 어느 판정이었는지는
+    answerability_detail.reason만 구분하므로 그 값으로 문장을 고른다. 값이 없거나 대응표에
+    없는 값이면 사유를 단정하지 않는 기본 문장을 쓴다.
+    """
+    detail = result.answerability_detail
+
+    if detail is None:
+        return UNAVAILABLE_MESSAGE_BY_REASON[AnswerabilityReason.OUT_OF_SCOPE_POLICY]
+
+    return POLICY_REFUSAL_MESSAGE_BY_DETAIL_REASON.get(
+        detail.reason,
+        UNAVAILABLE_MESSAGE_BY_REASON[AnswerabilityReason.OUT_OF_SCOPE_POLICY],
+    )
+
+
+def _unresolved_answer(result: AgentExecutionResult) -> str:
+    """
+    확정하지 못한 판정을 문장으로 옮긴다.
+
+    "정보가 없습니다"로 만들지 않는다. UNRESOLVED는 후보를 찾았는데 하나로 좁히지 못한
+    것이고, NOT_FOUND는 찾지 못한 것이다. 두 문장이 같으면 사용자가 질문을 좁혀야 한다는
+    사실이 사라진다.
+    """
+    reason = result.answerability_reason
+
+    if reason is None:
+        return UNRESOLVED_WITHOUT_REASON_MESSAGE
+
+    return _message_for_reason(reason)
+
+
+def _message_for_reason(reason: AnswerabilityReason) -> str:
+    message = UNAVAILABLE_MESSAGE_BY_REASON.get(reason)
+
+    if message is None:
+        raise UnsupportedResultShapeError(
+            f"문장이 정해지지 않은 answerability_reason입니다: {reason.value!r}. "
+            "UNAVAILABLE_MESSAGE_BY_REASON에 추가하십시오."
+        )
+
+    return message
+
+
+# --------------------------------------------------------------------------
+# 문장 조립 보조
+# --------------------------------------------------------------------------
+
+
+def _join(*sentences: str) -> str:
+    """비어 있지 않은 문장만 한 칸 띄어 잇는다."""
+    return " ".join(sentence for sentence in sentences if sentence)
+
+
+def _topic_particle(word: str) -> str:
+    """
+    앞말에 붙일 주제 조사(은/는).
+
+    받침이 있으면 '은', 없으면 '는'이다. 한글 음절은 (코드포인트 - 0xAC00) % 28로 종성
+    유무를 알 수 있다. 한글이 아니면 '는'을 쓴다.
+    """
+    if not word:
+        return "는"
+
+    last = word[-1]
+
+    if "가" <= last <= "힣":
+        return "는" if (ord(last) - 0xAC00) % 28 == 0 else "은"
+
+    return "는"

@@ -22,9 +22,8 @@ from typing import Any
 
 import pytest
 
-from disclosure_agent.agent import router
+from disclosure_agent.agent import period_retrieval, router
 from disclosure_agent.agent.answer_builder import STATUS_BLOCKED, STATUS_OK
-from disclosure_agent.agent.handlers import single_fact
 from disclosure_agent.agent.handlers.single_fact import (
     build_single_fact_result,
     handle_single_fact,
@@ -58,11 +57,14 @@ def parsed_document_stub(monkeypatch: pytest.MonkeyPatch):
 
     합성 corpus의 XML은 파싱 경계를 시험하기 위한 최소 파일이므로, 정상 흐름 검증에는
     parser가 보완된 뒤의 출력 형태를 전제한 fixture를 쓴다.
+
+    대체 지점은 파싱을 실제로 부르는 agent.period_retrieval이다. Pattern A는 그 모듈의
+    primitive를 호출하며, Pattern C도 같은 자리를 쓴다.
     """
 
     def _install(document: dict[str, Any]) -> None:
         monkeypatch.setattr(
-            single_fact,
+            period_retrieval,
             "load_parsed_document",
             lambda document_path: document,
         )
@@ -302,6 +304,53 @@ def test_answer_question_blocks_unknown_company_before_reading_documents(
     assert result.execution_status is ExecutionStatus.BLOCKED
     assert result.execution_issue.stage == "query_plan"
     assert result.execution_issue.reason == "unknown_company"
+    assert result.facts == []
+    assert result.evidence == []
+
+
+def test_answer_question_reports_ambiguous_company_as_an_answerability_judgement(
+    synthetic_manifest_path: Path,
+    nfd_corpus_root: Path,
+) -> None:
+    """
+    후보가 여럿인 기업 표현은 실행 중단이 아니라 답변 가능성 판정으로 나간다.
+
+    바로 위 unknown_company와 짝으로 둔다. 둘은 같은 단계에서 막히지만 실제로 일어난 일이
+    다르다.
+
+        unknown_company             질문이 가리킨 기업이 이 코퍼스에 없다. 답할 수 있는지
+                                    판정하지 못하고 멈춘 것이므로 BLOCKED다.
+        ambiguous_company_match     인식 후보를 모두 보고 "여럿이라 고르지 않는다"까지
+                                    확정했다. 판정은 끝났으므로 COMPLETED이고, 답할 수
+                                    없는 이유가 UNRESOLVED/AMBIGUOUS_MATCH다.
+
+    두 사유가 같은 상태로 보이면 되묻기로 풀리는 질문과 코퍼스에 없는 질문이 구분되지 않는다.
+
+    합성 manifest의 '테스트반도체(주)'와 '테스트전자'가 '테스트'라는 표기를 함께 나눠 갖는다.
+    실제 기업명을 쓰지 않고도 후보가 여럿인 상황을 만들 수 있는 자리다.
+    """
+    result = router.answer_question(
+        "테스트 2025년 연결 기준 매출액이 얼마야?",
+        corpus_root=nfd_corpus_root,
+        manifest_path=synthetic_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
+    assert result.answerability_reason is AnswerabilityReason.AMBIGUOUS_MATCH
+
+    # 실행 중단이 아니므로 execution_issue는 비어 있어야 한다. 남아 있으면 받는 쪽이 같은
+    # 결과를 고장으로도 판정으로도 읽을 수 있다.
+    assert result.execution_issue is None
+
+    # 후보를 어디서 잃지 않았는지 남긴다. 사유만 남기면 되묻는 쪽이 무엇을 되물어야 할지
+    # 결과에서 알 수 없다.
+    assert result.answerability_detail.stage == "query_plan"
+    assert result.answerability_detail.reason == "ambiguous_company_match"
+    assert "테스트반도체(주)" in result.answerability_detail.detail
+    assert "테스트전자" in result.answerability_detail.detail
+
+    # 후보 중 하나를 고르지 않았으므로 조회도 일어나지 않는다.
     assert result.facts == []
     assert result.evidence == []
 

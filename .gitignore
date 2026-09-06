@@ -20,6 +20,7 @@ Thumbs.db
 *.xml
 *.pdf
 *.html
+!src/disclosure_agent/api/ui/*.html
 *.db
 *.sqlite
 *.sqlite3

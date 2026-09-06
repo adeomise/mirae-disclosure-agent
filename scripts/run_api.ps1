@@ -1,1 +1,3 @@
-Write-Output "FastAPI application is not implemented yet."
+$ErrorActionPreference = "Stop"
+
+uv run uvicorn disclosure_agent.api.main:app --host 0.0.0.0 --port 8000

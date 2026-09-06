@@ -19,6 +19,14 @@ EVENT_UNITS = {
     "%",
 }
 
+SUPPLY_NOTES_FIELDS = {
+    "기타 투자판단과 관련한 중요사항",
+    "기타 투자판단에 참고할 사항",
+}
+
+SUPPLY_NOTES_COLSPANS = {"3", "4"}
+
+
 def extract_table_id(table: Tag, table_index: int) -> str:
     """원문 ID를 우선 사용하고 없을 때만 문서 내 안정적인 local ID를 만든다."""
     original_id = table.get("id")
@@ -121,6 +129,62 @@ def is_correction_document(root: BeautifulSoup) -> bool:
     return False
 
 
+def is_supply_contract_document(root: BeautifulSoup) -> bool:
+    """본문 제목으로 공급계약 문서인지 좁게 판별한다."""
+    title = find_main_title(root) or ""
+    return "단일판매" in title and "공급계약" in title
+
+
+def parse_supply_notes_pair(
+    *,
+    label_row: Tag,
+    label_row_index: int,
+    value_row: Tag,
+    value_row_index: int,
+    table_id: str,
+) -> dict[str, Any] | None:
+    """공급계약 notes의 실제 2행 구조만 구조화한다."""
+    label_cells = label_row.find_all("td", recursive=False)
+    value_cells = value_row.find_all("td", recursive=False)
+
+    if len(label_cells) != 1 or len(value_cells) != 1:
+        return None
+
+    label_cell = label_cells[0]
+    value_cell = value_cells[0]
+
+    if label_cell.find("table") is not None or value_cell.find("table") is not None:
+        return None
+
+    label = strip_number_prefix(element_text(label_cell))
+    value = element_text(value_cell)
+    label_colspan = str(label_cell.get("colspan", ""))
+    value_colspan = str(value_cell.get("colspan", ""))
+
+    if label not in SUPPLY_NOTES_FIELDS or not value:
+        return None
+
+    if (
+        label_colspan not in SUPPLY_NOTES_COLSPANS
+        or value_colspan != label_colspan
+    ):
+        return None
+
+    return {
+        "group": label,
+        "field": label,
+        "raw_field": label,
+        "value": value,
+        "unit": None,
+        "table_id": table_id,
+        # Evidence가 실제 값이 있는 다음 row/cell을 가리키게 한다.
+        "row_index": value_row_index,
+        "field_row_index": label_row_index,
+        "field_cell_index": 0,
+        "value_cell_index": 0,
+    }
+
+
 def parse_normal_rows(root: BeautifulSoup) -> list[dict[str, Any]]:
     """
     일반 거래소공시 표를 row 구조로 변환한다.
@@ -137,6 +201,7 @@ def parse_normal_rows(root: BeautifulSoup) -> list[dict[str, Any]]:
 
     rows: list[dict[str, Any]] = []
     current_group: str | None = None
+    is_supply_contract = is_supply_contract_document(root)
 
     for table_index, table in enumerate(root.find_all("table")):
         original_table_id = str(table.get("id", ""))
@@ -146,10 +211,31 @@ def parse_normal_rows(root: BeautifulSoup) -> list[dict[str, Any]]:
         if "XFormD8" in original_table_id:
             continue
 
-        for row_index, tr in enumerate(table.find_all("tr")):
+        indexed_rows = [
+            (row_index, tr)
+            for row_index, tr in enumerate(table.find_all("tr"))
             # 중첩 table의 row가 바깥 table에 다시 포함되지 않도록 한다.
-            if tr.find_parent("table") is not table:
+            if tr.find_parent("table") is table
+        ]
+        consumed_row_indexes: set[int] = set()
+
+        for position, (row_index, tr) in enumerate(indexed_rows):
+            if row_index in consumed_row_indexes:
                 continue
+
+            if is_supply_contract and position + 1 < len(indexed_rows):
+                next_row_index, next_tr = indexed_rows[position + 1]
+                notes_row = parse_supply_notes_pair(
+                    label_row=tr,
+                    label_row_index=row_index,
+                    value_row=next_tr,
+                    value_row_index=next_row_index,
+                    table_id=table_id,
+                )
+                if notes_row is not None:
+                    rows.append(notes_row)
+                    consumed_row_indexes.add(next_row_index)
+                    continue
 
             indexed_texts = indexed_cell_texts(tr)
             texts = [text for _, text in indexed_texts]
@@ -266,6 +352,8 @@ def parse_correction(root: BeautifulSoup) -> dict[str, Any] | None:
             # 실제 변경 행
             if len(texts) >= 3:
                 raw_field = texts[0]
+                field_text = strip_number_prefix(raw_field)
+                field, raw_unit = split_unit(field_text)
                 before = texts[1]
                 after = texts[2]
 
@@ -285,7 +373,13 @@ def parse_correction(root: BeautifulSoup) -> dict[str, Any] | None:
                 changes.append(
                     {
                         "raw_field": raw_field,
-                        "field": strip_number_prefix(raw_field),
+                        "raw_group": (
+                            field
+                            if re.match(r"^\d+\.", raw_field.strip())
+                            else None
+                        ),
+                        "field": field,
+                        "raw_unit": raw_unit,
                         "before": before,
                         "after": after,
                         "table_id": table_id,

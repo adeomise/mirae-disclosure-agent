@@ -25,6 +25,8 @@ SYNTHETIC_DOCUMENT_PATH = FIXTURE_DIR / "synthetic_parsed_document.json"
 
 SYNTHETIC_AMBIGUOUS_DOCUMENT_PATH = FIXTURE_DIR / "synthetic_ambiguous_document.json"
 
+SYNTHETIC_SUMMARY_DOCUMENT_PATH = FIXTURE_DIR / "synthetic_summary_document.json"
+
 # 합성 manifest. 실제 접수번호를 쓰지 않는다.
 SYNTHETIC_MANIFEST_RECORDS: list[dict[str, Any]] = [
     {
@@ -203,6 +205,19 @@ def ambiguous_document() -> dict[str, Any]:
     표 분류 없이는 구분할 수 없다.
     """
     with SYNTHETIC_AMBIGUOUS_DOCUMENT_PATH.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+@pytest.fixture
+def summary_document() -> dict[str, Any]:
+    """
+    사업보고서의 Section 구조만 재현한 합성 parsed document.
+
+    '사업의 내용' 아래 생산설비 Section 하나와, 요약 범위 밖에 있는 재무제표 주석 Section을
+    함께 담는다. 범위 밖 Section이 함께 있어야 "요약이 지정 범위를 벗어나지 않았는가"를
+    시험할 수 있다(docs/agent_design/agent_patterns.md Pattern B 검증 조건 1).
+    """
+    with SYNTHETIC_SUMMARY_DOCUMENT_PATH.open("r", encoding="utf-8") as file:
         return json.load(file)
 
 

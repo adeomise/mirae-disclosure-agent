@@ -1,7 +1,11 @@
 # 미결정 사항
 
-질문·Agent 설계 과정에서 확인되었으나 팀 합의가 필요한 항목입니다. 본 문서의 권고안은 팀원 2의
-의견이며 **확정안이 아닙니다**. 최종 결정 상태 열이 `미정`인 항목은 구현 근거로 사용하지 않습니다.
+질문·Agent 설계 과정에서 확인되었으나 팀 합의가 필요한 항목입니다. 상태가 `미정`인 항목의 권고안은
+팀원 2의 의견이며 **확정안이 아닙니다**. 최종 결정 상태 열이 `미정`인 항목은 구현 근거로 사용하지
+않습니다.
+
+상태가 **확정**인 항목은 팀 합의를 마친 규범이며 구현 근거로 사용합니다. 확정 항목을 바꾸려면 이
+문서를 먼저 고칩니다.
 
 중요도는 현재 MVP 성공 여부에 미치는 영향을 기준으로 구분했습니다. 사소한 구현 세부는 포함하지
 않습니다. `DC` 항목은 `docs/data_contracts.md` Draft와 Agent 설계 요구 사이의 차이를 추적하기
@@ -18,7 +22,10 @@
 | D5 | 정정공시 판본 선택 정책 | IMPORTANT | 미정 |
 | D5-a | 기간 미지정 질문의 기본 문서 선택 정책 | IMPORTANT | 미정 |
 | D6 | 평가 데이터셋·대표 질문의 실제 정보 취급 범위 | IMPORTANT | 미정 |
+| D6-a | 지분공시(Q03)의 개인 식별정보 처리 | IMPORTANT | **확정** |
 | D7 | Vector Search 도입 시점 | LATER | 미정 |
+| D8 | 루트 이벤트가 복수일 때의 선택 정책 | IMPORTANT | **확정** |
+| D9 | 원문에서 유보된 필드의 판정 | IMPORTANT | **확정** |
 
 ## Data Contract Draft 차이 추적
 
@@ -146,13 +153,158 @@ D5의 하위 항목입니다.
   2. **대표 질문에 실제 기업명·연도·계약상대방·사업명을 사용할 수 있는 범위** — 현재 대표 질문은
      실제 데이터 기반으로 설계된 핵심 산출물이므로 임의로 익명화하지 않았습니다. 다만 이 조합이
      특정 공시를 식별할 수 있다는 점은 **저장소 데이터 보안 정책과 함께 팀 확인이 필요**합니다.
-  3. **지분공시 기반 문항(Q03)의 개인 식별정보 처리** — Gold·Evidence 작성 시 개인 식별정보가
-     포함되지 않아야 한다는 점은 분명합니다. Agent 응답 단계의 처리 수준(C15 PII Filtering)은
-     팀 정책 확인 대상입니다.
+  3. **지분공시 기반 문항(Q03)의 개인 식별정보 처리** — **D6-a로 분리해 확정했습니다.** 아래
+     D6-a를 따릅니다. 이 항목은 1·2와 독립적으로 판단할 수 있어 따로 떼어 냈습니다.
 - **권고안** — 팀원 3이 주관해 결정할 사항입니다. 결정 전에는 `evaluation/` 아래 파일을 채울 수
   없습니다. 팀 확인 전까지 **실제 접수번호·실제 금액·원문 전문·개인 식별정보는 계속 금지**합니다.
   본 디렉터리의 설계 문서들도 이 규칙에 따라 작성되었습니다.
-- **최종 결정 상태** — 미정
+- **최종 결정 상태** — 미정 (1·2 한정. 3은 D6-a에서 확정)
+
+### D6-a. 지분공시(Q03)의 개인 식별정보 처리
+
+D6의 하위 항목이며, D6 1·2와 독립적으로 확정했습니다. **D6 1·2의 상태는 이 결정으로 바뀌지
+않습니다.** 평가 데이터셋이 실제 문서를 어떻게 가리킬지와 대표 질문의 실제 정보 사용 범위는
+여전히 미정이며, 팀 확인 전까지 D6의 권고안이 그대로 적용됩니다.
+
+- **왜 결정이 필요한가** — 지분공시는 발행회사와 보고자가 다른 유일한 문서군이고 원문에 개인
+  식별정보가 들어 있습니다. 처리 수준을 정하지 않으면 Q03 extractor를 착수할 수 없습니다.
+- **영향 받는 문항** — Q03
+- **관련 모듈** — `holding/` (미구현), `common/schemas`, C15 PII Filtering
+
+- **결정** — 지분공시 질문에서는 **사전에 허용된 보유 관련 ACODE만 구조화합니다.**
+
+현재 allowlist:
+
+| ACODE | 의미 |
+|---|---|
+| `THS_STK_CNT` | 보유 주식 수 |
+| `THS_STK_RT` | 보유 비율 |
+
+정책의 표현은 **"Parser가 PII를 읽지 않는다"가 아니라 "PII를 downstream Contract로 승격하지
+않는다"입니다.** 범용 XML parsing은 PII가 들어 있는 원문을 읽을 수 있습니다. 읽는 것 자체를 막는
+정책은 범용 Parser에서 성립하지 않고, 성립하는 척하면 실제로 어디서 PII가 새는지 보이지 않게
+됩니다. 경계는 Parser 입구가 아니라 **extractor 출구**입니다.
+
+- 개인 성명·생년월일·주소·연락처 등의 PII는 **Fact · Evidence · 구조화 출력 · 로그 · 경고 ·
+  예외 detail** 어디에도 포함하지 않습니다. 진단 경로도 예외가 아닙니다. 사람이 보는 자리라는
+  이유로 예외를 두면 그 자리가 실제 유출 경로가 됩니다.
+- allowlist field를 **결정론적으로 특정할 수 없으면 fail-closed** 합니다. 값을 비우고 진행하지
+  않습니다.
+- 주변 label이나 비허용 field로 **의미를 추정하거나 allowlist를 넓히지 않습니다.** 추정으로
+  범위를 넓히는 순간 무엇이 나갈 수 있는지가 코드를 읽어야만 알 수 있게 됩니다.
+
+- **canonical status/reason** — allowlist field를 특정하지 못해 멈춘 경우는 값을 만들어 채우지
+  않고 답변 가능성 판정으로 넘깁니다. 그 값이 원문에서 유보된 것이라면 D9를 따릅니다.
+- **non-goals** — 이 결정은 **정책만 확정합니다.** Q03 production extractor, ACODE 인식,
+  `document_class=holding` 지원, 별도 PII detector는 포함하지 않습니다.
+- **향후 구현 acceptance criteria** — Q03 extractor를 구현하는 PR은 아래를 만족해야 합니다.
+  1. allowlist에 있는 보유 field만 Fact·Evidence가 된다.
+  2. allowlist 밖의 PII가 직렬화된 Contract에 나타나지 않는다.
+  3. PII가 진단 detail·로깅에 나타나지 않는다.
+  4. allowlist field를 특정하지 못하면 fail-closed 한다.
+
+- **최종 결정 상태** — **확정.** allowlist는 필요한 보유 field가 늘 때 위 표에 추가하며, 표를
+  거치지 않고 넓히지 않습니다. 이 확정은 **D6 1·2로 넘어가지 않습니다.**
+
+### D8. 루트 이벤트가 복수일 때의 선택 정책
+
+- **왜 결정이 필요한가** — 같은 기업·같은 제출일·같은 계약상대방으로 원공시가 2건 이상 존재하는
+  사례가 실제로 있습니다(2024-10-15 LG에너지솔루션-Ford 계약). 질문이 두 계약을 구분할 조건을
+  담고 있지 않으면 어느 계약의 이력인지 질문만으로는 정해지지 않습니다.
+- **영향 받는 문항** — Q14 (직접), Q02·Q12 등 C3 Document Disambiguation에 의존하는 문항 (일반)
+- **관련 모듈** — `agent/handlers/event_history`, `event/linker`, `retrieval/metadata_filter`
+
+- **결정** — 후속 correction·termination chain이 한쪽에만 존재한다는 이유로 **루트를 역으로
+  선택하지 않습니다.** 루트가 복수면 그대로 모호로 판정합니다.
+
+- **rationale** — 체인이 붙어 있다는 것은 그 계약에 후속 공시가 있었다는 사실일 뿐, 질문이 그
+  계약을 가리켰다는 근거가 아닙니다. 체인의 길이로 루트를 고르면 "정정이 많은 계약"이 항상
+  정답이 되고, 사용자가 물은 것이 다른 계약이었을 때 **다른 계약의 이력을 그 계약의 이력이라고
+  말하게 됩니다.** 그 오답은 형식상 완전한 답변으로 보이기 때문에 사용자가 알아챌 수 없습니다.
+
+- **canonical status/reason**
+
+  | 필드 | 값 |
+  |---|---|
+  | `execution_status` | `COMPLETED` |
+  | `answerability_status` | `UNRESOLVED` |
+  | `answerability_reason` | `AMBIGUOUS_MATCH` |
+  | `execution_issue` | 없음 |
+
+  판정 자체는 정상적으로 끝났으므로 `BLOCKED`나 `FAILED`가 아닙니다. 후보를 좁히지 못한 것이지
+  실행이 실패한 것이 아닙니다.
+
+- **`AMBIGUOUS_MATCH`와 `AMBIGUOUS_LINK`의 구분** — 두 사유를 섞지 않습니다.
+
+  | 사유 | 무엇이 모호한가 |
+  |---|---|
+  | `AMBIGUOUS_MATCH` | 질문 → **root event 자체**를 특정하지 못함 |
+  | `AMBIGUOUS_LINK` | root는 특정됐고 **correction·link 연결**이 모호함 |
+
+  섞으면 "질문이 모호하다"와 "문서 연결이 모호하다"가 한 지표로 묶여, 질문을 좁히면 풀리는
+  실패와 링크 해석을 고쳐야 풀리는 실패가 구분되지 않습니다.
+
+- **평가 정답에 미치는 영향** — 질문이 루트를 특정할 정보를 담고 있지 않으면 gold는 **특정
+  `EventHistory` 1건을 요구하지 않습니다.** 요구하면 "하나를 골라라"가 정답이 되어 위 결정이
+  뒤집힙니다. Q14 gold가 이 규칙을 따릅니다.
+
+- **non-goals** — 계약상대방 기반 루트 확정(C3), Q14 linker, termination relation 구현은 포함하지
+  않습니다. 이 결정은 **그 능력이 없을 때 무엇이 정답인가**만 정합니다. C3가 구현되어 질문이
+  루트를 1건으로 좁힐 수 있게 되면 그 질문은 더 이상 이 경로에 오지 않습니다.
+
+- **최종 결정 상태** — **확정**
+
+### D9. 원문에서 유보된 필드의 판정
+
+- **왜 결정이 필요한가** — 공시는 존재하고 항목도 있는데 값만 공시유보로 공개되지 않은 상태가
+  있습니다. 이것을 데이터 부재로 처리하면 "원문에 없다"와 "원문이 공개하지 않았다"가 한 지표로
+  묶이고, 유보된 값을 0이나 미기재로 채우면 원문에 없는 값을 만들게 됩니다.
+- **영향 받는 문항** — Q14, Q02 계열
+- **관련 모듈** — `common/enums`, `agent/answer_builder`, `event/extractor`, `event/diff`
+
+- **결정** — canonical `AnswerabilityReason`에 **`WITHHELD_IN_SOURCE`**(`withheld_in_source`)를
+  둡니다. 의미는 **문서·공시는 존재하지만 질문에 필요한 필드가 source 자체에서 공시유보 등으로
+  공개되지 않은 상태**입니다.
+
+- **rationale** — 아래 넷과 원인이 다르고, 사용자가 할 수 있는 다음 행동도 다릅니다.
+
+  | 사유 | 무엇이 다른가 |
+  |---|---|
+  | `NOT_FOUND` | 문서는 있는데 **찾지 못했다** (검색 품질 문제일 수 있음) |
+  | `INSUFFICIENT_EVIDENCE` | 값은 얻었는데 **근거 연결에 실패했다** |
+  | `INCOMPLETE_CHAIN` | 체인의 일부가 **보유 범위 밖**이다 |
+  | `AMBIGUOUS_MATCH` | 대상을 **하나로 좁히지 못했다** |
+
+  유보는 넷 중 어느 것도 아닙니다. 대상도 문서도 항목도 확정됐고 값만 비공개입니다. 질문을 좁혀도,
+  검색을 개선해도, 체인을 더 모아도 값이 나오지 않습니다.
+
+- **`chain_complete`와 유보는 독립된 축입니다.** 체인을 전부 확보하고도 그 안의 일부 field가
+  유보일 수 있습니다. 유보를 이유로 `chain_complete=False`를 적지 않습니다. 완결된 체인을
+  미완결로 적으면 "보유 범위 밖 문서가 있다"는 사실과 구분되지 않습니다.
+
+- **canonical semantics**
+
+  | | 상황 | `answerability_status` | `answerability_reason` |
+  |---|---|---|---|
+  | A | cutoff까지 질문에 필요한 **일부** field가 유보 | `PARTIALLY_ANSWERABLE` | `WITHHELD_IN_SOURCE` |
+  | B | cutoff까지 질문의 핵심 required field **전체**가 유보 | `UNANSWERABLE` | `WITHHELD_IN_SOURCE` |
+  | C | 원공시에서는 유보였으나 **후속 정정에서 값이 공개됨** | `ANSWERABLE` | 없음 |
+
+  A와 B를 가르는 것은 유보의 **범위**이며 사유 값은 같습니다. `WITHHELD_IN_SOURCE`는 두 상태에
+  모두 실릴 수 있는 유일한 사유입니다.
+
+  C에서 **과거에 유보였다는 이력 자체는 `EventHistory`·`Evidence`에 보존합니다.** 최신값이
+  공개됐다고 그 이력을 지우면 값이 언제 확정됐는지 대조할 근거가 사라집니다. 그래서
+  `WITHHELD_IN_SOURCE`는 근거를 붙이면 안 되는 거부 사유 목록에 넣지 않습니다.
+
+- **금지** — 유보된 값을 **추측하지 않고, 0·미공개·없음으로 바꾸지 않으며, 다른 문서에서 추정해
+  채우지 않습니다.** source에 없는 값을 만들지 않습니다.
+
+- **non-goals** — 유보 상태를 감지하는 production extractor, Q02·Q14의 유보 판정 경로,
+  `AnswerResponse`의 새 필드는 포함하지 않습니다. 이 결정은 **Contract의 자리와 판정 의미**만
+  고정합니다. 유보 여부는 기존 `answerability_reason`으로 표현하며 새 필드를 만들지 않습니다.
+
+- **최종 결정 상태** — **확정**
 
 ---
 
@@ -220,8 +372,9 @@ D5의 하위 항목입니다.
 
 ### DC6. 답변 가능성 상태와 사유 코드의 응답 반영
 
-- **Agent 설계 요구** — [evidence_and_answerability.md](evidence_and_answerability.md)가 상태
-  3종과 사유 코드 9종을 제안합니다. Q16~Q18은 사유 코드가 서로 달라야 능력이 구분됩니다.
+- **Agent 설계 요구** — [evidence_and_answerability.md](evidence_and_answerability.md)는
+  답변 가능성 상태와 canonical 사유 코드를 구분해 사용합니다.
+  Q16~Q18처럼 동일한 비답변 결과라도 원인에 따라 사유 코드가 달라야 능력이 구분됩니다.
 - **Draft 현황** — Draft의 응답 구조에는 경고 목록만 있고 상태·사유 코드 필드가 없습니다.
 - **Pending** — 반영 여부와 표현 방식 미정입니다.
 
@@ -246,3 +399,9 @@ D5의 하위 항목입니다.
 - `docs/team_roles.md`·`docs/development_plan.md`의 대표 질문 수 표기 — 공통 문서이므로 수정하지
   않았습니다. 현황은 [README.md](README.md)에 기록했습니다.
 - 평가 지표의 정의와 산출 방식 — `docs/evaluation/`의 평가 설계 범위입니다.
+- **ComparisonResult의 Contract 반영** — Calculation을 numeric-only로 두고 관계 판정을
+  ComparisonResult로 분리한다는 설계는 팀 합의로 확정됐고
+  [agent_patterns.md](agent_patterns.md#comparison-judgment와-comparisonresult)에 기록했습니다.
+  실제 schema, input reference 표현, `AgentExecutionResult` 수용 위치, `AnswerResponse` 노출
+  여부, Comparability Validation 실패의 status/reason 매핑은 **별도 Contract PR에서 확정**하며
+  본 문서에서 결정 항목으로 추가하지 않았습니다.

@@ -19,12 +19,12 @@ from disclosure_agent.common.enums import (
     EventType,
 )
 from disclosure_agent.event.contract_adapter import (
-    GAP_CHANGE_SOURCE_DOCUMENT,
     GAP_PENDING_EVENT_ID,
     GAP_PENDING_RESOLUTION_STATUS,
     GAP_RAW_FIELD_NAME,
     GAP_UNMAPPED_FIELD_NAME,
     GAP_UNRESOLVED_LINKS,
+    build_change_evidence_id,
     build_event_id,
     gap_kinds,
     pending_decision_gaps,
@@ -78,6 +78,7 @@ def q13_chain(make_event_filing, make_exchange_document):
         root_receipt_no="A0001",
         filings=[original, first, second],
         documents=documents,
+        event_type="supply_contract",
     )
 
     return chain, documents
@@ -386,6 +387,11 @@ def test_mapped_change_uses_canonical_field_name() -> None:
     assert converted.before == "2026-01-31"
     assert converted.after == "2026-06-30"
     assert converted.unit is None
+    expected_evidence_id = build_change_evidence_id(
+        "exchange_A0002", FIELD_CONTRACT_END_DATE
+    )
+    assert converted.before_evidence_id == expected_evidence_id
+    assert converted.after_evidence_id == expected_evidence_id
 
 
 def test_raw_field_survives_in_gaps() -> None:
@@ -408,8 +414,8 @@ def test_raw_field_survives_in_gaps() -> None:
     assert "계약기간 종료일" not in str(converted.model_dump())
 
 
-def test_change_provenance_survives_in_gaps() -> None:
-    """어느 문서에서 나온 변경인지 Contract FieldChange에 담을 자리가 없다."""
+def test_change_provenance_uses_deterministic_row_evidence_id() -> None:
+    """같은 정정 행의 before/after는 같은 결정론적 근거를 가리킨다."""
     change = InternalFieldChange(
         field=FIELD_CONTRACT_AMOUNT,
         raw_field="계약금액(원)",
@@ -419,16 +425,15 @@ def test_change_provenance_survives_in_gaps() -> None:
 
     converted, gaps = to_field_change(change, source_doc_id="exchange_A0003")
 
-    source_gaps = _gaps_of(GAP_CHANGE_SOURCE_DOCUMENT, gaps)
+    expected = "evidence_exchange_A0003_contract_amount"
 
-    assert source_gaps[0].dropped["source_doc_id"] == "exchange_A0003"
-    assert source_gaps[0].is_temporary is True
-    assert (
-        source_gaps[0].planned_contract_field
-        == "FieldChange.before_evidence_id / after_evidence_id"
-    )
+    assert converted.before_evidence_id == expected
+    assert converted.after_evidence_id == expected
+    assert all(gap.kind != "change_source_document" for gap in gaps)
 
-    assert "exchange_A0003" not in str(converted.model_dump())
+    repeated, _ = to_field_change(change, source_doc_id="exchange_A0003")
+    assert repeated.before_evidence_id == expected
+    assert repeated.after_evidence_id == expected
 
 
 def test_unmapped_change_is_excluded_not_forced_into_field_name() -> None:
@@ -546,6 +551,7 @@ def test_missing_root_does_not_get_a_canonical_event_id(
         root_receipt_no="NOT_IN_CANDIDATES",
         filings=[make_event_filing("A0001", "20250830")],
         documents={},
+        event_type="supply_contract",
     )
 
     conversion = to_event_history(chain)
@@ -616,6 +622,7 @@ def test_incomplete_chain_is_reported(
         root_receipt_no="A0001",
         filings=[original, twin, correction],
         documents=documents,
+        event_type="supply_contract",
     )
 
     conversion = to_event_history(chain, documents=documents)
@@ -654,7 +661,7 @@ def test_temporary_and_pending_gaps_are_separable(q13_chain) -> None:
 
     temporary_kinds = {gap.kind for gap in temporary_gaps(gaps)}
 
-    assert temporary_kinds == {GAP_RAW_FIELD_NAME, GAP_CHANGE_SOURCE_DOCUMENT}
+    assert temporary_kinds == {GAP_RAW_FIELD_NAME}
 
     assert pending_decision_gaps(gaps) == ()
 

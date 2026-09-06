@@ -40,12 +40,20 @@ Parser 경계에 대한 메모:
   ExtractionBlockedError를 올려 상위 단계가 BLOCKED로 보고하게 한다.
 
 
+Section 범위 탐색 경계에 대한 메모:
+- 지정 범위(`section_scope`)를 Section 경로로 옮기고 그 Section의 본문·표를 모으는 규칙은
+  periodic.sections가 가지고 있다. 이 모듈은 호출 경계만 고정한다.
+- 범위를 하나로 확정하지 못하면 값을 고르지 않고 SectionNavigationError를 그대로 올린다.
+  상위 Section이나 문서 전체로 넓히는 대체는 하지 않는다
+  (docs/agent_design/retrieval_strategy.md Pattern B).
+
 입력:
 - 본문 XML 경로 또는 이미 파싱된 document dict
 
 출력:
 - ParsedDocument dict
 - FinancialFact (Pattern A 내부 추출 표현)
+- SectionSelection + SectionContentItem 목록 (Pattern B 내부 표현)
 
 Integration boundary:
 - FinancialFact는 periodic 내부 표현으로 사용한다.
@@ -65,8 +73,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from disclosure_agent.common.enums import SectionScope
 from disclosure_agent.periodic.extractor import FinancialFact, extract_financial_fact
 from disclosure_agent.periodic.parser import parse_periodic_xml
+from disclosure_agent.periodic.sections import (
+    SectionContentItem,
+    SectionSelection,
+    collect_section_content,
+    select_scope_section,
+)
 
 
 def load_parsed_document(document_path: str | Path) -> dict[str, Any]:
@@ -85,6 +100,8 @@ def extract_fact(
     metric: str,
     fiscal_year: int,
     accounting_scope: str,
+    document_subtype: str = "annual",
+    base_month: int | None = None,
 ) -> FinancialFact:
     """
     파싱된 문서에서 단일 재무 수치를 뽑는다.
@@ -97,4 +114,23 @@ def extract_fact(
         metric=metric,
         fiscal_year=fiscal_year,
         accounting_scope=accounting_scope,
+        document_subtype=document_subtype,
+        base_month=base_month,
     )
+
+
+def collect_scope_content(
+    document: dict[str, Any],
+    *,
+    section_scope: SectionScope,
+) -> tuple[SectionSelection, list[SectionContentItem]]:
+    """
+    파싱된 문서에서 지정 범위의 Section을 확정하고 그 안의 본문·표를 모은다.
+
+    탐색 규칙은 periodic.sections가 가지고 있고 이 함수는 호출 경계만 고정한다.
+    범위를 하나로 확정하지 못하거나 확정한 Section이 비어 있으면
+    SectionNavigationError가 올라온다.
+    """
+    selection = select_scope_section(document, section_scope=section_scope)
+
+    return selection, collect_section_content(document, selection=selection)

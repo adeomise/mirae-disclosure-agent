@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from disclosure_agent.event.adapter import adapt_extracted_event
+from disclosure_agent.event.extractor import extract_event
 from disclosure_agent.event.parser import parse_exchange_document
 
 
@@ -45,6 +47,189 @@ def test_supply_contract_rows_preserve_values_units_and_provenance(tmp_path: Pat
     ]
 
 
+def test_supply_contract_split_notes_flow_preserves_fields_and_value_provenance(
+    tmp_path: Path,
+) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <span>단일판매ㆍ공급계약 체결</span>
+        <table id="XFormD1_Form0_Table0">
+          <tr><td>2. 계약내역</td><td>계약금액(원)</td><td>100</td></tr>
+          <tr><td></td><td>최근매출액(원)</td><td>200</td></tr>
+          <tr><td></td><td>매출액대비(%)</td><td>50</td></tr>
+          <tr><td>3. 계약상대</td><td>테스트 계약상대</td></tr>
+          <tr><td>5. 계약기간</td><td>시작일</td><td>2099-01-01</td></tr>
+          <tr><td></td><td>종료일</td><td>2099-12-31</td></tr>
+          <tr><td>6. 계약(수주)일자</td><td>2098-12-31</td></tr>
+          <tr><td colspan="3">기타 투자판단과 관련한 중요사항</td></tr>
+          <tr><td colspan="3">테스트용 중요사항</td></tr>
+        </table>
+        """,
+    )
+
+    notes_row = next(
+        row
+        for row in document["rows"]
+        if row["field"] == "기타 투자판단과 관련한 중요사항"
+    )
+    assert notes_row == {
+        "group": "기타 투자판단과 관련한 중요사항",
+        "field": "기타 투자판단과 관련한 중요사항",
+        "raw_field": "기타 투자판단과 관련한 중요사항",
+        "value": "테스트용 중요사항",
+        "unit": None,
+        "table_id": "XFormD1_Form0_Table0",
+        "row_index": 8,
+        "field_row_index": 7,
+        "field_cell_index": 0,
+        "value_cell_index": 0,
+    }
+
+    extracted = extract_event(document)
+    assert extracted["event_type"] == "supply_contract"
+    assert {
+        "contract_amount",
+        "recent_revenue",
+        "revenue_ratio",
+        "counterparty",
+        "contract_start_date",
+        "contract_end_date",
+        "contract_date",
+        "notes",
+    } <= extracted["fields"].keys()
+    assert extracted["fields"]["notes"]["raw_value"] == "테스트용 중요사항"
+    assert extracted["fields"]["notes"]["normalized_value"] == "테스트용 중요사항"
+    assert extracted["fields"]["notes"]["provenance"] == {
+        "table_id": "XFormD1_Form0_Table0",
+        "row_index": 8,
+        "field_row_index": 7,
+        "field_cell_index": 0,
+        "value_cell_index": 0,
+    }
+
+    adapted = adapt_extracted_event(extracted)
+    notes_evidence = next(
+        evidence
+        for evidence in adapted.evidence
+        if evidence.field_name == "notes"
+    )
+    assert notes_evidence.doc_id == "exchange_SAMPLE"
+    assert notes_evidence.row_label == "기타 투자판단과 관련한 중요사항"
+    assert notes_evidence.raw_text == "테스트용 중요사항"
+    assert notes_evidence.provenance is not None
+    assert notes_evidence.provenance.table_id == "XFormD1_Form0_Table0"
+    assert notes_evidence.provenance.row_index == 8
+    assert notes_evidence.provenance.column_index == 0
+
+
+def test_supply_contract_alternate_split_notes_label_is_canonicalized(
+    tmp_path: Path,
+) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <span>단일판매ㆍ공급계약 체결</span>
+        <table>
+          <tr><td colspan="4">기타 투자판단에 참고할 사항</td></tr>
+          <tr><td colspan="4">테스트용 참고사항</td></tr>
+        </table>
+        """,
+    )
+
+    extracted = extract_event(document)
+
+    assert extracted["fields"]["notes"]["raw_value"] == "테스트용 참고사항"
+    assert extracted["fields"]["notes"]["normalized_value"] == "테스트용 참고사항"
+
+
+def test_supply_contract_correction_keeps_current_notes_outside_xformd8(
+    tmp_path: Path,
+) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <span>정정신고(보고)</span><span>단일판매ㆍ공급계약 체결</span>
+        <table id="XFormD8_Form0_RepeatTable0">
+          <tr><td>3. 정정사유</td><td>테스트 정정사유</td></tr>
+          <tr><td>정정항목</td><td>정정전</td><td>정정후</td></tr>
+          <tr>
+            <td>기타 투자판단과 관련한 중요사항</td>
+            <td>테스트 정정 전</td>
+            <td>테스트 정정 후</td>
+          </tr>
+        </table>
+        <table id="XFormD1_Form0_Table0">
+          <tr><td colspan="4">기타 투자판단과 관련한 중요사항</td></tr>
+          <tr><td colspan="4">테스트 현재 본문</td></tr>
+        </table>
+        """,
+    )
+
+    assert document["correction"]["reason"] == "테스트 정정사유"
+    assert document["correction"]["changes"][0]["before"] == "테스트 정정 전"
+    assert document["correction"]["changes"][0]["after"] == "테스트 정정 후"
+    assert len(document["rows"]) == 1
+    assert document["rows"][0]["value"] == "테스트 현재 본문"
+    assert extract_event(document)["fields"]["notes"]["raw_value"] == (
+        "테스트 현재 본문"
+    )
+
+
+def test_supply_contract_without_split_notes_does_not_fabricate_notes(
+    tmp_path: Path,
+) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <span>단일판매ㆍ공급계약 체결</span>
+        <table><tr><td>2. 계약내역</td><td>계약금액(원)</td><td>100</td></tr></table>
+        """,
+    )
+
+    extracted = extract_event(document)
+
+    assert "notes" not in extracted["fields"]
+
+
+def test_supply_contract_notes_label_with_unsupported_layout_is_not_inferred(
+    tmp_path: Path,
+) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <span>단일판매ㆍ공급계약 체결</span>
+        <table>
+          <tr><td colspan="4">기타 투자판단과 관련한 중요사항</td></tr>
+          <tr><td>설명</td><td>임의의 다음 값</td></tr>
+        </table>
+        """,
+    )
+
+    extracted = extract_event(document)
+
+    assert "notes" not in extracted["fields"]
+
+
+def test_facility_split_notes_shape_is_unchanged_by_supply_specific_parser(
+    tmp_path: Path,
+) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <title>신규시설투자등</title>
+        <span>신규 시설투자 등</span>
+        <table>
+          <tr><td colspan="4">기타 투자판단과 관련한 중요사항</td></tr>
+          <tr><td colspan="4">테스트 시설투자 참고사항</td></tr>
+        </table>
+        """,
+    )
+
+    assert document["rows"] == []
+    assert "notes" not in extract_event(document)["fields"]
+
+
 def test_correction_preserves_raw_reference_changes_and_provenance(tmp_path: Path) -> None:
     document = parse_html(
         tmp_path,
@@ -69,7 +254,9 @@ def test_correction_preserves_raw_reference_changes_and_provenance(tmp_path: Pat
     assert correction["changes"] == [
         {
             "raw_field": "3. 계약상대",
+            "raw_group": "계약상대",
             "field": "계약상대",
+            "raw_unit": None,
             "before": "정정 전 값",
             "after": "정정 후 값",
             "table_id": "XFormD8_Form0_RepeatTable0",
@@ -79,6 +266,11 @@ def test_correction_preserves_raw_reference_changes_and_provenance(tmp_path: Pat
             "after_cell_index": 2,
         }
     ]
+
+    extracted_change = extract_event(document)["correction"]["changes"][0]
+    assert extracted_change["raw_group"] == "계약상대"
+    assert extracted_change["raw_field"] == "3. 계약상대"
+    assert extracted_change["raw_unit"] is None
 
 
 def test_facility_investment_keeps_existing_row_shape_with_fallback_table_id(
@@ -100,6 +292,121 @@ def test_facility_investment_keeps_existing_row_shape_with_fallback_table_id(
     assert investment["unit"] == "원"
     assert investment["table_id"] == "table_0001"
     assert investment["row_index"] == 0
+
+
+def test_facility_investment_correction_fields_are_canonicalized(tmp_path: Path) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <title>신규시설투자등</title>
+        <span>정정신고(보고)</span><span>신규 시설투자 등</span>
+        <table id="XFormD8_Form0_Table1">
+          <tr><td>정정일자</td><td>2024-12-18</td></tr>
+        </table>
+        <table id="XFormD8_Form0_RepeatTable0">
+          <tr><td>정정항목</td><td>정정전</td><td>정정후</td></tr>
+          <tr>
+            <td>4. 투자기간 - 종료일</td>
+            <td>2025-09-30</td>
+            <td>2025-04-01</td>
+          </tr>
+          <tr>
+            <td>2. 투자내역 - 투자금액(원)</td>
+            <td>1,980,100,000,000</td>
+            <td>2,009,800,000,000</td>
+          </tr>
+          <tr>
+            <td>5. 이사회결의일(결정일)</td>
+            <td>2024-12-17</td>
+            <td>2024-12-18</td>
+          </tr>
+        </table>
+        """,
+    )
+
+    changes = extract_event(document)["correction"]["changes"]
+
+    assert [change["canonical_field"] for change in changes] == [
+        "investment_end_date",
+        "investment_amount",
+        "board_resolution_date",
+    ]
+    assert changes[0]["before"] == "2025-09-30"
+    assert changes[0]["after"] == "2025-04-01"
+    assert changes[1]["raw_unit"] == "원"
+
+
+def test_facility_composite_correction_preserves_raw_change_and_provenance(
+    tmp_path: Path,
+) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <title>신규시설투자등</title>
+        <span>정정신고(보고)</span><span>신규 시설투자 등</span>
+        <table id="XFormD8_Form0_RepeatTable0">
+          <tr><td>정정항목</td><td>정정전</td><td>정정후</td></tr>
+          <tr>
+            <td>투자내역 / 투자금액(원) / 자기자본대비(%)</td>
+            <td>OLD_AMOUNT_AND_RATIO</td>
+            <td>NEW_AMOUNT_AND_RATIO</td>
+          </tr>
+        </table>
+        """,
+    )
+
+    parsed_change = document["correction"]["changes"][0]
+
+    assert parsed_change["before"] == "OLD_AMOUNT_AND_RATIO"
+    assert parsed_change["after"] == "NEW_AMOUNT_AND_RATIO"
+    assert parsed_change["table_id"] == "XFormD8_Form0_RepeatTable0"
+    assert parsed_change["row_index"] == 1
+    assert parsed_change["field_cell_index"] == 0
+    assert parsed_change["before_cell_index"] == 1
+    assert parsed_change["after_cell_index"] == 2
+
+    extracted_change = extract_event(document)["correction"]["changes"][0]
+
+    assert extracted_change["canonical_field"] is None
+    assert extracted_change["before"] == "OLD_AMOUNT_AND_RATIO"
+    assert extracted_change["after"] == "NEW_AMOUNT_AND_RATIO"
+    assert extracted_change["provenance"] == {
+        "table_id": "XFormD8_Form0_RepeatTable0",
+        "row_index": 1,
+        "field_cell_index": 0,
+        "before_cell_index": 1,
+        "after_cell_index": 2,
+    }
+
+
+def test_supply_contract_single_field_corpus_aliases_are_canonicalized(
+    tmp_path: Path,
+) -> None:
+    document = parse_html(
+        tmp_path,
+        """
+        <span>정정신고(보고)</span><span>단일판매ㆍ공급계약 체결</span>
+        <table id="XFormD8_Form0_RepeatTable0">
+          <tr><td>정정항목</td><td>정정전</td><td>정정후</td></tr>
+          <tr><td>2. 계약내역 - 계약금액(원)</td><td>1</td><td>2</td></tr>
+          <tr><td>2.계약내역 - 매출액대비(%)</td><td>3</td><td>4</td></tr>
+          <tr><td>8. 공시유보 관련내용 - 유보기한</td><td>A</td><td>B</td></tr>
+        </table>
+        """,
+    )
+
+    changes = extract_event(document)["correction"]["changes"]
+
+    assert [change["canonical_field"] for change in changes] == [
+        "contract_amount",
+        "revenue_ratio",
+        "disclosure_hold_until",
+    ]
+    assert [(change["before"], change["after"]) for change in changes] == [
+        ("1", "2"),
+        ("3", "4"),
+        ("A", "B"),
+    ]
 
 def test_parser_does_not_treat_parenthetical_label_as_unit(
     tmp_path: Path,

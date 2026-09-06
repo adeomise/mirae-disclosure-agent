@@ -13,6 +13,20 @@
 - 현재 이 브랜치가 병합한 `develop` = `1f19a72`
   (PR #24 `feat/periodic-operating-income` 병합, 2026-08-25). 그 이후 반영분은 아래 표에
   재측정되지 않았습니다.
+- **Q16~Q18 재측정: 2026-08-25**, 브랜치 `feat/f3-f4-safety-gate`
+  (F3·F4 pre-retrieval Gate + PR #29 `AnswerabilityReason` 반영분).
+- **Q08~Q09 재측정: 2026-08-26**, 브랜치 `fix/multi-period-silent-wrong`
+  (다중 기간 질문 fail-closed 가드 반영분, base `develop` = `eb70f12`). 두 문항의 정지 지점이
+  `query_plan/unsupported_metric`에서 `routing/unimplemented_intent`로 바뀌어 아래 표를
+  갱신했습니다. 지원 상태(`NOT_IMPLEMENTED`)는 그대로입니다.
+- **Q14 재측정: 2026-09-04**, 브랜치 `fix/hcx-v3-transport-readiness`
+  (연도 없는 Pattern E 계획을 허용한 반영분). 정지 지점이 `query_plan/missing_year`에서
+  `filing_discovery`/`ambiguous_root`로 바뀌어 아래 표를 갱신했습니다. 지원 상태도
+  `NOT_IMPLEMENTED`에서 `PASS_ACTUAL`로 바뀝니다 — 이 문항의 정답이 답변이 아니라 모호
+  판정이고(D8), 그 판정을 실측 코퍼스에서 확인했기 때문입니다.
+- **Q11 상태 갱신: 2026-09-05**. Pattern D cross-entity derived-metric comparison 구현 및
+  기존 actual corpus의 `COMPLETED`/`ANSWERABLE`, API HTTP 200 확인 결과를 반영했습니다.
+- 위에 적은 문항 외에는 재측정하지 않았습니다. 나머지 문항의 값은 최초 측정일 기준입니다.
 
 본 문서에는 실제 공시 값·접수번호를 기재하지 않습니다. 상태와 건수만 기록합니다.
 
@@ -37,44 +51,59 @@
 |---|---|---|---|---|---|
 | Q01 | A | `PASS_ACTUAL` | Actual | 없음. FY2025·FY2024·별도 기준 모두 `COMPLETED`/`ANSWERABLE`, Fact 1 · Evidence 1, 연결 유효 | 회귀 fixture에 고정 완료(`Q01`, `Q01-FY2024`, `Q01-SEPARATE`) |
 | Q02 | A | `NOT_IMPLEMENTED` | – | 거래소공시 단건 필드 조회 경로 없음. 현재 `query_plan/unsupported_metric`으로 BLOCKED. 계약상대방으로 문서를 좁히는 C3도 없음 | Pattern A에 event 단건 조회 추가. D1(거래소공시 Parser) 확정 후 |
-| Q03 | A | `NOT_IMPLEMENTED` | – | 지분공시(`document_class=holding`) 미지원. `MetricConcept`에 값은 있으나 analyzer가 인식하지 않음. `query_plan/unsupported_metric`으로 BLOCKED | D6(PII 처리) 확정 전에는 착수하지 않음 |
+| Q03 | A | `NOT_IMPLEMENTED` | – | 지분공시(`document_class=holding`) 미지원. `MetricConcept`에 값은 있으나 analyzer가 인식하지 않음. `query_plan/unsupported_metric`으로 BLOCKED | **D6-a 확정됨.** allowlist(`THS_STK_CNT`, `THS_STK_RT`) 기반 extractor 구현. D6-a의 acceptance criteria 4개를 만족해야 함 |
 | Q04 | B | `NOT_IMPLEMENTED` | – | `document_summary` handler 없음. `query_plan/unsupported_metric`으로 BLOCKED | Pattern B 착수 시. C13 Vector fallback 여부는 D7 |
 | Q05 | B | `NOT_IMPLEMENTED` | – | 같음 + 기간 미지정 기본 문서 정책 미확정(D5-a). `query_plan/missing_year`로 BLOCKED | D5-a 확정 필요 |
 | Q06 | B | `NOT_IMPLEMENTED` | – | 같음 + 판본 선택 정책 미확정(D5). `query_plan/missing_year`로 BLOCKED | D5 확정 필요 |
-| Q07 | C | `NOT_IMPLEMENTED` | – | `temporal_compare` 미분류·미등록. 상대 기간("작년") 해석 없어 `query_plan/missing_year`로 BLOCKED. **상대 기간 해석을 넣는 순간 F4("내년 매출") 질문이 통과함** | Pattern C 착수. 미래 방향 차단(Pattern F)과 같은 PR로 묶어야 함 |
-| Q08 | C | `NOT_IMPLEMENTED` | – | 영업이익률 파생지표 미지원. `query_plan/unsupported_metric`으로 BLOCKED(사유는 정확) | `operating_income` 추출 + `agent/calculator` 연결 |
-| Q09 | C | `NOT_IMPLEMENTED` | – | 서술 비교(C14) 없음. `query_plan/unsupported_metric`으로 BLOCKED | Pattern B/C 이후 |
+| Q07 | C | `NOT_IMPLEMENTED` | – | 상대 기간 해석은 끝남(D8 확정). "작년"이 FY2024·FY2025로 옮겨져 `temporal_compare` 계획까지 만들어지며, 이제 `pattern_entry/unsupported_comparison_metric`으로 BLOCKED. 남은 것은 원천 지표의 증감(`delta`·`delta_pct`) 계산이며 그것이 Q07-2 범위. F4 충돌은 없음 — 미래 방향은 해석하지 않고 safety Gate가 질의 해석보다 앞에 있음(F-D6 해소) | Pattern C에 원천 지표 증감 추가 |
+| Q08 | C | `NOT_IMPLEMENTED` | – | 다중 기간으로 인식되어 `routing/unimplemented_intent`로 BLOCKED. 영업이익률 파생지표는 여전히 미지원이지만, 더 근본적인 미구현(Pattern C)이 먼저 판정됨 | `operating_income` 질의 어휘 + `agent/calculator` 연결 |
+| Q09 | C | `NOT_IMPLEMENTED` | – | 다중 기간으로 인식되어 `routing/unimplemented_intent`로 BLOCKED. 서술 비교(C14)는 여전히 없음 | Pattern B/C 이후 |
 | Q10 | D | `NOT_IMPLEMENTED` | – | 오라우팅 해소됨. analyzer가 매치된 서로 다른 기업을 모두 인식해 `cross_entity_compare`로 분류하고, handler가 없으므로 `routing/unimplemented_intent`로 BLOCKED(Fact 0 · Evidence 0). 이전에는 `_extract_company`가 가장 긴 이름 하나만 골라 `COMPLETED`/`ANSWERABLE`로 한 기업 값만 답했음 | Pattern D handler 착수. 차단 동작은 회귀 fixture에 고정 완료(`GUARD-MULTI-COMPANY`) |
-| Q11 | D | `NOT_IMPLEMENTED` | – | 영업이익률 미지원으로 `query_plan/unsupported_metric` BLOCKED. Q10과 달리 지표에서 먼저 걸려 오라우팅되지 않음 | Q08과 함께 |
-| Q12 | D | `NOT_IMPLEMENTED` | – | 신규시설투자 subtype 미지원 + 집계 경로 없음. `query_plan/unsupported_metric`으로 BLOCKED | D1 확정 후. Q15 선행 |
+| Q11 | D | `PASS_ACTUAL` | Actual | 없음. Pattern D cross-entity derived-metric comparison 구현. `COMPLETED`/`ANSWERABLE`, Fact 4 · Evidence 4 · Calculation 2 · Comparison 1, API HTTP 200 | lifecycle `active`, semantic gold 및 mutation regression 고정 완료(`tests/evaluation/test_runner.py`). 실측 검증: `tests/integration/test_pattern_d_q11.py` · `tests/integration/test_api_pattern_d_corpus.py` |
+| Q12 | D | `NOT_IMPLEMENTED` | – | 신규시설투자 subtype은 Q15에서 지원됐으나 집계 경로가 없음. 기업이 둘이라 `cross_entity_compare`로 분류되고 handler가 없어 `routing/unimplemented_intent`로 BLOCKED. 이력 표현이 없어 Pattern E로 새지도 않음 | 거래소공시 집계 경로. D1 확정 후 |
 | Q13 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 2 · Evidence 9, `chain_complete=True` | 회귀 fixture에 고정 완료(`Q13`) |
-| Q14 | E | `NOT_IMPLEMENTED` | Synthetic(능력 일부) | 질문이 연/월을 주지 않아 `query_plan/missing_year`로 BLOCKED. 계약상대방("포드")으로 루트를 좁히는 C3 없음. 체인 미완결 → `PARTIALLY_ANSWERABLE` 경로는 `tests/integration/test_pattern_e.py`에서 합성 검증됨 | 계약상대방 기반 루트 확정. 공시유보(`WITHHELD_IN_SOURCE`)는 Contract 미결정 |
-| Q15 | E | `NOT_IMPLEMENTED` | Synthetic(능력 일부) | 연도 없음 + 신규시설투자 subtype 미지원으로 BLOCKED. 다중 정정 정렬·필드별 궤적은 합성 fixture로 검증됨 | `EVENT_SUBTYPE_TOKENS`에 신규시설투자 추가. D1 확정 후 |
-| Q16 | F | `PARTIAL` | Actual | 거부되긴 하나 사유가 다름. `query_plan/unsupported_period`(분기·반기 미지원)로 BLOCKED이며 **기간 밖 판정이 아님**. 연 단위로 물으면(`2027년 매출액`) 방어가 사라짐 | Pattern F Gate. 사유 코드는 F-D1 미결정 |
-| Q17 | F | `PARTIAL` | Actual | `query_plan/unknown_company`로 BLOCKED. 기업명이 없어서 막힌 것이지 "시장 반응은 보유 문서군이 아니다"라는 판정이 아님 | 같음 |
-| Q18 | F | `PARTIAL` | Actual | `query_plan/missing_year`로 BLOCKED. 연도가 없어서 막힌 것이지 정책 판정이 아님. **`삼성전자 2024년 매출 기준으로 지금 사도 될까?`는 그대로 통과함** | 같음. 정책 판정은 문서 접근 이전 단계여야 함 |
+| Q14 | E | `PASS_ACTUAL` | Actual | 없음. **정답이 답변 아님**(D8)이며 그 정답을 실측으로 확인함. `COMPLETED`/`UNRESOLVED`/`AMBIGUOUS_MATCH`, 정지 지점 `filing_discovery`/`ambiguous_root`, 원공시 후보 12건에서 루트를 고르지 않음 — EventHistory 0 · EventLink 0 · Evidence 0. API는 HTTP 200(실행이 끝나지 못한 BLOCKED가 아니라 끝난 뒤의 미해결 판정이므로 422가 아님). 이전에는 `query_plan/missing_year`로 막혔고 그 사유는 실제로 일어난 일과 달랐음 — 질문이 연도를 밝히지 않은 것이 원인이 아니라 루트를 하나로 좁힐 조건이 없는 것이 원인이며, 연도 없는 Pattern E 계획을 허용해 판정을 후보 개수가 보이는 handler로 옮김. **계약상대방 검증은 여전히 없음(C3)이며, 없다는 사실에 맞춰 막음** — 원공시가 1건뿐인 기업이라도 질문이 상대방을 지목했으면 그 1건을 답으로 삼지 않고 `filing_discovery`/`unverified_counterparty`로 막는다(같은 `UNRESOLVED`/`AMBIGUOUS_MATCH`). 후보가 하나인 것은 코퍼스가 그렇다는 뜻이지 질문이 가리킨 계약이라는 뜻이 아니므로 개수를 근거로 삼지 않는다. 상대방을 적지 않은 질문은 확인하지 못한 조건이 없어 그대로 답한다. 두 경우 모두 `tests/integration/test_pattern_e_q15.py`에 대조쌍으로 고정 | C3(계약상대방 기반 문서 확정). 루트가 1건으로 좁혀진 뒤에야 공시유보(`WITHHELD_IN_SOURCE`, **Contract 확정됨** D9, production 판정은 미구현)와 역방향·후속 연결 체인이 검증 대상이 됨. 회귀 fixture(`scripts/corpus_regression_cases.jsonl`) 등재는 미완 — 현재는 `tests/integration/test_pattern_e_q15.py`·`tests/integration/test_api_q14_corpus.py`가 고정 |
+| Q15 | E | `PASS_ACTUAL` | Actual | 없음. `COMPLETED`/`ANSWERABLE`, EventHistory 1 · EventLink 3 · Evidence 8, `chain_complete=True`. 질문에 연도가 없어도 공시일 창 없이 루트를 찾음. 공시 유형으로 가르지 않는다 — Pattern E는 유형과 무관하게 공시일 기준점 없는 계획을 만들고, 루트를 하나로 좁힐 수 있는지는 handler가 실제 후보 개수로 판정한다(후보가 여럿이면 `ambiguous_root`). 이 질문은 후보가 1건이라 답에 이른다. **"몇 번 바뀌었나" = 정정/변경 이벤트 cardinality = EventLink 수 = 3회** — `semantic_count`={"source":"event_links","value":3}가 확정 계약. `document_count=4`는 root 공시 + 정정 문서 3건이며, FieldChange 4건은 세부 필드 변경 건수일 뿐 user-facing count가 아니다 — producer는 FieldChange도 보존하지만 답변 카운트에는 쓰지 않는다 | 회귀 fixture에 고정 완료(`Q15`). lifecycle `active` |
+| Q16 | F | `PARTIAL` | Actual | 거부되긴 하나 사유가 다름. `query_plan/unsupported_period`(분기·반기 미지원)로 BLOCKED이며 **기간 밖 판정이 아님**. 연 단위로 물으면(`삼성전자 2027년 매출액이 얼마야?`) 이 차단이 사라지고 `COMPLETED`/`UNANSWERABLE`/`not_found`(`filing_discovery`/`no_matching_filing`)로 답합니다 — 검색 실패이지 기간 밖 판정이 아님 | F1 Gate 구현. 사유 코드는 확정됨(`OUT_OF_DATA_RANGE`, PR #29) |
+| Q17 | F | `PARTIAL` | Actual | `query_plan/unknown_company`로 BLOCKED. 기업명이 없어서 막힌 것이지 "시장 반응은 보유 문서군이 아니다"라는 판정이 아님 | F2 Gate 구현. 사유 코드는 확정됨(`OUT_OF_SCOPE_DATA`, PR #29) |
+| Q18 | F | `PASS_ACTUAL` | Actual | 없음. F3 Gate가 retrieval 이전에 판정. `COMPLETED`/`UNANSWERABLE`/`out_of_scope_policy`, `answerability_detail`=`answerability_gate`/`investment_advice`, Fact 0 · Evidence 0. 이전에는 `query_plan/missing_year`(연도 부재)로 막힌 우연한 방어였고 **`삼성전자 2024년 매출 기준으로 지금 사도 될까?`는 그대로 통과**했으나, 그 형태도 같은 결과로 거부됨 | 판정 동작은 `tests/unit/test_pattern_f_safety_gate.py`에 고정 완료 |
 
 ## 집계
 
 | 상태 | 문항 수 | 문항 |
 |---|---|---|
-| `PASS_ACTUAL` | 2 | Q01 Q13 |
-| `PARTIAL` | 3 | Q16 Q17 Q18 |
-| `NOT_IMPLEMENTED` | 13 | Q02~Q12 Q14 Q15 |
+| `PASS_ACTUAL` | 6 | Q01 Q11 Q13 Q14 Q15 Q18 |
+| `PARTIAL` | 2 | Q16 Q17 |
+| `NOT_IMPLEMENTED` | 10 | Q02~Q10 Q12 |
 | `PASS_SYNTHETIC_ONLY` | 0 | – |
 | `BLOCKED_BY_DATA` | 0 | – |
 | `BLOCKED_BY_CONTRACT` | 0 | – |
 
-`BLOCKED_BY_CONTRACT`가 0인 이유는, Contract 값이 없는 판정(F1~F4의 사유 코드)이 지금은
-**결과를 만들지 못하게 막는 것이 아니라 `answerability_reason`을 비우고 판정 근거를
-`answerability_detail`(stage/reason/detail)에 남기는 방식**으로 처리되고 있기 때문입니다.
-문항 단위로는 막혀 있지 않습니다.
+`BLOCKED_BY_CONTRACT`가 0입니다. F1~F4의 사유 코드는 PR #29에서
+`OUT_OF_DATA_RANGE` · `OUT_OF_SCOPE_DATA` · `OUT_OF_SCOPE_POLICY`가 추가되어 **Contract에
+자리가 있습니다.** Q18은 그 값(`out_of_scope_policy`)을 실제로 싣고 나오고, Q16·Q17이 아직
+`PARTIAL`인 것은 Contract 때문이 아니라 **판정 자체가 구현되지 않았기 때문**입니다.
+
+`WITHHELD_IN_SOURCE`와 `NOT_COMPARABLE`도 이제 Contract에 자리가 있습니다. `NOT_COMPARABLE`은
+Pattern D 작업에서, `WITHHELD_IN_SOURCE`는 D9 확정과 함께 추가됐습니다. 두 사유 모두
+`answerability_reason`을 비우지 않고 그대로 싣습니다.
+
+`NOT_COMPARABLE`은 production 판정까지 있고(`agent/normalization.py`의 `STAGE_COMPARABILITY`),
+`WITHHELD_IN_SOURCE`는 **Contract와 Answer Builder 대응만 있고 production 판정은 아직
+없습니다.** 유보를 감지하는 쪽은 Event Parser 결과에 의존하며 별도 PR입니다.
+
+**대응 값이 없는 판정은 현재 없습니다.** 새로 생기면 `answerability_reason`을 비우고 판정 근거를
+`answerability_detail`(stage/reason/detail)에 남기는 기존 규약을 씁니다.
 
 `ambiguous` 판정은 여기 해당하지 않습니다. Contract v0.1에 대응 값이 있어 그대로 표현됩니다.
 
-- `extraction` / `ambiguous_candidates`, `filing_discovery` / `ambiguous_root`
+- `extraction` / `ambiguous_candidates`, `filing_discovery` / `ambiguous_root`,
+  `filing_discovery` / `unverified_counterparty`
   → `ExecutionStatus.COMPLETED` · `AnswerabilityStatus.UNRESOLVED` ·
   `AnswerabilityReason.AMBIGUOUS_MATCH`
+- `unverified_counterparty`는 후보가 1건인데 질문이 건 조건(계약상대방)을 확인할 수 없어
+  그 1건을 대상으로 확정하지 못한 경우입니다. 후보가 여럿인 `ambiguous_root`와 공개 사유는
+  같고 내부 사유만 다릅니다 — 후보 개수가 1과 N으로 달라 같은 진단 문장을 쓸 수 없습니다.
 - 진단 정보는 `answerability_detail`(stage/reason/detail)에 기록합니다.
 - `conversion_gaps`는 Contract에 실을 자리가 없어 손실되는 정보 전용이므로 판정 근거를
   담지 않습니다.
@@ -89,10 +118,10 @@
 |---|---|---|
 | A 단일 사실 | Q01 Q02 Q03 | 1/3 실측 통과. 정기공시 매출만 |
 | B 문서 요약 | Q04 Q05 Q06 | 0/3. handler 없음 |
-| C 시계열 비교 | Q07 Q08 Q09 | 0/3. **상대 기간 해석과 Pattern F가 충돌** |
-| D 기업 간 비교 | Q10 Q11 Q12 | 0/3. handler 없음. Q10 오라우팅은 해소되어 `routing`에서 BLOCKED |
-| E 정정·후속 추적 | Q13 Q14 Q15 | 1/3 실측 통과. 공급계약 + 연/월 지정 형태만 |
-| F 답변 불가 | Q16 Q17 Q18 | 0/3 정상 판정. 3건 모두 우연히 거부됨 |
+| C 시계열 비교 | Q07 Q08 Q09 | 0/3. 상대 기간 해석은 완료(D8). Pattern F와 충돌하지 않음 — 과거 방향만 해석하고 Gate가 앞에 있음 |
+| D 기업 간 비교 | Q10 Q11 Q12 | 1/3 실측 통과. Q11 파생지표 기업 간 비교 구현, actual corpus/API 정상 동작. Q10·Q12는 기존 측정값 유지 |
+| E 정정·후속 추적 | Q13 Q14 Q15 | 3/3 실측 통과. 공급계약(연/월 지정)·신규시설투자(연도 없음)는 이력을 답하고, Q14는 **정답인 모호 판정**(`UNRESOLVED`/`AMBIGUOUS_MATCH`)에 도달. 연도는 유형과 무관하게 선택 사항이며, 루트를 1건으로 좁히지 못하면 `filing_discovery`에서 막는다 — 후보가 여럿이면 `ambiguous_root`, 후보가 1건이어도 질문이 상대방을 지목했으면 `unverified_counterparty`(C3 미구현). 한 질문이 두 유형에 맞으면 고르지 않고 `query_plan/ambiguous_event_subtype`으로 BLOCKED |
+| F 답변 불가 | Q16 Q17 Q18 | 1/3 정상 판정. Q18은 F3 Gate가 retrieval 이전에 판정. Q16·Q17은 여전히 우연히 거부됨(F1·F2 미구현) |
 
 ## Q01 계열 실측 스윕
 
@@ -125,12 +154,15 @@
    경로에서 실측 코퍼스를 쓰는 것은 `tests/unit/test_pattern_f_safety_cases.py`의
    현재 동작 대조 테스트뿐입니다(코퍼스가 없으면 건너뜁니다). 실측 검증의 정본은
    `scripts/run_corpus_regression.py`입니다.
-2. **`PARTIAL` 3건을 "Pattern F가 동작한다"의 근거로 쓰지 않습니다.** 거부 사유가 전부
-   무관한 파싱 실패입니다. 자세한 내용은 [pattern_f_safety.md](pattern_f_safety.md) 부록.
+2. **`PARTIAL` 2건(Q16·Q17)을 "Pattern F가 동작한다"의 근거로 쓰지 않습니다.** 거부 사유가
+   무관한 파싱 실패입니다. Pattern F에서 판정으로 거부되는 것은 Q18(F3)뿐입니다. 자세한
+   내용은 [pattern_f_safety.md](pattern_f_safety.md) 부록.
 3. **오라우팅은 미구현보다 나쁩니다.** 미구현은 답을 안 하지만, 오라우팅은 근거를 붙인 틀린
-   답을 합니다. Q10(기업 다중 값)은 해소됐고, 같은 성격의 `F6-02`(Q07 계열 기간 다중 값)는
-   남아 있습니다. "삼성전자 2024년 매출과 2025년 매출을 비교해줘"가 여전히 첫 연도만
-   `ANSWERABLE`로 답합니다.
+   답을 합니다. Q10(기업 다중 값)과 `F6-02`(Q07 계열 기간 다중 값)가 같은 성격이었고 둘 다
+   해소됐습니다. "삼성전자 2024년 매출과 2025년 매출을 비교해줘"는 이제 첫 연도만
+   `ANSWERABLE`로 답하지 않고 `routing`/`unimplemented_intent`로 막힙니다. 회귀 감시는
+   `scripts/corpus_regression_cases.jsonl`의 `GUARD-MULTI-COMPANY`와 `GUARD-MULTI-PERIOD`가
+   맡습니다. 두 Pattern(C·D) 자체는 아직 구현되지 않았습니다.
 
 ## 관련 문서
 

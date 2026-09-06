@@ -1,0 +1,1620 @@
+"""Pattern E — Q15 계열(신규시설투자 정정 이력) 통합 테스트.
+
+무엇을 고정하는가:
+    Q15는 "레인보우로보틱스 사옥·제조시설 신축 투자, 그동안 계획이 몇 번 바뀌었어?"다.
+    Q13(공급계약)과 같은 파이프라인을 쓰지만 두 가지가 다르다.
+
+    - 질문이 공시 유형명을 쓰지 않는다. '신규시설투자'도 '시설투자'도 연속 문자열로 들어
+      있지 않고, 대상(사옥·제조시설)과 행위(신축·투자)로만 말한다.
+    - 질문이 공시 시점을 밝히지 않는다. 연도가 없다.
+
+    이 파일은 그 둘을 여는 것과, 여는 과정에서 다른 질문이 함께 열리지 않는 것을 같은
+    무게로 고정한다. 어휘를 넓히는 변경의 위험은 '열리지 않는다'가 아니라 '엉뚱한 것까지
+    열린다'이기 때문이다.
+
+무엇을 검증하지 않는가:
+    자연어 답변을 만들지 않는다. 이 Pattern은 AgentExecutionResult까지가 범위이며,
+    "몇 번 바뀌었나"를 문장으로 옮기는 일은 answer-builder의 책임이다.
+
+    ResolvedEventState도 만들지 않는다. 질문이 묻는 것은 최종 상태 하나가 아니라 변경
+    이력 전체이며, 그 세부 내용(어떤 필드가 무엇에서 무엇으로 바뀌었는가)의 정본은
+    EventHistory.changes다. 다만 사용자 질문의 "몇 번"에 대한 semantic count는
+    EventHistory.changes의 길이가 아니라 EventLink cardinality이고, Q15에서는 3이다
+    (아래 "몇 번"이 무엇을 세는가에 대하여 참고).
+
+"몇 번"이 무엇을 세는가에 대하여:
+    사용자 질문의 "몇 번 바뀌었어?"는 correction/change event cardinality를 묻는다.
+    evaluation contract(evaluation/README.md의 semantic_count)는 이를 EventLink 수로
+    정의하며, Q15의 semantic answer count는 3이다(정정 공시 3건).
+
+    Q15의 체인에는 원공시 1건 + 정정 공시 3건(document_count=4)과, 이름 붙은 FieldChange
+    4건이 있다. FieldChange 4건은 정정마다 어떤 필드가 어떻게 바뀌었는지의 세부 기록이며,
+    사용자에게 답하는 "몇 번"이 아니다.
+
+    두 값 모두 결과에 그대로 남아 있다. 정정 건수는 EventHistory.document_ids에서 원공시
+    하나를 뺀 수이고(= EventLink 수), 필드 변경 건수는 EventHistory.changes의 길이다.
+    producer가 둘 중 하나를 미리 접어 버리면 나중에 어느 쪽으로 답하기로 정하든 되돌릴 수
+    없으므로, 여기서는 둘 다 보존하는 것까지만 고정한다. "몇 번"으로 답할 값을 EventLink
+    수로 고르는 일은 evaluation의 semantic_count contract가 맡고, 그 값을 문장으로 옮기는
+    일은 answer-builder/HCX가 맡는다.
+
+실제 공시 값에 대하여:
+    합성 fixture에는 실제 접수번호·수치를 쓰지 않는다. 실측 코퍼스를 읽는 테스트는
+    `corpus` 마크로 분리하고, 코퍼스가 없으면 건너뛴다.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import unicodedata
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from disclosure_agent.agent.answer_builder import (
+    REASON_AMBIGUOUS_ROOT,
+    REASON_UNVERIFIED_COUNTERPARTY,
+    STAGE_FILING_DISCOVERY,
+    build_answer_response,
+)
+from disclosure_agent.agent.handlers.event_history import (
+    EVENT_TYPE_BY_DOCUMENT_SUBTYPE,
+    build_event_history_result,
+    handle_event_history,
+    resolve_event_type,
+    root_filing_window,
+)
+from disclosure_agent.agent.query_analyzer import (
+    EVENT_SUBTYPE_FACILITY_INVESTMENT,
+    EVENT_SUBTYPE_RULES,
+    EVENT_SUBTYPE_SUPPLY_CONTRACT,
+    INTENT_EVENT_HISTORY,
+    QueryPlan,
+    UnsupportedQuestionError,
+    build_query_plan,
+)
+from disclosure_agent.agent.query_vocabulary import (
+    OPERATION_CHANGE_COUNT,
+    normalize_change_count_request,
+)
+from disclosure_agent.agent.router import answer_question
+from disclosure_agent.common.enums import (
+    AnswerabilityReason,
+    AnswerabilityStatus,
+    ChainPolicy,
+    EventLinkResolutionStatus,
+    EventType,
+    ExecutionStatus,
+)
+from disclosure_agent.event.diff import FIELD_INVESTMENT_AMOUNT, FIELD_INVESTMENT_END_DATE
+
+CORPUS_ROOT_ENV = "DISCLOSURE_CORPUS_ROOT"
+
+DEFAULT_CORPUS_ROOT = (
+    Path(__file__).resolve().parents[2] / "data" / "raw" / "3.공시" / "3.공시" / "corpus"
+)
+
+# evaluation/questions.jsonl의 Q15 원문. 가운뎃점 표기까지 그대로 둔다.
+Q15 = "레인보우로보틱스 사옥·제조시설 신축 투자, 그동안 계획이 몇 번 바뀌었어?"
+
+# evaluation/questions.jsonl의 Q12·Q14 원문. 이번 PR에서 열리면 안 되는 두 질문이다.
+Q12 = (
+    "2024년에 LG이노텍하고 레인보우로보틱스가 새로 발표한 시설투자, "
+    "회사별로 다 합치면 어디가 더 커?"
+)
+
+Q14 = "LG에너지솔루션이 포드랑 맺었던 배터리 공급계약, 지금 어떻게 됐어?"
+
+REAL_COMPANIES = ("레인보우로보틱스", "LG이노텍", "LG에너지솔루션", "HD현대일렉트릭")
+
+# BB17. 실측 코퍼스에서 정정공시가 원공시 제출일로 자기 접수일을 적은 질문이다.
+#
+# 이 정정(exchange_20240813800252)은 실재하고 파싱도 된다. 투자금액 803억 -> 1,008억,
+# 투자기간 종료일 2025-09-30 -> 2025-10-31을 바꾼다. 그런데 연결이 자기 자신을 가리켜
+# 대상을 특정하지 못하고, 예전 구현은 그 정정을 조용히 빼고 완결 체인이라고 답했다.
+BB17_QUESTION = "엘에스일렉트릭이 2024년에 낸 신규 시설투자 공시, 그 뒤에 수정된 부분이 있어?"
+
+BB17_COMPANIES = ("엘에스일렉트릭",)
+
+BB17_CORRECTION_RECEIPT_NO = "20240813800252"
+
+BB17_CORRECTION_DOC_ID = f"exchange_{BB17_CORRECTION_RECEIPT_NO}"
+
+# 이력이 완결됐을 때만 쓸 수 있는 문장. 이 질문에는 나오면 안 된다.
+NO_LATER_CHANGE_SENTENCE = "이후 변경된 내용은 확인되지 않았습니다"
+
+# 실측 코퍼스에서 공급계약 원공시가 한 건뿐인 기업을 쓰는 대조쌍.
+#
+# 두 질문의 차이는 상대방을 적었는가 하나뿐이다. 그 하나가 결과를 가른다는 것이 이 쌍이
+# 고정하는 내용이며, fail-close의 기준이 '후보가 하나'가 아니라 '확인할 수 없는 조건을 걸고
+# 물었다'임을 보인다.
+SINGLE_ROOT_SUPPLY_CONTRACT_QUESTION = "삼성전자 공급계약, 지금 어떻게 됐어?"
+
+# Q14와 같은 표기('<상대방>랑 맺었던')를 쓴다. 상대방 이름은 실제 계약 상대가 아니어도 된다.
+# 이 구현은 그 이름을 대조하지 않으며, 대조하지 못한다는 것이 막는 이유이기 때문이다.
+SINGLE_ROOT_COUNTERPARTY_QUESTION = "삼성전자가 테슬라랑 맺었던 공급계약 지금 어떻게 됐어?"
+
+SINGLE_ROOT_COMPANIES = ("삼성전자",)
+
+# 상대방을 적었지만 원공시가 여럿인 질문. 상대방 판정이 ambiguous_root를 가로채지 않는지 본다.
+MULTI_ROOT_COUNTERPARTY_QUESTION = (
+    "LG에너지솔루션이 테슬라랑 맺었던 공급계약 지금 어떻게 됐어?"
+)
+
+# 합성 코퍼스에서 쓰는 이름. 실제 기업명을 쓰지 않는다.
+COMPANY = "테스트반도체(주)"
+
+KNOWN_COMPANIES = ("테스트반도체",)
+
+# Q15와 같은 모양의 합성 질문. 연도가 없고 유형명도 쓰지 않는다.
+SYNTHETIC_Q15 = "테스트반도체 사옥·제조시설 신축 투자, 그동안 계획이 몇 번 바뀌었어?"
+
+# 대조군. 같은 Pattern E이지만 공급계약이고 시점을 밝힌다(Q13 모양).
+SYNTHETIC_Q13 = "테스트반도체 2025년 8월에 공시한 공급계약, 나중에 바뀐 내용 있어?"
+
+# 두 유형을 함께 가리키는 질문. 리뷰가 지적한 first-match silent narrowing의 재현 케이스다.
+#
+#   공급계약        -> 단일판매공급계약체결
+#   공장 + 증설·투자 -> 신규시설투자등
+#   바뀌었어         -> 이력 질문
+#
+# 예전 구현은 선언 순서상 앞인 공급계약으로 조용히 좁혔다. 시설투자를 함께 물었다는 사실이
+# 계획에도 결과에도 남지 않았다.
+AMBIGUOUS_SUBTYPE_QUESTION = (
+    "레인보우로보틱스 2024년 공급계약 이후 공장 증설 투자 계획이 바뀌었어?"
+)
+
+SYNTHETIC_AMBIGUOUS_SUBTYPE_QUESTION = (
+    "테스트반도체 2025년 공급계약 이후 공장 증설 투자 계획이 바뀌었어?"
+)
+
+
+def _matched_subtypes(question: str) -> tuple[str, ...]:
+    """
+    공개 어휘로 계산한 매치 결과.
+
+    production의 matcher(_find_event_subtype_rules)는 비공개이므로 같은 공개 규칙
+    (EVENT_SUBTYPE_RULES와 EventSubtypeRule.matches)으로 다시 센다. 이 helper가 고정하는
+    것은 '어휘가 이 질문에 몇 종을 매치시키는가'이고, 그 매치 수를 production이 어떻게
+    처리하는가는 아래 계획·실행 단계 테스트가 따로 고정한다.
+    """
+    return tuple(rule.subtype for rule in EVENT_SUBTYPE_RULES if rule.matches(question))
+
+ROOT_RECEIPT_NO = "SYNTHETIC0101"
+
+CORRECTION_RECEIPT_NOS = ("SYNTHETIC0102", "SYNTHETIC0103", "SYNTHETIC0104")
+
+# 원공시 공시일. 정정본이 본문에 적어 두는 '최초 공시일'과 같아야 연결된다.
+ROOT_FILING_DATE = "20240430"
+
+
+def _resolve_corpus_root() -> Path | None:
+    raw = os.environ.get(CORPUS_ROOT_ENV)
+
+    candidate = Path(raw) if raw else DEFAULT_CORPUS_ROOT
+
+    if candidate.is_dir() and (candidate / "manifest.jsonl").is_file():
+        return candidate
+
+    return None
+
+
+# --------------------------------------------------------------------------
+# 합성 코퍼스
+#
+# 원공시 1건 + 정정 3건. 실측 체인과 같은 모양이되 값은 전부 합성이다.
+# --------------------------------------------------------------------------
+
+
+def _record(
+    receipt_no: str,
+    receipt_date: str,
+    *,
+    subtype: str,
+    is_correction: bool,
+) -> dict[str, Any]:
+    prefix = "[기재정정]" if is_correction else ""
+
+    return {
+        "doc_id": f"exchange_{receipt_no}",
+        "corp_code": "00000001",
+        "corp_name": COMPANY,
+        "stock_code": "000001",
+        "doc_group": "exchange",
+        "doc_subtype": subtype,
+        "report_nm": f"{prefix}{subtype}",
+        "is_correction": is_correction,
+        "rcept_no": receipt_no,
+        "rcept_dt": receipt_date,
+        "base_year": None,
+        "base_month": None,
+        "file_path": f"raw/exchange/테스트반도체/{receipt_no}",
+        "file_format": "xml",
+        "n_files": 1,
+    }
+
+
+FACILITY_RECORDS: list[dict[str, Any]] = [
+    _record(
+        ROOT_RECEIPT_NO,
+        ROOT_FILING_DATE,
+        subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+        is_correction=False,
+    ),
+    *[
+        _record(
+            receipt_no,
+            receipt_date,
+            subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+            is_correction=True,
+        )
+        for receipt_no, receipt_date in zip(
+            CORRECTION_RECEIPT_NOS, ("20250205", "20251205", "20260327"), strict=True
+        )
+    ],
+    # 같은 기업의 다른 유형. 유형 필터가 걸러야 한다. 걸러지지 않으면 원공시가 둘이 되어
+    # ambiguous_root로 막히므로, 이 레코드가 유형 필터의 대조군 역할을 한다.
+    _record(
+        "SYNTHETIC0111",
+        "20240501",
+        subtype=EVENT_SUBTYPE_SUPPLY_CONTRACT,
+        is_correction=False,
+    ),
+]
+
+# 정정본이 밝힌 변경. 실측 체인과 같은 필드 조합을 쓰되 값은 합성이다.
+#
+# 마지막 항목은 일부러 대응표에 없는 필드다. 이름을 붙이지 못한 변경이 조용히 사라지지
+# 않는지(field=None으로 남는지) 함께 고정한다.
+FACILITY_CHANGES: dict[str, list[dict[str, str]]] = {
+    CORRECTION_RECEIPT_NOS[0]: [
+        {
+            "raw_field": "2. 투자내역-투자금액",
+            "before": "1,000,000,000",
+            "after": "1,100,000,000",
+        },
+    ],
+    CORRECTION_RECEIPT_NOS[1]: [
+        {
+            "raw_field": "2. 투자내역-투자금액",
+            "before": "1,100,000,000",
+            "after": "1,200,000,000",
+        },
+        {
+            "raw_field": "4. 투자기간-종료일",
+            "before": "2025-12-15",
+            "after": "2026-03-31",
+        },
+    ],
+    CORRECTION_RECEIPT_NOS[2]: [
+        {
+            "raw_field": "4. 투자기간-종료일",
+            "before": "2026-03-31",
+            "after": "2026-03-27",
+        },
+        {
+            "raw_field": "8. 기타 투자판단에 참고할 사항",
+            "before": "문구추가",
+            "after": "합성 문구",
+        },
+    ],
+}
+
+
+def _parsed_document(record: dict[str, Any]) -> dict[str, Any]:
+    """event.parser가 내놓는 형태의 문서. 원문 XML을 다시 열지 않는다."""
+    receipt_no = record["rcept_no"]
+
+    correction = None
+
+    if record["is_correction"]:
+        correction = {
+            "correction_date": record["rcept_dt"],
+            "original_filing_date": ROOT_FILING_DATE,
+            "reason": "투자 계획 변경",
+            "changes": [
+                {
+                    "raw_field": change["raw_field"],
+                    "field": change["raw_field"],
+                    "before": change["before"],
+                    "after": change["after"],
+                }
+                for change in FACILITY_CHANGES.get(receipt_no, [])
+            ],
+        }
+
+    return {
+        "metadata": {
+            "doc_id": record["doc_id"],
+            "document_type": "exchange",
+            "is_correction": record["is_correction"],
+        },
+        "title": record["report_nm"],
+        "rows": [],
+        "correction": correction,
+    }
+
+
+@pytest.fixture
+def facility_manifest_path(tmp_path: Path) -> Path:
+    path = tmp_path / "manifest.jsonl"
+
+    with path.open("w", encoding="utf-8") as file:
+        for record in FACILITY_RECORDS:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    return path
+
+
+@pytest.fixture
+def facility_corpus_root(tmp_path: Path) -> Path:
+    """
+    합성 corpus. 한글 경로는 실측 코퍼스와 같은 NFD 표기로 만든다.
+
+    XML은 경로 해석만 검증하는 최소 파일이다. 본문 파싱 결과는 _parsed_document가 대신한다.
+    """
+    root = tmp_path / "corpus"
+
+    for record in FACILITY_RECORDS:
+        directory = root / unicodedata.normalize("NFD", record["file_path"])
+
+        directory.mkdir(parents=True, exist_ok=True)
+
+        (directory / f"{record['rcept_no']}.xml").write_text("<html/>", encoding="utf-8")
+
+    return root
+
+
+@pytest.fixture
+def parsed_documents(monkeypatch: pytest.MonkeyPatch) -> None:
+    """handler가 여는 본문 파싱을 합성 결과로 대신한다."""
+    by_receipt_no = {record["rcept_no"]: _parsed_document(record) for record in FACILITY_RECORDS}
+
+    def _parse(path: Path | str) -> dict[str, Any]:
+        receipt_no = Path(path).stem
+
+        return by_receipt_no[receipt_no]
+
+    monkeypatch.setattr(
+        "disclosure_agent.agent.handlers.event_history.parse_exchange_document", _parse
+    )
+
+
+# --------------------------------------------------------------------------
+# 1. 질의 해석 — Q15가 연도 없이 event_history로 계획된다
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("question", "known_companies"),
+    [(Q15, REAL_COMPANIES), (SYNTHETIC_Q15, KNOWN_COMPANIES)],
+)
+def test_q15_shaped_question_plans_a_facility_investment_history(
+    question: str, known_companies: tuple[str, ...]
+) -> None:
+    """
+    유형명을 쓰지 않은 질문이 신규시설투자 이력 조회로 계획돼야 한다.
+
+    document_subtype은 manifest의 doc_subtype 표기와 같아야 한다. 다르면 검색이 한 건도
+    맞지 않아 '코퍼스에 없다'로 답하게 된다.
+    """
+    plan: QueryPlan = build_query_plan(question, known_companies=known_companies)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+    assert plan.chain_policy == ChainPolicy.FULL_CHAIN
+    assert plan.metric is None
+
+
+@pytest.mark.parametrize(
+    ("question", "known_companies"),
+    [(Q15, REAL_COMPANIES), (SYNTHETIC_Q15, KNOWN_COMPANIES)],
+)
+def test_q15_shaped_question_is_planned_without_a_year(
+    question: str, known_companies: tuple[str, ...]
+) -> None:
+    """
+    연도를 밝히지 않은 질문이 missing_year로 막히지 않아야 한다.
+
+    연도를 지어내지도 않는다. years가 비어 있는 것과 아무 연도나 채워 넣은 것은 다르며,
+    후자면 그 해에 공시된 다른 건의 이력을 답하게 된다.
+    """
+    plan = build_query_plan(question, known_companies=known_companies)
+
+    assert plan.years == ()
+    assert plan.month is None
+
+    # 공시일 창을 만들지 않는다. 창이 있으면 그 밖의 원공시가 통째로 빠진다.
+    assert root_filing_window(plan) is None
+
+
+def test_facility_investment_question_still_accepts_an_explicit_year() -> None:
+    """
+    연도를 밝힌 신규시설투자 질문은 예전처럼 그 해로 원공시를 좁힌다.
+
+    연도 요구를 푸는 변경이 '연도를 무시한다'가 되면 안 된다. 질문이 시점을 밝혔으면
+    그것이 조회 조건이다.
+    """
+    plan = build_query_plan(
+        "테스트반도체 2024년 사옥 신축 투자, 계획이 바뀐 적 있어?",
+        known_companies=KNOWN_COMPANIES,
+    )
+
+    assert plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+    assert plan.years == (2024,)
+    assert root_filing_window(plan) == ("20240101", "20241231")
+
+
+def test_facility_investment_question_with_a_month_still_requires_a_year() -> None:
+    """
+    월만 있고 연도가 없으면 막는다.
+
+    월은 공시일 창을 좁히는 조건인데 연도가 없으면 창을 만들 수 없다. 그대로 진행하면
+    질문이 밝힌 '4월'이 조회에 쓰이지 않은 채 사라진다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(
+            "테스트반도체 4월에 공시한 사옥 신축 투자, 계획이 바뀐 적 있어?",
+            known_companies=KNOWN_COMPANIES,
+        )
+
+    assert error.value.reason == "missing_year"
+
+
+def test_supply_contract_history_question_no_longer_requires_a_year() -> None:
+    """
+    공급계약 이력 질문도 연도 없이 계획된다.
+
+    예전에는 이 자리가 Q14를 missing_year로 막았다. 그 사유는 실제로 일어난 일과 달랐다.
+    질문이 연도를 못 밝힌 것이 문제가 아니라, 그 기업의 공급계약 원공시가 여러 건이라 어느
+    계약인지 좁히지 못하는 것이 문제다. 후보가 몇 건인지는 코퍼스를 열어야 알 수 있으므로
+    질의 해석 계층이 판정할 수 없고, 막는 자리는 후보 개수가 보이는 handler다
+    (test_q14_is_unresolved_as_ambiguous_in_the_actual_corpus).
+
+    연도를 지어내지도 않는다. years가 비어 있는 것과 아무 연도나 채워 넣은 것은 다르며,
+    후자면 그 해에 공시된 다른 건의 이력을 답하게 된다.
+    """
+    plan = build_query_plan(Q14, known_companies=REAL_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_SUPPLY_CONTRACT
+    assert plan.chain_policy is ChainPolicy.FULL_CHAIN
+    assert plan.years == ()
+    assert plan.month is None
+
+    # 공시일 창을 만들지 않는다. 창이 있으면 그 밖의 원공시가 통째로 빠진다.
+    assert root_filing_window(plan) is None
+
+    # 상대방('포드')은 계획에 담긴다. 조회 조건으로 쓰이지는 않으며, handler가 이 값을 보고
+    # 원공시 1건을 확정하지 않는다(unverified_counterparty). 담고도 아무도 읽지 않는 값이
+    # 아니라, 읽는 쪽이 정해져 있고 그 쪽이 하는 일이 '고르지 않기'다.
+    assert plan.counterparty == "포드"
+
+
+def test_supply_contract_history_question_with_a_month_still_requires_a_year() -> None:
+    """
+    공급계약 이력 질문도 월만 있고 연도가 없으면 막는다.
+
+    연도 요구가 남은 자리는 이 하나다. 월은 공시일 창을 좁히는 조건인데 연도가 없으면 창을
+    만들 수 없고, 그대로 진행하면 질문이 밝힌 '4월'이 조회에 쓰이지 않은 채 사라진다.
+    신규시설투자에 대해 같은 것을 고정하는 시험이 위에 있다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(
+            "테스트반도체 4월에 공시한 공급계약, 나중에 바뀐 내용 있어?",
+            known_companies=KNOWN_COMPANIES,
+        )
+
+    assert error.value.reason == "missing_year"
+
+
+def test_count_question_carries_the_change_count_request() -> None:
+    """
+    "몇 번 바뀌었어?"는 횟수를 묻는다. 그 사실을 계획이 담는다.
+
+    이력을 확보하는 절차는 두 갈래가 같다. 다른 것은 그 이력의 무엇을 답으로 삼는가뿐이고,
+    그 구분은 질문에만 있다. 계획이 담지 않으면 표현 계층은 횟수를 물은 질문과 내용을 물은
+    질문을 가르지 못한다.
+    """
+    plan = build_query_plan(SYNTHETIC_Q15, known_companies=KNOWN_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert OPERATION_CHANGE_COUNT in plan.operations
+
+
+def test_content_question_does_not_carry_the_change_count_request() -> None:
+    """
+    "바뀐 내용 있어?"는 내용을 묻는다. 횟수를 요청한 적이 없다.
+
+    이 자리를 비워 두지 않으면 묻지 않은 값이 답에 실린다.
+    """
+    plan = build_query_plan(SYNTHETIC_Q13, known_companies=KNOWN_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.operations == ()
+
+
+def test_ordinal_wording_is_not_a_count_request() -> None:
+    """
+    "몇 번째"는 순서를 묻는 말이고 답이 개수가 아니다.
+
+    '번'과 '회'는 횟수가 아닌 자리에 훨씬 자주 쓰인다. 어휘를 넓게 잡으면 순서를 물은 질문에
+    개수가 답으로 나간다.
+    """
+    assert normalize_change_count_request("몇 번째로 바뀐 거야?") is None
+    assert normalize_change_count_request("이번 계약은 어떻게 됐어?") is None
+    assert normalize_change_count_request("1회차 계약 내용 알려줘") is None
+
+    assert normalize_change_count_request("몇 번 바뀌었어?") == OPERATION_CHANGE_COUNT
+    assert normalize_change_count_request("몇 회 정정됐어?") == OPERATION_CHANGE_COUNT
+    assert normalize_change_count_request("몇 차례 바뀌었어?") == OPERATION_CHANGE_COUNT
+
+
+def test_q13_shaped_question_keeps_its_supply_contract_plan() -> None:
+    """대조군. 공급계약 경로의 계획은 하나도 달라지지 않아야 한다."""
+    plan = build_query_plan(SYNTHETIC_Q13, known_companies=KNOWN_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_SUPPLY_CONTRACT
+    assert plan.years == (2025,)
+    assert plan.month == 8
+    assert root_filing_window(plan) == ("20250801", "20250831")
+
+
+# --------------------------------------------------------------------------
+# 2. 어휘 — 넓힌 표현이 다른 질문을 끌어오지 않는다
+#
+# '투자' 한 낱말을 유형 표현으로 쓰지 않는 것이 이 절의 전부다.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 투자판단관련주요경영사항. 실제 코퍼스에 있는 다른 거래소공시 유형이다.
+        "테스트반도체 투자판단관련주요경영사항 공시, 정정된 내용 있어?",
+        "테스트반도체 투자판단 관련 주요 경영사항이 바뀐 게 있어?",
+        # 일반 투자 표현. 시설을 가리키는 말이 없다.
+        "테스트반도체 투자자문 계약이 변경된 적 있어?",
+        "테스트반도체 투자활동 현금흐름이 작년이랑 달라졌어?",
+        "테스트반도체 타법인 출자 투자 내역이 수정됐어?",
+    ],
+)
+def test_investment_wording_alone_does_not_open_the_facility_investment_path(
+    question: str,
+) -> None:
+    """
+    대상 표현 없이 '투자'만 있는 질문은 신규시설투자로 읽히지 않아야 한다.
+
+    읽히면 이 질문들이 Pattern E로 흘러가 엉뚱한 공시의 정정 이력을 답으로 받는다.
+    """
+    try:
+        plan = build_query_plan(question, known_companies=KNOWN_COMPANIES)
+
+    except UnsupportedQuestionError:
+        # 다른 이유로 거절되는 것은 이 테스트의 관심사가 아니다. 신규시설투자 이력으로
+        # 열리지 않았다는 사실만 확인하면 된다.
+        return
+
+    assert plan.document_subtype != EVENT_SUBTYPE_FACILITY_INVESTMENT
+
+
+def test_q12_is_not_routed_to_pattern_e_by_the_new_vocabulary() -> None:
+    """
+    Q12에는 '시설투자'가 그대로 들어 있지만 Pattern E로 가면 안 된다.
+
+    가드가 둘이다. 다중 기업 판정이 이력 판정보다 먼저 실행되고, 그것을 통과하더라도 Q12에는
+    변경 이력을 묻는 표현이 없다. 둘 중 하나만 남아도 이 성질은 유지돼야 하므로 계획의
+    intent와 유형 표현을 함께 본다.
+    """
+    plan = build_query_plan(Q12, known_companies=REAL_COMPANIES)
+
+    assert plan.intent != INTENT_EVENT_HISTORY
+    # Q12의 시설투자 subtype은 Pattern D 집계 계획에 명시적으로 남지만,
+    # intent가 event_history가 아니므로 Pattern E의 single-root 경로로는 들어가지 않는다.
+    assert plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+
+
+def test_q12_wording_without_the_second_company_still_lacks_a_history_question() -> None:
+    """
+    기업을 하나로 줄여 다중 기업 가드를 없애도 Q12 모양은 이력 질문이 아니다.
+
+    두 가드 중 하나를 걷어 낸 상태를 일부러 만들어, 남은 가드 하나가 실제로 막고 있는지
+    본다. 이력 표현 요구가 사라지면 이 테스트가 먼저 깨진다.
+    """
+    with pytest.raises(UnsupportedQuestionError):
+        build_query_plan(
+            "2025년에 테스트반도체가 새로 발표한 시설투자, 다 합치면 얼마야?",
+            known_companies=KNOWN_COMPANIES,
+        )
+
+
+# --------------------------------------------------------------------------
+# 3. 유형이 둘 이상 맞는 질문 — 순서로 고르지 않는다
+#
+# 어휘를 넓힐 때의 위험은 두 가지다. 하나는 엉뚱한 질문까지 열리는 것이고(위 2절), 다른
+# 하나는 한 질문이 두 유형에 맞을 때 하나로 조용히 좁혀지는 것이다. 이 절이 뒤쪽을 맡는다.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "question", [AMBIGUOUS_SUBTYPE_QUESTION, SYNTHETIC_AMBIGUOUS_SUBTYPE_QUESTION]
+)
+def test_ambiguous_question_matches_exactly_two_subtypes(question: str) -> None:
+    """
+    이 질문이 실제로 두 유형에 맞는지부터 고정한다.
+
+    아래 테스트들이 '둘 이상 맞을 때 막힌다'를 검증하는데, 어휘가 바뀌어 한 종만 맞게 되면
+    그 테스트들은 여전히 통과하면서 아무것도 검증하지 않게 된다. 전제를 따로 못박는다.
+
+    선언 순서대로 나열된다. 순서는 우선순위가 아니라 진단 문자열의 나열 차례다.
+    """
+    assert _matched_subtypes(question) == (
+        EVENT_SUBTYPE_SUPPLY_CONTRACT,
+        EVENT_SUBTYPE_FACILITY_INVESTMENT,
+    )
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        (SYNTHETIC_Q13, (EVENT_SUBTYPE_SUPPLY_CONTRACT,)),
+        (SYNTHETIC_Q15, (EVENT_SUBTYPE_FACILITY_INVESTMENT,)),
+        (Q15, (EVENT_SUBTYPE_FACILITY_INVESTMENT,)),
+        (Q14, (EVENT_SUBTYPE_SUPPLY_CONTRACT,)),
+    ],
+)
+def test_single_subtype_questions_match_exactly_one(
+    question: str, expected: tuple[str, ...]
+) -> None:
+    """대조군. 기존 질문들은 한 종만 맞아야 하며, 그래서 예전처럼 계획이 만들어진다."""
+    assert _matched_subtypes(question) == expected
+
+
+@pytest.mark.parametrize(
+    ("question", "known_companies"),
+    [
+        (AMBIGUOUS_SUBTYPE_QUESTION, REAL_COMPANIES),
+        (SYNTHETIC_AMBIGUOUS_SUBTYPE_QUESTION, KNOWN_COMPANIES),
+    ],
+)
+def test_ambiguous_subtype_question_is_rejected_at_planning(
+    question: str, known_companies: tuple[str, ...]
+) -> None:
+    """
+    두 유형에 맞으면 계획을 만들지 않는다.
+
+    사유를 unsupported_event_subtype과 나누는 것이 규약이다. 그쪽은 어휘를 넓히면 풀리고,
+    이쪽은 넓혀도 풀리지 않는다. 후속 작업이 다르므로 같은 사유로 뭉개지 않는다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(question, known_companies=known_companies)
+
+    assert error.value.reason == "ambiguous_event_subtype"
+
+
+def test_ambiguous_subtype_rejection_names_both_candidates() -> None:
+    """
+    무엇과 무엇 사이에서 막혔는지가 남아야 한다.
+
+    후보를 적지 않으면 질문을 어떻게 고쳐야 답할 수 있는지 알 수 없고, '유형을 못 찾았다'와
+    구분되지도 않는다. 새 노출 경로를 만들지는 않는다. detail은 missing_year 등이 이미 쓰고
+    있는 진단 자리 그대로다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        build_query_plan(AMBIGUOUS_SUBTYPE_QUESTION, known_companies=REAL_COMPANIES)
+
+    detail = error.value.detail
+
+    assert EVENT_SUBTYPE_SUPPLY_CONTRACT in detail
+    assert EVENT_SUBTYPE_FACILITY_INVESTMENT in detail
+
+
+def test_ambiguous_subtype_question_is_not_narrowed_to_either_subtype(
+    facility_manifest_path: Path,
+    facility_corpus_root: Path,
+) -> None:
+    """
+    값을 하나도 만들지 않는다.
+
+    예전 구현은 여기서 공급계약 계획을 만들어 실행까지 갔다. 코퍼스 사정에 따라서는
+    근거를 갖춘 COMPLETED/ANSWERABLE이 나올 수 있었고, 그러면 시설투자를 함께 물은 질문에
+    공급계약 이력만 답한 결과가 된다. 받는 쪽이 그것을 알 방법이 없다.
+    """
+    result = answer_question(
+        SYNTHETIC_AMBIGUOUS_SUBTYPE_QUESTION,
+        corpus_root=facility_corpus_root,
+        manifest_path=facility_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.answerability_status is None
+
+    assert result.facts == []
+    assert result.evidence == []
+    assert result.event_histories == []
+    assert result.event_links == []
+    assert result.resolved_event_states == []
+
+    assert result.execution_issue is not None
+    assert result.execution_issue.reason == "ambiguous_event_subtype"
+    # 계획 단계에서 막힌다. 코퍼스를 보기 전이므로 답변 가능성을 판정하지 않는다.
+    assert result.execution_issue.stage == "query_plan"
+
+
+def test_ambiguous_subtype_question_never_reaches_retrieval(
+    facility_manifest_path: Path,
+    facility_corpus_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    '값이 없다'가 아니라 '코퍼스를 열지 않았다'를 고정한다.
+
+    앞의 테스트는 결과가 비어 있음을 보지만, 조회를 하고서 아무것도 못 찾은 경우와 구분되지
+    않는다. 조회 함수를 폭발물로 바꿔 두면 그 구분이 생긴다. 호출되면 테스트가 깨진다.
+    """
+
+    def _explode(**_kwargs: object) -> None:
+        raise AssertionError(
+            "유형이 모호한 질문에서 공시 조회가 실행됐습니다. 계획 단계에서 막혀야 합니다."
+        )
+
+    monkeypatch.setattr(
+        "disclosure_agent.agent.handlers.event_history.list_event_filings", _explode
+    )
+
+    result = answer_question(
+        SYNTHETIC_AMBIGUOUS_SUBTYPE_QUESTION,
+        corpus_root=facility_corpus_root,
+        manifest_path=facility_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.execution_issue is not None
+    assert result.execution_issue.reason == "ambiguous_event_subtype"
+
+
+def test_unambiguous_questions_still_reach_retrieval(
+    facility_manifest_path: Path,
+    facility_corpus_root: Path,
+    parsed_documents: None,
+) -> None:
+    """
+    대조군. 위 테스트가 '아무것도 실행되지 않는다'를 고정하므로, 한 종만 맞는 질문은
+    반대로 끝까지 실행돼야 한다. 둘을 함께 두어야 가드가 과하게 걸린 경우를 잡는다.
+    """
+    result = answer_question(
+        SYNTHETIC_Q15,
+        corpus_root=facility_corpus_root,
+        manifest_path=facility_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert len(result.event_histories) == 1
+
+
+# --------------------------------------------------------------------------
+# 4. 이벤트 유형 대응 — 계획의 세부유형이 EventType을 정한다
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("document_subtype", "expected"),
+    [
+        (EVENT_SUBTYPE_SUPPLY_CONTRACT, EventType.SUPPLY_CONTRACT),
+        (EVENT_SUBTYPE_FACILITY_INVESTMENT, EventType.FACILITY_INVESTMENT),
+    ],
+)
+def test_document_subtype_decides_the_event_type(
+    document_subtype: str, expected: EventType
+) -> None:
+    assert resolve_event_type(document_subtype) is expected
+
+
+def test_unknown_document_subtype_has_no_event_type() -> None:
+    """
+    모르는 유형을 가까운 유형으로 대신하지 않는다.
+
+    대신하면 정정 항목이 다른 유형의 어휘로 조회되어 이름이 하나도 붙지 않고, 그 결과는
+    "바뀐 것이 없다"와 구분되지 않는다.
+    """
+    assert resolve_event_type("주식소각결정") is None
+    assert "주식소각결정" not in EVENT_TYPE_BY_DOCUMENT_SUBTYPE
+
+
+def test_unsupported_document_subtype_is_blocked_before_reading_the_corpus(
+    facility_manifest_path: Path,
+    facility_corpus_root: Path,
+) -> None:
+    """대응하는 유형이 없으면 값을 하나도 만들지 않고 막힌다."""
+    plan = QueryPlan(
+        question="합성 질문",
+        companies=(COMPANY,),
+        years=(2024,),
+        intent=INTENT_EVENT_HISTORY,
+        document_class="event",
+        document_subtype="주식소각결정",
+        metric=None,
+        chain_policy=ChainPolicy.FULL_CHAIN,
+    )
+
+    result = build_event_history_result(
+        plan,
+        corpus_root=facility_corpus_root,
+        manifest_path=facility_manifest_path,
+    )
+
+    assert result.history is None
+    assert result.status is None
+    assert result.blocked is not None
+    assert result.blocked.reason == "unsupported_event_type"
+
+
+# --------------------------------------------------------------------------
+# 5. 체인 — 원공시 1건 + 정정 3건
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def facility_result(
+    facility_manifest_path: Path,
+    facility_corpus_root: Path,
+    parsed_documents: None,
+):
+    plan = build_query_plan(SYNTHETIC_Q15, known_companies=KNOWN_COMPANIES)
+
+    return build_event_history_result(
+        plan,
+        corpus_root=facility_corpus_root,
+        manifest_path=facility_manifest_path,
+    )
+
+
+def test_facility_chain_collects_the_original_filing_and_every_correction(
+    facility_result,
+) -> None:
+    """
+    연도 없이도 원공시 1건과 정정 3건이 시간순으로 모여야 한다.
+
+    문서 순서가 규약이다. 정정은 원공시보다 뒤에, 서로는 공시일 순으로 놓인다. 순서가
+    흐트러지면 "무엇이 언제 바뀌었나"의 '언제'가 결과에서 사라진다.
+    """
+    assert facility_result.blocked is None
+    assert facility_result.status is AnswerabilityStatus.ANSWERABLE
+
+    history = facility_result.history
+
+    assert history is not None
+    assert history.chain_complete is True
+    assert history.document_ids == [
+        f"exchange_{ROOT_RECEIPT_NO}",
+        *[f"exchange_{receipt_no}" for receipt_no in CORRECTION_RECEIPT_NOS],
+    ]
+
+
+def test_facility_chain_resolves_every_correction_link(facility_result) -> None:
+    """정정 3건이 모두 같은 원공시로 연결돼야 한다."""
+    links = facility_result.links
+
+    assert len(links) == 3
+    assert all(
+        link.resolution_status is EventLinkResolutionStatus.RESOLVED for link in links
+    )
+    assert {link.resolved_doc_id for link in links} == {f"exchange_{ROOT_RECEIPT_NO}"}
+
+
+def test_facility_chain_keeps_the_full_change_trajectory(facility_result) -> None:
+    """
+    질문이 묻는 것은 최종 상태 하나가 아니라 변경 이력 전체다.
+
+    필드별로 마지막 값만 남기면 "몇 번 바뀌었나"에 답할 수 없다. 이름을 붙인 변경 4건이
+    순서대로 남아 있어야 한다.
+    """
+    history = facility_result.history
+
+    assert history is not None
+    assert [(change.field_name, change.before, change.after) for change in history.changes] == [
+        (FIELD_INVESTMENT_AMOUNT, "1,000,000,000", "1,100,000,000"),
+        (FIELD_INVESTMENT_AMOUNT, "1,100,000,000", "1,200,000,000"),
+        (FIELD_INVESTMENT_END_DATE, "2025-12-15", "2026-03-31"),
+        (FIELD_INVESTMENT_END_DATE, "2026-03-31", "2026-03-27"),
+    ]
+
+
+def test_facility_chain_does_not_produce_a_resolved_event_state(
+    facility_manifest_path: Path,
+    facility_corpus_root: Path,
+    parsed_documents: None,
+) -> None:
+    """
+    최종 상태 하나로 접지 않는다.
+
+    ResolvedEventState는 Q14 계열('지금 어떻게 됐어')의 표현이며 이번 범위 밖이다. 여기서
+    만들기 시작하면 이력 질문에 상태 하나로 답하는 경로가 생긴다.
+    """
+    result = answer_question(
+        SYNTHETIC_Q15,
+        corpus_root=facility_corpus_root,
+        manifest_path=facility_manifest_path,
+    )
+
+    assert result.resolved_event_states == []
+    assert len(result.event_histories) == 1
+
+
+def test_facility_history_reaches_the_common_execution_contract(
+    facility_manifest_path: Path,
+    facility_corpus_root: Path,
+    parsed_documents: None,
+) -> None:
+    """질문 문자열 하나가 공통 Contract까지 끊기지 않고 도달해야 한다."""
+    result = answer_question(
+        SYNTHETIC_Q15,
+        corpus_root=facility_corpus_root,
+        manifest_path=facility_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert result.answerability_reason is None
+    assert len(result.event_histories) == 1
+    assert len(result.event_links) == 3
+    assert len(result.evidence) >= 2
+
+    evidence_by_id = {item.evidence_id: item for item in result.evidence}
+    for change in result.event_histories[0].changes:
+        assert change.before_evidence_id is not None
+        assert change.after_evidence_id == change.before_evidence_id
+        evidence = evidence_by_id[change.before_evidence_id]
+        assert evidence.raw_text is not None
+        assert f"before: {change.before}" in evidence.raw_text
+        assert f"after: {change.after}" in evidence.raw_text
+
+
+def test_ambiguous_facility_root_is_not_silently_narrowed(
+    tmp_path: Path,
+    facility_corpus_root: Path,
+    parsed_documents: None,
+) -> None:
+    """
+    연도가 없을 때 원공시가 여럿이면 하나를 고르지 않는다.
+
+    이것이 공시일 창을 뺀 대가를 치르는 자리다. 창이 없으면 후보가 늘어날 수 있고, 그때
+    임의로 하나를 고르면 다른 건의 이력을 이 건의 이력이라고 말하게 된다.
+    """
+    manifest_path = tmp_path / "ambiguous_manifest.jsonl"
+
+    records = [
+        *FACILITY_RECORDS,
+        _record(
+            "SYNTHETIC0121",
+            "20230310",
+            subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+            is_correction=False,
+        ),
+    ]
+
+    with manifest_path.open("w", encoding="utf-8") as file:
+        for record in records:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    directory = facility_corpus_root / unicodedata.normalize(
+        "NFD", "raw/exchange/테스트반도체/SYNTHETIC0121"
+    )
+
+    directory.mkdir(parents=True, exist_ok=True)
+
+    (directory / "SYNTHETIC0121.xml").write_text("<html/>", encoding="utf-8")
+
+    plan = build_query_plan(SYNTHETIC_Q15, known_companies=KNOWN_COMPANIES)
+
+    result = build_event_history_result(
+        plan,
+        corpus_root=facility_corpus_root,
+        manifest_path=manifest_path,
+    )
+
+    assert result.history is None
+    assert result.status is AnswerabilityStatus.UNRESOLVED
+    assert result.blocked is not None
+    assert result.blocked.reason == "ambiguous_root"
+    assert len(result.root_candidate_doc_ids) == 2
+
+
+# --------------------------------------------------------------------------
+# 6. 실측 코퍼스 — 대표 질문 원문
+# --------------------------------------------------------------------------
+
+# 실측 체인이 밝힌 변경 궤적 전체.
+#
+# 건수만 세지 않고 값까지 못박는 이유:
+#     "투자금액이 2번 바뀌었다"는 궤적이 통째로 어긋나도 통과한다. 중간 판본이 빠지거나
+#     before/after가 뒤집혀도 개수는 그대로다. 이 이력의 쓸모는 "얼마에서 얼마로"에 있으므로
+#     그 사슬을 그대로 고정한다. 앞 변경의 after가 다음 변경의 before와 이어지는 것까지
+#     여기서 함께 보인다.
+#
+# 표기에 대하여:
+#     원문 문자열 그대로다. 쉼표를 지우거나 숫자로 바꾸지 않는다. event.diff가 값을 해석하지
+#     않는다는 규약(값의 해석은 diff의 책임이 아니다) 때문이며, producer가 실제로 내놓는
+#     canonical 형태가 이것이다. 여기서 임의로 정규화해 적으면 테스트가 production과 다른
+#     계약을 주장하게 된다.
+ACTUAL_Q15_CHANGES: list[tuple[str, str, str]] = [
+    (FIELD_INVESTMENT_AMOUNT, "27,850,000,000", "28,178,420,000"),
+    (FIELD_INVESTMENT_AMOUNT, "28,178,420,000", "28,533,520,000"),
+    (FIELD_INVESTMENT_END_DATE, "2025-12-15", "2026-03-31"),
+    (FIELD_INVESTMENT_END_DATE, "2026-03-31", "2026-03-27"),
+]
+
+
+
+@pytest.mark.corpus
+def test_q15_is_answered_in_the_actual_corpus() -> None:
+    """대표 질문 원문 그대로 실행해 이력 1건이 완결 체인으로 나와야 한다."""
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    result = answer_question(Q15, corpus_root=corpus_root)
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert result.answerability_reason is None
+
+    assert len(result.event_histories) == 1
+
+    history = result.event_histories[0]
+
+    assert history.chain_complete is True
+    # 원공시 1건 + 정정 3건.
+    assert len(history.document_ids) == 4
+    assert len(result.event_links) == 3
+    assert all(
+        link.resolution_status is EventLinkResolutionStatus.RESOLVED
+        for link in result.event_links
+    )
+
+    # gold(evaluation/gold_answers.jsonl q15)의 min_evidence_count.
+    assert len(result.evidence) >= 2
+
+    assert [
+        (change.field_name, change.before, change.after) for change in history.changes
+    ] == ACTUAL_Q15_CHANGES
+
+    assert result.resolved_event_states == []
+
+
+@pytest.mark.corpus
+def test_ambiguous_subtype_question_is_fail_closed_in_the_actual_corpus() -> None:
+    """
+    실측 코퍼스에서도 값이 만들어지지 않아야 한다.
+
+    합성 코퍼스만으로는 부족하다. 예전 구현이 이 질문에 무엇을 돌려주었는지는 그 기업이
+    2024년에 낸 공급계약 건수에 달려 있었고, 그것은 코퍼스마다 다르다. 원공시가 하나뿐인
+    기업이었다면 근거까지 갖춘 ANSWERABLE이 나왔을 것이다. 그 우연에 기대지 않는다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    result = answer_question(AMBIGUOUS_SUBTYPE_QUESTION, corpus_root=corpus_root)
+
+    assert result.execution_status is ExecutionStatus.BLOCKED
+    assert result.answerability_status is None
+    assert result.event_histories == []
+    assert result.event_links == []
+    assert result.evidence == []
+    assert result.facts == []
+
+    assert result.execution_issue is not None
+    assert result.execution_issue.reason == "ambiguous_event_subtype"
+
+
+@pytest.mark.corpus
+def test_q13_is_unchanged_in_the_actual_corpus() -> None:
+    """
+    Q13 회귀. 공급계약 경로가 이번 변경으로 달라지지 않아야 한다.
+
+    EventType을 상수에서 대응표로 바꾼 변경이 공급계약 쪽에 닿았는지 보는 자리다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    result = answer_question(
+        "HD현대일렉트릭이 2024년 8월에 공시한 공급계약, 나중에 바뀐 내용 있어?",
+        corpus_root=corpus_root,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert len(result.event_histories) == 1
+    assert result.event_histories[0].chain_complete is True
+
+
+@pytest.mark.corpus
+def test_q14_is_unresolved_as_ambiguous_in_the_actual_corpus() -> None:
+    """
+    Q14는 계획 단계를 지나 handler의 기존 모호 경로로 막힌다.
+
+    예전에는 이 질문이 query_plan 단계에서 missing_year로 막혔다. 지금은 계획이 만들어지고,
+    그 기업의 공급계약 원공시가 여러 건이라 handler가 ambiguous_root로 막는다. 답하지 못하는
+    것은 같지만 사유가 실제로 일어난 일과 맞는다.
+
+    execution_status가 COMPLETED인 것이 이 변경의 핵심이다. 실행이 끝나지 못한 것(BLOCKED)이
+    아니라 실행을 끝까지 하고 나서 답을 확정하지 못했다는 판정이며, 그래야 API가 422가 아니라
+    200으로 이 판정을 그대로 내보낸다(tests/integration/test_api_q14_corpus.py).
+
+    루트를 하나 지어내지 않는 것을 함께 고정한다. 후속 정정·해지 체인이 한쪽에만 있다는
+    이유로 루트를 역으로 고르면 다른 계약의 이력을 그 계약의 이력이라고 말하게 되고, 그
+    오답은 형식상 완전한 답변으로 보인다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    result = answer_question(Q14, corpus_root=corpus_root)
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
+    assert result.answerability_reason is AnswerabilityReason.AMBIGUOUS_MATCH
+
+    # 루트를 고르지 않았다는 것이 이 판정의 내용이다.
+    assert result.event_histories == []
+    assert result.event_links == []
+    assert result.evidence == []
+
+    # 막힌 자리가 계획이 아니라 문서 확정 단계여야 한다. 같은 UNRESOLVED라도 계획 단계에서
+    # 나온 것이면 이 변경이 되돌아간 것이다.
+    plan = build_query_plan(Q14, known_companies=REAL_COMPANIES)
+
+    internal = build_event_history_result(plan, corpus_root=corpus_root)
+
+    assert internal.blocked is not None
+    assert internal.blocked.stage == STAGE_FILING_DISCOVERY
+    assert internal.blocked.reason == REASON_AMBIGUOUS_ROOT
+
+
+def test_supply_contract_history_plan_carries_the_named_counterparty() -> None:
+    """
+    이력 계획이 질문의 상대방을 담는다. 조회 조건이 아니라 fail-close 신호로 담는다.
+
+    Q02(단건 조회)와 어휘를 나눈 것이 여기서 드러난다. Q02의 패턴은 '<이름>과/와 체결·계약·맺'
+    이고, 이 경로는 '<이름>과/와/랑/이랑 체결·맺'이다. Q14가 쓰는 '포드랑 맺었던'은 앞 패턴에
+    걸리지 않으므로 이 경로가 따로 읽는다.
+    """
+    plan = build_query_plan(Q14, known_companies=REAL_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_SUPPLY_CONTRACT
+    assert plan.counterparty == "포드"
+
+
+def test_contract_field_conjunction_is_not_read_as_a_counterparty() -> None:
+    """
+    '이랑'이 접속 조사로 쓰인 문장을 상대방으로 읽지 않는다.
+
+    조사를 넓히면서 생기는 유일한 위험이 이것이다. "계약금액이랑 계약기간은?"에서 '이랑'은
+    두 필드를 함께 묻는 말이지 상대를 가리키는 말이 아니며, 뒤따르는 말에 '계약'을 넣으면
+    '계약금액이'가 상대방으로 읽힌다. 체결·맺음만 남긴 이유다.
+
+    이 문장은 Q02 계열이 실제로 쓰는 표기다(tests/unit/test_q02_query_plan.py).
+    """
+    from disclosure_agent.agent.query_analyzer import EVENT_COUNTERPARTY_PATTERN
+
+    assert EVENT_COUNTERPARTY_PATTERN.search("계약금액이랑 계약기간은?") is None
+
+    # 상대를 가리키는 '이랑'은 그대로 읽는다.
+    matched = EVENT_COUNTERPARTY_PATTERN.search("테슬라랑 맺은 공급계약")
+
+    assert matched is not None
+    assert matched.group(1) == "테슬라"
+
+
+@pytest.mark.corpus
+def test_single_root_supply_contract_with_a_named_counterparty_fails_closed() -> None:
+    """
+    원공시가 1건이어도 질문이 상대방을 지목했으면 답하지 않는다.
+
+    무엇을 막는가:
+        이 구현은 상대방 이름을 본문과 대조하지 못한다(C3 미구현). 그 상태에서 후보가 하나라는
+        이유로 그 하나를 답하면, "그 상대방과 맺은 계약의 이력"을 물었는데 "이 기업의 공급계약
+        중 코퍼스에 하나뿐인 것의 이력"을 답하게 된다. 둘이 같은 계약인지는 확인하지 않았고,
+        확인하지 않았다는 사실은 답 어디에도 남지 않는다.
+
+        후보가 하나뿐인 것은 코퍼스가 그렇다는 뜻이지 질문이 가리킨 계약이라는 뜻이 아니다.
+        개수가 맞아떨어진 것을 근거로 삼지 않는다.
+
+    사유를 ambiguous_root와 나누는 이유:
+        후보 개수가 1과 N으로 다르다. 같은 사유로 묶으면 "후보가 1건이라 특정할 수 없습니다"라는
+        말이 되어 진단이 사실과 어긋난다. 공개 사유(AMBIGUOUS_MATCH)는 같다 — 둘 다 대상 문서를
+        확정하지 못한 판정이며, 새 공개 사유를 만들 만큼 다르지 않다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    plan = build_query_plan(
+        SINGLE_ROOT_COUNTERPARTY_QUESTION,
+        known_companies=SINGLE_ROOT_COMPANIES,
+    )
+
+    assert plan.years == ()
+    assert plan.counterparty == "테슬라"
+
+    internal = build_event_history_result(plan, corpus_root=corpus_root)
+
+    if len(internal.root_candidate_doc_ids) != 1:
+        pytest.skip(
+            "이 코퍼스에서는 해당 기업의 공급계약 원공시가 한 건이 아닙니다: "
+            f"{len(internal.root_candidate_doc_ids)}건."
+        )
+
+    assert internal.status is AnswerabilityStatus.UNRESOLVED
+    assert internal.history is None
+    assert internal.blocked is not None
+    assert internal.blocked.stage == STAGE_FILING_DISCOVERY
+    assert internal.blocked.reason == REASON_UNVERIFIED_COUNTERPARTY
+
+    result = answer_question(
+        SINGLE_ROOT_COUNTERPARTY_QUESTION, corpus_root=corpus_root
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.UNRESOLVED
+    assert result.answerability_reason is AnswerabilityReason.AMBIGUOUS_MATCH
+    assert result.event_histories == []
+    assert result.evidence == []
+
+
+@pytest.mark.corpus
+def test_single_root_supply_contract_without_a_counterparty_still_answers() -> None:
+    """
+    대조군. 상대방을 적지 않은 질문의 동작은 달라지지 않는다.
+
+    fail-close의 기준은 '후보가 하나'가 아니라 '확인할 수 없는 조건을 걸고 물었다'이다. 이
+    질문은 상대방을 걸지 않았으므로 확인하지 못한 조건이 없고, 그 기업의 공급계약이 코퍼스에
+    하나뿐이라는 사실이 그대로 답이 된다.
+
+    위 시험과 질문 문자열의 차이는 상대방 구절 하나뿐이다. 둘을 나란히 두어야 이번 변경이
+    무엇을 기준으로 막는지가 드러난다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    plan = build_query_plan(
+        SINGLE_ROOT_SUPPLY_CONTRACT_QUESTION,
+        known_companies=SINGLE_ROOT_COMPANIES,
+    )
+
+    assert plan.years == ()
+    assert plan.counterparty is None
+
+    internal = build_event_history_result(plan, corpus_root=corpus_root)
+
+    if internal.blocked is not None:
+        pytest.skip(
+            "이 코퍼스에서는 해당 기업의 공급계약 원공시가 한 건이 아닙니다: "
+            f"{internal.blocked.reason}."
+        )
+
+    assert internal.status is AnswerabilityStatus.ANSWERABLE
+    assert internal.history is not None
+
+
+@pytest.mark.corpus
+def test_named_counterparty_with_several_roots_still_stops_at_ambiguous_root() -> None:
+    """
+    상대방 판정이 ambiguous_root를 가로채지 않는다.
+
+    후보가 여럿이면 상대방을 적었든 아니든 ambiguous_root다. 순서가 뒤집히면 Q14의 사유가
+    바뀌고, "후보가 12건"이라는 진단이 "상대방을 확인할 수 없다"로 대체된다. 둘 다 사실이지만
+    먼저 말해야 하는 것은 후보가 여럿이라는 쪽이다 — 상대방을 대조할 수 있게 되어도 후보가
+    여럿인 상황은 그대로 남기 때문이다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    plan = build_query_plan(
+        MULTI_ROOT_COUNTERPARTY_QUESTION,
+        known_companies=REAL_COMPANIES,
+    )
+
+    assert plan.counterparty == "테슬라"
+
+    internal = build_event_history_result(plan, corpus_root=corpus_root)
+
+    assert len(internal.root_candidate_doc_ids) > 1
+    assert internal.blocked is not None
+    assert internal.blocked.reason == REASON_AMBIGUOUS_ROOT
+
+
+# --------------------------------------------------------------------------
+# BB17 — 자기참조 정정이 완결 체인으로 둔갑하지 않는다
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.corpus
+def test_bb17_self_referential_correction_is_not_reported_as_a_complete_chain() -> None:
+    """
+    연결하지 못한 정정이 있는 이력을 "변경 없음"으로 답하지 않는다.
+
+    이 PR은 연결을 되찾지 않는다. 정정은 여전히 원공시에 붙지 않는다. 고정하는 것은 그
+    정정이 사라지지 않는다는 것과, 사라지지 않았으므로 완결이라고 말하지 않는다는 것이다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    plan = build_query_plan(BB17_QUESTION, known_companies=BB17_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+
+    result = answer_question(BB17_QUESTION, corpus_root=corpus_root)
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.INCOMPLETE_CHAIN
+
+    assert len(result.event_histories) == 1
+
+    history = result.event_histories[0]
+
+    assert history.chain_complete is False
+
+    # 미해결 정정이 구조에 남아 있다. 접수번호를 잃어버리면 무엇이 미해결인지 알 수 없다.
+    unresolved_receipt_nos = [
+        receipt_no
+        for gap in result.conversion_gaps
+        for receipt_no in gap.dropped.get("unresolved_correction_receipt_nos", [])
+    ]
+
+    assert unresolved_receipt_nos == [BB17_CORRECTION_RECEIPT_NO]
+
+    # 어느 정정을 Contract 상태로 옮기지 못했는지도 그 정정을 지목해 남는다.
+    assert BB17_CORRECTION_DOC_ID in {gap.subject for gap in result.conversion_gaps}
+
+    # 없는 연결을 지어내지 않는다. 정정은 원공시에 붙지 않은 상태 그대로다.
+    assert history.document_ids == ["exchange_20240521800037"]
+
+    answer = build_answer_response(result).answer
+
+    assert NO_LATER_CHANGE_SENTENCE not in answer
+
+
+@pytest.mark.corpus
+def test_q15_answer_is_unchanged_by_the_bb17_fix() -> None:
+    """
+    fail-closed 규칙이 정상 체인을 건드리지 않는다.
+
+    Q15는 원공시 1건 + 정정 3건이 전부 연결되는 이력이다. 이 체인에는 연결 정보가 무의미한
+    정정이 없으므로 새 규칙이 발동할 자리가 없고, 답 문장도 그대로여야 한다.
+    """
+    corpus_root = _resolve_corpus_root()
+
+    if corpus_root is None:
+        pytest.skip(f"실측 코퍼스가 없습니다. {CORPUS_ROOT_ENV}로 경로를 지정할 수 있습니다.")
+
+    result = answer_question(Q15, corpus_root=corpus_root)
+
+    assert result.answerability_status is AnswerabilityStatus.ANSWERABLE
+    assert result.event_histories[0].chain_complete is True
+
+    answer = build_answer_response(result).answer
+
+    assert "이력을 확인했습니다" in answer
+
+
+# --------------------------------------------------------------------------
+# 질의가 고른 루트가 '가능한 대상' 여럿 중 하나인 경우
+#
+# 리뷰어 사례를 production 조건 그대로 재현한다. 질문의 기간이 원공시를 B 하나로 좁히지만,
+# 체인 후보에는 A·B·C가 모두 들어 있다.
+# --------------------------------------------------------------------------
+
+# A 원공시 2023-03-01, B 원공시 2025-08-30, C 정정 2025-09-15(자기참조).
+#
+# 질문이 2025년을 지목하므로 원공시 후보는 B 하나다. C는 A와 B 둘 다 시간상 가능하며,
+# 어느 쪽인지 원문이 밝히지 않는다.
+PLAUSIBLE_EARLIER_ROOT = "SYNTHETIC0201"
+
+PLAUSIBLE_SELECTED_ROOT = "SYNTHETIC0202"
+
+PLAUSIBLE_CORRECTION = "SYNTHETIC0203"
+
+PLAUSIBLE_RECORDS: list[dict[str, Any]] = [
+    _record(
+        PLAUSIBLE_EARLIER_ROOT,
+        "20230301",
+        subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+        is_correction=False,
+    ),
+    _record(
+        PLAUSIBLE_SELECTED_ROOT,
+        "20250830",
+        subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+        is_correction=False,
+    ),
+    _record(
+        PLAUSIBLE_CORRECTION,
+        "20250915",
+        subtype=EVENT_SUBTYPE_FACILITY_INVESTMENT,
+        is_correction=True,
+    ),
+]
+
+PLAUSIBLE_QUESTION = (
+    f"{COMPANY}가 2025년에 낸 신규 시설투자 공시, 그 뒤에 수정된 부분이 있어?"
+)
+
+
+def _plausible_document(record: dict[str, Any]) -> dict[str, Any]:
+    """정정본은 원공시 제출일로 자기 접수일을 적는다. 대상을 가리키지 못하는 값이다."""
+    if not record["is_correction"]:
+        return {
+            "metadata": {"doc_id": record["doc_id"], "document_type": "exchange"},
+            "title": record["report_nm"],
+            "rows": [],
+            "correction": None,
+        }
+
+    return {
+        "metadata": {"doc_id": record["doc_id"], "document_type": "exchange"},
+        "title": record["report_nm"],
+        "rows": [],
+        "correction": {
+            "correction_date": "2025-09-15",
+            "original_filing_date": "2025-09-15",
+            "reason": "투자금액 변경",
+            "changes": [
+                {
+                    "raw_field": "2. 투자내역-투자금액",
+                    "field": "2. 투자내역-투자금액",
+                    "before": "1,000,000,000",
+                    "after": "1,500,000,000",
+                }
+            ],
+        },
+    }
+
+
+@pytest.fixture
+def plausible_manifest_path(tmp_path: Path) -> Path:
+    path = tmp_path / "plausible-manifest.jsonl"
+
+    with path.open("w", encoding="utf-8") as file:
+        for record in PLAUSIBLE_RECORDS:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    return path
+
+
+@pytest.fixture
+def plausible_corpus_root(tmp_path: Path) -> Path:
+    root = tmp_path / "plausible-corpus"
+
+    for record in PLAUSIBLE_RECORDS:
+        directory = root / unicodedata.normalize("NFD", record["file_path"])
+
+        directory.mkdir(parents=True, exist_ok=True)
+
+        (directory / f"{record['rcept_no']}.xml").write_text("<html/>", encoding="utf-8")
+
+    return root
+
+
+@pytest.fixture
+def plausible_documents(monkeypatch: pytest.MonkeyPatch) -> None:
+    by_receipt_no = {
+        record["rcept_no"]: _plausible_document(record) for record in PLAUSIBLE_RECORDS
+    }
+
+    def _parse(path: Path | str) -> dict[str, Any]:
+        return by_receipt_no[Path(path).stem]
+
+    monkeypatch.setattr(
+        "disclosure_agent.agent.handlers.event_history.parse_exchange_document", _parse
+    )
+
+
+def test_selected_root_among_several_plausible_roots_is_not_certified_complete(
+    plausible_manifest_path: Path,
+    plausible_corpus_root: Path,
+    plausible_documents: None,
+) -> None:
+    """
+    질의가 고른 루트가 '가능한 대상' 여럿 중 하나여도 완결이라 말하지 않는다.
+
+    질문의 기간이 원공시를 B 하나로 좁힌다. 그러나 C가 정정한 대상은 A일 수도 B일 수도
+    있고 원문은 밝히지 않는다. 그러면 "B 뒤에 변경이 없다"는 증명되지 않은 진술이 된다.
+
+    귀속은 정하지 않는다. EventLink는 만들어지지 않는다. 막는 것은 완결 선언뿐이다.
+    """
+    plan = build_query_plan(PLAUSIBLE_QUESTION, known_companies=KNOWN_COMPANIES)
+
+    assert plan.intent == INTENT_EVENT_HISTORY
+    assert plan.document_subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
+    assert plan.years == (2025,)
+
+    internal = build_event_history_result(
+        plan,
+        corpus_root=plausible_corpus_root,
+        manifest_path=plausible_manifest_path,
+    )
+
+    # 질의가 고른 원공시는 B 하나다. A는 기간 밖이라 루트 후보가 아니다.
+    assert internal.blocked is None
+    assert internal.root_candidate_doc_ids == (f"exchange_{PLAUSIBLE_SELECTED_ROOT}",)
+
+    assert internal.history is not None
+    assert internal.history.chain_complete is False
+    assert internal.status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+
+    # 소유를 만들지 않았다. 체인에 들어간 문서는 루트뿐이고 EventLink도 없다.
+    assert internal.history.document_ids == [f"exchange_{PLAUSIBLE_SELECTED_ROOT}"]
+    assert internal.links == ()
+
+    result = handle_event_history(
+        plan,
+        corpus_root=plausible_corpus_root,
+        manifest_path=plausible_manifest_path,
+    )
+
+    assert result.execution_status is ExecutionStatus.COMPLETED
+    assert result.answerability_status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.INCOMPLETE_CHAIN
+    assert result.event_links == []
+
+    # 미해결 정정의 접수번호가 남는다.
+    assert [
+        receipt_no
+        for gap in result.conversion_gaps
+        for receipt_no in gap.dropped.get("unresolved_correction_receipt_nos", [])
+    ] == [PLAUSIBLE_CORRECTION]
+
+    answer = build_answer_response(result).answer
+
+    assert NO_LATER_CHANGE_SENTENCE not in answer
+
+
+def test_earlier_root_of_the_same_group_is_also_not_certified_complete(
+    plausible_manifest_path: Path,
+    plausible_corpus_root: Path,
+    plausible_documents: None,
+) -> None:
+    """
+    같은 정정이 A의 완결도 막는다. 그것은 '양쪽 모두의 정정'이라는 뜻이 아니다.
+
+    A와 B 어느 쪽도 "뒤에 변경이 없다"를 증명하지 못한다는 뜻이며, 어느 쪽에도 EventLink는
+    생기지 않는다. 하나를 골라 붙이는 것이 귀속이고, 이 PR은 귀속을 하지 않는다.
+    """
+    plan = build_query_plan(
+        f"{COMPANY}가 2023년에 낸 신규 시설투자 공시, 그 뒤에 수정된 부분이 있어?",
+        known_companies=KNOWN_COMPANIES,
+    )
+
+    assert plan.years == (2023,)
+
+    internal = build_event_history_result(
+        plan,
+        corpus_root=plausible_corpus_root,
+        manifest_path=plausible_manifest_path,
+    )
+
+    assert internal.root_candidate_doc_ids == (f"exchange_{PLAUSIBLE_EARLIER_ROOT}",)
+    assert internal.history is not None
+    assert internal.history.chain_complete is False
+    assert internal.history.document_ids == [f"exchange_{PLAUSIBLE_EARLIER_ROOT}"]
+    assert internal.links == ()

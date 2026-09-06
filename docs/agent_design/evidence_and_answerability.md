@@ -1,8 +1,8 @@
 # Fact·Evidence와 답변 가능성
 
 18개 대표 질문을 기준으로 Fact와 Evidence의 책임을 나누고, 답변 가능·불가능 판정 체계를
-정리합니다. **본 문서는 초안이며 확정 규범이 아닙니다.** 아래 상태·사유 코드 목록과 최소 요건은
-팀 검토를 거쳐 확정합니다.
+정리합니다. **아래 상태·사유 코드 목록은 확정됐으며** `common/enums.py`가 정본입니다. 최소 요건
+표는 아직 초안이고 `Pending` 표시가 있는 행은 팀 검토를 거쳐 확정합니다.
 
 문서군 표기는 [query_plan.md](query_plan.md)의 대응을 따르고, 문서 내부 구조는 **Section**으로
 표기합니다. Capability 이름은 [agent_patterns.md](agent_patterns.md)를 정본으로 사용합니다.
@@ -47,15 +47,44 @@ Fact는 "무엇이 사실인가"를, Evidence는 "그것을 어디서 확인할 
 | 1 단일 사실 (Q02) | 3 (금액, 시작일, 종료일) | 같은 문서 내 2~3 | 확정 | 계산 없음 |
 | 2 단일 문서 요약 (Q04~Q06) | 0 (Fact 추출 아님) | 요약 항목 수만큼 | 확정 | 계산 없음. 원문 기재 비율은 인용하고 재계산하지 않음 |
 | 3 시계열 수치 (Q07) | 2 | **2** | **Pending D4** | 입력 Fact 2건 전부 참조 |
-| 3 시계열 파생지표 (Q08) | 4 | **2~4** | **Pending D4** | 기간별 분자·분모 4건 참조 |
+| 3 시계열 파생지표 (Q08) | 4 | **2~4** | **Pending D4** | 기간별 분자·분모 4건 참조. **Calculation 3** |
 | 3 시계열 서술 (Q09) | 0 | **2** (연도별 각 1) | **Pending D4** | 변화 항목마다 해당 연도 Evidence |
-| 4 기업 간 수치 (Q10) | 2 | 2 (기업별 1) | 확정 | 정규화 전 값과 정규화 후 값을 모두 보존 |
-| 4 기업 간 파생지표 (Q11) | 4 | 2~4 | 확정 | 기업별 비율 산출 후 비교 |
-| 4 기업 간 집계 (Q12) | 기업별 투자 건 수만큼 (합계 3 이상) | **합산에 포함된 투자 건별 1 이상**. 값을 확정한 정정공시가 있으면 그 문서도 포함 | 확정 | 기업별 합계는 해당 기업의 건별 Fact 전부 참조 |
+| 4 기업 간 수치 (Q10) | 2 | 2 (기업별 1) | 확정 | **Calculation 0**. Fact 2건을 Comparison Judgment로 판정해 ComparisonResult 1건. 단위 정규화 성공은 비교 직전 guard ②에서 확인. 정규화 전 값과 정규화 후 값을 모두 보존 |
+| 4 기업 간 파생지표 (Q11) | 4 | 2~4 | 확정 | 기업별 비율 **Calculation 2** → Comparison Judgment → ComparisonResult 1건 |
+| 4 기업 간 집계 (Q12) | 기업별 투자 건 수만큼 (합계 3 이상) | **합산에 포함된 투자 건별 1 이상**. 값을 확정한 정정공시가 있으면 그 문서도 포함 | 확정 | 기업별 합계 **Calculation 2** → Comparison Judgment → ComparisonResult 1건. 합계는 해당 기업의 건별 Fact 전부 참조 |
 | 5 단일 필드 정정 (Q13) | 2 (변경 전·후) | 2 이상 (원공시와 정정공시) | 확정 | 변경점은 두 Fact 모두 참조 |
-| 5 최종 상태 (Q14) | 3 이상 | 3 이상 (체인 전 문서) | 확정 | 상태 판정은 체인 전체 참조 |
+| 5 최종 상태 (Q14) | 3 이상 | 3 이상 (체인 전 문서) | 확정 | 상태 판정은 체인 전체 참조. **루트가 1건으로 확정된 경우의 요건**이며, 현재 Q14 질문처럼 루트가 복수면 이 요건에 닿지 않고 `UNRESOLVED`로 판정한다(D8) |
 | 5 다중 변경 (Q15) | 4 이상 | 체인 전 문서 | 확정 | 필드별 궤적은 해당 필드가 등장한 모든 문서 참조 |
 | 6 답변 불가능 (Q16~Q18) | 0 | 0 | 확정 | 계산 없음 |
+
+## Calculation cardinality
+
+Calculation은 Fact 또는 다른 Calculation에서 나온 **수치형 파생 결과**만 가리킵니다. 관계 판정은
+Calculation이 아니라 별도의 **ComparisonResult**입니다. 두 구조의 범위 정의는
+[agent_patterns.md](agent_patterns.md#c10-calculation의-범위)를 정본으로 씁니다. 개수는 내부 산술
+primitive 개수가 아니라 **최종 답변에서 의미 있게 사용되는 수치형 파생 결과 하나당 1건**으로
+셉니다.
+
+| 문항 | Calculation | ComparisonResult | 구성 | 근거 |
+|---|---|---|---|---|
+| Q08 | **3** | 없음 | 2024년 영업이익률 · 2025년 영업이익률 · 두 영업이익률의 변화량 | 원문에 없는 파생지표를 연도별로 각각 만들고, 질문이 "어떻게 달라졌어"로 변화량 자체를 요구합니다. 최종 우열 판정을 요구하지 않아 ComparisonResult가 없습니다 |
+| Q10 | **0** | 1 | – | 원문 Fact 두 개를 그대로 비교하므로 수치형 파생 결과가 없습니다 |
+| Q11 | **2** | 1 | 기업 A 영업이익률 · 기업 B 영업이익률 | 기업별 영업이익률 2건이 파생값입니다 |
+| Q12 | **2** | 1 | 기업 A 투자 합계 · 기업 B 투자 합계 | 기업별 투자 합계 2건이 파생값입니다 |
+
+- 최종 greater/less/equal 판정은 **Calculation count에 포함하지 않습니다.** Q10·Q11·Q12의 우열
+  판정은 ComparisonResult로 표현합니다.
+- Q10의 `0`은 계산 능력이 없다는 뜻이 아니라 **현재 질문이 수치형 파생 결과를 요구하지 않는다**는
+  뜻입니다. 같은 두 Fact를 두고 "얼마나 더 큰가", "몇 %p 차이인가"처럼 차이 수치 자체를 물으면 그
+  결과가 Calculation 1건으로 추가됩니다.
+- Q07은 위 canonical 목록에 포함되지 않았습니다. 질문("얼마나 늘었어")이 증감 수치를 요구하므로
+  Calculation은 최소 1건(증감액)이며, 답변에 증감률을 함께 제시하면 증감액·증감률 2건입니다.
+  Q07·Q08 모두 최종 우열 판정을 요구하지 않으므로 ComparisonResult를 만들지 않습니다.
+- **Comparability Validation이 실패하면** 그 지점 이후의 파생값도 ComparisonResult도 만들지 않고
+  answerability 경로로 넘깁니다. 검증은 단일 단계가 아니라 연산 직전마다 적용되는 guard입니다
+  (→ [agent_patterns.md](agent_patterns.md#comparability-validation의-적용-지점),
+  [답변 가능성 상태](#답변-가능성-상태)).
+- 여기서는 개수의 의미만 정합니다. 평가에서 이 개수를 어떻게 채점할지는 `evaluation/`의 범위입니다.
 
 ## 표기 예시
 
@@ -67,8 +96,9 @@ Fact는 "무엇이 사실인가"를, Evidence는 "그것을 어디서 확인할 
 Fact A = {기업, 지표=revenue, 기간=직전 회계연도, 기준=연결, 값, 단위}
 Fact B = {기업, 지표=revenue, 기간=당해 회계연도, 기준=연결, 값, 단위}
 
-Validation   = 동일 기업 ∧ 동일 개념 ∧ 동일 기준 ∧ 단위 정규화 성공
-Calculation  = delta(A, B), delta_pct(A, B)   # Python
+Validation①  = 동일 개념 ∧ 동일 기준 ∧ 단위 정규화 성공   # Calculation 입력 검증
+Validation②  = 동일 기업 ∧ 두 기간 값의 비교 가능성        # 증감 산출 직전
+Calculation  = 질문이 요구하는 증감 수치 — delta(A, B), 필요하면 delta_pct(A, B)   # Python
 Evidence A   = {직전 연도 사업보고서, 재무제표 Section, 해당 계정 행·열}
 Evidence B   = {당해 연도 사업보고서, 재무제표 Section, 해당 계정 행·열}
 ```
@@ -79,8 +109,11 @@ Evidence B   = {당해 연도 사업보고서, 재무제표 Section, 해당 계�
 Fact A = {기업 A, 지표=revenue, 기간, 기준=연결, 값, 단위 = 단위 X}
 Fact B = {기업 B, 지표=revenue, 기간, 기준=연결, 값, 단위 = 단위 Y}
 
-Validation   = ... ∧ 단위 정규화 성공
-Calculation  = compare(정규화된 A, 정규화된 B)
+Validation②  = ... ∧ 단위 정규화 성공
+               # Calculation이 없어 guard ①을 지나지 않으므로
+               # 단위 정규화 검증을 여기서 반드시 수행
+Calculation  = 없음 (질문이 수치형 파생 결과를 요구하지 않음)
+Comparison   = ComparisonResult{left=Fact A, right=Fact B, relation}   # Comparison Judgment
 출력          = 원문 단위 값과 정규화 값을 병기
                 (정규화 결과만 제시하면 사용자가 검증할 수 없음)
 ```
@@ -95,8 +128,10 @@ Calculation  = compare(정규화된 A, 정규화된 B)
             값은 해당 건의 필드 단위 최신값 (정정 반영)
             같은 건의 정정공시를 별개 건으로 세지 않음
 
-Calculation = aggregate(기업 A 건별 Fact) , aggregate(기업 B 건별 Fact)
-              → compare(합계 A, 합계 B)
+Validation① = 단위 정규화 성공 ∧ 집계 대상 집합 확정 ∧ 건별 최신값 확정   # 집계 직전
+Calculation = aggregate(기업 A 건별 Fact) , aggregate(기업 B 건별 Fact)   # 수치형 파생 2건
+Validation② = 결산월 일치 ∧ 계정 체계 호환                                # 비교 직전
+Comparison  = ComparisonResult{left=합계 A, right=합계 B, relation}       # Comparison Judgment
 
 Evidence    = 건별 원공시 + 값을 확정한 정정공시
 출력         = 기업별 합계와 함께 **합산에 포함된 투자 건 목록**을 제시
@@ -108,7 +143,8 @@ Evidence    = 건별 원공시 + 값을 확정한 정정공시
 Fact chain(투자금액)   = [원본, 정정 1, 정정 2, ...]
 Fact chain(투자 종료일) = [원본, 정정 2, 정정 3, ...]
 
-Calculation = state_resolution(공시일 시간순 정렬 → 필드별 최신값)
+State resolution = 공시일 시간순 정렬 → 필드별 최신값
+                   (수치형 파생값이 아니므로 Calculation으로 세지 않음)
 Evidence    = 원본과 정정 공시 전량
               (일부 생략 시 이력 신뢰성을 확인할 수 없음)
 ```
@@ -118,12 +154,30 @@ Evidence    = 원본과 정정 공시 전량
 | 상태 | 의미 | 해당 문항 |
 |---|---|---|
 | `ANSWERABLE` | 요구 정보를 확보했고 Evidence가 완비됨 | Q01~Q13, Q15 |
-| `PARTIALLY_ANSWERABLE` | 일부만 확보. 확보분은 답하고 미확보분을 명시 | Q14의 일부, 체인 미완결 사례, Q12에서 일부 건의 최신값 미확정 시 |
+| `PARTIALLY_ANSWERABLE` | 일부만 확보. 확보분은 답하고 미확보분을 명시 | 체인 미완결 사례, 질문에 필요한 일부 field가 원문에서 유보된 경우(D9 case A), Q12에서 일부 건의 최신값 미확정 시 |
+| `UNRESOLVED` | 후보를 찾았으나 하나로 좁히지 못함. "정보가 없다"와 다름 | Q14, 루트 이벤트가 복수인 사례 |
 | `UNANSWERABLE` | 답변 불가 | Q16 Q17 Q18 |
+
+`UNRESOLVED`는 Contract v0.1의 네 번째 상태입니다. `UNANSWERABLE`과 뭉치지 않습니다. 전자는
+질문을 좁히면 풀리고 후자는 좁혀도 풀리지 않으므로, 사용자가 할 수 있는 다음 행동이 다릅니다.
+
+**Q14는 `UNRESOLVED` + `AMBIGUOUS_MATCH`입니다.** 같은 기업·같은 제출일·같은 계약상대방으로
+원공시가 2건 이상이고 질문이 둘을 구분할 조건을 담고 있지 않기 때문입니다. 후속 정정·해지
+체인이 한쪽에만 있다는 이유로 루트를 역으로 고르지 않습니다
+([open_decisions.md](open_decisions.md) D8).
+
+**Comparability Validation 실패** — 비교 가능성 항목은 각각 필요한 연산 직전에 확인하며, Pattern
+전용 항목은 그 Pattern에서만 적용합니다(동일 기업은 Pattern C 전용, 결산월 일치는 Pattern D 전용)
+(→ [agent_patterns.md](agent_patterns.md#comparability-validation의-적용-지점)). Calculation 입력
+검증이 실패하면 Numeric Calculation을 수행하지 않고, 비교 가능성 검증이 실패하면 Comparison
+Judgment를 성공 결과로 확정하지 않고 ComparisonResult를 생성하지 않으며, 두 경우 모두 위
+answerability 경로로 넘깁니다.
+실패를 `relation` 값으로 표현하지 않습니다. 어떤 `AnswerabilityStatus`·`AnswerabilityReason`·
+stage/detail에 매핑할지는 **별도 Contract PR에서 확정**합니다.
 
 ## 사유 코드
 
-아래 목록은 18문항에서 도출한 최소 집합이며 **확정본이 아닙니다**.
+아래 목록은 18문항에서 도출한 최소 집합입니다. 모두 `AnswerabilityReason`에 자리가 있습니다.
 
 | 코드 | 의미 | 대표 문항 | 판정 근거 |
 |---|---|---|---|
@@ -131,11 +185,34 @@ Evidence    = 원본과 정정 공시 전량
 | `OUT_OF_SCOPE_DATA` | 요구하는 데이터 종류가 코퍼스에 없음 | Q17 | 보유 문서군 목록과 대조 |
 | `OUT_OF_SCOPE_POLICY` | 정책상 지원하지 않음 | Q18 | `docs/mvp_scope.md` 제외 항목 |
 | `WITHHELD_IN_SOURCE` | 원문에 항목은 있으나 공시유보로 미기재 | Q14, Q02 계열 | 필드값이 비어 있고 유보 사유가 기재됨 |
-| `AMBIGUOUS_LINK` | 정정 대상 문서를 1건으로 확정할 수 없음 | Q14 | 연결 대상 후보가 복수 |
+| `AMBIGUOUS_MATCH` | 질문이 가리키는 대상 자체를 1건으로 좁히지 못함 | Q14 | 조건에 맞는 루트 후보가 복수 |
+| `AMBIGUOUS_LINK` | 루트는 확정됐으나 정정 대상 문서를 1건으로 확정할 수 없음 | Q13~Q15 계열 | 연결 대상 후보가 복수 |
 | `INCOMPLETE_CHAIN` | 체인의 루트가 보유 범위 밖 | Q15 유사 사례, Q12 집계 시 | 역참조 대상이 코퍼스 기간 이전 |
 | `NOT_COMPARABLE` | 비교 전제 불충족 | Q10 실패 시 | 기준·단위·개념·계정 체계 검증 실패 |
 | `NOT_FOUND` | 문서는 있으나 해당 정보를 찾지 못함 | 전 문항 공통 | 아래 절 참조 |
 | `INSUFFICIENT_EVIDENCE` | 값은 얻었으나 Evidence 연결 실패 | 전 문항 공통 | 답변을 차단 |
+
+**`AMBIGUOUS_MATCH`와 `AMBIGUOUS_LINK`를 혼동하지 않습니다.** 전자는 질문 → root event 자체를
+특정하지 못한 것이고, 후자는 root는 특정됐는데 correction 연결이 모호한 것입니다. 섞으면 질문을
+좁혀야 풀리는 실패와 링크 해석을 고쳐야 풀리는 실패가 한 지표로 묶입니다
+([open_decisions.md](open_decisions.md) D8).
+
+### `WITHHELD_IN_SOURCE`의 상태 대응
+
+유보의 **범위**가 상태를 가르고 사유 값은 같습니다([open_decisions.md](open_decisions.md) D9).
+
+| | 상황 | 상태 | 사유 |
+|---|---|---|---|
+| A | 질문에 필요한 **일부** field가 유보 | `PARTIALLY_ANSWERABLE` | `WITHHELD_IN_SOURCE` |
+| B | 핵심 required field **전체**가 유보 | `UNANSWERABLE` | `WITHHELD_IN_SOURCE` |
+| C | 후속 정정에서 값이 공개됨 | `ANSWERABLE` | 없음 |
+
+C에서도 과거에 유보였다는 이력은 `EventHistory`·`Evidence`에 보존합니다. 원칙 7(거부 응답에
+Evidence를 붙이지 않음)은 여기에 적용하지 않습니다. 유보는 판정 대상이 확정된 상태이고, 어느
+공시에서 유보였는지가 답변의 근거 자체이기 때문입니다.
+
+`chain_complete`와 유보는 **독립된 축**입니다. 체인을 전부 확보하고도 그 안의 일부 field가 유보일
+수 있으므로, 유보를 이유로 `chain_complete=False`를 적지 않습니다.
 
 ## `NOT_FOUND`와 `OUT_OF_DATA_RANGE`의 구분
 
@@ -180,18 +257,23 @@ Evidence    = 원본과 정정 공시 전량
   연도와 그 전년도를 비교 열로 함께 담고 있는 것으로 관찰되어, 수집 시작 연도 이전 값도 사실상
   조회 가능합니다. Q16을 최신 기간 이후 방향으로 설계한 이유입니다.
 - **공시유보는 데이터 부재가 아닙니다.** 항목 자체는 존재하고 값만 비공개인 상태이므로
-  `WITHHELD_IN_SOURCE`로 별도 구분합니다. 이 값을 다른 문서에서 추정해 채우지 않습니다.
+  `WITHHELD_IN_SOURCE`로 별도 구분합니다. 이 값을 다른 문서에서 추정해 채우지 않고,
+  0·미공개·없음으로 바꾸지도 않습니다(D9).
 - **체인 미완결과 연결 모호는 서로 다릅니다.** 전자는 문서가 코퍼스 밖에 있는 것이고, 후자는 코퍼스
   안에 있으나 어느 것인지 특정하지 못하는 것입니다.
 - **집계에서 제외한 항목은 반드시 드러내야 합니다.** Q12처럼 여러 건을 합산할 때 최신값을 확정하지
   못한 건이 있으면 임의 값으로 채우지 않고 제외 사실과 사유를 함께 제시합니다.
-- **지분공시(Q03)에는 개인 식별정보가 포함될 수 있습니다.** Gold·Evidence 작성 시 개인 식별정보가
-  포함되지 않아야 하며, Agent 응답 단계의 처리 수준은 **팀 정책 확인이 필요합니다**
-  ([open_decisions.md](open_decisions.md) D6).
+- **지분공시(Q03)에는 개인 식별정보가 포함될 수 있습니다.** 처리 수준은
+  [open_decisions.md](open_decisions.md) **D6-a에서 확정**됐습니다. 사전에 허용된 보유 관련
+  ACODE(`THS_STK_CNT`, `THS_STK_RT`)만 구조화하며, PII는 Fact·Evidence·구조화 출력·로그·경고·
+  예외 detail 어디에도 승격하지 않습니다. allowlist field를 결정론적으로 특정할 수 없으면
+  fail-closed 하고, 주변 label로 의미를 추정해 범위를 넓히지 않습니다.
 
 ## 미결정 사항
 
 - 시계열 질문의 근거 문서 건수 요건은 [open_decisions.md](open_decisions.md)의 D4 Pending입니다.
 - `docs/data_contracts.md` Draft와 본 문서의 Fact·Evidence 구성 차이는 DC1~DC3에 기록했습니다.
-- 답변 가능성 상태와 사유 코드를 응답 구조에 담을지는 DC6 Pending입니다.
+- 답변 가능성 상태와 사유 코드를 응답 구조에 담을지는 DC6 Pending입니다. 다만 위 상태·사유
+  목록 자체는 `common/enums.py`의 `AnswerabilityStatus`·`AnswerabilityReason`에 모두 자리가
+  있습니다.
 - `PARTIALLY_ANSWERABLE`의 부분 정답 채점 기준은 팀원 3의 평가 설계와 함께 확정해야 합니다.

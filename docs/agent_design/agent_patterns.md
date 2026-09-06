@@ -35,8 +35,12 @@ Agent 설계 문서 전체에서 정본 표기로 사용합니다.**
 | F. Answerability Gate | Q16 Q17 Q18 | 거부 판정. A~E의 선행·후행 관문 |
 
 18문항은 각각 정확히 하나의 Pattern에 배정됩니다. Pattern F는 독립 유형인 동시에 다른 Pattern의
-실행 중에도 작동합니다. 예를 들어 Q14에서 원공시 시점의 금액은 공시유보 상태이므로, Pattern E
-실행 중에 Pattern F 판정으로 부분 거부되어야 합니다.
+실행 중에도 작동합니다. 예를 들어 Q14 계열에서 원공시 시점의 금액이 공시유보 상태라면, Pattern E
+실행 중에 `WITHHELD_IN_SOURCE` 판정으로 부분 거부되어야 합니다
+([open_decisions.md](open_decisions.md) D9).
+
+다만 **현재 Q14 질문은 그 지점에 닿지 않습니다.** 루트 계약을 1건으로 좁힐 조건이 질문에 없어
+`UNRESOLVED` · `AMBIGUOUS_MATCH`로 먼저 끝납니다(D8). 유보 판정은 루트가 확정된 뒤의 단계입니다.
 
 각 Pattern의 필요 Capability는 **연쇄 참조 없이 전부 나열**합니다. Pattern 한 절만 읽어도 필요한
 Capability가 완결되도록 했습니다.
@@ -116,6 +120,13 @@ Query Analysis
 ## Pattern C — Temporal Comparison
 
 수치 비교와 서술 비교가 갈리므로 흐름을 분기합니다. Q09는 계산 경로를 지나지 않습니다.
+수치 경로 안에서도 **수치형 파생값을 만드는 Numeric Calculation**과 **관계를 판정하는 Comparison
+Judgment**는 서로 다른 단계이며, 후자의 결과는 별도의 **ComparisonResult**입니다
+(→ [Comparison Judgment와 ComparisonResult](#comparison-judgment와-comparisonresult)).
+Q07("얼마나 늘었어")과 Q08("어떻게 달라졌어")은 증감액·영업이익률·변화량처럼 **파생값 자체**를
+답으로 요구하므로 Numeric Calculation을 지나고, 최종 우열 판정을 요구하지 않으므로
+**ComparisonResult를 만들지 않습니다.** 범위 정의는
+[C10 Calculation의 범위](#c10-calculation의-범위)를 정본으로 씁니다.
 
 ```text
 Query Analysis
@@ -126,10 +137,18 @@ Query Analysis
 → Section Navigation (양쪽 동일 경로)
 → Content Extraction
      ├ 수치 경로 (Q07 Q08)
-     │    → Fact Retrieval ×2
+     │    → Period Retrieval ×2 — 기간별로 필요한 source Fact를 각각 확보
+     │      (Q07 revenue 2건 → source Fact 2건.
+     │       Q08 revenue·operating_income 각 2건 → source Fact 4건)
      │    → Unit & Concept Normalization
-     │    → Comparability Validation
-     │    → Calculation
+     │    → Comparability Validation [guard ①] — Calculation 입력 검증
+     │    → Numeric Calculation — 기간별 파생값
+     │      (Q08 영업이익률 2건. Q07은 기간별 파생값 없음)
+     │    → Comparability Validation [guard ②] — 두 기간 값의 비교 가능성
+     │    → Numeric Calculation — 두 값에서 나오는 파생값
+     │      (Q07 질문이 요구하는 증감 수치, Q08 변화량 1건 → 합계 3건)
+     │    → Comparison Judgment → ComparisonResult
+     │      (질문이 관계 판정을 요구할 때. Q07·Q08은 해당 없음)
      └ 서술 경로 (Q09)
           → 본문 추출 ×2
           → Narrative Diff
@@ -149,14 +168,22 @@ Query Analysis
   - C11 Evidence Verification — Q07 Q08 Q09
   - C12 Answerability Judgment — Q07 Q08 Q09
   - C14 Narrative Diff — Q09
-- **검증 조건** — 수치 경로의 비교 가능성 4항목
-  1. 동일 기업
-  2. 동일 지표 개념
-  3. 동일 `accounting_scope`
-  4. 단위 일치 또는 정규화 성공
+- **검증 조건** — 수치 경로의 비교 가능성 4항목. 괄호는 적용 지점입니다
+  (→ [Comparability Validation의 적용 지점](#comparability-validation의-적용-지점))
+  1. 동일 기업 (②) — **Pattern C 전용**. 같은 기업의 두 기간을 견주므로 성립하는 조건이며,
+     Pattern D에는 상속되지 않습니다
+  2. 동일 지표 개념 (①②)
+  3. 동일 `accounting_scope` (①②)
+  4. 단위 일치 또는 정규화 성공 (①②) — Numeric Calculation 입력은 ①에서, 두 값을 함께 쓰기
+     직전은 ②에서 확인합니다
 
-  하나라도 실패하면 계산을 수행하지 않습니다. 서술 경로(Q09)는 1·3항만 적용합니다.
-- **출력 요구사항** — 두 기간 값, 계산 결과, 계산식. Evidence는 기간별로 각각 유지합니다.
+  해당 지점에서 하나라도 실패하면 그 이후 연산을 수행하지 않습니다. ①이 실패하면 Numeric
+  Calculation을 하지 않고, ②가 실패하면 두 값을 함께 쓰는 파생값도 ComparisonResult도 만들지
+  않으며, 두 경우 모두 answerability 경로로 넘깁니다. 서술 경로(Q09)는 1·3항만 적용합니다.
+- **출력 요구사항** — 두 기간 값, 계산 결과, 계산식. Q08은 2024년 영업이익률·2025년 영업이익률·두
+  영업이익률의 변화량으로 **Calculation 3건**입니다
+  ([evidence_and_answerability.md](evidence_and_answerability.md#calculation-cardinality)).
+  Evidence는 기간별로 각각 유지합니다.
   **근거 문서 건수 요건은 D4 Pending**이며 현재 Draft 권고값은
   [evidence_and_answerability.md](evidence_and_answerability.md)를 따릅니다.
 - **주요 실패 모드** — 기간이 둘이라는 이유만으로 비교 수행, 분자와 분모를 다른 표에서 취해 기준
@@ -179,16 +206,27 @@ Query Analysis
           → Document Disambiguation (동일 투자 건 판별)
           → Event History Resolution (건별 최신 정정값 반영, 중복 합산 금지)
           → Fact Retrieval (건별 금액)
-          → Aggregation (기업별 합계)
+          → Comparability Validation [guard ①] — 집계 입력 검증
+            (단위 정규화 성공, 집계 대상 집합·건별 최신값 확정)
+          → Aggregation (기업별 합계 = Numeric Calculation 2건)
 → Unit & Concept Normalization
-→ Comparability Validation
-→ Calculation (비교)
+→ Comparability Validation [guard ①] — Calculation 입력 검증
+  (Q11 분자·분모 기준 정합과 단위 정규화 성공. Q12는 위 집계 경로에서 이미 통과.
+   Q10은 Numeric Calculation이 없어 이 지점을 지나지 않음)
+→ Numeric Calculation — 기업별 파생값
+  (Q11 영업이익률 2건. Q12는 위 Aggregation 결과가 해당. Q10은 없음)
+→ Comparability Validation [guard ②] — 두 기업 값의 비교 가능성
+  (결산월·계정 체계 정합. **Q10은 여기서 단위 정규화 성공도 함께 확인**)
+→ Comparison Judgment (Q10 Q11 Q12)
+→ ComparisonResult (Q10 Q11 Q12)
 → Evidence Verification (기업별 각각)
 ```
 
 - **적용 문항** — Q10, Q11, Q12
 - **입력 특징** — `intent=cross_entity_compare`, 기업 2개, 기간 1개.
-  Q12는 `operations=[aggregate, compare]`와 `chain_policy` 사용
+  Q12는 `operations=[aggregate, compare]`와 `chain_policy`를 사용합니다. 이 중 Calculation을 낳는
+  numeric operation은 `aggregate` 하나이며, `compare`는 Calculation operation이 아니라 Comparison
+  Judgment 단계와 그 결과인 ComparisonResult를 가리킵니다.
 - **필요 Capability**
   - C1 Company Resolution — Q10 Q11 Q12
   - C2 Filing Discovery — Q10 Q11 Q12
@@ -199,15 +237,37 @@ Query Analysis
   - C7 Event History Resolution — Q12
   - C8 Unit & Concept Normalization — Q10 Q12
   - C9 Comparability Validation — Q10 Q11 Q12
-  - C10 Calculation — Q10 Q11 Q12
+  - C10 Calculation — Q11 Q12 (Q10은 수치형 파생값을 만들지 않으므로 해당하지 않음)
   - C11 Evidence Verification — Q10 Q11 Q12
   - C12 Answerability Judgment — Q10 Q11 Q12
-- **검증 조건** — Pattern C 수치 경로의 4항목에 더해
-  5. 결산월 일치 (현재 코퍼스 관찰 기준이며 일반 규칙으로 확정하지 않음)
-  6. 계정 체계 호환. 한쪽 기업에 해당 지표 개념이 존재하지 않으면 비교 불가
-  7. 파생지표 비교 시 분모 개념 동일 여부 (Q11)
-  8. **집계 대상 집합의 정확성** (Q12) — 대상 연도에 최초 공시된 건만 포함했는가, 동일 투자 건의
-     정정본을 별건으로 세지 않았는가, 각 건에 필드 단위 최신값을 반영했는가
+- **문항별 단계 구성** — Calculation 개수는
+  [evidence_and_answerability.md](evidence_and_answerability.md#calculation-cardinality)를 따릅니다
+  - **Q10** — Fact A · Fact B → Unit & Concept Normalization →
+    Comparability Validation [guard ②] (단위 정규화 성공 포함) → Comparison Judgment →
+    ComparisonResult. **Calculation 0**. Numeric Calculation이 없어 guard ①을 지나지 않으므로,
+    단위 검증이 빠지지 않도록 ②가 반드시 걸립니다
+  - **Q11** — 원천 Fact → 기업 A 영업이익률 Calculation → 기업 B 영업이익률 Calculation →
+    Comparability Validation → Comparison Judgment → ComparisonResult. **Calculation 2**
+  - **Q12** — 기업별 Event/Fact 집합 → 최신 정정값 반영 → 기업 A 투자 합계 Calculation →
+    기업 B 투자 합계 Calculation → Comparability Validation → Comparison Judgment →
+    ComparisonResult. **Calculation 2**
+- **검증 조건** — **서로 다른 두 기업이 정상 입력입니다.** Pattern C의 "동일 기업"(조건 1)은
+  같은 기업의 두 기간을 견주는 temporal comparison 전용 조건이므로 여기에 **상속되지 않습니다.**
+  Pattern D가 확인하는 항목은 다음과 같습니다. 괄호는 적용 지점입니다
+  (→ [Comparability Validation의 적용 지점](#comparability-validation의-적용-지점))
+  2. 동일 지표 개념 (①②) — Pattern C와 공통
+  3. 동일 `accounting_scope` (①②) — Pattern C와 공통
+  4. 단위 일치 또는 정규화 성공 (①②) — Pattern C와 공통. 기업 간 단위 표기 차이가 실제로
+     관찰되므로 **Pattern D에서는 어느 경로든 반드시 확인합니다.** Q11·Q12는 Calculation 입력
+     단계인 ①에서, **Q10은 Numeric Calculation이 없으므로 Comparison Judgment 직전 ②에서**
+     확인합니다
+  5. 결산월 일치 (②) — **Pattern D 전용**. 현재 코퍼스 관찰 기준이며 일반 규칙으로 확정하지 않음
+  6. 계정 체계 호환 (①②) — **Pattern D 전용**. 한쪽 기업에 해당 지표 개념이 존재하지 않으면
+     비교 불가
+  7. 파생지표 비교 시 분모 개념 동일 여부 (①②) — **Pattern D 전용** (Q11)
+  8. **집계 대상 집합의 정확성** (①) — **Pattern D 전용** (Q12). 대상 연도에 최초 공시된 건만
+     포함했는가, 동일 투자 건의 정정본을 별건으로 세지 않았는가, 각 건에 필드 단위 최신값을
+     반영했는가. 합계를 만들기 전에 확정해야 하므로 집계 경로 안에서 걸립니다
 - **출력 요구사항** — 기업별 값을 **원문 단위와 정규화 단위 모두 병기**. 정규화 결과만 제시하면
   사용자가 검증할 수 없습니다. Q12는 합계뿐 아니라 **합계에 포함된 투자 건 목록**을 함께 제시해야
   중복·누락을 확인할 수 있습니다. Evidence는 기업별로 각각 유지합니다
@@ -299,21 +359,170 @@ Query Analysis
 | C6 | Event Retrieval | 기업·이벤트 유형·기간으로 거래소공시 조회 및 대상 집합 확정. 본문 필드 조건이 필요해 C2와 분리 | Q02 Q06 Q12~Q15 | `event/service` | MUST |
 | C7 | **Event History Resolution** | 원공시·정정·후속 체인의 양방향 재귀 복원, 완결성 판정, 필드 단위 최신값 확정 | Q12~Q15 | `event/linker`, `event/diff` | MUST |
 | C8 | **Unit & Concept Normalization** | 금액 단위 정규화, 지표 개념 통합, 괄호 음수·구분 기호 처리 | Q07 Q08 Q10 Q12 | 구현 위치 **미정** ([D2](open_decisions.md)) | MUST |
-| C9 | **Comparability Validation** | 비교 수행 전 기준·단위·개념·결산월·계정 체계 정합 판정 | Q07 Q08 Q10~Q12 | `agent/calculator` 진입 게이트 | MUST |
-| C10 | Calculation | Fact 배열에서 결정적 결과 산출(증감·비율·집계·비교). LLM이 수치를 직접 계산하지 않음 | Q07 Q08 Q10~Q12 | `agent/calculator` | MUST |
+| C9 | **Comparability Validation** | 기준·단위·개념·결산월·계정 체계 정합 판정. 단일 단계가 아니라 **필요한 연산 직전마다 적용되는 guard**([적용 지점](#comparability-validation의-적용-지점)) | Q07 Q08 Q10~Q12 | `agent/calculator` 진입 게이트와 비교 판정 직전 | MUST |
+| C10 | Calculation | Fact 또는 기존 Calculation에서 **수치형 파생 결과**를 결정적으로 산출(증감·증감률·비율·%p 변화·집계). 대소·우열 판정은 포함하지 않음([범위](#c10-calculation의-범위)). LLM이 수치를 직접 계산하지 않음 | Q07 Q08 Q11 Q12 | `agent/calculator` | MUST |
 | C11 | **Evidence Verification** | Fact·계산 결과·주장을 원문 위치에 연결하고 일치를 검증 | Q01~Q15 | `agent/evidence` | MUST |
 | C12 | **Answerability Judgment** | 지원 가능 여부와 사유 코드 판정. 전 Pattern의 선행 관문 | 전 문항 | `agent/safety`, `agent/evidence` | MUST |
 | C13 | Semantic Search | Section 경로 매핑 실패 시의 조건부 fallback | Q04 | `retrieval/keyword`, `vector`, `fusion` | SHOULD |
 | C14 | Narrative Diff | 서술 텍스트 2건에서 변화 항목 도출 | Q09 | 구현 위치 미정 | MUST |
-| C15 | PII Filtering | 지분공시에 포함될 수 있는 개인 식별정보 처리 | Q03 | `agent/safety` | **팀 확인 필요** |
+| C15 | PII Filtering | 지분공시에 포함될 수 있는 개인 식별정보 처리 | Q03 | `holding/extractor` (경계는 extractor 출구) | MUST |
 
 - **C14를 MUST로 둔 이유** — Q09의 Primary Capability이며, 대표 질문 18문항은 모두 필수이므로
   선택 등급과 모순이 생기지 않도록 했습니다.
-- **C15를 등급 대신 "팀 확인 필요"로 둔 이유** — Gold·Evidence 작성 시 개인 식별정보가 포함되지
-  않아야 한다는 점은 분명하지만, Agent 응답 단계의 처리 수준은 팀 정책 확인 대상입니다. 이 문서에서
-  구현 정책을 확정하지 않습니다([open_decisions.md](open_decisions.md) D6).
+- **C15가 MUST가 된 이유** — [open_decisions.md](open_decisions.md) **D6-a에서 확정**됐습니다.
+  허용된 보유 ACODE(`THS_STK_CNT`, `THS_STK_RT`)만 구조화하고, PII는 Fact·Evidence·구조화 출력·
+  로그·경고·예외 detail 어디에도 승격하지 않으며, allowlist field를 결정론적으로 특정할 수 없으면
+  fail-closed 합니다.
+- **C15의 구현 위치가 `agent/safety`가 아닌 이유** — 정책이 "Parser가 PII를 읽지 않는다"가 아니라
+  **"PII를 downstream Contract로 승격하지 않는다"**이기 때문입니다. 범용 XML parsing은 PII가 든
+  원문을 읽을 수 있고, 막아야 할 경계는 Parser 입구가 아니라 **extractor 출구**입니다. 응답 단계에
+  필터를 두면 그 앞의 Fact·로그·예외에는 이미 PII가 실려 있게 됩니다.
 - **C13을 Q04에만 배정한 이유** — Q05는 문서 선택 문제이지 검색 문제가 아니고, Q09는 Section 경로로
   위치를 지정할 수 있어 의미 검색이 필요하지 않다고 판단했습니다.
+
+### C10 Calculation의 범위
+
+C10 Calculation은 Fact 또는 다른 Calculation을 입력으로 받아 **수치형 파생 결과(numeric-only
+derived value)** 를 생성합니다. 단순 대소 관계나 우열 판정은 Calculation에 포함하지 않으며,
+Comparison Judgment 단계에서 **별도의 ComparisonResult**로 처리합니다
+(→ [Comparison Judgment와 ComparisonResult](#comparison-judgment와-comparisonresult)).
+
+- **포함** — ratio, sum·aggregate, delta, delta_pct, difference, growth rate,
+  percentage-point change, 그 밖의 수치형 파생값
+- **제외** — greater_than · less_than · equal, 단순 대소 관계, 우열 판정, 관계 판단
+- **개수 세는 법** — 내부 산술 primitive 개수가 아니라 **최종 답변에서 의미 있게 사용되는 수치형
+  파생 결과 하나당 1건**입니다. `영업이익 / 매출 × 100`을 division 1건 + multiply 1건으로 세지
+  않고 '영업이익률' Calculation 1건으로 셉니다. 문항별 개수는
+  [evidence_and_answerability.md](evidence_and_answerability.md#calculation-cardinality)를 따릅니다.
+- **차이 수치를 묻는 질문** — "얼마나 더 큰가", "몇 %p 차이인가"처럼 차이 수치 자체를 요구하면 그
+  결과는 관계 판정과 별개로 Calculation 1건을 더합니다.
+
+### Comparability Validation의 적용 지점
+
+C9 Comparability Validation은 파이프라인의 한 지점이 아니라 **필요한 연산 직전마다 적용되는
+guard**입니다. 항목마다 확인해야 하는 시점이 다르기 때문입니다. 새 Capability 번호를 만들지
+않았고, C9 하나가 아래 두 지점에서 걸립니다.
+
+| Guard | 언제 | 무엇을 막는가 |
+|---|---|---|
+| **① Calculation 입력 검증** | Numeric Calculation 직전. Q12는 Aggregation 직전이므로 집계 경로 안에서 | 잘못된 Fact로 파생값을 만드는 것 |
+| **② 비교 가능성 검증** | 두 값을 함께 쓰기 직전 — 변화량 Calculation과 Comparison Judgment. Q10처럼 Calculation 없이 Fact를 바로 견주는 경로에서는 **여기가 유일한 guard** | 서로 견줄 수 없는 두 값을 견주는 것 |
+
+항목별 적용 지점입니다. 번호는 Pattern C·D 검증 조건의 번호이며, Pattern 전용 항목은 그 Pattern
+에서만 적용합니다. 특히 **동일 기업(1)은 Pattern C temporal comparison 전용**이고, Pattern D는
+서로 다른 두 기업이 정상 입력이므로 이 조건을 적용하지 않습니다.
+
+| 검증 항목 | Guard |
+|---|---|
+| 단위 일치 또는 정규화 성공 (4) | ① Numeric Calculation 입력 · ② Q10처럼 direct Fact comparison, 그리고 파생값끼리의 최종 비교 |
+| 동일 지표 개념 (2) · 계정 체계 호환 (6) | ① 계산 입력의 개념 · ② 두 값의 개념 |
+| 동일 `accounting_scope` (3) | ① 분자·분모 기준 · ② 두 값의 기준 |
+| 파생지표의 분모 개념 동일 (7, Q11) | ① 기업별 비율 산출 · ② 두 비율 비교 |
+| 집계 대상 집합·건별 최신 정정값 확정 (8, Q12) | ① |
+| 동일 기업 (1) — **Pattern C 전용** | ② |
+| 결산월 일치 (5) — **Pattern D cross-entity 전용** | ② |
+
+- ①이 실패하면 Numeric Calculation을 수행하지 않습니다.
+- ②가 실패하면 두 값을 함께 쓰는 파생값도 만들지 않고 ComparisonResult도 생성하지 않습니다.
+- 두 경우 모두 answerability 경로로 넘깁니다
+  (→ [Comparison Judgment와 ComparisonResult](#comparison-judgment와-comparisonresult)).
+- Q10은 Numeric Calculation이 없으므로 ②만 걸립니다. Q08은 기간별 영업이익률 2건을 ① 뒤에,
+  변화량 1건을 ② 뒤에 만듭니다. Calculation 3건이라는 개수는 그대로입니다.
+
+### Comparison Judgment와 ComparisonResult
+
+**Comparison Judgment**는 Agent가 두 비교 대상을 검증하고 관계를 판정하는 단계이고,
+**ComparisonResult**는 그 판정 결과를 표현하는 **별도의 semantic result**입니다. Calculation의 한
+종류가 아니며 Calculation 개수에 더해지지 않습니다.
+
+최소 의미는 다음 네 가지입니다. **아래 명칭은 semantic placeholder이며, 실제 field name과 타입
+표현은 별도 Contract PR에서 확정합니다.**
+
+| 항목 | 의미 |
+|---|---|
+| `comparison_id` | 판정 결과의 식별자 |
+| left input reference | 좌측 비교 입력에 대한 참조 |
+| right input reference | 우측 비교 입력에 대한 참조 |
+| `relation` | `left_greater` · `right_greater` · `equal` |
+
+- 비교 입력은 Fact일 수도 Calculation일 수도 있습니다. Q10은 Fact 2건을, Q11·Q12는 Calculation
+  2건을 비교합니다.
+- `relation`에는 `not_comparable` · `unknown` · `failed` · `unresolved` 같은 값을 두지 않습니다.
+  **ComparisonResult는 비교가 정상적으로 성공한 경우에만 존재합니다.**
+- **Comparability Validation이 실패하면** Comparison Judgment를 성공 결과로 확정하지 않고
+  ComparisonResult도 생성하지 않으며, answerability 경로로 넘깁니다. 실패 시의
+  `AnswerabilityStatus` · `AnswerabilityReason` · stage/detail 매핑은 **별도 Contract PR에서
+  확정**합니다.
+- Comparison Judgment에 별도 Capability 번호를 부여하지 않았습니다. C9 Comparability Validation
+  직후의 판정 단계로 다룹니다.
+
+**이번 문서가 확정하는 범위** — ComparisonResult의 semantic 역할과 위 최소 의미까지입니다. 실제
+Pydantic schema는 작성하지 않습니다. ComparisonResult는 Agent의 semantic result이며, 실제
+`AgentExecutionResult` 수용 방식과 `AnswerResponse`에 structured comparison을 노출할지 여부는
+확정하지 않았습니다.
+
+**별도 Contract PR follow-up** — 아래는 이 문서에서 확정하지 않습니다.
+
+1. ComparisonResult의 실제 schema와 필드명
+2. input reference 표현 — 단순 ID로 둘지, Fact/Calculation 타입을 포함한 typed reference로 둘지
+3. Fact reference와 Calculation reference의 ambiguity 해소
+4. `AgentExecutionResult`의 수용 위치와 구조 (field name, list인지 single인지)
+5. `AnswerResponse` 노출 여부와 API JSON 구조
+6. Comparability Validation 실패의 status/reason 매핑
+
+### Agent와 Answer Builder의 책임 경계
+
+**Agent computes and judges. Builder presents.**
+
+| 주체 | 책임 |
+|---|---|
+| Agent | Fact 확보 · Numeric Calculation · Comparability Validation · Comparison Judgment · ComparisonResult 생성 |
+| Answer Builder | Agent가 이미 확정한 결과를 읽어 deterministic하게 자연어로 표현 |
+
+Builder는 raw Fact를 직접 비교하지 않고, Calculation 값을 다시 비교하지 않으며,
+greater/less/equal을 새로 판단하지 않고, 새로운 계산을 수행하지 않습니다
+([pattern_f_safety.md](pattern_f_safety.md) §8).
+
+#### 우열 판정이 실린 결과의 표현 순서
+
+`COMPLETED` + `ANSWERABLE` 결과에 `comparisons`가 있으면 Builder는 **단일 Fact 문장보다 비교
+문장을 먼저 고릅니다**(`answer_builder._supported_answer`).
+
+Pattern D의 성공 결과에는 견준 값이 Fact로 함께 실립니다(Q10은 2건, Q11은 4건). Fact를 먼저
+보면 값 하나를 말하는 단일 Fact 문장이 여러 건 앞에서 멈추고, 그 정지가 API 경계에서 500이
+됩니다. 순서만 바꾸며, 우열 판정이 없는 결과(Pattern A)의 문장은 달라지지 않습니다.
+
+문장을 만들 때 Builder가 읽는 것은 다음이 전부입니다.
+
+| 결과 모양 | 관계 | 수치 | 대상 이름 |
+|---|---|---|---|
+| Q10 (`left`/`right`가 Fact) | `ComparisonResult.relation` | `Fact`의 원문 표기와 정규화 값(병기) | `Fact.company` |
+| Q11 (`left`/`right`가 Calculation) | `ComparisonResult.relation` | `CalculationResult.value`/`unit` | 입력 Fact의 `company` |
+
+Q11에서 입력 Fact까지 따라가는 것은 그 파생값이 **누구의 어느 기간·기준 값인지**를 부르기
+위해서입니다. `CalculationResult`에는 그 정보가 없습니다. 참조를 따라가 이름을 읽는 것과 그
+값으로 비율을 다시 만드는 것은 다른 일이며, 후자는 하지 않습니다. 다시 계산하면 반올림
+자릿수가 계산 계층과 달라질 수 있고, 그때 답변에 실린 수치와 우열 판정의 근거가 된 수치가
+서로 다른 값이 됩니다.
+
+정규화 단위는 사용자 표기로 옮겨 적습니다. `Fact.normalized_unit`은 추출 계층의 어휘이고
+(`periodic.extractor`가 "KRW"를, `periodic.adapter`가 "원"을 싣습니다) 사용자 문장의 말이
+아니므로, 그대로 적으면 한국어 답변에 "2000000000KRW"가 실립니다. 옮기는 것은 문장에 적을
+표기뿐이며 `Fact.normalized_unit` 값은 그대로 응답에 나갑니다. 원문 단위(`raw_unit`)는 공시에
+적힌 표기이므로 옮기지 않습니다. 사용자가 원문과 대조하는 값이기 때문입니다.
+
+Fact 정규화 단위 대응표와 Calculation 단위 대응표는 분리합니다. 열쇠를 정하는 계층이 다르고
+(`periodic.extractor` vs `agent.derived_metrics`), 두 어휘에는 이미 같은 문자열("percent")이
+서로 다른 뜻으로 존재합니다.
+
+관계 어휘(`left_greater` / `right_greater` / `equal`)와 파생 개념 표기는 대응표로 두고, 표에
+없는 값을 만나면 generic 표기를 만들지 않고 멈춥니다. 표현 방법이 정해지지 않은 모양
+(대상 종류가 서로 다른 판정, 같은 대상을 두 번 가리킨 판정, 참조가 결과에 없는 판정,
+`ComparisonResult` 2건 이상)도 같습니다. 추측해 문장을 완성하면 형식만 정상인 답변이 나갑니다.
+
+비교 불가 판정은 이 경로를 지나지 않습니다. `NOT_COMPARABLE`은 `UNANSWERABLE`이고 그 결과에는
+`comparisons`가 실리지 않으므로(`normalization`의 `comparability` 경로), 문장은 사유별 대응표에서
+그대로 옵니다.
 
 ## 실제 데이터 사전 검토에서 필요성이 관찰된 Capability
 

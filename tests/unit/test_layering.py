@@ -164,9 +164,14 @@ def test_importing_periodic_does_not_pull_in_agent() -> None:
     assert leaked == "", f"periodic을 import했을 때 agent 모듈이 함께 로드된다: {leaked}"
 
 
-def test_agent_handlers_may_import_lower_layers() -> None:
-    """반대 방향은 허용된다. 규칙이 과하게 잠기지 않았는지 확인한다."""
-    imported = _imported_modules(PACKAGE_ROOT / "agent" / "handlers" / "single_fact.py")
+def test_agent_may_import_lower_layers() -> None:
+    """
+    반대 방향은 허용된다. 규칙이 과하게 잠기지 않았는지 확인한다.
+
+    공시 조회와 값 추출을 실제로 부르는 곳은 agent.period_retrieval이다. Pattern A와
+    Pattern C가 그 모듈의 primitive를 공유하므로, 양성 대조군도 그 자리를 본다.
+    """
+    imported = _imported_modules(PACKAGE_ROOT / "agent" / "period_retrieval.py")
 
     assert "disclosure_agent.periodic.service" in imported
     assert "disclosure_agent.retrieval.metadata_filter" in imported

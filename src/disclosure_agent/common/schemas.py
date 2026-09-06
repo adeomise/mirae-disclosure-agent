@@ -1,14 +1,16 @@
 """Pydantic models for the Disclosure Agent contract v0.1."""
 
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
     ChainPolicy,
+    ComparisonRelation,
     DocumentClass,
     EventLinkRelation,
     EventLinkResolutionStatus,
@@ -19,6 +21,9 @@ from disclosure_agent.common.enums import (
     Intent,
     MetricConcept,
     QueryAccountingScope,
+    ResultInputType,
+    SectionScope,
+    SummaryItemType,
 )
 
 
@@ -86,6 +91,55 @@ class Evidence(BaseModel):
     provenance: EvidenceProvenance | None = None
 
 
+class SourceDocument(BaseModel):
+    """Document-level metadata for one selected filing that Evidence.doc_id points to.
+
+    Evidence는 원문 안의 근거 위치만 나타낸다(section_path·table·row/column 등). 문서
+    자체의 metadata(정식 명칭, 회계기간, 접수번호, 공시일)는 여기 한 번만 싣는다. 같은
+    문서에서 여러 Evidence가 나와도 Evidence마다 이 metadata를 반복해 담지 않는다 —
+    반복해 담으면 어느 필드가 문서 단위 값이고 어느 필드가 근거 위치인지가 Evidence
+    스키마 안에서 섞인다.
+
+    doc_id로 Evidence와 연결한다:
+        AgentExecutionResult.evidence의 각 항목이 가리키는 문서는 doc_id가 같은
+        source_documents 항목 하나와 대응한다. 실제로 선택되지 않은 후보 문서는 담지
+        않는다 — 답변이 실제로 근거로 삼은 문서만 담는다.
+
+    metadata의 출처는 검색이 실제로 선택한 FilingRef다. 이 값을 다시 만들려고 manifest를
+    조회하지 않으며, 질문·Fact.metric·section_path·doc_id 문자열에서 문서 종류나 날짜를
+    추측해 채우지도 않는다.
+    """
+
+    doc_id: str
+    company: str
+    report_name: str
+    fiscal_year: int | None = None
+    document_subtype: str | None = None
+    base_month: int | None = None
+    filing_date: date | None = None
+    receipt_no: str | None = None
+
+
+def _require_unique_source_document_doc_ids(
+    source_documents: list[SourceDocument],
+) -> None:
+    """source_documents 안에서 doc_id가 중복되지 않는지 본다.
+
+    같은 doc_id가 두 번 실리면(값이 같든 다르든) 그 문서를 몇 건으로 셀지가 모호해진다.
+    조용히 하나로 합치지 않고 여기서 멈춘다.
+    """
+    seen: set[str] = set()
+
+    for document in source_documents:
+        if document.doc_id in seen:
+            raise ValueError(
+                f"source_documents에 doc_id {document.doc_id!r}가 두 번 이상 있습니다. "
+                "문서마다 한 번만 실어야 합니다."
+            )
+
+        seen.add(document.doc_id)
+
+
 class Fact(BaseModel):
     """A source value with separate raw and normalized representations."""
 
@@ -100,6 +154,37 @@ class Fact(BaseModel):
     normalized_value: float | str | None = None
     normalized_unit: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
+
+
+class SummaryItem(BaseModel):
+    """One bounded content unit inside a requested document scope.
+
+    값을 담지 않는다. 요약 항목이 무엇이고 그 근거가 어디인지만 담으며, 원문 발췌는
+    Evidence.raw_text 하나에만 둔다. 두 곳에 두면 어느 쪽이 정본인지 알 수 없게 된다
+    (docs/agent_design/evidence_and_answerability.md의 Fact·Evidence 구분과 같은 이유).
+    """
+
+    item_id: str
+    item_type: SummaryItemType
+    label: str
+    evidence_ids: list[str] = Field(min_length=1)
+
+
+class DocumentSummary(BaseModel):
+    """A single document's content collected for one requested section scope.
+
+    Pattern B는 Fact를 만들지 않는다. 지정 범위 안의 항목과 그 항목마다의 Evidence가
+    결과이며, 최소 Fact 요건이 0인 것이 확정 사항이다
+    (docs/agent_design/evidence_and_answerability.md 유형별 최소 요건).
+    """
+
+    summary_id: str
+    doc_id: str
+    company: str
+    report_name: str
+    section_scope: SectionScope
+    section_path: list[str] = Field(default_factory=list)
+    items: list[SummaryItem] = Field(min_length=1)
 
 
 class Event(BaseModel):
@@ -156,6 +241,29 @@ class EventHistory(BaseModel):
     chain_complete: bool
 
 
+class ResolvedFieldValue(BaseModel):
+    """A resolved field value with document and evidence provenance."""
+
+    value: str | float | None = None
+    unit: str | None = None
+    source_doc_id: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ResolvedEventState(BaseModel):
+    """An event's field-level state at a filing-date resolution cutoff.
+
+    ``event_id`` is the correction-chain identity used by ``EventHistory.event_id``.
+    It may therefore have a different meaning from an individual ``Event.event_id``.
+    """
+
+    event_id: str
+    event_type: EventType
+    company: str
+    as_of: date
+    fields: dict[str, ResolvedFieldValue] = Field(default_factory=dict)
+
+
 class ExecutionIssue(BaseModel):
     """A reason the Agent execution was blocked or failed."""
 
@@ -172,13 +280,117 @@ class AnswerabilityDetail(BaseModel):
     detail: str | None = None
 
 
-class CalculationResult(BaseModel):
-    """A minimal deterministic calculation with its evidence linkage."""
+class ResultInputReference(BaseModel):
+    """A typed reference to one semantic result input."""
 
+    input_type: ResultInputType
+    input_id: str
+
+
+class CalculationResult(BaseModel):
+    """A minimal deterministic calculation with its inputs and evidence linkage."""
+
+    calculation_id: str
     operation: str
+    inputs: list[ResultInputReference] = Field(min_length=1)
     value: float | str | None = None
     unit: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def reject_direct_self_reference(self) -> "CalculationResult":
+        if any(
+            item.input_type is ResultInputType.CALCULATION
+            and item.input_id == self.calculation_id
+            for item in self.inputs
+        ):
+            raise ValueError("CalculationResult cannot directly reference itself")
+        return self
+
+class ComparisonResult(BaseModel):
+    """A successful relation between two comparable inputs."""
+
+    comparison_id: str
+    left: ResultInputReference
+    right: ResultInputReference
+    relation: ComparisonRelation
+
+
+class NarrativeComparisonClaim(BaseModel):
+    """One observed difference between two fiscal years' narrative sections.
+
+    양쪽 연도의 Evidence를 모두 요구한다:
+        서술 비교는 "무엇이 달라졌는가"를 말한다. 한쪽 연도의 근거만으로는 그 연도에 무엇이
+        적혀 있었는지까지만 말할 수 있고, 달라졌다는 진술은 다른 연도를 함께 봐야 성립한다.
+        한쪽이 비어도 통과하면 한 해의 서술을 변화로 옮겨 적은 항목이 형식만 맞는 채로 남는다
+        (docs/agent_design/evidence_and_answerability.md 유형 3 "변화 항목마다 해당 연도
+        Evidence").
+
+    값도 원인도 담지 않는다:
+        Q09는 계산 경로를 지나지 않으므로 수치를 담을 자리가 없고(agent_patterns.md Pattern C
+        서술 경로), 왜 달라졌는지는 원문이 말하지 않는 한 추론이다. 담을 자리를 만들어 두면
+        비워 두기로 한 판단이 다음 구현에서 조용히 채워진다.
+    """
+
+    claim_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    left_evidence_ids: list[str] = Field(min_length=1)
+    right_evidence_ids: list[str] = Field(min_length=1)
+
+
+class NarrativeComparisonResult(BaseModel):
+    """Two fiscal years of one company's same semantic section, compared as narrative.
+
+    claims가 비어 있는 것과 결과가 없는 것은 다르다:
+        claims=[]는 "양쪽을 모두 읽었고 의미 있는 변화를 찾지 못했다"이며 그 자체가 답이다.
+        그래서 최소 길이를 두지 않는다. 반대로 어느 한쪽 Section을 확정하지 못한 경우는 이
+        결과를 만들지 않고 상위 단계가 막는다. 둘을 같은 모양으로 두면 '변화 없음'과 '보지
+        못함'이 구분되지 않으며, 그것이 이 문항의 주요 실패 모드다
+        (docs/agent_design/representative_questions.md Q09).
+
+    section_path를 양쪽 모두 요구하는 이유:
+        같은 의미 범위를 견줬다는 사실은 결과에 남아야 확인할 수 있다. 경로가 없으면 어느
+        Section을 읽었는지 결과만 봐서는 드러나지 않는다.
+
+    CalculationResult·ComparisonResult와 잇지 않는다:
+        Q09는 수치 비교가 아니다. 참조를 담을 자리를 만들면 서술 결과가 수치 결과의 근거로
+        쓰일 수 있게 되고, 그 경로는 이 Pattern이 만들지 않는다.
+    """
+
+    comparison_id: str = Field(min_length=1)
+    company: str = Field(min_length=1)
+    section_scope: SectionScope
+    left_fiscal_year: int
+    right_fiscal_year: int
+    left_section_path: list[str] = Field(min_length=1)
+    right_section_path: list[str] = Field(min_length=1)
+    claims: list[NarrativeComparisonClaim] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def require_ordered_distinct_years(self) -> "NarrativeComparisonResult":
+        """
+        두 회계연도가 서로 다르고 오래된 쪽이 left인지 확인한다.
+
+        순서를 고정하는 이유는 Pattern C의 수치 경로가 변화량을 시간 순서로 만드는 것과 같다
+        (handlers/temporal_compare의 ``sorted(plan.years)``). 질문에 적힌 순서를 그대로 쓰면
+        같은 변화가 방향이 뒤집힌 채로 서술되고, 뒤집힌 서술도 그럴듯하다.
+
+        같은 연도를 막는 이유는, 한 해를 자기 자신과 견준 결과는 변화가 없다는 판정처럼
+        보이지만 실제로는 비교를 하지 않은 것이기 때문이다.
+        """
+        if self.left_fiscal_year == self.right_fiscal_year:
+            raise ValueError(
+                "NarrativeComparisonResult는 서로 다른 두 회계연도를 요구합니다: "
+                f"{self.left_fiscal_year}"
+            )
+
+        if self.left_fiscal_year > self.right_fiscal_year:
+            raise ValueError(
+                "NarrativeComparisonResult의 left_fiscal_year는 right_fiscal_year보다 "
+                f"앞서야 합니다: {self.left_fiscal_year} > {self.right_fiscal_year}"
+            )
+
+        return self
 
 
 class ConversionGap(BaseModel):
@@ -211,10 +423,32 @@ class AgentExecutionResult(BaseModel):
     events: list[Event] = Field(default_factory=list)
     event_links: list[EventLink] = Field(default_factory=list)
     event_histories: list[EventHistory] = Field(default_factory=list)
+    resolved_event_states: list[ResolvedEventState] = Field(default_factory=list)
+    document_summaries: list[DocumentSummary] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
+    # 문서 단위 metadata. Evidence.doc_id로 연결한다(SourceDocument docstring 참조). 이
+    # 필드를 채우지 않는 기존 producer는 빈 목록을 그대로 갖는다.
+    source_documents: list[SourceDocument] = Field(default_factory=list)
     calculations: list[CalculationResult] = Field(default_factory=list)
+    comparisons: list[ComparisonResult] = Field(default_factory=list)
+    # 서술 비교(Q09)의 결과. comparisons와 나눠 둔다. ComparisonResult는 두 값의 우열이고
+    # 이쪽은 두 서술의 변화 항목이라, 한 목록에 담으면 받는 쪽이 어느 것이 수치 판정인지
+    # 항목마다 확인해야 한다.
+    narrative_comparisons: list[NarrativeComparisonResult] = Field(default_factory=list)
+    # 질문이 요청한 결정적 처리. QueryPlan.operations와 같은 어휘를 그대로 옮긴다.
+    #
+    # 계획이 표현 계층까지 넘어오지 않으므로, 무엇을 요청했는지는 이 자리로만 전달된다.
+    # 값을 만들지 않는다. 세는 일도 여기서 하지 않으며, 담기는 것은 요청의 이름뿐이다.
+    #
+    # 기본값이 비어 있어 이 필드를 채우지 않는 기존 producer는 지금까지와 똑같이 동작한다.
+    operations: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     conversion_gaps: list[ConversionGap] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def reject_duplicate_source_documents(self) -> "AgentExecutionResult":
+        _require_unique_source_document_doc_ids(self.source_documents)
+        return self
 
 
 class AskRequest(BaseModel):
@@ -224,7 +458,13 @@ class AskRequest(BaseModel):
 
 
 class AnswerResponse(BaseModel):
-    """Answer and all structured evidence-bearing results."""
+    """Answer and all structured evidence-bearing results.
+
+    ``resolved_event_states`` carries the field-level state an event disclosure was
+    resolved to at one cutoff. 이벤트 단건 요약(Q06)의 답은 그 상태 자체이며, 자리가 없으면
+    답의 본체가 문장에만 남고 구조화 결과에서 사라진다. 최신 상태와 원공시 상태 중 어느
+    시점인지는 ``as_of``와 각 필드의 ``source_doc_id``가 밝힌다.
+    """
 
     answer: str
     status: AnswerabilityStatus
@@ -233,4 +473,13 @@ class AnswerResponse(BaseModel):
     events: list[Event] = Field(default_factory=list)
     event_links: list[EventLink] = Field(default_factory=list)
     event_histories: list[EventHistory] = Field(default_factory=list)
+    resolved_event_states: list[ResolvedEventState] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
+    # 문서 단위 metadata. Evidence.doc_id로 연결한다(SourceDocument docstring 참조).
+    # 기존 소비자는 이 필드를 모르는 채로도 그대로 동작한다(additive, 기본값 []).
+    source_documents: list[SourceDocument] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def reject_duplicate_source_documents(self) -> "AnswerResponse":
+        _require_unique_source_document_doc_ids(self.source_documents)
+        return self

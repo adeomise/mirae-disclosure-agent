@@ -35,6 +35,41 @@ PROTECTED_XML_PATTERN = re.compile(
     r"<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>",
     re.DOTALL,
 )
+MALFORMED_PERCENT_COMPARISON_PATTERN = re.compile(
+    r"<(?=[ \t](?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?[ \t]*%)"
+)
+MALFORMED_NUMERIC_LT_TEXT_PATTERN = re.compile(
+    r"<(?=[ \t]*"
+    r"\d+(?:\.\d+)?"
+    r"(?:[kKmMbB][ \t]*(?:€|\$|₩|원))?"
+    r"(?:%|\)|이다|이하|이상|미만|초과)"
+    r")"
+)
+MALFORMED_REGULATION_HEADING_LT_PATTERN = re.compile(
+    r"<(?=주요법령[ \t]*및[ \t]*감독규정〉)"
+)
+MALFORMED_TCF_LT_TEXT_PATTERN = re.compile(
+    r"<(?=[ \t]+tcf(?:[ \t]|</P>))"
+)
+MALFORMED_TCF_LT_ALLOWED_PREFIXES = {
+    "1일",
+    "1M",
+    "3M",
+    "6M",
+    "9M",
+    "1Y",
+    "1.5Y",
+    "2Y",
+    "3Y",
+    "4Y",
+    "5Y",
+    "6Y",
+    "7Y",
+    "8Y",
+    "9Y",
+    "10Y",
+    "15Y",
+}
 
 # 제공된 dart3/dart4 XML의 실제 구조 tag vocabulary다. 이 목록 밖의
 # ``<프로젝트>``/``<Connected Work>`` 같은 token은 원문 본문으로 보존한다.
@@ -72,13 +107,286 @@ DART_STRUCTURAL_TAGS = {
     "TR",
     "TU",
 }
+_DART_STRUCTURAL_CLOSING_NAMES = "|".join(
+    sorted(map(re.escape, DART_STRUCTURAL_TAGS), key=len, reverse=True)
+)
+MALFORMED_INCOMPLETE_KOREAN_TEXT_PATTERN = re.compile(
+    rf"<(?=[가-힣]{{1,9}}[ \t]*"
+    rf"</(?:{_DART_STRUCTURAL_CLOSING_NAMES}|SECTION-\d+)[ \t]*>)"
+)
+# A lone literal less-than immediately before a SPAN closing tag was observed
+# in the annual corpus. Do not extend this to arbitrary incomplete markup.
+MALFORMED_BARE_LT_TEXT_PATTERN = re.compile(r"<(?=</SPAN[ \t]*>)")
+XML_ATTRIBUTE_NAME_PATTERN = re.compile(r"[A-Za-z_:][A-Za-z0-9_.:-]*")
+MALFORMED_DUPLICATED_QUOTE_VALUE_START_PATTERN = re.compile(
+    r"[^\s\"'=<>/]"
+)
+
+
+def _repair_malformed_attribute_syntax(fragment: str) -> str:
+    """Audit-confirmed attribute syntax errors in structural start tags only.
+
+    Repairs are intentionally narrow:
+
+    - ``NAME=""value"`` loses the duplicated opening quote only when the
+      second quote is followed by a non-delimiter value character.  Therefore
+      the valid empty value ``NAME=""`` is unchanged.
+    - ``NAME="value""`` loses one duplicated closing double quote only for
+      nonempty values followed by XML whitespace or a tag terminator.
+    - ``NAME="value"NEXT="other"`` gains one space only when the closing
+      quote is immediately followed by a complete XML attribute name and
+      ``=``.
+
+    The small lexer must understand the whole start tag before applying any
+    recorded edit.  Unknown or otherwise malformed attribute grammar remains
+    untouched so the strict XML parser can reject it.
+    """
+
+    parts: list[str] = []
+    unchanged_start = 0
+    search_position = 0
+
+    while True:
+        tag_start = fragment.find("<", search_position)
+        if tag_start == -1:
+            break
+
+        tag_name_match = XML_ATTRIBUTE_NAME_PATTERN.match(fragment, tag_start + 1)
+        if tag_name_match is None:
+            search_position = tag_start + 1
+            continue
+
+        tag_name = tag_name_match.group(0)
+        if (
+            tag_name not in DART_STRUCTURAL_TAGS
+            and SECTION_PATTERN.fullmatch(tag_name) is None
+        ):
+            search_position = tag_start + 1
+            continue
+
+        position = tag_name_match.end()
+        edits: list[tuple[int, int, str]] = []
+        tag_end: int | None = None
+
+        while position < len(fragment):
+            while position < len(fragment) and fragment[position].isspace():
+                position += 1
+
+            if fragment.startswith("/>", position):
+                tag_end = position + 2
+                break
+            if position < len(fragment) and fragment[position] == ">":
+                tag_end = position + 1
+                break
+
+            attribute_match = XML_ATTRIBUTE_NAME_PATTERN.match(fragment, position)
+            if attribute_match is None:
+                break
+            position = attribute_match.end()
+
+            while position < len(fragment) and fragment[position].isspace():
+                position += 1
+            if position >= len(fragment) or fragment[position] != "=":
+                break
+            position += 1
+
+            while position < len(fragment) and fragment[position].isspace():
+                position += 1
+            if position >= len(fragment) or fragment[position] not in {'"', "'"}:
+                break
+
+            quote = fragment[position]
+            position += 1
+            if (
+                position + 1 < len(fragment)
+                and fragment[position] == quote
+                and MALFORMED_DUPLICATED_QUOTE_VALUE_START_PATTERN.match(
+                    fragment,
+                    position + 1,
+                )
+                is not None
+            ):
+                edits.append((position, position + 1, ""))
+                position += 1
+
+            value_start = position
+            closing_quote = fragment.find(quote, position)
+            if closing_quote == -1:
+                break
+            position = closing_quote + 1
+            if (
+                quote == '"'
+                and closing_quote > value_start
+                and fragment.startswith('"', position)
+                and position + 1 < len(fragment)
+                and (
+                    fragment[position + 1] in " \t\r\n>"
+                    or fragment.startswith("/>", position + 1)
+                )
+            ):
+                edits.append((position, position + 1, ""))
+                position += 1
+
+            if position >= len(fragment):
+                break
+            if fragment[position].isspace() or fragment[position] in {"/", ">"}:
+                continue
+
+            next_attribute = XML_ATTRIBUTE_NAME_PATTERN.match(fragment, position)
+            if next_attribute is None:
+                break
+            equals_position = next_attribute.end()
+            while (
+                equals_position < len(fragment)
+                and fragment[equals_position].isspace()
+            ):
+                equals_position += 1
+            if (
+                equals_position >= len(fragment)
+                or fragment[equals_position] != "="
+            ):
+                break
+            edits.append((position, position, " "))
+
+        if tag_end is None:
+            search_position = tag_start + 1
+            continue
+
+        if edits:
+            parts.append(fragment[unchanged_start:tag_start])
+            edit_start = tag_start
+            for start, end, replacement in edits:
+                parts.append(fragment[edit_start:start])
+                parts.append(replacement)
+                edit_start = end
+            parts.append(fragment[edit_start:tag_end])
+            unchanged_start = tag_end
+
+        search_position = tag_end
+
+    if not parts:
+        return fragment
+    parts.append(fragment[unchanged_start:])
+    return "".join(parts)
+
+
+def _is_dart_structural_markup_start(
+    fragment: str,
+    position: int,
+) -> bool:
+    """현재 ``<``가 실제 DART structural tag 시작인지 확인한다."""
+    cursor = position + 1
+    if cursor < len(fragment) and fragment[cursor] == "/":
+        cursor += 1
+
+    tag_name_match = XML_ATTRIBUTE_NAME_PATTERN.match(fragment, cursor)
+    if tag_name_match is None:
+        return False
+
+    tag_name = tag_name_match.group(0)
+    return (
+        tag_name in DART_STRUCTURAL_TAGS
+        or SECTION_PATTERN.fullmatch(tag_name) is not None
+    )
+
+
+def _repair_malformed_literal_lt_in_text(fragment: str) -> str:
+    """Element text의 audit-confirmed malformed literal ``<``만 escape한다.
+
+    호출자는 CDATA/comment/processing instruction을 제외한 fragment를 전달한다.
+    start/end tag와 quoted attribute 안의 동일 문자열은 strict parser가 계속
+    검증하도록 그대로 둔다. percent 비교식과 structural closing tag 직전의
+    미완성 한글 token, SPAN 닫힘 직전의 단독 `<`를 좁은 문법으로 판정한다.
+    """
+    parts: list[str] = []
+    unchanged_start = 0
+    position = 0
+    in_markup = False
+    quote: str | None = None
+
+    while position < len(fragment):
+        if not in_markup:
+            next_markup = fragment.find("<", position)
+            if next_markup == -1:
+                break
+            position = next_markup
+            comparison = MALFORMED_PERCENT_COMPARISON_PATTERN.match(
+                fragment,
+                position,
+            )
+            numeric_less_than = MALFORMED_NUMERIC_LT_TEXT_PATTERN.match(
+                fragment,
+                position,
+            )
+            regulation_heading = MALFORMED_REGULATION_HEADING_LT_PATTERN.match(
+                fragment,
+                position,
+            )
+            tcf_less_than = MALFORMED_TCF_LT_TEXT_PATTERN.match(
+                fragment,
+                position,
+            )
+            if tcf_less_than is not None:
+                tcf_prefix_allowed = any(
+                    position >= len(prefix)
+                    and fragment[position - len(prefix) : position] == prefix
+                    for prefix in MALFORMED_TCF_LT_ALLOWED_PREFIXES
+                )
+                if not tcf_prefix_allowed:
+                    tcf_less_than = None
+            incomplete_korean_text = (
+                MALFORMED_INCOMPLETE_KOREAN_TEXT_PATTERN.match(
+                    fragment,
+                    position,
+                )
+            )
+            bare_lt = MALFORMED_BARE_LT_TEXT_PATTERN.match(fragment, position)
+            if (
+                comparison is not None
+                or numeric_less_than is not None
+                or regulation_heading is not None
+                or tcf_less_than is not None
+                or incomplete_korean_text is not None
+                or bare_lt is not None
+            ):
+                parts.append(fragment[unchanged_start:position])
+                parts.append("&lt;")
+                position += 1
+                unchanged_start = position
+                continue
+
+            if not _is_dart_structural_markup_start(fragment, position):
+                position += 1
+                continue
+
+            in_markup = True
+            position += 1
+            continue
+
+        character = fragment[position]
+        if quote is not None:
+            if character == quote:
+                quote = None
+        elif character in {'"', "'"}:
+            quote = character
+        elif character == ">":
+            in_markup = False
+        position += 1
+
+    if not parts:
+        return fragment
+    parts.append(fragment[unchanged_start:])
+    return "".join(parts)
 
 
 def sanitize_dart_xml_text(xml_text: str) -> str:
-    """DART 본문에 섞인 XML entity/pseudo-tag 오류만 보수적으로 교정한다.
+    """Audit-confirmed DART XML syntax errors only, preserving strict parsing.
 
     정상 entity는 그대로 두며, 구조 tag allowlist 밖의 ``<...>``는 text로
-    escape한다. XML 선언, comment, CDATA, processing instruction은 변경하지 않는다.
+    escape한다. audit으로 확정한 percent 비교식, 미완성 한글 text 및 SPAN 닫힘
+    직전의 단독 ``<``만 text node에서 escape한다. 구조 start tag 안에서는 빈 attribute와
+    구분 가능한 중복 opening/closing quote 및 attribute 사이의 누락된 공백만 복구한다.
+    XML 선언, comment, CDATA, processing instruction은 변경하지 않는다.
     """
 
     def sanitize_fragment(fragment: str) -> str:
@@ -93,7 +401,14 @@ def sanitize_dart_xml_text(xml_text: str) -> str:
 
             return f"&lt;{inner}&gt;"
 
-        escaped_tags = TAG_LIKE_PATTERN.sub(escape_pseudo_tag, fragment)
+        repaired_attributes = _repair_malformed_attribute_syntax(fragment)
+        escaped_literal_lt = _repair_malformed_literal_lt_in_text(
+            repaired_attributes,
+        )
+        escaped_tags = TAG_LIKE_PATTERN.sub(
+            escape_pseudo_tag,
+            escaped_literal_lt,
+        )
         return VALID_XML_ENTITY_PATTERN.sub("&amp;", escaped_tags)
 
     parts: list[str] = []

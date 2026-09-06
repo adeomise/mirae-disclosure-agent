@@ -1,10 +1,15 @@
 """Validation tests for contract v0.1 vertical-slice objects."""
 
+from datetime import date
 from decimal import Decimal
+
+import pytest
+from pydantic import ValidationError
 
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
+    ComparisonRelation,
     EventLinkRelation,
     EventLinkResolutionStatus,
     EventType,
@@ -12,12 +17,14 @@ from disclosure_agent.common.enums import (
     ExecutionStatus,
     FactAccountingScope,
     MetricConcept,
+    ResultInputType,
 )
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
     AnswerabilityDetail,
     AnswerResponse,
     CalculationResult,
+    ComparisonResult,
     ConversionGap,
     Event,
     EventHistory,
@@ -28,6 +35,10 @@ from disclosure_agent.common.schemas import (
     Fact,
     FieldChange,
     RawReference,
+    ResolvedEventState,
+    ResolvedFieldValue,
+    ResultInputReference,
+    SourceDocument,
 )
 from disclosure_agent.event.identity import make_event_id
 
@@ -55,6 +66,7 @@ def test_q01_dummy_fact_preserves_raw_and_normalized_values() -> None:
 def test_additional_source_metric_concepts_validate_as_facts() -> None:
     metrics = (
         MetricConcept.OPERATING_INCOME,
+        MetricConcept.INVESTMENT_AMOUNT,
         MetricConcept.HOLDING_SHARES,
         MetricConcept.HOLDING_RATIO,
     )
@@ -67,6 +79,165 @@ def test_additional_source_metric_concepts_validate_as_facts() -> None:
             accounting_scope=FactAccountingScope.NOT_APPLICABLE,
         )
         assert fact.metric is metric
+
+
+def test_investment_amount_metric_validates_and_serializes_as_fact() -> None:
+    assert MetricConcept.INVESTMENT_AMOUNT.value == "investment_amount"
+
+    fact = Fact(
+        fact_id="fact_dummy_investment_amount",
+        company="dummy-company",
+        metric=MetricConcept.INVESTMENT_AMOUNT,
+        accounting_scope=FactAccountingScope.NOT_APPLICABLE,
+        normalized_value="28533520000",
+        normalized_unit="KRW",
+        evidence_ids=[],
+    )
+
+    payload = fact.model_dump(mode="json")
+    assert payload["metric"] == "investment_amount"
+    assert payload["accounting_scope"] == "not_applicable"
+    assert payload["normalized_value"] == "28533520000"
+    assert payload["normalized_unit"] == "KRW"
+
+
+def test_result_input_and_comparison_enums_preserve_contract_values() -> None:
+    assert {relation.name: relation.value for relation in ComparisonRelation} == {
+        "LEFT_GREATER": "left_greater",
+        "RIGHT_GREATER": "right_greater",
+        "EQUAL": "equal",
+    }
+    assert {input_type.name: input_type.value for input_type in ResultInputType} == {
+        "FACT": "fact",
+        "CALCULATION": "calculation",
+    }
+
+
+def test_result_input_reference_accepts_fact_and_calculation() -> None:
+    fact_reference = ResultInputReference(
+        input_type=ResultInputType.FACT,
+        input_id="fact_dummy_left",
+    )
+    calculation_reference = ResultInputReference(
+        input_type=ResultInputType.CALCULATION,
+        input_id="calculation_dummy_right",
+    )
+
+    assert fact_reference.model_dump(mode="json") == {
+        "input_type": "fact",
+        "input_id": "fact_dummy_left",
+    }
+    assert calculation_reference.model_dump(mode="json") == {
+        "input_type": "calculation",
+        "input_id": "calculation_dummy_right",
+    }
+
+
+def test_comparison_result_serializes_successful_relation() -> None:
+    comparison = ComparisonResult(
+        comparison_id="comparison_dummy_revenue",
+        left=ResultInputReference(input_type="fact", input_id="fact_dummy_left"),
+        right=ResultInputReference(
+            input_type="calculation",
+            input_id="calculation_dummy_right",
+        ),
+        relation=ComparisonRelation.LEFT_GREATER,
+    )
+
+    assert comparison.model_dump(mode="json") == {
+        "comparison_id": "comparison_dummy_revenue",
+        "left": {"input_type": "fact", "input_id": "fact_dummy_left"},
+        "right": {
+            "input_type": "calculation",
+            "input_id": "calculation_dummy_right",
+        },
+        "relation": "left_greater",
+    }
+
+
+def test_comparison_result_rejects_failure_relation() -> None:
+    with pytest.raises(ValidationError):
+        ComparisonResult(
+            comparison_id="comparison_dummy_invalid",
+            left=ResultInputReference(input_type="fact", input_id="fact_dummy_left"),
+            right=ResultInputReference(input_type="fact", input_id="fact_dummy_right"),
+            relation="not_comparable",
+        )
+
+
+def test_calculation_result_requires_and_serializes_identity() -> None:
+    calculation = CalculationResult(
+        calculation_id="calculation_dummy_ratio",
+        operation="ratio",
+        inputs=[
+            ResultInputReference(input_type="fact", input_id="fact_dummy_numerator"),
+            ResultInputReference(input_type="fact", input_id="fact_dummy_denominator"),
+        ],
+        value="dummy",
+        unit="percent",
+    )
+
+    assert calculation.model_dump(mode="json") == {
+        "calculation_id": "calculation_dummy_ratio",
+        "operation": "ratio",
+        "inputs": [
+            {"input_type": "fact", "input_id": "fact_dummy_numerator"},
+            {"input_type": "fact", "input_id": "fact_dummy_denominator"},
+        ],
+        "value": "dummy",
+        "unit": "percent",
+        "evidence_ids": [],
+    }
+
+    with pytest.raises(ValidationError):
+        CalculationResult(
+            operation="ratio",
+            inputs=[ResultInputReference(input_type="fact", input_id="fact_dummy_input")],
+        )
+
+
+def test_calculation_result_requires_non_empty_inputs() -> None:
+    with pytest.raises(ValidationError):
+        CalculationResult(calculation_id="calculation_dummy", operation="ratio")
+    with pytest.raises(ValidationError):
+        CalculationResult(
+            calculation_id="calculation_dummy",
+            operation="ratio",
+            inputs=[],
+        )
+
+
+def test_calculation_result_accepts_fact_and_calculation_inputs() -> None:
+    calculation = CalculationResult(
+        calculation_id="calculation_dummy_diff",
+        operation="diff_pp",
+        inputs=[
+            ResultInputReference(input_type="fact", input_id="fact_dummy_source"),
+            ResultInputReference(
+                input_type="calculation",
+                input_id="calculation_dummy_margin",
+            ),
+        ],
+    )
+
+    assert [item.input_type for item in calculation.inputs] == [
+        ResultInputType.FACT,
+        ResultInputType.CALCULATION,
+    ]
+
+
+def test_calculation_result_rejects_direct_self_reference() -> None:
+    with pytest.raises(ValidationError, match="cannot directly reference itself"):
+        CalculationResult(
+            calculation_id="calculation_dummy",
+            operation="identity",
+            inputs=[
+                ResultInputReference(
+                    input_type="calculation",
+                    input_id="calculation_dummy",
+                )
+            ],
+        )
 
 
 def test_q02_dummy_supply_contract_event() -> None:
@@ -146,6 +317,90 @@ def test_answer_response_preserves_reason_and_event_link() -> None:
     assert unresolved.reason is AnswerabilityReason.AMBIGUOUS_LINK
 
 
+def test_source_document_requires_only_doc_id_company_and_report_name() -> None:
+    """나머지 필드는 기본값 None. 값을 지어내지 않는 optional 규약이다."""
+    document = SourceDocument(
+        doc_id="doc_dummy_periodic",
+        company="dummy-company",
+        report_name="dummy-report",
+    )
+
+    assert document.fiscal_year is None
+    assert document.document_subtype is None
+    assert document.base_month is None
+    assert document.filing_date is None
+    assert document.receipt_no is None
+
+
+def test_source_document_serializes_filing_date_as_an_iso_string() -> None:
+    document = SourceDocument(
+        doc_id="doc_dummy_periodic",
+        company="dummy-company",
+        report_name="dummy-report",
+        fiscal_year=2025,
+        document_subtype="annual",
+        base_month=12,
+        filing_date=date(2026, 3, 10),
+        receipt_no="20260310002820",
+    )
+
+    assert document.model_dump(mode="json")["filing_date"] == "2026-03-10"
+
+
+def test_execution_result_accepts_source_documents_and_defaults_to_empty_list() -> None:
+    document = SourceDocument(
+        doc_id="doc_dummy_periodic",
+        company="dummy-company",
+        report_name="dummy-report",
+        fiscal_year=2025,
+    )
+    with_document = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        source_documents=[document],
+    )
+    without_document = AgentExecutionResult(execution_status=ExecutionStatus.COMPLETED)
+
+    assert with_document.model_dump(mode="json")["source_documents"] == [
+        document.model_dump(mode="json")
+    ]
+    assert without_document.source_documents == []
+
+
+def test_execution_result_rejects_duplicate_source_document_doc_ids() -> None:
+    """같은 doc_id가 두 번 실리면 그 문서를 몇 건으로 셀지 모호해진다. 조용히 합치지 않는다."""
+    document = SourceDocument(
+        doc_id="doc_dummy_periodic",
+        company="dummy-company",
+        report_name="dummy-report",
+    )
+
+    with pytest.raises(ValidationError):
+        AgentExecutionResult(
+            execution_status=ExecutionStatus.COMPLETED,
+            source_documents=[document, document],
+        )
+
+
+def test_answer_response_accepts_source_documents_and_defaults_to_empty_list() -> None:
+    document = SourceDocument(
+        doc_id="doc_dummy_periodic",
+        company="dummy-company",
+        report_name="dummy-report",
+    )
+    with_document = AnswerResponse(
+        answer="dummy answer",
+        status=AnswerabilityStatus.ANSWERABLE,
+        source_documents=[document],
+    )
+    without_document = AnswerResponse(
+        answer="dummy answer",
+        status=AnswerabilityStatus.ANSWERABLE,
+    )
+
+    assert with_document.source_documents == [document]
+    assert without_document.source_documents == []
+
+
 def test_ambiguous_event_link_preserves_candidate_doc_ids() -> None:
     link = EventLink(
         link_id="link_dummy_ambiguous",
@@ -184,6 +439,132 @@ def test_event_id_is_deterministic_for_canonical_root_document() -> None:
     assert first != different_root
 
 
+def test_resolved_event_state_serializes_field_level_provenance() -> None:
+    state = ResolvedEventState(
+        event_id="event_chain_dummy_supply_contract",
+        event_type=EventType.SUPPLY_CONTRACT,
+        company="dummy-company",
+        as_of=date(2025, 3, 14),
+        fields={
+            "contract_amount": ResolvedFieldValue(
+                value=123.5,
+                unit="KRW",
+                source_doc_id="doc_dummy_correction",
+                evidence_ids=["evidence_dummy_amount"],
+            )
+        },
+    )
+
+    assert state.model_dump(mode="json") == {
+        "event_id": "event_chain_dummy_supply_contract",
+        "event_type": "supply_contract",
+        "company": "dummy-company",
+        "as_of": "2025-03-14",
+        "fields": {
+            "contract_amount": {
+                "value": 123.5,
+                "unit": "KRW",
+                "source_doc_id": "doc_dummy_correction",
+                "evidence_ids": ["evidence_dummy_amount"],
+            }
+        },
+    }
+
+
+def test_resolved_event_state_event_id_is_correction_chain_identity() -> None:
+    history = EventHistory(
+        event_id="event_chain_dummy_supply_contract",
+        document_ids=["doc_dummy_original", "doc_dummy_correction"],
+        chain_complete=True,
+    )
+    state = ResolvedEventState(
+        event_id=history.event_id,
+        event_type=EventType.SUPPLY_CONTRACT,
+        company="dummy-company",
+        as_of=date(2025, 3, 14),
+    )
+    individual_event = Event(
+        event_id="event_individual_dummy_correction",
+        event_type=EventType.SUPPLY_CONTRACT,
+        company="dummy-company",
+        source_doc_id="doc_dummy_correction",
+        is_correction=True,
+    )
+
+    assert state.event_id == history.event_id
+    assert state.event_id != individual_event.event_id
+
+
+def test_resolved_contract_defaults_are_not_shared() -> None:
+    first_value = ResolvedFieldValue(source_doc_id="doc_dummy_first")
+    second_value = ResolvedFieldValue(source_doc_id="doc_dummy_second")
+    first_state = ResolvedEventState(
+        event_id="event_chain_dummy_first",
+        event_type=EventType.SUPPLY_CONTRACT,
+        company="dummy-company",
+        as_of=date(2025, 3, 14),
+    )
+    second_state = ResolvedEventState(
+        event_id="event_chain_dummy_second",
+        event_type=EventType.SUPPLY_CONTRACT,
+        company="dummy-company",
+        as_of=date(2025, 3, 15),
+    )
+
+    assert first_value.value is None
+    assert first_value.unit is None
+    assert first_value.evidence_ids == []
+    assert first_value.evidence_ids is not second_value.evidence_ids
+    assert first_state.fields == {}
+    assert first_state.fields is not second_state.fields
+
+
+@pytest.mark.parametrize(
+    ("model", "kwargs"),
+    [
+        (ResolvedFieldValue, {}),
+        (
+            ResolvedEventState,
+            {
+                "event_type": EventType.SUPPLY_CONTRACT,
+                "company": "dummy-company",
+                "as_of": date(2025, 3, 14),
+            },
+        ),
+        (
+            ResolvedEventState,
+            {
+                "event_id": "event_chain_dummy",
+                "company": "dummy-company",
+                "as_of": date(2025, 3, 14),
+            },
+        ),
+        (
+            ResolvedEventState,
+            {
+                "event_id": "event_chain_dummy",
+                "event_type": EventType.SUPPLY_CONTRACT,
+                "as_of": date(2025, 3, 14),
+            },
+        ),
+        (
+            ResolvedEventState,
+            {
+                "event_id": "event_chain_dummy",
+                "event_type": EventType.SUPPLY_CONTRACT,
+                "company": "dummy-company",
+            },
+        ),
+    ],
+)
+def test_resolved_contract_rejects_missing_required_fields(
+    model: type[ResolvedFieldValue] | type[ResolvedEventState],
+    kwargs: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        model(**kwargs)
+
+
 def test_completed_answerable_execution_result() -> None:
     result = AgentExecutionResult(
         execution_status=ExecutionStatus.COMPLETED,
@@ -217,9 +598,88 @@ def test_answerability_reason_values_include_pattern_f_contract_extensions() -> 
         "AMBIGUOUS_MATCH": "ambiguous_match",
         "NOT_FOUND": "not_found",
         "INSUFFICIENT_EVIDENCE": "insufficient_evidence",
+        "WITHHELD_IN_SOURCE": "withheld_in_source",
+        "NOT_COMPARABLE": "not_comparable",
         "OUT_OF_DATA_RANGE": "out_of_data_range",
         "OUT_OF_SCOPE_DATA": "out_of_scope_data",
         "OUT_OF_SCOPE_POLICY": "out_of_scope_policy",
+        "PARTIAL_SOURCE_SUPPORT": "partial_source_support",
+    }
+
+
+def test_not_comparable_is_completed_unanswerable_canonical_reason() -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.UNANSWERABLE,
+        answerability_reason=AnswerabilityReason.NOT_COMPARABLE,
+    )
+
+    assert result.model_dump(mode="json") == {
+        "execution_status": "COMPLETED",
+        "answerability_status": "UNANSWERABLE",
+        "answerability_reason": "not_comparable",
+        "answerability_detail": None,
+        "execution_issue": None,
+        "facts": [],
+        "events": [],
+        "event_links": [],
+        "event_histories": [],
+        "resolved_event_states": [],
+        "document_summaries": [],
+        "evidence": [],
+        "source_documents": [],
+        "calculations": [],
+        "comparisons": [],
+        "narrative_comparisons": [],
+        "operations": [],
+        "warnings": [],
+        "conversion_gaps": [],
+    }
+    assert result.answerability_reason not in {
+        AnswerabilityReason.NOT_FOUND,
+        AnswerabilityReason.INSUFFICIENT_EVIDENCE,
+    }
+
+
+@pytest.mark.parametrize(
+    "status",
+    [AnswerabilityStatus.PARTIALLY_ANSWERABLE, AnswerabilityStatus.UNANSWERABLE],
+)
+def test_withheld_in_source_serializes_on_both_of_its_statuses(
+    status: AnswerabilityStatus,
+) -> None:
+    """
+    공시유보는 두 상태에 실린다(open_decisions.md D9).
+
+    질문에 필요한 field 일부만 유보면 PARTIALLY_ANSWERABLE, 핵심 field 전체가 유보면
+    UNANSWERABLE이다. 어느 쪽인지는 유보 범위가 정하며 사유 값은 같다.
+    """
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=status,
+        answerability_reason=AnswerabilityReason.WITHHELD_IN_SOURCE,
+    )
+
+    payload = result.model_dump(mode="json")
+
+    assert payload["execution_status"] == "COMPLETED"
+    assert payload["answerability_status"] == status.value
+    assert payload["answerability_reason"] == "withheld_in_source"
+    assert payload["execution_issue"] is None
+
+
+def test_withheld_in_source_is_not_collapsed_into_a_missing_data_reason() -> None:
+    """
+    유보는 데이터 부재가 아니다(evidence_and_answerability.md).
+
+    문서도 항목도 있고 값만 비공개다. 부재 계열 사유로 근사하면 검색 실패·범위 밖·원문
+    비공개가 한 지표로 묶여 세 실패의 원인이 구분되지 않는다.
+    """
+    assert AnswerabilityReason.WITHHELD_IN_SOURCE not in {
+        AnswerabilityReason.NOT_FOUND,
+        AnswerabilityReason.INSUFFICIENT_EVIDENCE,
+        AnswerabilityReason.OUT_OF_DATA_RANGE,
+        AnswerabilityReason.OUT_OF_SCOPE_DATA,
     }
 
 
@@ -321,8 +781,11 @@ def test_execution_result_default_lists_are_not_shared() -> None:
         "events",
         "event_links",
         "event_histories",
+        "resolved_event_states",
         "evidence",
+        "source_documents",
         "calculations",
+        "comparisons",
         "warnings",
         "conversion_gaps",
     )
@@ -337,6 +800,47 @@ def test_execution_result_default_lists_are_not_shared() -> None:
 
     assert second.warnings == []
     assert second.conversion_gaps == []
+
+
+def test_execution_result_accepts_comparison_and_defaults_to_empty_list() -> None:
+    comparison = ComparisonResult(
+        comparison_id="comparison_dummy_revenue",
+        left=ResultInputReference(input_type="fact", input_id="fact_dummy_left"),
+        right=ResultInputReference(input_type="fact", input_id="fact_dummy_right"),
+        relation=ComparisonRelation.EQUAL,
+    )
+    with_comparison = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        comparisons=[comparison],
+    )
+    without_comparison = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+    )
+
+    assert with_comparison.comparisons == [comparison]
+    assert with_comparison.model_dump(mode="json")["comparisons"] == [
+        comparison.model_dump(mode="json")
+    ]
+    assert without_comparison.comparisons == []
+
+
+def test_execution_result_accepts_resolved_event_state_and_defaults_to_empty_list() -> None:
+    state = ResolvedEventState(
+        event_id="event_chain_dummy_supply_contract",
+        event_type=EventType.SUPPLY_CONTRACT,
+        company="dummy-company",
+        as_of=date(2025, 3, 14),
+    )
+    with_state = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        resolved_event_states=[state],
+    )
+    without_state = AgentExecutionResult(execution_status=ExecutionStatus.COMPLETED)
+
+    assert with_state.model_dump(mode="json")["resolved_event_states"] == [
+        state.model_dump(mode="json")
+    ]
+    assert without_state.resolved_event_states == []
 
 
 def test_execution_result_accepts_existing_common_contract_objects() -> None:
@@ -463,7 +967,14 @@ def test_execution_result_serializes_to_json_compatible_contract() -> None:
         answerability_status=AnswerabilityStatus.ANSWERABLE,
         calculations=[
             CalculationResult(
+                calculation_id="calculation_dummy_identity",
                 operation="identity",
+                inputs=[
+                    ResultInputReference(
+                        input_type="fact",
+                        input_id="fact_dummy_source",
+                    )
+                ],
                 value="dummy",
                 unit="dummy-unit",
                 evidence_ids=["evidence_dummy"],
@@ -479,7 +990,11 @@ def test_execution_result_serializes_to_json_compatible_contract() -> None:
     assert dumped["answerability_status"] == "ANSWERABLE"
     assert dumped["calculations"] == [
         {
+            "calculation_id": "calculation_dummy_identity",
             "operation": "identity",
+            "inputs": [
+                {"input_type": "fact", "input_id": "fact_dummy_source"}
+            ],
             "value": "dummy",
             "unit": "dummy-unit",
             "evidence_ids": ["evidence_dummy"],
@@ -501,3 +1016,18 @@ def test_execution_result_serializes_to_json_compatible_contract() -> None:
         }
     ]
     assert "answer" not in dumped
+
+
+def test_partial_source_support_is_partial_answerability_reason() -> None:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.PARTIALLY_ANSWERABLE,
+        answerability_reason=AnswerabilityReason.PARTIAL_SOURCE_SUPPORT,
+    )
+
+    assert result.answerability_status is AnswerabilityStatus.PARTIALLY_ANSWERABLE
+    assert result.answerability_reason is AnswerabilityReason.PARTIAL_SOURCE_SUPPORT
+    assert (
+        result.model_dump(mode="json")["answerability_reason"]
+        == "partial_source_support"
+    )

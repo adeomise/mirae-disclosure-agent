@@ -4,7 +4,8 @@
 - 거래소공시 하나와 그 정정 이력을 모아 무엇이 언제 바뀌었는지 구조화한다.
 
 현재 구현 범위:
-- 대표 질문 Q13 계열(공급계약 1건의 정정 추적)만 다룬다.
+- 대표 질문 Q13 계열(공급계약 1건의 정정 추적)과 Q15 계열(신규시설투자 1건의 정정 추적)을
+  다룬다. 두 유형은 같은 파이프라인을 쓰고 EventType만 다르다.
 
     QueryPlan
       -> 원공시 후보 조회        (retrieval.metadata_filter, 질문이 지정한 기간)
@@ -21,6 +22,46 @@
     체인까지 자르면 이후 연도의 정정이 통째로 빠져 "바뀐 것이 없다"는 잘못된 답이 나온다.
     원공시는 창 안에서 찾고, 체인은 창 밖까지 본다.
 
+기간을 밝히지 않은 질문:
+    Q14("...포드랑 맺었던 배터리 공급계약, 지금 어떻게 됐어?")나 Q15처럼 공시 시점을 말하지
+    않는 이력 질문이 있다. 그때 계획의 years는 비어 있고(agent.query_analyzer의
+    _build_event_history_plan), 원공시 조회에 창을 걸지 않는다. 공시 유형으로 가르지 않는다.
+    어느 유형이든 연도 없는 이력 질문은 창 없는 계획으로 여기까지 온다.
+
+    질의 해석 계층이 연도를 요구하지 않는 이유가 이 handler에 있다. 시점 없이 답할 수 있는지는
+    그 기업의 원공시 후보가 몇 건이냐가 정하고, 그 개수는 코퍼스를 열어야 알 수 있다. 계획
+    단계에서 유형만 보고 미리 막으면 후보가 하나뿐인 질문까지 막히고, 막힌 사유도 '연도를 못
+    읽었다'가 되어 실제로 일어난 일과 달라진다. 그래서 판정을 후보 개수가 보이는 이 자리로
+    미룬다.
+
+    창이 없어도 기업과 공시 유형이 후보를 좁힌다. 그 뒤의 판정은 후보 개수와 질문이 건 조건에
+    따라 셋으로 갈리며, 순서가 규약이다.
+
+        원공시가 여럿                    ambiguous_root로 막는다. 상대방을 적었든 아니든
+                                         이 판정이 먼저다. 후보를 하나로 좁히지 못한 것이
+                                         더 앞선 사실이고, 상대방을 대조할 수 있게 되어도
+                                         후보가 여럿인 상황은 그대로 남기 때문이다.
+
+        원공시 1건 + 질문이 상대방을 지목  unverified_counterparty로 막는다. 아래 참조.
+
+        원공시 1건 + 상대방 언급 없음      그 1건의 이력을 답한다. 확인하지 못한 조건이
+                                         없으므로 예전과 같다.
+
+    상대방을 적은 질문에서 1건을 답으로 삼지 않는 이유:
+        이 구현은 계약상대방으로 문서를 확정하지 못한다(C3 미구현). 대조하지 못하는 상태에서
+        후보가 하나라는 이유로 그 하나를 답하면, "그 상대방과 맺은 계약의 이력"을 물었는데
+        "이 기업의 공급계약 중 코퍼스에 하나뿐인 것의 이력"을 답하게 된다. 둘이 같은 계약인지는
+        확인하지 않았고, 확인하지 않았다는 사실은 답 어디에도 남지 않는다.
+
+        후보가 하나뿐인 것은 코퍼스가 그렇다는 뜻이지 질문이 가리킨 계약이라는 뜻이 아니다.
+        개수가 맞아떨어진 것을 근거로 삼지 않는다. 후보가 여럿일 때 하나를 고르지 않는 것과
+        같은 규칙이며, 다른 것은 못 고르는 이유뿐이다.
+
+        여기서 상대방으로 후보를 좁히지는 않는다. 그것이 C3이고 이 자리에서 하지 않는다.
+        하는 일은 좁히지 못한다는 사실을 결과에 남기는 것뿐이다.
+
+    세 갈래 모두 tests/integration/test_pattern_e_q15.py에 대조군으로 고정해 두었다.
+
 자연어 답변을 만들지 않는 이유:
     이 handler는 구조화된 결과까지만 만든다. Contract의 AnswerResponse는 answer를 필수 문자열로
     요구하지만, 빈 문자열이나 기계 문장으로 형식만 맞추면 "답을 만들었다"와 "아직 못 만들었다"가
@@ -35,7 +76,6 @@
 
 TODO:
 - 후속·해지 방향 연결(본문 '관련공시')로 Q14 확장
-- 필드별 변경 궤적으로 Q15 확장
 """
 
 from __future__ import annotations
@@ -50,12 +90,20 @@ from disclosure_agent.agent.answer_builder import (
     REASON_NO_MATCHING_FILING,
     REASON_NO_ORIGINAL_FILING,
     REASON_PARSE_FAILED,
+    REASON_UNSUPPORTED_EVENT_TYPE,
+    REASON_UNVERIFIED_COUNTERPARTY,
+    STAGE_CONTRACT_ADAPTATION,
     STAGE_FILING_DISCOVERY,
     STAGE_PARSING,
+    STAGE_PATTERN_ENTRY,
     BlockedInfo,
 )
 from disclosure_agent.agent.normalization import normalize_event_history_result
-from disclosure_agent.agent.query_analyzer import QueryPlan
+from disclosure_agent.agent.query_analyzer import (
+    EVENT_SUBTYPE_FACILITY_INVESTMENT,
+    EVENT_SUBTYPE_SUPPLY_CONTRACT,
+    QueryPlan,
+)
 from disclosure_agent.common.enums import (
     AnswerabilityStatus,
     EventType,
@@ -67,16 +115,44 @@ from disclosure_agent.common.schemas import (
     EventLink,
     Evidence,
 )
-from disclosure_agent.event.contract_adapter import ContractGap, to_event_history
+from disclosure_agent.event.contract_adapter import (
+    ContractGap,
+    build_change_evidence_id,
+    to_event_history,
+)
 from disclosure_agent.event.linker import FilingChain, FilingLike, build_filing_chain
 from disclosure_agent.event.parser import parse_exchange_document
-from disclosure_agent.retrieval.metadata_filter import FilingNotFoundError, list_event_filings
+from disclosure_agent.retrieval.metadata_filter import (
+    FilingNotFoundError,
+    FilingRef,
+    list_event_filings,
+)
 
 # 정지 사유와 BlockedInfo는 answer_builder가 어휘를 들고 있다. Pattern마다 같은 사유를 다른
 # 문자열로 쓰면 정규화 대응표와 대조할 수 없다.
 
-# 이번 슬라이스가 다루는 이벤트 유형.
-EVENT_TYPE = EventType.SUPPLY_CONTRACT
+# 질문이 지목한 공시 세부유형(manifest의 doc_subtype)을 이벤트 유형으로 옮긴다.
+#
+# 상수 하나로 고정하지 않는 이유:
+#     예전에는 EVENT_TYPE = SUPPLY_CONTRACT 하나였다. 그 상태로 신규시설투자 계획이 들어오면
+#     '투자금액'·'투자기간 종료일' 같은 정정 항목이 공급계약 어휘로 조회되어 한 건도 이름이
+#     붙지 않는다(event.correction_fields의 대응표는 유형별로 나뉘어 있다). 그러면 변경이
+#     전부 field=None으로 남아 "바뀐 것이 없다"에 가까운 결과가 되고, 그것이 틀린 답이다.
+#
+# 모르는 유형은 상수로 대신하지 않는다. resolve_event_type이 None을 돌려주고 호출부가 막는다.
+EVENT_TYPE_BY_DOCUMENT_SUBTYPE: dict[str, EventType] = {
+    EVENT_SUBTYPE_SUPPLY_CONTRACT: EventType.SUPPLY_CONTRACT,
+    EVENT_SUBTYPE_FACILITY_INVESTMENT: EventType.FACILITY_INVESTMENT,
+}
+
+# 같은 문서의 같은 canonical field는 현재 행 단위 Evidence ID를 공유하게 된다. 서로 다른
+# 원문 행을 하나의 근거처럼 보이게 만들 수 있으므로 Contract 변환 전에 실행을 막는다.
+REASON_EVENT_EVIDENCE_ID_COLLISION = "event_evidence_id_collision"
+
+
+def resolve_event_type(document_subtype: str) -> EventType | None:
+    """계획의 공시 세부유형에 대응하는 이벤트 유형. 모르는 유형이면 None."""
+    return EVENT_TYPE_BY_DOCUMENT_SUBTYPE.get(document_subtype)
 
 
 @dataclass(frozen=True)
@@ -89,6 +165,13 @@ class EventHistoryResult:
 
     status가 None이면 답변 가능성을 판정할 단계에 이르지 못한 것이다(blocked 참조).
     데이터가 없어서 답할 수 없는 것과 파이프라인이 막힌 것은 다르다.
+
+    filings를 따로 들고 다니는 이유:
+        history/links/evidence는 이미 공통 Contract 타입이지만 그 안에는 FilingRef가 없다.
+        source_documents(문서 metadata)를 만들려면 이력에 실제로 채택된 원공시·정정공시의
+        FilingRef가 필요하고, 그 값은 event.linker.FilingChain.entries에만 있다. 체인 확정
+        전에 멈춘 결과(history is None)에는 채우지 않는다 — 그때는 아직 이력에 채택된
+        문서 집합 자체가 없다.
     """
 
     plan: QueryPlan
@@ -98,6 +181,7 @@ class EventHistoryResult:
     evidence: tuple[Evidence, ...] = field(default_factory=tuple)
     conversion_gaps: tuple[ContractGap, ...] = field(default_factory=tuple)
     root_candidate_doc_ids: tuple[str, ...] = field(default_factory=tuple)
+    filings: tuple[FilingRef, ...] = field(default_factory=tuple)
     blocked: BlockedInfo | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -128,6 +212,22 @@ def filing_date_window(year: int, month: int | None) -> tuple[str, str]:
     return f"{year}{month:02d}01", f"{year}{month:02d}{last_day:02d}"
 
 
+def root_filing_window(plan: QueryPlan) -> tuple[str, str] | None:
+    """
+    원공시 후보를 좁힐 공시일 범위. 질문이 시점을 밝히지 않았으면 None.
+
+    None은 '기간 조건 없음'이며 '아무 문서나 좋다'가 아니다. 기업과 공시 유형 조건은 그대로
+    걸리고, 그러고도 원공시가 여럿이면 호출부가 ambiguous_root로 막는다.
+
+    plan.year를 바로 읽지 않는 이유는 그 통로가 단일 기간을 전제하기 때문이다. 연도가 없는
+    계획에서 그대로 부르면 ValueError가 난다. 여기서 먼저 판정해 예외 대신 None으로 가른다.
+    """
+    if not plan.years:
+        return None
+
+    return filing_date_window(plan.year, plan.month)
+
+
 def build_event_evidence(chain: FilingChain) -> tuple[Evidence, ...]:
     """
     체인의 각 문서와 변경 필드에 대한 근거를 만든다.
@@ -136,8 +236,8 @@ def build_event_evidence(chain: FilingChain) -> tuple[Evidence, ...]:
     만들면 이력의 출발점이 근거 없이 남는다.
 
     거래소공시는 Section 구조가 없으므로 location_type은 event_field를 쓴다.
-    raw_text에는 원문 필드 표기를 그대로 남긴다. Contract FieldChange가 원문 라벨을 담지
-    못하는 것과 달리 Evidence는 담을 수 있어, 원문 대조 경로가 여기서는 끊기지 않는다.
+    변경 행의 raw_text에는 원문 필드 표기와 before/after 값을 함께 남긴다. 셋은 parser가
+    보존한 같은 정정 행에서 왔으며, 별도의 셀 위치를 추론하지 않는다.
     """
     evidence: list[Evidence] = []
 
@@ -163,11 +263,15 @@ def build_event_evidence(chain: FilingChain) -> tuple[Evidence, ...]:
 
             evidence.append(
                 Evidence(
-                    evidence_id=f"evidence_{doc_id}_{change.field}",
+                    evidence_id=build_change_evidence_id(doc_id, change.field),
                     doc_id=doc_id,
                     location_type=EvidenceLocationType.EVENT_FIELD,
                     field_name=change.field,
-                    raw_text=change.raw_field,
+                    raw_text=(
+                        f"raw_field: {change.raw_field}\n"
+                        f"before: {change.before}\n"
+                        f"after: {change.after}"
+                    ),
                 )
             )
 
@@ -196,12 +300,33 @@ def build_event_history_result(
         "document_subtype": plan.document_subtype,
     }
 
+    event_type = resolve_event_type(plan.document_subtype)
+
+    if event_type is None:
+        # 유형을 모르면 정정 항목의 이름을 붙일 수 없다. 가까운 유형으로 대신 처리하면
+        # 변경이 전부 이름 없이 남고, 그 결과는 "바뀐 것이 없다"와 구분되지 않는다.
+        return EventHistoryResult(
+            plan=plan,
+            blocked=BlockedInfo(
+                stage=STAGE_PATTERN_ENTRY,
+                reason=REASON_UNSUPPORTED_EVENT_TYPE,
+                detail=(
+                    f"'{plan.document_subtype}'에 대응하는 이벤트 유형이 없습니다. "
+                    f"현재 지원하는 유형: "
+                    f"{', '.join(sorted(EVENT_TYPE_BY_DOCUMENT_SUBTYPE))}."
+                ),
+            ),
+        )
+
+    root_window = root_filing_window(plan)
+
     try:
         # 원공시 후보: 질문이 지정한 기간 안에서만 찾는다. 정정본은 원공시가 아니다.
+        # 질문이 기간을 밝히지 않았으면(root_window is None) 기간 조건 없이 찾는다.
         root_candidates = list_event_filings(
             **retrieval_kwargs,
             include_corrections=False,
-            date_range=filing_date_window(plan.year, plan.month),
+            date_range=root_window,
         )
 
         # 체인 후보: 기간 제한 없이 본다. 정정은 이후 연도에 나온다.
@@ -235,7 +360,15 @@ def build_event_history_result(
         )
 
     if not root_candidates:
-        window = filing_date_window(plan.year, plan.month)
+        detail = (
+            f"{plan.company}의 {plan.document_subtype} 원공시가 없습니다. "
+            "정정본만으로는 이력의 출발점을 정하지 않습니다."
+            if root_window is None
+            else (
+                f"{root_window[0]}~{root_window[1]} 사이에 제출된 원공시가 없습니다. "
+                "다른 기간의 공시로 대신하지 않습니다."
+            )
+        )
 
         return EventHistoryResult(
             plan=plan,
@@ -243,10 +376,7 @@ def build_event_history_result(
             blocked=BlockedInfo(
                 stage=STAGE_FILING_DISCOVERY,
                 reason=REASON_NO_ORIGINAL_FILING,
-                detail=(
-                    f"{window[0]}~{window[1]} 사이에 제출된 원공시가 없습니다. "
-                    "다른 기간의 공시로 대신하지 않습니다."
-                ),
+                detail=detail,
             ),
         )
 
@@ -261,8 +391,37 @@ def build_event_history_result(
                 stage=STAGE_FILING_DISCOVERY,
                 reason=REASON_AMBIGUOUS_ROOT,
                 detail=(
-                    f"조건에 맞는 원공시가 {len(root_candidates)}건이라 어느 계약의 이력인지 "
+                    f"조건에 맞는 원공시가 {len(root_candidates)}건이라 어느 건의 이력인지 "
                     "특정할 수 없습니다. 본문 대조로 문서를 확정해야 합니다."
+                ),
+            ),
+        )
+
+    if plan.document_subtype == EVENT_SUBTYPE_SUPPLY_CONTRACT and plan.counterparty:
+        # 질문이 상대방을 지목했는데 이 구현은 그 이름을 본문과 대조하지 못한다.
+        #
+        # 여기까지 왔다는 것은 후보가 정확히 1건이라는 뜻이다. 그 1건을 답으로 삼으면 "그
+        # 상대방과 맺은 계약의 이력"을 물었는데 "이 기업의 공급계약 중 코퍼스에 하나뿐인 것의
+        # 이력"을 답하게 된다. 둘이 같은 계약인지는 확인하지 않았고, 확인하지 않았다는 사실은
+        # 답에 남지 않는다. 상대방이 다른 계약이었다면 그 답은 형식이 온전한 채로 틀린다.
+        #
+        # 후보가 하나뿐인 것은 코퍼스가 그렇다는 뜻이지 질문이 가리킨 계약이라는 뜻이 아니다.
+        # 개수가 맞아떨어진 것을 근거로 삼지 않는다. 후보가 여럿일 때 하나를 고르지 않는 것과
+        # 같은 규칙이며, 다른 것은 못 고르는 이유뿐이다(위 ambiguous_root).
+        #
+        # 상대방으로 후보를 좁히지는 않는다. 그것이 C3이고 이 자리에서 하지 않는다. 여기서
+        # 하는 일은 좁히지 못한다는 사실을 결과에 남기는 것뿐이다.
+        return EventHistoryResult(
+            plan=plan,
+            status=AnswerabilityStatus.UNRESOLVED,
+            root_candidate_doc_ids=tuple(_doc_id(filing) for filing in root_candidates),
+            blocked=BlockedInfo(
+                stage=STAGE_FILING_DISCOVERY,
+                reason=REASON_UNVERIFIED_COUNTERPARTY,
+                detail=(
+                    f"질문이 계약상대방('{plan.counterparty}')을 지목했지만 상대방으로 문서를 "
+                    "확정하는 기능이 없어 원공시 1건이 그 계약인지 확인할 수 없습니다. "
+                    "후보가 하나뿐이라는 이유로 그 건의 이력을 답하지 않습니다."
                 ),
             ),
         )
@@ -289,13 +448,33 @@ def build_event_history_result(
         root_receipt_no=root.receipt_no,
         filings=chain_candidates,
         documents=documents,
+        event_type=event_type,
     )
+
+    collision_key = find_event_evidence_id_collision(chain)
+
+    if collision_key is not None:
+        source_doc_id, canonical_field = collision_key
+        return EventHistoryResult(
+            plan=plan,
+            root_candidate_doc_ids=(_doc_id(root),),
+            blocked=BlockedInfo(
+                stage=STAGE_CONTRACT_ADAPTATION,
+                reason=REASON_EVENT_EVIDENCE_ID_COLLISION,
+                detail=(
+                    "서로 다른 정정 행이 같은 행 단위 Evidence ID를 만들 수 있어 "
+                    "EventHistory 변환을 중단했습니다: "
+                    f"source_doc_id={source_doc_id!r}, "
+                    f"canonical_field={canonical_field!r}."
+                ),
+            ),
+        )
 
     conversion = to_event_history(
         chain,
         documents=documents,
         filings=chain_candidates,
-        event_type=EVENT_TYPE,
+        event_type=event_type,
     )
 
     if conversion.history is None:
@@ -316,6 +495,10 @@ def build_event_history_result(
         evidence=build_event_evidence(chain),
         conversion_gaps=conversion.conversion_gaps,
         root_candidate_doc_ids=(_doc_id(root),),
+        # chain.entries가 이 이력에 실제로 귀속을 확정한 문서 전부다(원공시 + 채택된
+        # 정정공시). build_event_evidence(chain)가 만드는 Evidence.doc_id와 정확히 같은
+        # 집합이며, unresolved_links의 후보는 여기 담지 않는다.
+        filings=tuple(entry.filing for entry in chain.entries),
     )
 
 
@@ -330,6 +513,27 @@ def _judge_answerability(chain: FilingChain) -> AnswerabilityStatus:
         return AnswerabilityStatus.ANSWERABLE
 
     return AnswerabilityStatus.PARTIALLY_ANSWERABLE
+
+
+def find_event_evidence_id_collision(chain: FilingChain) -> tuple[str, str] | None:
+    """첫 중복 (source_doc_id, canonical_field) 키를 결정론적으로 찾는다."""
+    seen: set[tuple[str, str]] = set()
+
+    for entry in chain.entries:
+        source_doc_id = _doc_id(entry.filing)
+
+        for change in entry.changes:
+            if change.field is None:
+                continue
+
+            key = (source_doc_id, change.field)
+
+            if key in seen:
+                return key
+
+            seen.add(key)
+
+    return None
 
 
 def _doc_id(filing: FilingLike) -> str:

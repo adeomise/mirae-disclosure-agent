@@ -28,6 +28,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from disclosure_agent.event.correction_fields import resolve_correction_field
+
 EVENT_SUPPLY_CONTRACT = "supply_contract"
 EVENT_FACILITY_INVESTMENT = "facility_investment"
 
@@ -41,12 +43,14 @@ SUPPLY_CONTRACT_FIELDS = {
     ("판매ㆍ공급계약구분", "체결계약명"): "contract_name",
 
     ("계약내역", "계약금액"): "contract_amount",
+    ("계약내역", "계약금액총액"): "contract_amount",
     ("계약내역", "최근매출액"): "recent_revenue",
     ("계약내역", "매출액대비"): "revenue_ratio",
     ("계약내역", "대규모법인여부"): "large_corporation",
 
     ("계약상대", "계약상대"): "counterparty",
     ("계약상대", "회사와의관계"): "counterparty_relation",
+    ("계약상대방", "계약상대방"): "counterparty",
 
     ("판매ㆍ공급지역", "판매ㆍ공급지역"): "supply_region",
 
@@ -54,6 +58,7 @@ SUPPLY_CONTRACT_FIELDS = {
     ("계약기간", "종료일"): "contract_end_date",
 
     ("계약(수주)일자", "계약(수주)일자"): "contract_date",
+    ("계약(수주)일", "계약(수주)일"): "contract_date",
 
     ("공시유보관련내용", "유보사유"): "disclosure_hold_reason",
     ("공시유보관련내용", "유보기한"): "disclosure_hold_until",
@@ -62,6 +67,18 @@ SUPPLY_CONTRACT_FIELDS = {
         "기타투자판단과관련한중요사항",
         "기타투자판단과관련한중요사항",
     ): "notes",
+    (
+        "기타투자판단에참고할사항",
+        "기타투자판단에참고할사항",
+    ): "notes",
+}
+
+# 이 alias들은 actual schema의 group/field 조합에서만 의미가 확정된다.
+# field-only fallback 대상으로 넓히지 않는다.
+SUPPLY_CONTRACT_EXACT_ONLY_FIELDS = {
+    ("계약내역", "계약금액총액"),
+    ("계약상대방", "계약상대방"),
+    ("계약(수주)일", "계약(수주)일"),
 }
 
 
@@ -178,41 +195,55 @@ def detect_event_type(document: dict[str, Any]) -> str:
 # canonical field mapping
 # ---------------------------------------------------------------------------
 
-def match_field(
+def _match_field_with_priority(
     event_type: str,
     group: str | None,
     field: str | None,
-) -> str | None:
-    """Parser의 group/field를 canonical field로 매핑한다."""
+) -> tuple[str | None, int]:
+    """Parser field와 canonical field 및 match priority를 반환한다."""
 
     group_key = normalize_label(group)
     field_key = normalize_label(field)
 
     if event_type == EVENT_SUPPLY_CONTRACT:
         rules = SUPPLY_CONTRACT_FIELDS
+        exact_only_fields = SUPPLY_CONTRACT_EXACT_ONLY_FIELDS
     elif event_type == EVENT_FACILITY_INVESTMENT:
         rules = FACILITY_INVESTMENT_FIELDS
+        exact_only_fields = set()
     else:
-        return None
+        return None, 0
 
     # group + field exact match 우선
     canonical = rules.get((group_key, field_key))
 
     if canonical is not None:
-        return canonical
+        return canonical, 2
 
     # 단독 행은 parser의 current_group 영향으로 group이 조금 다를 수 있다.
     # field 자체가 유일한 경우에만 fallback한다.
     candidates = {
         result
-        for (_, rule_field), result in rules.items()
+        for (rule_group, rule_field), result in rules.items()
         if rule_field == field_key
+        and (rule_group, rule_field) not in exact_only_fields
     }
 
     if len(candidates) == 1:
-        return next(iter(candidates))
+        return next(iter(candidates)), 1
 
-    return None
+    return None, 0
+
+
+def match_field(
+    event_type: str,
+    group: str | None,
+    field: str | None,
+) -> str | None:
+    """Parser의 group/field를 canonical field로 매핑한다."""
+    canonical, _ = _match_field_with_priority(event_type, group, field)
+
+    return canonical
 
 
 # ---------------------------------------------------------------------------
@@ -302,36 +333,7 @@ def match_correction_field(
     확실하지 않은 값은 억지로 추론하지 않고 None으로 둔다.
     """
 
-    field_key = normalize_label(raw_field)
-
-    if event_type == EVENT_SUPPLY_CONTRACT:
-        unique_aliases = {
-            "계약상대": "counterparty",
-            "계약금액": "contract_amount",
-            "체결계약명": "contract_name",
-            "계약(수주)일자": "contract_date",
-            "판매ㆍ공급지역": "supply_region",
-            "기타투자판단과관련한중요사항": "notes",
-        }
-
-    elif event_type == EVENT_FACILITY_INVESTMENT:
-        unique_aliases = {
-            "투자금액": "investment_amount",
-            "투자구분": "investment_type",
-            "투자대상": "investment_target",
-            "투자목적": "investment_purpose",
-            "이사회결의일(결정일)": "board_resolution_date",
-            "기타투자판단과관련한중요사항": "notes",
-        }
-
-    else:
-        return None
-
-    for alias, canonical in unique_aliases.items():
-        if alias in field_key:
-            return canonical
-
-    return None
+    return resolve_correction_field(raw_field, event_type=event_type)
 
 
 # ---------------------------------------------------------------------------
@@ -353,11 +355,12 @@ def extract_event(document: dict[str, Any]) -> dict[str, Any]:
     event_type = detect_event_type(document)
 
     fields: dict[str, dict[str, Any]] = {}
+    field_match_priorities: dict[str, int] = {}
     unmapped_rows: list[dict[str, Any]] = []
     duplicate_fields: list[dict[str, Any]] = []
 
     for row in document.get("rows", []):
-        canonical_field = match_field(
+        canonical_field, match_priority = _match_field_with_priority(
             event_type,
             row.get("group"),
             row.get("field"),
@@ -376,6 +379,15 @@ def extract_event(document: dict[str, Any]) -> dict[str, Any]:
             raw_unit,
         )
 
+        provenance = {
+            "table_id": row.get("table_id"),
+            "row_index": row.get("row_index"),
+            "field_cell_index": row.get("field_cell_index"),
+            "value_cell_index": row.get("value_cell_index"),
+        }
+        if row.get("field_row_index") is not None:
+            provenance["field_row_index"] = row["field_row_index"]
+
         extracted = {
             "raw_group": row.get("group"),
             "raw_field": row.get("raw_field"),
@@ -383,24 +395,34 @@ def extract_event(document: dict[str, Any]) -> dict[str, Any]:
             "raw_unit": raw_unit,
             "normalized_value": normalized_value,
             "normalized_unit": normalized_unit,
-            "provenance": {
-                "table_id": row.get("table_id"),
-                "row_index": row.get("row_index"),
-                "field_cell_index": row.get("field_cell_index"),
-                "value_cell_index": row.get("value_cell_index"),
-            },
+            "provenance": provenance,
         }
 
         if canonical_field in fields:
-            duplicate_fields.append(
-                {
-                    "canonical_field": canonical_field,
-                    **extracted,
-                }
-            )
+            previous_priority = field_match_priorities[canonical_field]
+            if (
+                event_type == EVENT_SUPPLY_CONTRACT
+                and match_priority > previous_priority
+            ):
+                duplicate_fields.append(
+                    {
+                        "canonical_field": canonical_field,
+                        **fields[canonical_field],
+                    }
+                )
+                fields[canonical_field] = extracted
+                field_match_priorities[canonical_field] = match_priority
+            else:
+                duplicate_fields.append(
+                    {
+                        "canonical_field": canonical_field,
+                        **extracted,
+                    }
+                )
             continue
 
         fields[canonical_field] = extracted
+        field_match_priorities[canonical_field] = match_priority
 
     correction = extract_correction(
         document,
@@ -451,6 +473,7 @@ def extract_correction(
         changes.append(
             {
                 "canonical_field": canonical_field,
+                "raw_group": change.get("raw_group"),
                 "raw_field": raw_field,
 
                 # 여기서는 절대 before/after를 덮어쓰거나

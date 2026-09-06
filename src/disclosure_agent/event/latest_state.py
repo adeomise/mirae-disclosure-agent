@@ -1,0 +1,305 @@
+"""Deterministic state resolution for an event correction chain.
+
+Two resolution cutoffs live here and they answer different questions.
+
+    resolve_latest_event_state    "지금 유효한 내용은 무엇인가"  (정정 반영 후)
+    resolve_original_event_state  "처음 공시했을 때 내용은 무엇인가" (원공시 시점)
+
+둘을 한 함수의 옵션으로 두지 않는 이유는, 요구하는 입력이 다르기 때문이다. 최신 상태는
+체인이 완결돼야만 성립하고(미해결 정정이 남아 있으면 최신값을 확정할 수 없다), 원공시 상태는
+이후 정정을 아예 보지 않으므로 체인 완결과 무관하다. 한 함수에 플래그로 담으면 완결 요건이
+호출자의 인자에 따라 켜졌다 꺼졌다 하고, 그 조건은 호출부에서 드러나지 않는다.
+
+두 함수가 공유하는 것은 구조 검증(_require_consistent_chain_inputs)과 필드 표현
+(_initial_fields)이다. 그 둘을 나눠 두어야 "어느 문서의 어느 필드였는가"를 만드는 규칙이
+한 벌로 유지된다.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from datetime import date
+
+from disclosure_agent.common.dates import normalize_filing_date
+from disclosure_agent.common.schemas import (
+    Event,
+    EventHistory,
+    Evidence,
+    ResolvedEventState,
+    ResolvedFieldValue,
+)
+from disclosure_agent.event.adapter import EventAdapterResult
+from disclosure_agent.event.contract_adapter import build_event_id
+from disclosure_agent.event.correction_fields import (
+    classify_latest_state_blocking_correction,
+)
+from disclosure_agent.event.exceptions import UnsupportedCompositeCorrectionError
+from disclosure_agent.event.linker import ChainEntry, FilingChain
+
+
+def resolve_latest_event_state(
+    *,
+    root_event: Event,
+    history: EventHistory,
+    chain: FilingChain,
+    documents: Mapping[str, EventAdapterResult],
+) -> ResolvedEventState:
+    """Apply explicit changes to the root event's normalized field state.
+
+    ``documents`` is keyed by Contract ``doc_id``. A correction change is only a
+    provenance signal: its value and unit come from the corresponding adapted
+    correction Event, never from the raw before/after strings.
+    """
+    entries = _ordered_entries(chain)
+    root_entry = _root_entry(chain, entries)
+    root_doc_id = _doc_id(root_entry)
+
+    root_result = _require_consistent_chain_inputs(
+        root_event=root_event,
+        history=history,
+        chain=chain,
+        documents=documents,
+        entries=entries,
+        root_entry=root_entry,
+        root_doc_id=root_doc_id,
+    )
+
+    if not chain.is_complete or not history.chain_complete:
+        raise ValueError("latest state requires a complete correction chain")
+
+    fields = _initial_fields(root_event, root_result.evidence)
+
+    for entry in entries:
+        if not entry.is_correction:
+            continue
+
+        source_doc_id = _doc_id(entry)
+        result = _document_result(documents, source_doc_id)
+        _validate_event(result.event, root_event)
+
+        for change in entry.changes:
+            if change.field is None:
+                category = classify_latest_state_blocking_correction(
+                    change.raw_field,
+                    event_type=root_event.event_type.value,
+                )
+                if category is not None:
+                    raise UnsupportedCompositeCorrectionError(
+                        source_doc_id=source_doc_id,
+                        category=category,
+                    )
+                continue
+            if change.field not in fields:
+                raise ValueError(
+                    f"changed field {change.field!r} is absent from the root state"
+                )
+            if change.field not in result.event.attributes:
+                raise ValueError(
+                    f"changed field {change.field!r} is absent from {source_doc_id!r}"
+                )
+
+            fields[change.field] = _resolved_field(
+                event=result.event,
+                evidence=result.evidence,
+                field_name=change.field,
+            )
+
+    as_of = _filing_date(entries[-1])
+    return ResolvedEventState(
+        event_id=history.event_id,
+        event_type=root_event.event_type,
+        company=root_event.company,
+        as_of=as_of,
+        fields=fields,
+    )
+
+
+def resolve_original_event_state(
+    *,
+    root_event: Event,
+    history: EventHistory,
+    chain: FilingChain,
+    documents: Mapping[str, EventAdapterResult],
+) -> ResolvedEventState:
+    """Return the root disclosure's field state, before any correction is applied.
+
+    ``documents`` is keyed by Contract ``doc_id``, as in
+    :func:`resolve_latest_event_state`. Only the root document is read; later
+    corrections are not applied and their values never reach the result.
+
+    체인 완결을 요구하지 않는 이유:
+        원공시 시점의 내용은 원공시 문서 하나가 정한다. 이후 정정 중 연결하지 못한 것이
+        있어도 그 사실이 원공시에 무엇이 적혀 있었는지를 바꾸지 않는다. 완결을 요구하면
+        답할 수 있는 질문("처음 공시했을 때 내용")이 이후 정정의 연결 실패 때문에 막힌다.
+
+        반대로 최신 상태에서는 완결이 필수다. 미해결 정정이 남은 채로 원공시 값을 내보내면
+        그것이 곧 "낡은 값을 최신값이라고 말하는" 실패이며, 이 파일이 두 함수를 나눠 둔
+        이유가 그것이다.
+
+    ``as_of``는 원공시 제출일이다. 최신 상태의 ``as_of``(체인 마지막 공시일)와 값이 다르므로,
+    결과만 보고도 어느 시점의 상태인지 구분할 수 있다.
+    """
+    entries = _ordered_entries(chain)
+    root_entry = _root_entry(chain, entries)
+    root_doc_id = _doc_id(root_entry)
+
+    root_result = _require_consistent_chain_inputs(
+        root_event=root_event,
+        history=history,
+        chain=chain,
+        documents=documents,
+        entries=entries,
+        root_entry=root_entry,
+        root_doc_id=root_doc_id,
+    )
+
+    return ResolvedEventState(
+        event_id=history.event_id,
+        event_type=root_event.event_type,
+        company=root_event.company,
+        as_of=_filing_date(root_entry),
+        fields=_initial_fields(root_event, root_result.evidence),
+    )
+
+
+def _require_consistent_chain_inputs(
+    *,
+    root_event: Event,
+    history: EventHistory,
+    chain: FilingChain,
+    documents: Mapping[str, EventAdapterResult],
+    entries: Sequence[ChainEntry],
+    root_entry: ChainEntry,
+    root_doc_id: str,
+) -> EventAdapterResult:
+    """Verify that root Event, EventHistory, FilingChain and documents agree.
+
+    두 해석 시점이 공유하는 검사만 담는다. 체인 완결 요건은 최신 상태에만 있으므로 여기에
+    두지 않는다(모듈 docstring 참조).
+
+    돌려주는 값은 루트 문서의 변환 결과다. 호출부가 같은 조회를 다시 하지 않게 하기 위한
+    것이며, 두 번 조회하면 그 사이에 다른 문서를 집어도 드러나지 않는다.
+    """
+    if entries[0] is not root_entry:
+        raise ValueError("FilingChain root is not the earliest filing")
+    if root_event.source_doc_id != root_doc_id:
+        raise ValueError("root Event does not match the FilingChain root")
+
+    expected_event_id = build_event_id(
+        root_event.event_type,
+        root_doc_id,
+    )
+    if history.event_id != expected_event_id:
+        raise ValueError(
+            "EventHistory event_id does not match the FilingChain root"
+        )
+
+    ordered_doc_ids = [_doc_id(entry) for entry in entries]
+    if history.document_ids != ordered_doc_ids:
+        raise ValueError("EventHistory documents do not match FilingChain chronology")
+
+    root_result = _document_result(documents, root_doc_id)
+    _validate_event(root_result.event, root_event)
+    if root_result.event != root_event:
+        raise ValueError("root Event does not match its adapted source document")
+
+    if chain.root_receipt_no != root_entry.filing.receipt_no:
+        raise ValueError("FilingChain root receipt number does not match its root entry")
+
+    return root_result
+
+
+def _ordered_entries(chain: FilingChain) -> tuple[ChainEntry, ...]:
+    if not chain.entries:
+        raise ValueError("latest state requires a root Event and FilingChain entries")
+
+    return tuple(
+        sorted(
+            chain.entries,
+            key=lambda entry: (
+                normalize_filing_date(entry.filing.receipt_date) or "",
+                entry.filing.receipt_no,
+            ),
+        )
+    )
+
+
+def _root_entry(chain: FilingChain, entries: Sequence[ChainEntry]) -> ChainEntry:
+    matches = [
+        entry for entry in entries if entry.filing.receipt_no == chain.root_receipt_no
+    ]
+    if len(matches) != 1 or matches[0].is_correction:
+        raise ValueError("FilingChain does not contain one non-correction root")
+    return matches[0]
+
+
+def _doc_id(entry: ChainEntry) -> str:
+    doc_id = getattr(entry.filing, "doc_id", "")
+    if not doc_id:
+        raise ValueError(f"filing {entry.filing.receipt_no!r} has no doc_id")
+    return str(doc_id)
+
+
+def _document_result(
+    documents: Mapping[str, EventAdapterResult],
+    doc_id: str,
+) -> EventAdapterResult:
+    result = documents.get(doc_id)
+    if result is None:
+        raise ValueError(f"source document {doc_id!r} is absent from resolver inputs")
+    if result.event.source_doc_id != doc_id:
+        raise ValueError(f"document key {doc_id!r} does not match its Event source_doc_id")
+    return result
+
+
+def _validate_event(event: Event, root_event: Event) -> None:
+    if event.event_type != root_event.event_type or event.company != root_event.company:
+        raise ValueError("source Event identity does not match the root Event")
+
+
+def _initial_fields(
+    root_event: Event,
+    evidence: Sequence[Evidence],
+) -> dict[str, ResolvedFieldValue]:
+    unit_keys = {
+        key
+        for key in root_event.attributes
+        if key.endswith("_unit") and key.removesuffix("_unit") in root_event.attributes
+    }
+    return {
+        field_name: _resolved_field(
+            event=root_event,
+            evidence=evidence,
+            field_name=field_name,
+        )
+        for field_name in root_event.attributes
+        if field_name not in unit_keys
+    }
+
+
+def _resolved_field(
+    *,
+    event: Event,
+    evidence: Sequence[Evidence],
+    field_name: str,
+) -> ResolvedFieldValue:
+    evidence_ids = [
+        item.evidence_id
+        for item in evidence
+        if item.doc_id == event.source_doc_id and item.field_name == field_name
+    ][:1]
+    return ResolvedFieldValue(
+        value=event.attributes[field_name],
+        unit=event.attributes.get(f"{field_name}_unit"),
+        source_doc_id=event.source_doc_id,
+        evidence_ids=evidence_ids,
+    )
+
+
+def _filing_date(entry: ChainEntry) -> date:
+    normalized = normalize_filing_date(entry.filing.receipt_date)
+    if normalized is None:
+        raise ValueError(f"filing {entry.filing.receipt_no!r} has no valid filing date")
+    return date.fromisoformat(
+        f"{normalized[:4]}-{normalized[4:6]}-{normalized[6:]}"
+    )

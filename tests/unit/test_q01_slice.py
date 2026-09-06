@@ -325,7 +325,7 @@ def test_locate_filing_raises_when_no_manifest_match(
     plan = QueryPlan(
         question="테스트반도체 2019년 연결 매출액",
         companies=("테스트반도체",),
-        year=2019,
+        years=(2019,),
     )
 
     with pytest.raises(FilingNotFoundError) as error:

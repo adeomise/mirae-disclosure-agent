@@ -377,23 +377,61 @@ def test_business_profile_with_a_relative_period_is_blocked() -> None:
 @pytest.mark.parametrize(
     "question",
     [
-        # 사업 서술 표현만 있다. 제품을 묻지 않았으므로 이 모양이 아니다.
         "테스트반도체는 무슨 사업을 해?",
-        # 제품 표현만 있다. 값 조회 어휘와 섞이는 경우가 여기 해당한다.
-        "테스트반도체 주요 제품 매출액이 얼마야?",
+        "테스트반도체가 영위하는 사업이 뭔지 설명해줘",
+        "테스트반도체가 영위하는 사업은 뭐야?",
+        "테스트반도체는 어떤 사업을 영위하고 있어?",
+        "테스트반도체 주요 사업이 뭐야?",
+        "테스트반도체 핵심 사업은 무엇인가요?",
     ],
 )
-def test_one_semantic_group_alone_does_not_open_the_business_profile_path(
+def test_business_description_alone_summarizes_only_the_business_overview(
     question: str,
 ) -> None:
     """
-    두 묶음 중 하나만으로는 기업 소개 요약으로 보지 않는다.
+    사업만 묻는 질문은 사업의 개요 하나만 요약한다.
 
-    한쪽만으로 열면 묻지 않은 범위까지 요약하거나, 값 조회 질문이 요약 경로로 끌려온다.
-    기간이 없는 이 질문들은 이전과 같이 missing_year로 막힌다.
+    예전에는 사업 서술과 제품 표현 둘 다 있어야 이 경로가 열렸다. 그 요구의 근거는 "한쪽만으로
+    열면 묻지 않은 범위까지 요약한다"였고, 그것은 계획이 늘 두 범위를 함께 담았기 때문에
+    성립했다. 지금은 계획이 질문이 물은 범위만 담으므로 그 근거가 성립하지 않는다.
+
+    요구를 그대로 두면 사업만 묻는 질문이 단일 사실 조회로 내려가 missing_year로 막힌다.
+    질문은 기간을 묻지 않았고 기간이 필요한 질문도 아니므로, 그 사유는 실제로 일어난 일과
+    다르다. 여기서 고정하는 것은 두 가지다. 경로가 열린다는 것과, **묻지 않은 제품 범위가
+    계획에 담기지 않는다**는 것이다.
+    """
+    plan = plan_for(question)
+
+    assert plan.intent == INTENT_DOCUMENT_SUMMARY
+    assert plan.section_scope is None
+    assert plan.section_scopes == (SectionScope.BUSINESS_OVERVIEW,)
+    assert plan.metric is None
+    assert plan.years == (2025,)
+
+
+def test_product_expression_alone_does_not_open_the_business_profile_path() -> None:
+    """
+    제품 표현만으로는 기업 소개 요약으로 보지 않는다.
+
+    제품 표현은 값 조회 질문의 수식어로 훨씬 자주 온다. 사업 서술 표현을 함께 요구해야 그
+    질문들이 이 경로로 오지 않는다. 기간이 없는 이 질문은 이전과 같이 missing_year다.
     """
     with pytest.raises(UnsupportedQuestionError) as error:
-        plan_for(question)
+        plan_for("테스트반도체 주요 제품 매출액이 얼마야?")
+
+    assert error.value.reason == "missing_year"
+
+
+def test_business_description_with_a_leftover_request_stays_fail_closed() -> None:
+    """
+    사업 서술 표현이 있어도 답하지 않을 요청이 함께 오면 열지 않는다.
+
+    잔여물 판정(_business_profile_residual)이 두 묶음을 요구하던 시절과 같은 자리에서 같은
+    일을 한다. 한 묶음으로 열게 된 뒤에도 이 가드가 남아 있어야, 사업을 물으면서 다른 것을
+    함께 물은 질문이 사업 개요 요약으로 축소되지 않는다.
+    """
+    with pytest.raises(UnsupportedQuestionError) as error:
+        plan_for("테스트반도체가 영위하는 사업의 상장 시점 알려줘")
 
     assert error.value.reason == "missing_year"
 

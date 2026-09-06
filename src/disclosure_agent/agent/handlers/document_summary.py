@@ -150,6 +150,41 @@ class DocumentSummaryResult:
     blocked: BlockedInfo | None = None
 
 
+# 이 경로가 실행하는 범위 묶음. 둘뿐이며, 부분집합이 아니라 열거다.
+#
+# 열거인 이유:
+#     "Q05의 범위로만 이뤄져 있는가"로 두면 (주요 제품,) 하나짜리 묶음도 통과한다. 그 묶음은
+#     사업 개요 없이 제품 절만 요약하라는 계획인데, 이 구현에서 확인된 적이 없는 모양이다.
+#     질의 해석 계층은 그것을 만들지 않지만(사업 서술 표현을 늘 요구한다), 계획을 직접 만드는
+#     호출자에게는 그 방어가 없다. 입구 가드의 몫은 그 호출자를 막는 것이므로, 여기서
+#     "무엇이 아닌가"가 아니라 "무엇인가"를 적는다.
+#
+# 차례를 함께 고정하는 이유:
+#     계획을 만드는 쪽이 BUSINESS_PROFILE_SECTION_SCOPES의 차례를 그대로 쓴다
+#     (query_analyzer._business_profile_section_scopes). 그 차례는 사업보고서 서식의 Section
+#     순서이고 결과가 실리는 순서이기도 하다. 차례가 다른 묶음은 이 경로가 만든 것이 아니므로
+#     받지 않는다. 같은 범위가 거듭 담기는 것은 QueryPlan.__post_init__이 이미 막는다.
+#
+# 두 번째 값을 다시 적지 않고 잇는 이유:
+#     Q05의 범위 묶음은 query_analyzer가 정하는 값이다. 여기에 같은 튜플을 다시 적으면 그쪽이
+#     늘 때 한쪽만 늘어난다.
+SUPPORTED_SECTION_SCOPE_BUNDLES: tuple[tuple[SectionScope, ...], ...] = (
+    (SectionScope.BUSINESS_OVERVIEW,),
+    BUSINESS_PROFILE_SECTION_SCOPES,
+)
+
+
+def _is_business_profile_scope_bundle(
+    section_scopes: tuple[SectionScope, ...],
+) -> bool:
+    """이 범위 묶음이 이 경로가 실행하는 두 묶음 중 하나인가.
+
+    빈 묶음은 거짓이다. 그 계획은 범위 하나(section_scope)로 실행되는 계획이며, 묶음 경로가
+    아니다.
+    """
+    return section_scopes in SUPPORTED_SECTION_SCOPE_BUNDLES
+
+
 def handle_document_summary(
     plan: QueryPlan,
     *,
@@ -161,12 +196,13 @@ def handle_document_summary(
 
     공통 Contract인 AgentExecutionResult를 돌려준다.
 
-    계획의 section_scopes가 Q05의 범위 묶음(BUSINESS_PROFILE_SECTION_SCOPES)과 정확히 같을
-    때만 범위 묶음 경로다. 그 경로는 정정본을 후보에 포함하는 조회 규칙을 쓰므로, 묶음이
-    비어 있지 않다는 것만으로 열면 다른 묶음이 그 규칙을 물려받는다. 다른 묶음은 범위 하나의
-    경로로 보내 입구 가드(_reject_unsupported_plan)가 막게 한다. 범위 하나로 바꿔 읽지 않는다.
+    계획의 section_scopes가 이 경로가 실행하는 두 묶음(SUPPORTED_SECTION_SCOPE_BUNDLES)
+    중 하나일 때만 범위 묶음 경로다. 그 경로는 정정본을 후보에 포함하는 조회 규칙을 쓰므로,
+    묶음이 비어 있지 않다는 것만으로 열면 다른 범위가 그 규칙을 물려받는다. 그 밖의 묶음은
+    범위 하나의 경로로 보내 입구 가드(_reject_unsupported_plan)가 막게 한다. 범위 하나로
+    바꿔 읽지 않는다.
     """
-    if plan.section_scopes == BUSINESS_PROFILE_SECTION_SCOPES:
+    if _is_business_profile_scope_bundle(plan.section_scopes):
         return _handle_multi_scope_summary(
             plan,
             corpus_root=corpus_root,
@@ -356,22 +392,34 @@ def _reject_unsupported_plan(plan: QueryPlan) -> BlockedInfo | None:
     section_scope가 비어 있는 계획은 QueryPlan.__post_init__이 아예 만들지 못하게 막으므로
     여기서 다시 보지 않는다.
 
-    범위 묶음은 Q05의 묶음 하나만 받는다:
-        범위 묶음 경로는 정정본을 후보에 포함하는 조회 규칙과 두 범위의 충돌 검사를 그
-        묶음에 맞춰 두었다. 다른 묶음(범위 하나짜리 묶음 포함)이 들어오면 그 규칙을
-        물려받거나, 범위 하나의 경로가 section_scope 없이 진행하게 된다. 어느 쪽도 계획이
-        요청한 것과 다르므로 입구에서 막는다.
+    범위 묶음은 Q05가 다루는 범위만 받는다:
+        범위 묶음 경로는 정정본을 후보에 포함하는 조회 규칙과 범위 간 충돌 검사를 그 범위들에
+        맞춰 두었다. 그 밖의 범위가 들어오면 그 규칙을 물려받거나, 범위 하나의 경로가
+        section_scope 없이 진행하게 된다. 어느 쪽도 계획이 요청한 것과 다르므로 입구에서 막는다.
+
+        받는 묶음을 열거하는 이유:
+            질문이 사업만 물었으면 계획도 사업의 개요 하나만 담는다
+            (query_analyzer._business_profile_section_scopes). 그 계획은 같은 질문 모양,
+            같은 문서, 같은 조회 규칙이며 범위가 하나 적을 뿐이므로 받는다.
+
+            그렇다고 "Q05의 범위로만 이뤄져 있으면 받는다"로 두지는 않는다. 그러면
+            (주요 제품,) 하나짜리 묶음까지 통과하는데, 사업 개요 없이 제품 절만 요약하는
+            모양은 이 구현에서 확인된 적이 없다. 받는 것을 열거해 두 묶음으로 못 박는다
+            (SUPPORTED_SECTION_SCOPE_BUNDLES).
     """
-    if plan.section_scopes and plan.section_scopes != BUSINESS_PROFILE_SECTION_SCOPES:
-        supported = ", ".join(scope.value for scope in BUSINESS_PROFILE_SECTION_SCOPES)
+    if plan.section_scopes and not _is_business_profile_scope_bundle(plan.section_scopes):
+        supported = " / ".join(
+            "(" + ", ".join(scope.value for scope in bundle) + ")"
+            for bundle in SUPPORTED_SECTION_SCOPE_BUNDLES
+        )
         requested = ", ".join(scope.value for scope in plan.section_scopes)
 
         return BlockedInfo(
             stage=STAGE_PATTERN_ENTRY,
             reason=REASON_UNSUPPORTED_SUMMARY_SECTION_SCOPE,
             detail=(
-                f"지원하지 않는 범위 묶음입니다: ({requested}). 범위 묶음 요약은 "
-                f"({supported}) 하나만 실행합니다. 범위 하나의 요약으로 바꿔 읽지 않습니다."
+                f"지원하지 않는 범위 묶음입니다: ({requested}). 실행하는 묶음은 "
+                f"{supported}뿐입니다. 범위 하나의 요약으로 바꿔 읽지 않습니다."
             ),
         )
 

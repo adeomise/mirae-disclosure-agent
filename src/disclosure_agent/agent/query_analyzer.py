@@ -77,6 +77,7 @@ from disclosure_agent.agent.derived_metrics import DerivedMetric
 from disclosure_agent.agent.query_vocabulary import (
     OPERATION_AGGREGATE,
     OPERATION_CHANGE_COUNT,
+    OPERATION_COMPARE,
     PRODUCT_TOKENS,
     YEAR_PATTERN,
     find_contract_fields,
@@ -86,6 +87,7 @@ from disclosure_agent.agent.query_vocabulary import (
     matches_product_phrase,
     normalize_aggregate_request,
     normalize_change_count_request,
+    normalize_comparison_request,
 )
 from disclosure_agent.common.enums import (
     ChainPolicy,
@@ -109,7 +111,7 @@ from disclosure_agent.retrieval.metadata_filter import (
 __all__ = [
     "AMBIGUOUS_COMPANY_REASON",
     "ANCHOR_SOURCE_LATEST_ANNUAL_FILING",
-    "BUSINESS_DESCRIPTION_TOKENS",
+    "BUSINESS_DESCRIPTION_PATTERNS",
     "BUSINESS_PROFILE_SECTION_SCOPES",
     "DOCUMENT_CLASS_PERIODIC",
     "DOCUMENT_SUBTYPE_ANNUAL",
@@ -499,11 +501,13 @@ EVENT_SUBTYPE_FACILITY_INVESTMENT = "신규시설투자등"
 # "합산"·"총합"·"전부 더해"가 모두 같은 요청이며, 그 대응을 이 판정 자리에 늘어놓으면
 # 어휘가 늘 때마다 여기가 함께 늘어난다.
 #
-# OPERATION_COMPARE는 옮기지 않는다. 비교 표현에는 아직 정규화할 다른 표기가 없고, 옮겨
-# 두면 어휘 모듈이 "정규화가 있는 개념"과 "이름만 있는 개념"을 함께 담게 된다.
-OPERATION_COMPARE = "compare"
-
-COMPARISON_REQUEST_TOKENS = ("더 커", "더 큰", "비교")
+# OPERATION_COMPARE와 그 표현 어휘도 같은 모듈이 갖는다. 예전에는 "비교 표현에는 아직
+# 정규화할 다른 표기가 없다"를 이유로 여기 두었으나, 그 전제가 깨졌다. "합쳐서 견주면"의
+# '견주다'와 "더 크지"의 어미가 모두 같은 요청이며, 그 대응을 이 판정 자리에 늘어놓으면
+# 어휘가 늘 때마다 여기가 함께 늘어난다. 집계 쪽과 같은 이유, 같은 자리다.
+#
+# COMPARISON_REQUEST_TOKENS라는 이름은 남기지 않는다. 표기 목록이 아니라 패턴이 되었고,
+# 같은 이름으로 두면 부분문자열 검사를 기대한 호출부가 조용히 어긋난다.
 
 
 @dataclass(frozen=True)
@@ -615,6 +619,87 @@ HISTORY_TOKENS = (
 # 그 문장 하나만 통과시키고 같은 모양의 다른 질문을 막는다.
 SUMMARY_REQUEST_TOKENS = ("요약", "정리")
 
+# 문서에 무엇이 적혀 있는지를 묻는 표현.
+#
+# 왜 필요한가:
+#     요약을 요청하는 말은 '요약'·'정리'만이 아니다. 사용자는 같은 것을 "어떤 내용이 담겨
+#     있어?"·"무슨 내용이 있어?"라고도 묻는다. 그 표기가 없으면 보고서 종류와 문서 내 범위를
+#     모두 밝힌 질문이 요약 판정에 서지 못하고 단일 사실 조회로 내려가, "지원하는
+#     지표(매출액)를 찾을 수 없습니다"로 막힌다. 막힌 사유가 실제로 일어난 일(문서 한 절을
+#     정리해 달라고 했다)과 다르다.
+#
+# 왜 '알려'·'설명'을 낱말 하나로 넣지 않는가:
+#     그 낱말은 값 조회 질문에도 그대로 붙는다("2025년 사업보고서 설비 관련 매출 알려줘").
+#     낱말만 보면 Pattern A가 답하던 질문이 요약 경로로 끌려가고, 돌아오는 것은 물어본 값이
+#     아니라 그 절의 요약이다. 형식이 맞는 답이 나가므로 값이 빠졌다는 사실이 드러나지 않는다.
+#     SUMMARY_REQUEST_TOKENS가 처음부터 이 두 낱말을 담지 않은 이유가 그것이고, 여기서도
+#     그 판단을 바꾸지 않는다.
+#
+# 그래서 '내용'을 요청의 머리로 요구한다:
+#     아래 세 모양은 모두 "문서에 적힌 것"이 요청의 머리다. 값 이름이 요청의 머리인 질문은
+#     이 모양이 되지 않는다. Q06(거래소공시 단건 요약)이 같은 이유로 같은 낱말을 요구하고
+#     있다(EVENT_SUMMARY_CONTENT_TOKEN).
+#
+#       1. 의문사 + 내용      "어떤 내용이 담겨 있어", "무슨 내용이 있어"
+#       2. 내용 + 되묻기      "내용이 뭐야", "내용은 무엇인가요"
+#       3. 내용 + 요청 동사   "내용 알려줘", "내용 설명해줘"
+#
+# 이 표현만으로 요약 경로가 열리지는 않는다:
+#     _looks_like_document_summary는 보고서 종류와 문서 내 범위를 함께 요구하며, 이 표현은
+#     그 셋 중 하나를 만족시킬 뿐이다. 그래서 "매출 내용 알려줘"처럼 범위가 없는 질문은
+#     여전히 이 경로로 오지 않는다.
+#
+# 범위까지 갖춘 값 조회는 이 조건으로 막히지 않는다:
+#     "사업보고서에서 설비 관련 매출 내용 알려줘"는 보고서 종류도 범위 낱말도 갖추고 있다.
+#     그런데 이 질문의 머리는 '내용'이 아니라 '매출'이다. 위 세 모양은 '내용' 앞에 무엇이
+#     오는지를 보지 않으므로 그 질문까지 통과시킨다. 통과하면 값으로 답할 수 있던 질문이
+#     설비 절 요약으로 돌아가고, 물어본 매출은 결과 어디에도 남지 않는다.
+#
+#     그래서 값 조회 표기를 함께 본다. 판정은 _requests_a_summary가 하며, 어휘는 이 모듈이
+#     이미 같은 목적으로 쓰는 것을 잇는다(BUSINESS_PROFILE_EXCLUDED_TOKENS). 기업 소개
+#     요약이 "제품이 뭐고 매출은 얼마야?"를 받지 않는 이유와 같은 이유, 같은 어휘다.
+#
+# 공백을 걷어낸 질문에 대해 읽는다. "어떤 내용"과 "어떤내용"이 같은 말이다.
+SUMMARY_CONTENT_REQUEST_PATTERNS: tuple[str, ...] = (
+    r"(?:어떤|무슨|어떠한)내용",
+    r"내용(?:이|은|을|를)?(?:뭐|뭔|무엇)",
+    r"내용(?:이|은|을|를)?(?:알려|설명해|소개해|보여|말해)",
+)
+
+_SUMMARY_CONTENT_REQUEST_PATTERN = re.compile("|".join(SUMMARY_CONTENT_REQUEST_PATTERNS))
+
+
+def _requests_a_summary(question: str) -> bool:
+    """질문이 문서를 정리해 달라고 말했는가.
+
+    정본 낱말('요약'·'정리')과 내용 요청 표현을 함께 본다. 두 어휘를 나눠 둔 이유는 서로
+    다른 위험을 갖기 때문이고, 그래서 값 조회 배제도 뒤엣것에만 건다.
+
+    정본 낱말 경로에 배제를 걸지 않는 이유:
+        "설비 관련 매출 정리해줘"가 요약으로 읽히는 것은 이 어휘를 넓히기 전부터의 동작이다.
+        여기서 함께 고치면 표현을 넓히는 변경이 기존 질문의 답까지 바꾸게 되고, 회귀가
+        생겼을 때 어느 쪽 변경 때문인지 가릴 수 없다. 그 구멍은 따로 다룬다.
+
+    내용 요청 경로에 배제를 거는 이유:
+        이 경로는 이번에 새로 여는 자리다. '내용'은 값 이름 바로 뒤에도 붙으므로("매출 내용
+        알려줘") 자리 조건만으로는 질문의 머리가 무엇인지 가려지지 않는다. 값 이름이 함께
+        있으면 이 경로로 열지 않고, 질문은 이 경로가 생기기 전과 같은 경로로 흘러간다.
+
+    어휘를 새로 만들지 않는다:
+        무엇이 값 조회 표기인지는 이 모듈이 이미 정해 두었다
+        (BUSINESS_PROFILE_EXCLUDED_TOKENS). 여기에 지표 판정을 하나 더 두면 지표 어휘가 늘
+        때 한쪽만 늘어나고, 같은 질문이 경로에 따라 갈린다.
+    """
+    if any(token in question for token in SUMMARY_REQUEST_TOKENS):
+        return True
+
+    compacted = "".join(question.split())
+
+    if any(token in compacted for token in BUSINESS_PROFILE_EXCLUDED_TOKENS):
+        return False
+
+    return _SUMMARY_CONTENT_REQUEST_PATTERN.search(compacted) is not None
+
 # 요약 대상이 정기공시임을 밝히는 표기.
 #
 # 사업보고서 하나만 둔다. 반기·분기보고서 표기는 QUARTER_TOKENS가 의도 분기보다 앞에서
@@ -637,8 +722,26 @@ PERIODIC_REPORT_TOKENS = ("사업보고서",)
 #
 #     '사업'만으로는 알아보지 않는다. 공백을 걷어내면 "사업보고서"가 그 조건을 만족해,
 #     문서 종류를 밝힌 모든 질문이 이 범위를 가리킨 것으로 읽힌다.
+#
+# facility_investment의 표기를 넷으로 둔 이유:
+#     이 범위가 가리키는 Section의 실제 제목이 "3. 원재료 및 생산설비"이며
+#     (periodic.sections의 SECTION_SCOPE_RULES), 사용자가 가장 자연스럽게 쓰는 낱말도 그
+#     제목의 낱말이다. '설비'는 "생산설비"·"설비투자"를 부분문자열로 함께 받는다.
+#
+#     '생산시설'·'제조시설'을 따로 적는 이유는 그 표기에 '설비'가 들어 있지 않기 때문이다.
+#     "생산 설비"는 공백을 걷어내면 '설비'에 걸리지만 "생산 시설"은 어디에도 걸리지 않아,
+#     같은 것을 가리키는 두 표기가 표기 하나 차이로 갈렸다. 셋 다 사업보고서가 그 Section에
+#     싣는 생산 관련 시설을 가리키므로 함께 둔다.
+#
+#     맨 '시설'은 두지 않는다. 그 낱말은 생산과 무관한 시설에도 붙고("복리후생 시설",
+#     "판매시설"), 넓히면 그 질문이 확인되지 않은 Section을 가리킨 채로 요약된다.
+#
+#     이 표기를 거래소공시 유형 규칙(EVENT_SUBTYPE_RULES)에 넣지는 않는다. 그쪽은 "무엇을
+#     새로 짓거나 늘렸는가"를 읽는 자리이고, 여기는 "사업보고서의 어느 절인가"를 읽는
+#     자리다. '생산설비'가 들어 있다는 이유로 시설투자 공시 경로로 보내면, 정기공시를
+#     지목한 질문이 거래소공시 이력 조회로 끌려간다.
 SECTION_SCOPE_TOKENS: tuple[tuple[SectionScope, tuple[str, ...]], ...] = (
-    (SectionScope.FACILITY_INVESTMENT, ("설비", "시설투자")),
+    (SectionScope.FACILITY_INVESTMENT, ("설비", "시설투자", "생산시설", "제조시설")),
     (SectionScope.BUSINESS_OVERVIEW, ("사업구조", "사업개요", "사업의개요")),
 )
 
@@ -646,11 +749,12 @@ SECTION_SCOPE_TOKENS: tuple[tuple[SectionScope, tuple[str, ...]], ...] = (
 # 기업 소개 요약(Q05)의 어휘
 # --------------------------------------------------------------------------
 
-# "무슨 사업을 하고 주력 제품이 뭐야?"처럼 사업 개요와 주요 제품을 함께 묻는 표현.
+# "무슨 사업을 하고 주력 제품이 뭐야?"·"영위하는 사업이 뭐야?"처럼 기업이 무슨 사업을
+# 하는지를 묻는 표현.
 #
-# 두 묶음을 모두 요구한다. 사업 개요만 묻거나 제품만 묻는 질문은 이 모양이 아니며, 그런
-# 질문을 여기로 끌어오면 묻지 않은 범위까지 요약한 결과가 나간다. 한 묶음만으로 판정하면
-# "주요 제품 매출이 얼마야?" 같은 값 조회 질문도 요약 경로로 끌려온다.
+# 사업 서술 표현을 요구한다. 제품 표현은 있어도 되고 없어도 되며, 있으면 요약 범위가 하나
+# 늘어난다. 제품만 묻는 질문은 이 모양이 아니다("주요 제품 매출이 얼마야?" 같은 값 조회가
+# 그쪽으로 끌려오기 때문이며, _looks_like_business_profile의 설명을 보라).
 #
 # 요약 요청 표현("정리해줘")도 보고서 종류("사업보고서")도 요구하지 않는다. 이 질문 모양은
 # 문서를 지목하지 않고 기업을 소개해 달라고 말하며, 그 답이 사업보고서의 사업 개요·주요 제품
@@ -666,7 +770,69 @@ SECTION_SCOPE_TOKENS: tuple[tuple[SectionScope, tuple[str, ...]], ...] = (
 # 묻는 어순이 여럿이고("주력 제품", "어떤 제품이 주력이야", "무슨 제품을 만들어"),
 # 그것을 여기에 낱말로 늘어놓으면 어순 하나를 넓힐 때마다 이 자리가 함께 늘어난다.
 # PRODUCT_TOKENS는 그 개념의 정본 표기이며 판정은 matches_product_phrase가 한다.
-BUSINESS_DESCRIPTION_TOKENS = ("무슨사업을", "어떤사업을", "어떤사업인지")
+#
+# 표기가 아니라 패턴인 이유:
+#     같은 것을 묻는 어순이 여럿이고("무슨 사업을 해", "영위하는 사업이 뭐야", "주요 사업이
+#     뭔지"), 표기를 낱말로 늘어놓으면 조사 하나가 다른 표기를 빠뜨렸을 때 조용히 막힌다.
+#     제품 표현이 같은 이유로 이미 패턴이다(query_vocabulary.PRODUCT_PHRASE_PATTERNS).
+#
+# 세 모양으로 나눠 두는 이유는 각 모양이 서로 다른 어순을 읽기 때문이다.
+#
+#   1. 의문사가 앞   "무슨 사업을 해", "어떤 사업인지"
+#   2. 영위 계열     "영위하는 사업", "어떤 사업을 영위하고 있어"
+#   3. 수식어가 앞   "주요 사업이 뭐야", "핵심 사업은?"
+#
+# 조사·어미를 요구하는 이유는 예전 표기 목록과 같다:
+#     '사업' 뒤에 조사가 오지 않으면 '사업부'·'사업보고서'가 함께 걸린다. "무슨 사업부의
+#     주요 제품이야?"는 기업 소개 질문이 아니고, "2025년 사업보고서"는 문서 지목이다. 조사를
+#     요구하면 그 둘은 걸리지 않는다.
+#
+# 수식어 묶음이 제품 쪽과 같은 이유:
+#     주력·주요·주된·대표·핵심은 "여럿 중 앞에 놓이는"을 뜻하며 서로 바꿔 써도 같은 Section을
+#     가리킨다. 제품 표현이 같은 묶음을 쓰고 있고(query_vocabulary의 _PRODUCT_QUALIFIERS),
+#     여기서 다른 묶음을 쓰면 같은 수식어가 무엇에 붙었는지에 따라 갈린다. 이름을 잇지 않고
+#     다시 적는 이유는 그쪽이 모듈 내부 이름이기 때문이며, 한쪽이 늘면 다른 쪽도 함께 본다.
+#
+# 이 표현만으로 값 조회가 요약으로 끌려오지는 않는다:
+#     _looks_like_business_profile이 값 조회 표기(BUSINESS_PROFILE_EXCLUDED_TOKENS)를 먼저
+#     보고, 그러고도 남은 말이 있으면 경로를 열지 않는다(_business_profile_residual).
+#     "주요 사업 이익률 알려줘"는 그 잔여물 판정에서 걸린다.
+_BUSINESS_QUALIFIERS = r"주력|주요|주된|대표|핵심"
+
+# '영위하다'의 활용형.
+#
+# 활용형을 적어 두는 이유:
+#     이 표현이 사업 서술의 앞에도 오고("영위하는 사업") 뒤에도 온다("어떤 사업을 영위하고
+#     있어"). 뒤에 올 때는 표현 구간이 그 활용까지 덮어야 한다. 덮지 않으면 '영위하고있'이
+#     잔여물로 남아, 사업만 묻는 정상 질문이 "답하지 않을 요청이 남았다"로 막힌다
+#     (_business_profile_residual).
+#
+# 어간 하나(`영위`)에 나머지를 아무 글자로 여는 방식(`영위[가-힣]*`)을 쓰지 않는 이유:
+#     판정 대상이 공백을 걷어낸 질문이라 뒤따르는 낱말과 경계가 없다. 아무 글자로 열면
+#     "영위하는 회사의 상장 시점"처럼 뒤에 붙은 다른 요청까지 표현 구간이 삼키고, 그 요청은
+#     잔여물 판정에서 사라진다.
+#
+# 긴 활용형을 앞에 적는다. 짧은 쪽이 먼저 걸리면 뒤가 잔여물로 남는다('하고있'보다 '하고'가
+# 먼저 걸리면 '있'이 남는다).
+_BUSINESS_OPERATE = r"영위(?:하고있는|하고있|하고|하는|하며|하나|중인|중|한|해|하)?"
+
+BUSINESS_DESCRIPTION_PATTERNS: tuple[str, ...] = (
+    rf"(?:무슨|어떤|어떠한)사업(?:을|은|이|인지)(?:{_BUSINESS_OPERATE})?",
+    rf"{_BUSINESS_OPERATE}사업",
+    r"사업(?:을|를)영위",
+    rf"(?:{_BUSINESS_QUALIFIERS})사업(?:을|은|이|인지)(?:{_BUSINESS_OPERATE})?",
+)
+
+_BUSINESS_DESCRIPTION_PATTERN = re.compile("|".join(BUSINESS_DESCRIPTION_PATTERNS))
+
+
+def _describes_the_business(question: str) -> bool:
+    """질문이 '이 기업이 무슨 사업을 하는가'를 물었는가.
+
+    자리는 공백을 걷어낸 질문 기준이다. 판정만 돌려주며, 이 표현이 질문의 전부인지는
+    _business_profile_residual이 따로 본다. 제품 표현과 같은 분업이다.
+    """
+    return _BUSINESS_DESCRIPTION_PATTERN.search("".join(question.split())) is not None
 
 # 기업 소개 요약이 답하지 않고도 남아 있을 수 있는 말.
 #
@@ -721,6 +887,20 @@ BUSINESS_PROFILE_SCAFFOLDING: tuple[str, ...] = (
     "줄래",
     "줘",
     "해줘",
+    # 의문 대명사. 조사·어미와 같은 닫힌 부류이며 내용을 가리키지 않는다.
+    #
+    # 왜 필요한가:
+    #     "주요 사업이 뭐야?"는 사업 서술 표현을 걷어내고 나면 '뭐'가 남는다. 그것을 남은
+    #     요청으로 세면 사업만 묻는 정상 질문이 막힌다. 제품 쪽은 이 문제가 없었는데, 제품
+    #     표현의 꼬리(_PRODUCT_IDENTITY_TAIL)가 되묻는 말을 표현 안으로 삼키기 때문이다.
+    #
+    # 왜 안전한가:
+    #     의문 대명사는 "무엇을 묻는가"를 가리키지 않고 "묻는다"는 사실만 나타낸다. 남은
+    #     요청이 실제로 있으면 그 요청의 낱말이 함께 남으므로("출시일도 뭐야") 판정이
+    #     바뀌지 않는다.
+    "무엇",
+    "뭐",
+    "뭔",
     # 종결·의문 어미.
     "인가요",
     "일까요",
@@ -890,8 +1070,13 @@ _LATEST_REPORT_SELECTOR_PATTERN = re.compile(
     rf"{re.escape(LATEST_REPORT_SELECTOR)}(?:{_PERIODIC_REPORT_ALTERNATION})"
 )
 
-# 이 질문 모양이 요약하는 범위. 순서는 사업보고서 서식의 Section 순서이며, 결과의
-# DocumentSummary도 이 순서로 실린다.
+# 이 질문 모양이 요약할 수 있는 범위 전부와 그 차례. 순서는 사업보고서 서식의 Section
+# 순서이며, 결과의 DocumentSummary도 이 순서로 실린다.
+#
+# 한 계획이 이 묶음을 통째로 담지는 않는다. 질문이 사업만 물었으면 사업의 개요 하나만
+# 담긴다(_business_profile_section_scopes). 이 값은 "이 경로가 다룰 수 있는 범위의 전부"와
+# "그 차례"를 정할 뿐이며, Pattern B handler의 입구도 같은 뜻으로 읽는다(요청한 범위가 이
+# 묶음 안에 있는가).
 BUSINESS_PROFILE_SECTION_SCOPES: tuple[SectionScope, ...] = (
     SectionScope.BUSINESS_OVERVIEW,
     SectionScope.PRODUCTS,
@@ -2077,7 +2262,7 @@ def _looks_like_facility_investment_aggregate(question: str) -> bool:
         len(matched) == 1
         and matched[0].subtype == EVENT_SUBTYPE_FACILITY_INVESTMENT
         and normalize_aggregate_request(question) == OPERATION_AGGREGATE
-        and any(token in question for token in COMPARISON_REQUEST_TOKENS)
+        and normalize_comparison_request(question) == OPERATION_COMPARE
     )
 
 
@@ -2103,7 +2288,7 @@ def _business_profile_residual(
     걷어내는 것은 다섯이다.
 
         제품 표현      이 경로가 답하는 요청 그 자체(find_product_phrase_span)
-        사업 서술 표기 같은 요청의 나머지 반(BUSINESS_DESCRIPTION_TOKENS)
+        사업 서술 표현  이 경로가 답하는 또 하나의 요청(BUSINESS_DESCRIPTION_PATTERNS)
         기업명         무엇을 묻는지가 아니라 누구에게 묻는지다
         기간           같은 이유다. 어느 문서를 볼지를 정할 뿐 요청을 늘리지 않는다
         문서 지목 구간 같은 이유다. 낱말이 아니라 구간이다
@@ -2145,8 +2330,7 @@ def _business_profile_residual(
     if span is not None:
         compacted = compacted[: span[0]] + compacted[span[1] :]
 
-    for token in BUSINESS_DESCRIPTION_TOKENS:
-        compacted = compacted.replace(token, "")
+    compacted = _BUSINESS_DESCRIPTION_PATTERN.sub("", compacted)
 
     # canonical 표기, 그 정규화 표기, 그리고 질문에 실제로 적힌 표기.
     subject_wording = {
@@ -2184,17 +2368,32 @@ def _looks_like_business_profile(
     subject_names: tuple[str, ...] = (),
 ) -> bool:
     """
-    기업이 무슨 사업을 하고 주력 제품이 무엇인지 함께 묻는 질문인가(Q05).
+    기업이 무슨 사업을 하는지(그리고 주력 제품이 무엇인지) 묻는 질문인가(Q05 계열).
 
-    두 묶음(사업 서술 표현, 제품 표현)이 모두 있어야 참이다. 한쪽만으로 판정하지 않는
-    이유는 BUSINESS_DESCRIPTION_TOKENS의 설명과 같다.
+    사업 서술 표현이 있어야 참이다. 제품 표현은 있어도 되고 없어도 된다.
 
-    값 조회 표기가 함께 있으면 거짓이다. 두 묶음이 있어도 값을 함께 묻는 질문은 순수한
+    예전에는 두 묶음을 모두 요구했다. 그 요구를 걷어낸 이유:
+        요구의 근거는 "한쪽만으로 열면 묻지 않은 범위까지 요약한다"였고, 그것은 계획이 늘
+        두 범위를 함께 담았기 때문에 성립했다. 이제 계획은 질문이 실제로 물은 범위만 담는다
+        (_build_business_profile_plan의 범위 판정). 사업만 물은 질문은 사업의 개요 하나를
+        요약하므로 묻지 않은 범위가 생기지 않는다.
+
+        그리고 요구를 그대로 두면 "영위하는 사업이 뭔지 설명해줘"처럼 사업만 묻는 질문이
+        단일 사실 조회로 내려가 missing_year로 막힌다. 질문은 기간을 묻지 않았고 기간이
+        필요한 질문도 아니므로, 그 사유는 실제로 일어난 일과 다르다.
+
+    제품 표현만 있는 질문은 여전히 거짓이다:
+        제품만 묻는 질문에 이 경로를 열면 사업 개요 없이 주요 제품만 요약하는 계획이 되는데,
+        그 모양은 이 구현에서 확인된 적이 없다. 그리고 제품 표현은 값 조회 질문의 수식어로
+        훨씬 자주 온다("주요 제품 매출액이 얼마야?"). 사업 서술 표현을 함께 요구하면 그
+        질문들이 이 경로로 오지 않는다. 여는 것은 그 모양이 실제로 오는 것을 본 뒤가 먼저다.
+
+    값 조회 표기가 함께 있으면 거짓이다. 사업·제품을 물었어도 값을 함께 묻는 질문은 순수한
     요약 요청이 아니며, 요약으로 받으면 물은 값이 조용히 빠진 답이 나간다
     (BUSINESS_PROFILE_EXCLUDED_TOKENS의 설명). 그런 질문은 이 경로가 생기기 전과 같은
     경로로 흘러간다.
 
-    두 묶음이 있어도 **남은 요청이 있으면 거짓이다.** 값 조회 표기 검사는 이 경로가 아는
+    사업 서술 표현이 있어도 **남은 요청이 있으면 거짓이다.** 값 조회 표기 검사는 이 경로가 아는
     지표 어휘만 보므로, 그 어휘에 없는 속성이 함께 오면 걸리지 않는다("대표 제품이 뭐고
     출시일도 알려줘"). 어휘를 늘리는 것으로는 끝나지 않으므로, 무엇이 남았는지를 본다
     (_business_profile_residual).
@@ -2227,13 +2426,33 @@ def _looks_like_business_profile(
     if any(token in compacted for token in BUSINESS_PROFILE_EXCLUDED_TOKENS):
         return False
 
-    if not any(token in compacted for token in BUSINESS_DESCRIPTION_TOKENS):
-        return False
-
-    if not matches_product_phrase(question):
+    if not _describes_the_business(question):
         return False
 
     return _business_profile_residual(question, companies, subject_names) == ""
+
+
+def _business_profile_section_scopes(question: str) -> tuple[SectionScope, ...]:
+    """이 질문이 요약해 달라고 한 범위만 고른다.
+
+    왜 고정 묶음이 아닌가:
+        예전에는 이 경로가 늘 (사업의 개요, 주요 제품) 둘을 담았다. 그때는 두 묶음을 모두
+        요구했으므로 질문이 실제로 둘을 물었지만, 사업만 묻는 질문까지 받게 되면 같은 묶음이
+        묻지 않은 범위를 하나 더 요약한다. 요약 결과에는 그 범위가 정상 항목으로 실리므로,
+        묻지 않은 것에 답했다는 사실이 드러나지 않는다.
+
+        그래서 무엇을 물었는지를 그대로 옮긴다. 판정은 경로를 여는 자리와 같은 두 함수가
+        하며, 여기서 다시 어휘를 두지 않는다.
+
+    차례는 BUSINESS_PROFILE_SECTION_SCOPES가 고정한다. 사업보고서 서식의 Section 순서이며,
+    질문에 적힌 차례를 따르면 같은 요청을 다르게 쓴 두 질문이 서로 다른 계획이 된다.
+    """
+    requested = {SectionScope.BUSINESS_OVERVIEW}
+
+    if matches_product_phrase(question):
+        requested.add(SectionScope.PRODUCTS)
+
+    return tuple(scope for scope in BUSINESS_PROFILE_SECTION_SCOPES if scope in requested)
 
 
 def _build_business_profile_plan(
@@ -2246,6 +2465,11 @@ def _build_business_profile_plan(
 
         "<기업>는 무슨 사업을 하고 주력 제품이 뭐야?"
         -> 정기공시 사업보고서 1건 + section_scopes=(business_overview, products)
+
+        "<기업>가 영위하는 사업이 뭔지 설명해줘."
+        -> 정기공시 사업보고서 1건 + section_scopes=(business_overview,)
+
+    담기는 범위는 질문이 물은 것뿐이다(_business_profile_section_scopes).
 
     대상 기간:
         절대연도가 하나 있으면 그 해다. 없으면 코퍼스에 있는 그 기업의 최신 사업보고서
@@ -2334,7 +2558,7 @@ def _build_business_profile_plan(
         document_subtype=DOCUMENT_SUBTYPE_ANNUAL,
         accounting_scope=QueryAccountingScope.NOT_APPLICABLE.value,
         metric=None,
-        section_scopes=BUSINESS_PROFILE_SECTION_SCOPES,
+        section_scopes=_business_profile_section_scopes(question),
         warnings=warnings,
     )
 
@@ -2345,9 +2569,11 @@ def _looks_like_document_summary(question: str) -> bool:
 
     셋을 모두 만족해야 참이다.
 
-        1. 요약 요청 표현      "정리해줘" / "요약해줘"
+        1. 요약 요청 표현      "정리해줘" / "요약해줘" / "어떤 내용이 담겨 있어"
         2. 정기공시 보고서 표기 "사업보고서"
         3. 알아볼 수 있는 범위  section_scope로 옮겨지는 표현
+
+    요청 표현의 어휘가 둘로 나뉜 이유는 _requests_a_summary의 설명에 있다.
 
     요약 표현 하나만으로 판정하지 않는 이유:
         "정리해줘"·"요약해줘"는 값 조회 질문에도 붙는다. "매출액 정리해줘"가 그 경우이며,
@@ -2368,7 +2594,7 @@ def _looks_like_document_summary(question: str) -> bool:
         이 판정은 이력 판정보다 뒤다. "시설투자 변경 내용 정리해줘"처럼 두 표현이 함께 있는
         질문은 Pattern E가 답하던 것이고, 앞에 두면 그 질문을 가로챈다.
     """
-    if not any(token in question for token in SUMMARY_REQUEST_TOKENS):
+    if not _requests_a_summary(question):
         return False
 
     if not any(token in question for token in PERIODIC_REPORT_TOKENS):

@@ -2607,6 +2607,108 @@ def test_dropped_value_is_rejected() -> None:
     rejected("한미반도체의 2025년 연결 기준 매출액을 확인했습니다.")
 
 
+# --------------------------------------------------------------------------
+# 누적 기간
+# --------------------------------------------------------------------------
+
+
+def cumulative_payload(fiscal_period: str = "6M YTD") -> GroundedPayload:
+    """누적 값 1건의 payload. 분기·반기보고서에서 나오는 모양이다."""
+    result = fact_result()
+
+    result.facts[0].fiscal_period = fiscal_period
+
+    return build_grounded_payload(result, question=QUESTION)
+
+
+@pytest.mark.parametrize(
+    "fiscal_period,period_phrase",
+    [
+        ("3M YTD", "2025년 1분기 누적"),
+        ("6M YTD", "2025년 반기 누적"),
+        ("9M YTD", "2025년 3분기 누적"),
+    ],
+)
+def test_cumulative_answer_stating_its_span_passes(
+    fiscal_period: str, period_phrase: str
+) -> None:
+    """기간을 적은 문장이 근거 규칙에 걸리지 않는다.
+
+    "1분기 누적"의 1이 근거 밖의 수치로 걸리거나 "분기 누적"이 payload 밖의 내용어로 걸리면,
+    기간을 적으라는 규칙과 서로를 막는다.
+    """
+    payload = cumulative_payload(fiscal_period)
+    answer = f"한미반도체의 {period_phrase} 연결 기준 매출액은 {VALUE}입니다."
+
+    client = ScriptedClient(model_reply(answer))
+
+    assert verbalize(payload, client=client) == answer
+
+
+def test_deterministic_cumulative_sentence_passes_the_validator() -> None:
+    """두 경로가 갈리지 않는지 본다. 결정론 문장이 거절되면 그 자체가 규칙의 결함이다."""
+    result = fact_result()
+
+    result.facts[0].fiscal_period = "9M YTD"
+
+    sentence = build_answer_response(result).answer
+    payload = build_grounded_payload(result, question=QUESTION)
+
+    assert verbalize(payload, client=ScriptedClient(model_reply(sentence))) == sentence
+
+
+@pytest.mark.parametrize("fiscal_period", ["3M YTD", "6M YTD", "9M YTD"])
+def test_cumulative_answer_written_as_a_full_year_figure_is_rejected(
+    fiscal_period: str,
+) -> None:
+    """이 규칙의 목적. 연도만 적은 문장은 누적 값을 한 해 전체의 실적으로 말한다.
+
+    사유까지 고정한다. 이 문장은 다른 규칙 어디에도 걸리지 않는다 — 기업도 지표도 회계기준도
+    값도 payload가 말한 그대로다. 빠진 것은 기간 하나뿐이고, 그것을 잡는 규칙이 이것뿐이라는
+    사실이 이 사유로만 드러난다.
+    """
+    payload = cumulative_payload(fiscal_period)
+    answer = f"한미반도체의 2025년 연결 기준 매출액은 {VALUE}입니다."
+
+    with pytest.raises(AnswerRejectedError) as caught:
+        validate_answer(parse_model_answer(model_reply(answer)), payload)
+
+    assert caught.value.code == "period_dropped"
+
+    rejected(answer, payload)
+
+
+def test_a_cumulative_answer_using_another_span_is_rejected() -> None:
+    """1분기 누적 값을 반기 누적으로 적으면 기간이 틀린 답이다.
+
+    수치가 겹치지 않는 방향을 고른다. 반대 방향("1분기 누적"을 반기 값에 적는 것)은 1이
+    근거 밖의 수치라 수치 규칙에 먼저 걸리고, 그러면 기간 규칙이 하는 일이 드러나지 않는다.
+    """
+    payload = cumulative_payload("3M YTD")
+    answer = f"한미반도체의 2025년 반기 누적 연결 기준 매출액은 {VALUE}입니다."
+
+    with pytest.raises(AnswerRejectedError) as caught:
+        validate_answer(parse_model_answer(model_reply(answer)), payload)
+
+    assert caught.value.code == "period_dropped"
+
+    rejected(answer, payload)
+
+
+def test_an_annual_answer_is_not_asked_for_a_span() -> None:
+    """연간 값에는 붙일 구간이 없다. 기존 문장이 새 규칙에 걸리지 않는다."""
+    client = ScriptedClient(model_reply(GOOD_ANSWER))
+
+    assert verbalize(fact_payload(), client=client) == GOOD_ANSWER
+
+
+def test_the_cumulative_span_reaches_the_model() -> None:
+    """검증만으로는 부족하다. 모델이 기간을 적으려면 payload에 그 말이 있어야 한다."""
+    payload = cumulative_payload("6M YTD")
+
+    assert "반기 누적" in payload.to_json()
+
+
 def test_dropped_company_is_rejected() -> None:
     rejected(f"2025년 연결 기준 매출액은 {VALUE}입니다.")
 

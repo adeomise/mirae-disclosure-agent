@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 import pytest
@@ -193,11 +194,115 @@ def test_metric_without_a_defined_label_is_not_grounded() -> None:
 
 
 def test_non_annual_period_is_not_grounded() -> None:
-    """분기 Fact를 연도만 실어 보내면 모델이 그것을 연간 값으로 적는다."""
+    """표기가 정해지지 않은 기간은 넘기지 않는다."""
     quarterly = fact(fiscal_period="Q3")
 
     with pytest.raises(PayloadNotGroundableError, match="fiscal_period"):
         grounded(completed(facts=[quarterly], evidence=[evidence()]))
+
+
+@pytest.mark.parametrize("fiscal_period", ["quarter", "half-year", "annual", "1Q YTD"])
+def test_a_period_outside_the_label_table_is_not_grounded(fiscal_period: str) -> None:
+    """대응표에 없는 기간의 표기를 이 파일에서 만들지 않는다."""
+    with pytest.raises(PayloadNotGroundableError, match="fiscal_period"):
+        grounded(completed(facts=[fact(fiscal_period=fiscal_period)], evidence=[evidence()]))
+
+
+@pytest.mark.parametrize(
+    "fiscal_period,expected_label",
+    [
+        ("3M YTD", "1분기 누적"),
+        ("6M YTD", "반기 누적"),
+        ("9M YTD", "3분기 누적"),
+    ],
+)
+def test_a_cumulative_fact_carries_its_span_alongside_the_year(
+    fiscal_period: str, expected_label: str
+) -> None:
+    """연도만 실으면 모델이 누적 값을 그 해 전체의 값으로 적는다."""
+    payload = grounded(
+        completed(facts=[fact(fiscal_period=fiscal_period)], evidence=[evidence()])
+    )
+
+    assert payload.facts[0].fiscal_year == 2025
+    assert payload.facts[0].period_label == expected_label
+
+    body = json.loads(payload.to_json())
+
+    assert body["facts"][0]["fiscal_year"] == 2025
+    assert body["facts"][0]["period"] == expected_label
+
+
+def test_an_annual_fact_carries_no_span() -> None:
+    """연간 값의 기간은 연도 하나로 전부 불린다. 빈 구간 표기를 보내지 않는다."""
+    payload = grounded(completed(facts=[fact()], evidence=[evidence()]))
+
+    assert payload.facts[0].period_label is None
+    assert "period" not in json.loads(payload.to_json())["facts"][0]
+
+
+def test_a_cumulative_fact_without_a_fiscal_year_is_not_grounded() -> None:
+    """어느 해의 누적인지 없이 보내면 모델이 그 자리를 채운다."""
+    with pytest.raises(PayloadNotGroundableError, match="회계연도"):
+        grounded(
+            completed(
+                facts=[fact(fiscal_period="6M YTD", fiscal_year=None)],
+                evidence=[evidence()],
+            )
+        )
+
+
+def test_a_calculation_over_cumulative_facts_is_not_grounded() -> None:
+    """GroundedCalculation에는 누적 구간을 실을 자리가 없다. 결정론 경로로 돌아간다."""
+    sources = margin_facts()
+
+    for source in sources:
+        source.fiscal_period = "6M YTD"
+
+    result = completed(
+        facts=sources,
+        calculations=[margin_calculation()],
+        evidence=[evidence(), evidence("ev_oi", "doc_a")],
+        comparisons=[
+            ComparisonResult(
+                comparison_id="cmp_margin",
+                left=ResultInputReference(
+                    input_type=ResultInputType.CALCULATION, input_id="calc_margin"
+                ),
+                right=ResultInputReference(input_type=ResultInputType.FACT, input_id="fact_rev"),
+                relation=ComparisonRelation.RIGHT_GREATER,
+            )
+        ],
+    )
+
+    with pytest.raises(PayloadNotGroundableError, match="누적 기간"):
+        grounded(result)
+
+
+def test_a_comparison_over_cumulative_facts_is_not_grounded() -> None:
+    """
+    우열 판정만 있고 계산이 없는 모양(Q10)도 넘기지 않는다.
+
+    이 모양은 계산 쪽 정지(_fiscal_year)를 지나지 않는다. Fact 표기만 보면 두 건 다 옮겨지고,
+    결정론 경로가 멈추는 결과의 payload가 만들어진다. 그 자리를 막는 것이
+    _require_supported_interim_shape이며, 이 검사가 없으면 같은 질문이 연동 설정에 따라
+    다르게 처리된다.
+    """
+    result = comparison_result()
+
+    for source in result.facts:
+        source.fiscal_period = "6M YTD"
+
+    with pytest.raises(PayloadNotGroundableError, match="누적 기간"):
+        grounded(result)
+
+
+def test_an_annual_comparison_is_unaffected_by_the_interim_boundary() -> None:
+    """연간 값의 Q10 payload는 이 변경 이전과 같다."""
+    payload = grounded(comparison_result())
+
+    assert len(payload.facts) == 2
+    assert all(fact.period_label is None for fact in payload.facts)
 
 
 # --------------------------------------------------------------------------

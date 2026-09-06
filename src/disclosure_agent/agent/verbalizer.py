@@ -418,46 +418,54 @@ SYSTEM_PROMPT = """당신은 한국 공시 데이터 질의응답 시스템의 '
    숫자와 단위는 JSON에 적힌 문자열 그대로 옮기십시오.
 2. question에 적힌 숫자를 답변에 옮겨 적지 마십시오. 질문의 "2024년 8월"은 확보한 값이
    아니라 요청이며, JSON에 없는 수치입니다.
-3. 날짜는 JSON에 적힌 그대로("2029-02-28") 쓰거나, 연·월·일을 모두 갖춘 한국어 형태
+3. fact에 period가 있으면 fiscal_year 바로 뒤에 period를 적힌 그대로 붙여 쓰십시오.
+   period는 그 값이 그 해의 어디까지를 더한 값인지입니다. 빠뜨리면 한 해 전체의 실적이
+   되어 뜻이 달라지므로, 빠뜨린 답변은 폐기됩니다.
+       period가 "반기 누적"이면 -> "2025년 반기 누적 연결 매출액은 …입니다"
+       period가 "1분기 누적"이면 -> "2025년 1분기 누적 연결 매출액은 …입니다"
+   question에 적힌 보고서 이름("반기보고서", "1분기보고서", "사업보고서")으로 바꿔 쓰지
+   마십시오. 그것은 문서의 이름이고, period는 값이 덮는 기간입니다.
+   period가 없는 fact에는 붙이지 마십시오. 그 값은 이미 연도 전체의 값입니다.
+4. 날짜는 JSON에 적힌 그대로("2029-02-28") 쓰거나, 연·월·일을 모두 갖춘 한국어 형태
    ("2029년 2월 28일")로 쓰십시오. "2029년 2월", "2029년 말"처럼 일부만 적거나
    "29.2.28"처럼 줄여 적으면 그 답변은 폐기됩니다.
-4. content 안의 표기도 고쳐 쓰지 마십시오. '22년은 '22년으로 두고 2022년으로 늘려 적지
+5. content 안의 표기도 고쳐 쓰지 마십시오. '22년은 '22년으로 두고 2022년으로 늘려 적지
    마십시오.
-5. content가 '…'로 끝나면 원문이 그 자리에서 잘린 것입니다. 뒤를 이어 쓰지 말고, 잘리기
+6. content가 '…'로 끝나면 원문이 그 자리에서 잘린 것입니다. 뒤를 이어 쓰지 말고, 잘리기
    전까지 적혀 있는 내용만 쓰십시오.
 
 무엇을 쓰면 안 되는가:
-6. JSON에 없는 회사명·연도·회계기준(연결/별도)·지표명·제품명을 쓰지 마십시오.
-7. JSON에 없는 배경 설명, 해석, 추측, 시장 상황, 인과 설명을 덧붙이지 마십시오.
-8. 투자 판단, 매수·매도 의견, 미래 예측, 전망을 쓰지 마십시오.
-9. fact_id, evidence_id, calculation_id, event_id 같은 식별자를 문장에 쓰지 마십시오.
-10. 영어 식별자(revenue, operating_income, ANSWERABLE 등)를 문장에 쓰지 마십시오.
-11. section, carrier, payload, 항목 수 같은 내부 용어를 문장에 쓰지 마십시오.
+7. JSON에 없는 회사명·연도·회계기준(연결/별도)·지표명·제품명을 쓰지 마십시오.
+8. JSON에 없는 배경 설명, 해석, 추측, 시장 상황, 인과 설명을 덧붙이지 마십시오.
+9. 투자 판단, 매수·매도 의견, 미래 예측, 전망을 쓰지 마십시오.
+10. fact_id, evidence_id, calculation_id, event_id 같은 식별자를 문장에 쓰지 마십시오.
+11. 영어 식별자(revenue, operating_income, ANSWERABLE 등)를 문장에 쓰지 마십시오.
+12. section, carrier, payload, 항목 수 같은 내부 용어를 문장에 쓰지 마십시오.
 
 무엇을 반드시 써야 하는가:
-12. facts와 calculations의 값은 하나도 빠뜨리지 말고 모두 문장에 담으십시오.
-13. comparisons의 relation은 이미 확정된 판정입니다. 값을 다시 비교하지 말고 그 판정을
+13. facts와 calculations의 값은 하나도 빠뜨리지 말고 모두 문장에 담으십시오.
+14. comparisons의 relation은 이미 확정된 판정입니다. 값을 다시 비교하지 말고 그 판정을
     그대로 옮기십시오. left_greater는 left_id가 큰 것, right_greater는 right_id가 큰 것입니다.
-14. event_histories의 changes가 있으면 모든 변경 항목의 before와 after를 빠짐없이 쓰십시오.
+15. event_histories의 changes가 있으면 모든 변경 항목의 before와 after를 빠짐없이 쓰십시오.
     변경 전 값 앞에는 '변경 전', 변경 후 값 앞에는 '변경 후'를 붙이고, 두 값을 뒤바꾸지
     마십시오. corrections가 있으면 언제 무엇 때문에 고쳤는지도 함께 쓸 수 있습니다.
-15. correction_count가 있으면 그 횟수를 '<수>회'로 쓰십시오. 공시 건수(document_count)나
+16. correction_count가 있으면 그 횟수를 '<수>회'로 쓰십시오. 공시 건수(document_count)나
     변경 항목 건수(change_count)와 섞어 쓰지 마십시오.
-16. limitation이 있으면 그 문장을 그대로 마지막에 붙이십시오.
+17. limitation이 있으면 그 문장을 그대로 마지막에 붙이십시오.
 
 어떻게 쓰는가:
-17. 첫 문장에서 question에 직접 답하십시오. 건수·문서 수·범위 이름부터 시작하지 마십시오.
+18. 첫 문장에서 question에 직접 답하십시오. 건수·문서 수·범위 이름부터 시작하지 마십시오.
     질문이 건수를 물은 경우에만 건수를 앞에 둡니다.
-18. document_summaries가 있으면 items의 content 중 question이 묻는 것을 골라 그 내용으로
+19. document_summaries가 있으면 items의 content 중 question이 묻는 것을 골라 그 내용으로
     답하십시오. 고른 근거는 content에 적힌 말이어야 하며, 없는 말을 보태지 마십시오.
     "몇 건을 확인했습니다"로 답하지 마십시오.
     금액·기간·대상·규모처럼 구체적인 값이 적힌 content가 있으면 그것을 먼저 쓰십시오.
     표의 머리글만 적힌 content("사업부문 | 투자목적 및 내용 | …")는 그 표에 무엇이 있는지만
     말할 뿐 값을 말하지 않으므로, 값이 있는 content보다 앞에 두지 마십시오.
-19. calculations에 magnitude와 direction이 있으면 "<magnitude> <direction>했습니다" 형태로
+20. calculations에 magnitude와 direction이 있으면 "<magnitude> <direction>했습니다" 형태로
     쓰는 것이 자연스럽습니다(예: "2.1017%p 감소했습니다"). 이때 value의 부호를 다시 붙이지
     마십시오. direction과 반대되는 말을 쓰지 마십시오.
-20. 한 문단으로, 군더더기 없이 쓰십시오. 400자를 넘기지 마십시오.
+21. 한 문단으로, 군더더기 없이 쓰십시오. 400자를 넘기지 마십시오.
 
 출력 형식 - 아래 JSON만 출력하십시오. 코드 펜스나 다른 설명을 붙이지 마십시오.
 {
@@ -585,6 +593,7 @@ def validate_answer(answer: ModelAnswer, payload: GroundedPayload) -> None:
     _require_every_value_is_stated(dated, payload)
     _require_bound_values(answer.answer, payload)
     _require_known_entities(answer.answer, payload)
+    _require_stated_period(answer.answer, payload)
     _require_consistent_accounting_scope(answer.answer, payload)
     _require_limitation_when_partial(answer.answer, payload)
     _require_preserved_relation(answer.answer, payload)
@@ -1283,6 +1292,39 @@ def _require_known_entities(text: str, payload: GroundedPayload) -> None:
 
     if missing:
         raise AnswerRejectedError("entity_dropped", f"문장에 없는 기업입니다: {missing}")
+
+
+def _require_stated_period(text: str, payload: GroundedPayload) -> None:
+    """
+    누적 값의 기간 표기가 문장에 그대로 나오는지 본다.
+
+    이것이 빠진 문장은 형식상 완전하다. 기업도 지표도 회계기준도 값도 맞고, 빠진 것은 그 값이
+    한 해 전체가 아니라는 사실 하나다. 그리고 그 문장은 "2025년 연결 매출액은 …입니다"로
+    읽혀, 1~6월 누적 값을 연간 실적으로 말한다. payload가 기간을 실어 보내는 것만으로는
+    막히지 않고(모델이 안 적으면 그만이다) 여기서 확인해야 막힌다.
+
+    결정론 경로는 같은 것을 문장을 만드는 자리에서 보장한다. 구절이 템플릿에 박혀 있어 빠질
+    자리가 없다(answer_builder._period_phrase). 두 경로가 같은 답을 하려면 이쪽에는 확인이
+    있어야 하고, 그 확인이 이 규칙이다.
+
+    연간 값은 보지 않는다. period_label이 None이며, 그 값의 기간은 연도 하나로 전부 불린다.
+
+    Raises:
+        AnswerRejectedError: 실린 누적 구간 표기가 문장에 없는 경우.
+    """
+    missing = sorted(
+        {
+            fact.period_label
+            for fact in payload.facts
+            if fact.period_label and fact.period_label not in text
+        }
+    )
+
+    if missing:
+        raise AnswerRejectedError(
+            "period_dropped",
+            f"누적 기간이 문장에서 빠졌습니다: {missing}. 연도만 적으면 연간 값으로 읽힙니다",
+        )
 
 
 def _require_consistent_accounting_scope(text: str, payload: GroundedPayload) -> None:
@@ -2137,6 +2179,13 @@ def _grounded_sources(payload: GroundedPayload) -> list[str]:
 
         if fact.fiscal_year is not None:
             sources.append(str(fact.fiscal_year))
+
+        # 누적 구간 표기. 문장에 반드시 나와야 하는 말이므로(_require_stated_period) 근거
+        # 문자열로도 있어야 한다. 없으면 그 문장은 기간을 적었다는 이유로 거절된다:
+        # "1분기 누적"의 1이 근거 밖의 수치가 되고, "분기 누적"이 payload가 말하지 않은
+        # 내용어가 된다.
+        if fact.period_label:
+            sources.append(fact.period_label)
 
         if fact.normalized_display:
             sources.append(fact.normalized_display)

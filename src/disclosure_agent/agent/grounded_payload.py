@@ -80,6 +80,7 @@ from disclosure_agent.agent.answer_builder import (
     EVENT_COUNT_DOCUMENT,
     EVENT_COUNT_LABELS,
     FULL_YEAR_FISCAL_PERIODS,
+    INTERIM_FISCAL_PERIOD_LABELS,
     LIMITATION_MESSAGE_BY_REASON,
     LIMITATION_WITHOUT_REASON_MESSAGE,
     METRIC_LABELS,
@@ -103,6 +104,7 @@ from disclosure_agent.agent.answer_builder import (
     correction_field_label,
     delta_direction_label,
     event_count_display,
+    supports_interim_fiscal_period,
     unsigned_display,
 )
 from disclosure_agent.agent.derived_metrics import UNIT_PERCENT
@@ -162,6 +164,16 @@ class GroundedFact:
     구절이기 때문이다(모듈 docstring 참조). 연도는 canonical 구조화 값이며 표기가 갈릴
     여지가 없다.
 
+    period_label은 그 연도 안에서 값이 덮는 누적 구간의 표기다("반기 누적"). 연간 값에서는
+    None이고, 그때 기간은 연도 하나로 전부 불린다. 이 자리가 비면 1~6월 누적 매출액이 연도만
+    실려 나가고, 모델은 그것을 그 해 전체의 값으로 적는다 — 연간 외 기간을 아예 넘기지 않던
+    이전 규칙이 막고 있던 실패이며, 기간을 함께 실어 막는 쪽으로 바꾼 것이 이 필드다.
+
+    구조화 값(3M YTD)이 아니라 표기를 싣는다. scope_label이 consolidated가 아니라 "연결"을
+    싣는 것과 같은 이유다. 문장에 나올 말은 한국어 표기이고, 그 대응표의 정본은 answer_builder다
+    (INTERIM_FISCAL_PERIOD_LABELS). 구조화 값을 넘기면 모델이 그 자리에서 한국어를 지어내고,
+    그 표기는 결정론 문장과 갈린다.
+
     scope_label이 None인 것은 '연결/별도를 확정하지 못했다'는 뜻이다. 임의로 연결을 적으면
     Q01의 주요 실패 모드를 payload 단계에서 다시 만든다.
     """
@@ -174,6 +186,7 @@ class GroundedFact:
     display_value: str
     normalized_display: str | None
     evidence_ids: tuple[str, ...]
+    period_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -379,6 +392,7 @@ class GroundedPayload:
                     "company": fact.company,
                     "metric": fact.metric_label,
                     **({"fiscal_year": fact.fiscal_year} if fact.fiscal_year else {}),
+                    **({"period": fact.period_label} if fact.period_label else {}),
                     **({"accounting_scope": fact.scope_label} if fact.scope_label else {}),
                     "value": fact.display_value,
                     **(
@@ -528,6 +542,8 @@ def build_grounded_payload(
         )
 
     shape = _resolve_supported_shape(result)
+
+    _require_supported_interim_shape(result)
 
     try:
         facts = tuple(_ground_fact(fact) for fact in result.facts)
@@ -890,7 +906,8 @@ def _ground_fact(fact: Fact) -> GroundedFact:
         fact_id=fact.fact_id,
         company=fact.company,
         metric_label=_metric_label(fact),
-        fiscal_year=_fiscal_year(fact),
+        fiscal_year=_fact_fiscal_year(fact),
+        period_label=_period_label(fact),
         scope_label=_scope_label(fact),
         display_value=_fact_value(fact),
         normalized_display=_normalized_value_with_unit(fact),
@@ -936,12 +953,91 @@ def _scope_label(fact: Fact) -> str | None:
     return label
 
 
+def _period_label(fact: Fact) -> str | None:
+    """
+    그 연도 안에서 값이 덮는 누적 구간의 표기. 연간 값은 None.
+
+    _period_phrase가 문장에서 읽는 것과 같은 대응표를 같은 공개 자리에서 읽는다
+    (answer_builder.INTERIM_FISCAL_PERIOD_LABELS). 판정 자체를 그쪽 함수에 맡기지 않는 이유는
+    오류형이 다르기 때문이다. 여기서의 정지는 "답할 수 없다"가 아니라 "외부 모델에 맡기지
+    않는다"이며, 그 경우의 동작은 결정론 경로로 돌아가는 것이다(PayloadNotGroundableError).
+
+    대응표에 없는 기간은 넘기지 않는다. 표기를 이 파일에서 만들면 문장 쪽 규칙이 우회된다
+    (모듈 docstring의 "대응표에 없는 값은 여기서 채우지 않는다").
+    """
+    if fact.fiscal_period is None or fact.fiscal_period in FULL_YEAR_FISCAL_PERIODS:
+        return None
+
+    label = INTERIM_FISCAL_PERIOD_LABELS.get(fact.fiscal_period)
+
+    if label is None:
+        raise PayloadNotGroundableError(
+            f"표기가 정해지지 않은 fiscal_period입니다: {fact.fiscal_period!r}. "
+            "표기가 정해지지 않은 기간은 외부 모델에 넘기지 않습니다."
+        )
+
+    return label
+
+
+def _require_supported_interim_shape(result: AgentExecutionResult) -> None:
+    """
+    누적 기간 Fact가 실렸다면 결정론 경로가 그것을 표현하는 모양인지 확인한다.
+
+    판정을 여기서 만들지 않고 answer_builder의 공개 술어에 묻는다
+    (supports_interim_fiscal_period). 그쪽이 정본이며, 두 곳에 적으면 한쪽만 넓어지는 날
+    같은 질문이 연동 설정에 따라 다르게 처리된다 — 모듈 docstring의 "결정론 경로가 답하지
+    못하는 모양은 여기서도 답하지 않는다"가 이 자리에도 적용된다.
+
+    Fact의 표기만으로는 막히지 않는 이유:
+        _ground_fact는 Fact를 한 건씩 옮기므로 그 Fact가 어떤 결과에 실렸는지 모른다. 우열
+        판정만 있고 계산이 없는 모양(Q10)에서는 계산 쪽 정지(_fiscal_year)도 일어나지 않아,
+        이 검사가 없으면 결정론 경로가 멈추는 결과의 payload가 만들어진다.
+    """
+    interim = [
+        fact
+        for fact in result.facts
+        if fact.fiscal_period is not None
+        and fact.fiscal_period not in FULL_YEAR_FISCAL_PERIODS
+    ]
+
+    if not interim or supports_interim_fiscal_period(result):
+        return
+
+    raise PayloadNotGroundableError(
+        f"누적 기간 Fact {len(interim)}건이 단일 Fact 조회가 아닌 결과에 실렸습니다. "
+        "결정론 경로가 멈추는 모양이므로 외부 모델에도 넘기지 않습니다."
+    )
+
+
+def _fact_fiscal_year(fact: Fact) -> int | None:
+    """
+    Fact의 회계연도.
+
+    누적 값에는 회계연도를 요구한다. 연도 없이 "반기 누적"만 실으면 어느 해의 반기인지가
+    payload에서 사라지고, 모델이 그 자리를 채우면 그것은 근거가 없는 연도다. 결정론 문장이
+    같은 자리에서 멈추는 것과 같은 판정이다(_period_phrase).
+    """
+    if _period_label(fact) is not None and fact.fiscal_year is None:
+        raise PayloadNotGroundableError(
+            f"Fact {fact.fact_id!r}는 {fact.fiscal_period!r} 누적 값인데 회계연도가 없습니다. "
+            "어느 해의 누적인지 없이는 넘기지 않습니다."
+        )
+
+    return fact.fiscal_year
+
+
 def _fiscal_year(fact: Fact) -> int | None:
     """
-    회계연도. 연간 외 기간은 넘기지 않는다.
+    계산의 입력으로 읽는 회계연도. 연간 외 기간은 넘기지 않는다.
 
-    _period_phrase가 문장에서 막는 것과 같은 규칙을 같은 공개 집합(FULL_YEAR_FISCAL_PERIODS)
-    에서 읽는다. 분기 Fact를 연도만 실어 보내면 모델이 그것을 연간 값으로 적는다.
+    Fact 자리(_fact_fiscal_year)와 달리 여기서는 누적 값을 막는다. GroundedCalculation에는
+    누적 구간을 실을 자리가 없어서다. 파생값에 연도만 실리면 1~6월 누적 매출액으로 만든
+    영업이익률이 그 해 전체의 비율로 적히고, 그 기간은 payload 어디에도 남지 않는다.
+
+    막는다고 답이 사라지지는 않는다. 이 정지는 결정론 경로로 돌아가라는 뜻이고, 그쪽 문장은
+    원천 Fact마다 기간 구절을 따로 적으므로 누적 값을 누적 값으로 말한다
+    (answer_builder._temporal_delta_sentence·_derived_period_value). 여는 쪽은
+    GroundedCalculation의 기간 표기를 먼저 정한다.
     """
     if fact.fiscal_period is not None and fact.fiscal_period not in FULL_YEAR_FISCAL_PERIODS:
         raise PayloadNotGroundableError(

@@ -453,10 +453,30 @@ SCOPE_OMITTED_IN_ANSWER: frozenset[FactAccountingScope] = frozenset(
 
 # 연도만 적어도 되는 fiscal_period 표기.
 #
-# 현재 periodic.adapter는 fiscal_period를 채우지 않고(None), Pattern A는 사업보고서의
-# 연간 값만 다룬다. 분기·반기 값이 들어오는데 "2025년 매출액"이라고 적으면 기간이 틀린
-# 답이 되므로, 표기가 정해지지 않은 값은 여기서 막는다.
+# 사업보고서의 연간 값이 이 자리다. 연도 하나로 그 값의 기간이 전부 불리므로 덧붙일 구간
+# 표기가 없다. fiscal_period가 None인 Fact도 같은 자리에 있다(연간 경로가 이 필드를 채우지
+# 않는다).
 FULL_YEAR_FISCAL_PERIODS: frozenset[str] = frozenset({"FY"})
+
+
+# 연간이 아닌 fiscal_period의 누적 구간 표기.
+#
+# periodic.extractor가 분기·반기보고서에서 확정하는 값이며(f"{base_month}M YTD"), 그 값이
+# 뜻하는 것은 '기초부터 그 시점까지의 누적'이다. 3M/6M/9M은 각각 1분기·반기·3분기 누적이고,
+# 그 셋이 지금 추출 경로가 만드는 값의 전부다.
+#
+# 연도만 적으면 이 구간이 문장에서 사라진다. 1~3월 누적 매출액이 "2025년 매출액"으로 적히면
+# 그 답은 한 해 전체의 값으로 읽히고, 그것이 이 대응표가 있는 이유다. 표기를 붙이는 일과
+# 기간을 생략하는 일은 다르다.
+#
+# 여기에 없는 값은 채우지 않고 막는다. 3개월 단독 값("quarter")처럼 누적이 아닌 기간이
+# 섞이면 같은 "1분기"라는 말이 누적과 단독 두 가지를 뜻하게 되고, 문장만 보고는 어느 쪽인지
+# 알 수 없다. 그런 값은 문장 형태를 먼저 정한 뒤에 연다.
+INTERIM_FISCAL_PERIOD_LABELS: dict[str, str] = {
+    "3M YTD": "1분기 누적",
+    "6M YTD": "반기 누적",
+    "9M YTD": "3분기 누적",
+}
 
 
 # 우열 판정 문장이 쓸 파생 개념 표기.
@@ -1336,6 +1356,13 @@ def _supported_answer(result: AgentExecutionResult, *, partial: bool) -> str:
         형식은 정상인 응답이 나간다. Router가 미등록 intent를 가장 가까운 handler로 대신
         처리하지 않는 것과 같은 이유로, 여기서도 대신 고르지 않는다.
     """
+    # 누적 기간 Fact를 표현할 수 있는 모양인지 먼저 본다.
+    #
+    # 모양을 고르기 전에 둔다. 아래 분기 중 어느 것을 고르든 그 문장은 _period_phrase를 지나며,
+    # 그 구절은 이제 누적 기간을 적는다. 분기 뒤에 두면 경로마다 같은 검사를 적어야 하고, 새
+    # Pattern이 늘 때 하나를 빠뜨리는 자리가 생긴다.
+    _require_supported_interim_shape(result)
+
     if result.document_summaries and (
         result.facts or result.comparisons or result.event_histories
     ):
@@ -2362,22 +2389,128 @@ def _metric_label(metric: MetricConcept) -> str:
     return label
 
 
+def interim_period_label(fiscal_period: str | None) -> str | None:
+    """
+    누적 구간 표기. 연간 값에는 붙일 구간이 없으므로 None.
+
+    표기가 정해진 값만 지난다. 대응표에 없는 fiscal_period는 여기서 멈추며, 그 정지가
+    "이 기간의 문장 형태가 아직 없다"는 뜻이다. 임의로 표기를 만들면 기간이 틀린 답이 나간다
+    (INTERIM_FISCAL_PERIOD_LABELS 주석 참조).
+
+    공개 함수인 이유는 근거 payload도 같은 판정을 해야 하기 때문이다. 그쪽은 이 대응표를 읽되
+    자기 오류형으로 멈춘다(grounded_payload._period_label). 판정을 두 곳에 적으면 한쪽만
+    넓어지는 날이 오고, 그때 같은 Fact가 경로에 따라 다른 기간으로 불린다.
+
+    Raises:
+        UnsupportedResultShapeError: 표기가 정해지지 않은 fiscal_period인 경우.
+    """
+    if fiscal_period is None or fiscal_period in FULL_YEAR_FISCAL_PERIODS:
+        return None
+
+    label = INTERIM_FISCAL_PERIOD_LABELS.get(fiscal_period)
+
+    if label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 fiscal_period입니다: {fiscal_period!r}. "
+            f"현재 표기가 정해진 기간: "
+            f"{', '.join(sorted(FULL_YEAR_FISCAL_PERIODS | set(INTERIM_FISCAL_PERIOD_LABELS)))}. "
+            "표기만 추가하지 말고 그 기간의 문장 형태를 먼저 정하십시오."
+        )
+
+    return label
+
+
+def supports_interim_fiscal_period(result: AgentExecutionResult) -> bool:
+    """
+    누적 기간 Fact를 표현할 수 있는 결과 모양인가.
+
+    #137/#138이 연 것은 '단일 Fact 조회'(Pattern A) 하나다. 그 계약이 다루는 것은 한 보고서에서
+    한 값을 꺼내 그 값의 기간과 함께 적는 일이며, 여러 값을 견주거나 계산하는 경로의 기간 표기는
+    아직 정해지지 않았다.
+
+    구절 함수가 아니라 여기서 가르는 이유:
+        _period_phrase는 Fact 하나를 받아 그 Fact의 기간을 적는다. 어느 문장의 어느 자리에
+        쓰이는지 모르고, 알아야 할 이유도 없다. 거기에 "이 자리에서는 누적을 적지 말라"를 넣으면
+        구절 함수가 호출자의 모양을 알게 되고, 그때부터 같은 Fact가 부르는 쪽에 따라 다른 기간으로
+        불린다. 모양을 아는 자리는 모양을 고르는 자리다(_supported_answer).
+
+    무엇을 보는가:
+        Fact 1건뿐이고, 계산도 우열 판정도 없는 결과. 그것이 단일 Fact 조회의 모양이다.
+        계산이 있으면 그 값은 여러 기간·여러 지표에서 나왔고, 우열 판정이 있으면 견준 값이
+        2건 이상 실린다. 어느 쪽도 "이 값의 기간은 무엇인가"가 한 구절로 끝나지 않는다.
+
+    이 판정을 근거 payload도 읽는다(grounded_payload). 두 경로가 같은 모양에서 열리고 같은
+    모양에서 멈춰야 하며, 판정을 두 곳에 적으면 한쪽만 넓어지는 날이 온다.
+    """
+    return (
+        len(result.facts) == 1
+        and not result.calculations
+        and not result.comparisons
+    )
+
+
+def _require_supported_interim_shape(result: AgentExecutionResult) -> None:
+    """
+    누적 기간 Fact가 실렸다면 그것을 표현할 수 있는 모양인지 확인한다.
+
+    표현할 수 없는 모양이면 이 변경 이전과 같이 멈춘다. 구절 함수가 연간 외 기간을 전부
+    거절하던 동안 Q07·Q08·Q11의 누적 입력은 여기서 멈췄고, 그 정지는 계약이 다루기로 한 범위
+    밖이라는 뜻이지 결함이 아니다. 구절이 열렸다고 해서 그 경로들이 함께 열리지는 않는다.
+
+    표기가 정해지지 않은 기간(예: "quarter")은 모양과 무관하게 여기서 멈춘다.
+    interim_period_label이 그 판정을 하며, 단일 Fact 조회에서도 예외가 아니다.
+
+    Raises:
+        UnsupportedResultShapeError: 표기가 정해지지 않은 기간이거나, 누적 기간 Fact가 단일
+            Fact 조회가 아닌 모양에 실린 경우.
+    """
+    interim = [
+        fact for fact in result.facts if interim_period_label(fact.fiscal_period) is not None
+    ]
+
+    if not interim or supports_interim_fiscal_period(result):
+        return
+
+    raise UnsupportedResultShapeError(
+        f"누적 기간 Fact {len(interim)}건이 단일 Fact 조회가 아닌 결과에 실렸습니다"
+        f"(Fact {len(result.facts)}건 / CalculationResult {len(result.calculations)}건 / "
+        f"ComparisonResult {len(result.comparisons)}건): "
+        f"{sorted({fact.fiscal_period for fact in interim if fact.fiscal_period})}. "
+        "기간 비교·파생값의 누적 기간 표기가 아직 정해지지 않았습니다. "
+        "표기를 여기서 만들지 말고 그 모양의 문장 형태를 먼저 정하십시오."
+    )
+
+
 def _period_phrase(fact: Fact) -> str:
     """
     회계기간 구절. 확정된 값만 적는다.
 
-    fiscal_period가 연간 표기가 아니면 막는다. 분기 값을 연간처럼 적으면 기간이 틀린 답이 된다.
+    연간 값은 연도만 적는다. 그 값의 기간이 연도 하나로 전부 불리기 때문이다.
+
+    누적 값은 구간까지 적는다("2025년 반기 누적 "). 연도만 적으면 1~6월 누적 매출액이 그 해
+    전체의 매출액으로 읽히고, 그것이 이 구절이 막아야 하는 실패다. 표기가 정해지지 않은
+    기간은 아예 문장으로 옮기지 않는다(interim_period_label).
+
+    누적 값에 회계연도가 없으면 멈춘다. 연간 값이라면 연도를 생략해도 "연결 기준 매출액"이
+    기간을 주장하지 않는 문장으로 남지만, 누적 값에서 연도를 빼면 "반기 누적"이 어느 해의
+    반기인지 없이 적힌다. 구절을 통째로 생략하는 쪽은 더 나쁘다. 그 문장은 누적 값을 기간
+    없이 말하게 되고, 읽는 사람이 그것을 한 해의 값으로 읽을 자리가 다시 생긴다.
     """
-    if fact.fiscal_period is not None and fact.fiscal_period not in FULL_YEAR_FISCAL_PERIODS:
-        raise UnsupportedResultShapeError(
-            f"표기가 정해지지 않은 fiscal_period입니다: {fact.fiscal_period!r}. "
-            "연간 외 기간의 문장 형태를 먼저 정하십시오."
-        )
+    period_label = interim_period_label(fact.fiscal_period)
+
+    if period_label is None:
+        if fact.fiscal_year is None:
+            return ""
+
+        return f"{fact.fiscal_year}년 "
 
     if fact.fiscal_year is None:
-        return ""
+        raise MissingAnswerSupportError(
+            f"Fact {fact.fact_id!r}는 {fact.fiscal_period!r} 누적 값인데 회계연도가 없습니다. "
+            "어느 해의 누적인지 적지 못하면 기간이 없는 값이 되므로 문장을 만들지 않습니다."
+        )
 
-    return f"{fact.fiscal_year}년 "
+    return f"{fact.fiscal_year}년 {period_label} "
 
 
 def _scope_phrase(scope: FactAccountingScope) -> str:
@@ -2939,6 +3072,12 @@ def _calculation_operand(
     입력이 하나의 기업·기간·기준으로 모이지 않으면 멈춘다. 그런 파생값은 "누구의 무엇"인지를 한
     구절로 부를 수 없고, 한쪽을 골라 적으면 나머지가 문장에서 사라진다. 정상 경로에서는 guard①과
     guard②가 같은 것을 이미 확인하므로 여기서 새로 걸릴 일은 없다.
+
+    sources[0]의 구절을 그대로 쓰는 것이 안전한 이유는 여기 오는 Fact가 전부 연간 값이기
+    때문이다. 누적 기간 Fact는 파생값을 실은 결과에 들어오지 못한다
+    (_require_supported_interim_shape). 그 경계가 열리는 날에는 여기서도 기간을 모아야 한다 —
+    기업 축 guard②는 회계기간 구분을 보지 않는다
+    (calculator.validate_cross_entity_fact_comparability).
     """
     sources: list[Fact] = []
 

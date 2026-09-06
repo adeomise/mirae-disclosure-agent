@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 from disclosure_agent.agent.answer_builder import (
     REASON_INCOMPARABLE_ENTITIES,
     STAGE_COMPARABILITY,
+    UnsupportedResultShapeError,
+    build_answer_response,
 )
 from disclosure_agent.agent.derived_metrics import OPERATION_RATIO, UNIT_PERCENT
 from disclosure_agent.api.dependencies import get_ask_service
@@ -328,6 +330,147 @@ def test_agent_result_without_source_documents_defaults_to_an_empty_list() -> No
 
     assert response.status_code == 200
     assert response.json()["source_documents"] == []
+
+
+@pytest.mark.parametrize(
+    "fiscal_period,period_phrase",
+    [
+        ("3M YTD", "2025년 1분기 누적"),
+        ("6M YTD", "2025년 반기 누적"),
+        ("9M YTD", "2025년 3분기 누적"),
+    ],
+)
+def test_cumulative_period_result_returns_200_with_its_span(
+    fiscal_period: str, period_phrase: str
+) -> None:
+    """분기·반기보고서의 누적 값이 HTTP 경계를 지난다.
+
+    이 자리가 500이었다. 파이프라인은 ANSWERABLE까지 정상으로 끝나는데 문장을 만드는 자리가
+    연간 외 기간을 거절해, 답이 있는 요청이 서버 오류로 나갔다.
+    """
+    result = answerable_execution_result()
+    result.facts[0].fiscal_period = fiscal_period
+
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "synthetic cumulative"})
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert body["status"] == "ANSWERABLE"
+    assert period_phrase in body["answer"]
+    assert body["facts"][0]["fiscal_period"] == fiscal_period
+
+
+@pytest.mark.parametrize("fiscal_period", ["3M YTD", "6M YTD", "9M YTD"])
+def test_a_cumulative_answer_is_never_presented_as_an_annual_figure(
+    fiscal_period: str,
+) -> None:
+    """500을 200으로 바꾸는 것만으로는 부족하다. 기간이 틀린 200이 더 나쁘다."""
+    result = answerable_execution_result()
+    result.facts[0].fiscal_period = fiscal_period
+
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    answer = client.post("/api/ask", json={"question": "synthetic cumulative"}).json()["answer"]
+
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(
+        answerable_execution_result()
+    )
+
+    annual = client.post("/api/ask", json={"question": "synthetic annual"}).json()["answer"]
+
+    assert "누적" in answer
+    assert answer != annual
+
+
+def test_an_unmapped_fiscal_period_still_fails_closed() -> None:
+    """표기가 정해지지 않은 기간까지 열리지는 않는다. 'quarter'는 누적이 아니다."""
+    result = answerable_execution_result()
+    result.facts[0].fiscal_period = "quarter"
+
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "synthetic unmapped period"})
+
+    assert response.status_code == 500
+
+
+def cumulative_comparison_result() -> AgentExecutionResult:
+    """누적 기간 Fact 2건을 견준 결과. 단일 Fact 조회가 아닌 모양이다."""
+    result = answerable_execution_result()
+
+    # 우열 판정은 정규화 값에서 나온다. 원본 fixture에는 그 짝이 없으므로 여기서 채운다
+    # (_fact_operand). 채우지 않으면 두 테스트가 기간 경계가 아니라 값이 없다는 이유로 멈추고,
+    # 그러면 이 파일이 무엇을 고정했는지 알 수 없다.
+    result.facts[0].normalized_value = "1000"
+    result.facts[0].normalized_unit = "원"
+
+    second = result.facts[0].model_copy(
+        update={
+            "fact_id": "synthetic-fact-2",
+            "company": "Synthetic Rival",
+            "normalized_value": "500",
+        }
+    )
+
+    result.facts.append(second)
+
+    for fact in result.facts:
+        fact.fiscal_period = "6M YTD"
+
+    result.comparisons.append(
+        ComparisonResult(
+            comparison_id="synthetic-comparison-1",
+            left=ResultInputReference(
+                input_type=ResultInputType.FACT, input_id="synthetic-fact-1"
+            ),
+            right=ResultInputReference(
+                input_type=ResultInputType.FACT, input_id="synthetic-fact-2"
+            ),
+            relation=ComparisonRelation.LEFT_GREATER,
+        )
+    )
+
+    return result
+
+
+def test_a_cumulative_comparison_stays_fail_closed_at_the_http_boundary() -> None:
+    """
+    누적 기간이 열린 것은 단일 Fact 조회뿐이다.
+
+    비교·계산 경로가 함께 열리면 계약이 정하지 않은 답이 나간다. 그 정지는 이 변경 이전과
+    같은 자리이며, 여기서 200이 되는 것이 회귀다.
+    """
+    result = cumulative_comparison_result()
+
+    # 같은 결과가 연간 값이면 답이 된다(아래 테스트). 그러므로 이 500은 값이 모자라서가 아니라
+    # 누적 기간이 이 모양에서 열려 있지 않아서다.
+    with pytest.raises(UnsupportedResultShapeError, match="누적 기간"):
+        build_answer_response(result)
+
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "synthetic cumulative comparison"})
+
+    assert response.status_code == 500
+
+
+def test_an_annual_comparison_is_unaffected_by_the_interim_boundary() -> None:
+    """연간 값의 같은 모양은 그대로 답한다. 막는 것은 누적 기간뿐이다."""
+    result = cumulative_comparison_result()
+
+    for fact in result.facts:
+        fact.fiscal_period = "FY"
+
+    app.dependency_overrides[get_ask_service] = lambda: runtime_service(result)
+
+    response = client.post("/api/ask", json={"question": "synthetic annual comparison"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ANSWERABLE"
 
 
 def test_completed_partial_holding_shares_result_returns_200() -> None:

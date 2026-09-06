@@ -25,6 +25,8 @@ from disclosure_agent.agent.answer_builder import (
     COMPARISON_RELATION_TEMPLATES,
     DERIVED_METRIC_LABELS,
     FACT_NORMALIZED_UNIT_LABELS,
+    FULL_YEAR_FISCAL_PERIODS,
+    INTERIM_FISCAL_PERIOD_LABELS,
     LIMITATION_MESSAGE_BY_REASON,
     METRIC_LABELS,
     OPERATION_AGGREGATE,
@@ -324,6 +326,65 @@ def test_non_annual_fiscal_period_is_rejected_instead_of_written_as_a_year() -> 
 
     with pytest.raises(UnsupportedResultShapeError, match="fiscal_period"):
         build_answer_response(result)
+
+
+@pytest.mark.parametrize(
+    "fiscal_period,expected_period",
+    [
+        ("3M YTD", "2025년 1분기 누적"),
+        ("6M YTD", "2025년 반기 누적"),
+        ("9M YTD", "2025년 3분기 누적"),
+    ],
+)
+def test_cumulative_periods_are_written_with_their_own_span(
+    fiscal_period: str, expected_period: str
+) -> None:
+    """누적 값은 연도가 아니라 누적 구간까지 적힌다."""
+    result = answerable_single_fact_result(fiscal_period=fiscal_period)
+
+    assert build_answer_response(result).answer == (
+        f"{SYNTHETIC_COMPANY}의 {expected_period} 연결 기준 매출액은 1,234백만원입니다."
+    )
+
+
+@pytest.mark.parametrize("fiscal_period", ["3M YTD", "6M YTD", "9M YTD"])
+def test_a_cumulative_answer_never_reads_as_a_full_year_figure(fiscal_period: str) -> None:
+    """이 규칙의 목적. 누적 값이 "2025년 매출액"으로 적히면 한 해 전체의 값으로 읽힌다."""
+    answer = build_answer_response(
+        answerable_single_fact_result(fiscal_period=fiscal_period)
+    ).answer
+
+    annual = build_answer_response(answerable_single_fact_result(fiscal_period="FY")).answer
+
+    assert "누적" in answer
+    assert answer != annual
+    assert f"{SYNTHETIC_COMPANY}의 2025년 연결" not in answer
+
+
+@pytest.mark.parametrize("fiscal_period", ["3M YTD", "6M YTD", "9M YTD"])
+def test_a_cumulative_value_without_a_fiscal_year_does_not_produce_an_answer(
+    fiscal_period: str,
+) -> None:
+    """어느 해의 누적인지 적지 못하면 기간이 없는 값이 된다. 구절만 빼고 답하지 않는다."""
+    result = answerable_single_fact_result(fiscal_period=fiscal_period, fiscal_year=None)
+
+    with pytest.raises(MissingAnswerSupportError):
+        build_answer_response(result)
+
+
+@pytest.mark.parametrize("fiscal_period", ["quarter", "half-year", "annual", "Q1", "1Q YTD"])
+def test_a_period_outside_the_label_table_is_still_rejected(fiscal_period: str) -> None:
+    """표기가 정해진 값만 지난다. 'quarter'는 누적이 아닌 3개월 단독 값이라 특히 그렇다."""
+    result = answerable_single_fact_result(fiscal_period=fiscal_period)
+
+    with pytest.raises(UnsupportedResultShapeError, match="fiscal_period"):
+        build_answer_response(result)
+
+
+def test_the_cumulative_label_table_matches_the_extractor_vocabulary() -> None:
+    """periodic.extractor가 만드는 값(f"{base_month}M YTD")과 대응표가 어긋나면 답이 멈춘다."""
+    assert set(INTERIM_FISCAL_PERIOD_LABELS) == {"3M YTD", "6M YTD", "9M YTD"}
+    assert not set(INTERIM_FISCAL_PERIOD_LABELS) & FULL_YEAR_FISCAL_PERIODS
 
 
 def test_supported_metric_labels_take_the_expected_particle() -> None:
@@ -1305,6 +1366,48 @@ def test_derived_values_are_read_from_the_calculations_not_recomputed_from_the_f
     assert "12.50" not in answer
     assert "5.00" not in answer
     assert answer.endswith(f"{RIGHT_COMPANY} 쪽이 더 큽니다.")
+
+
+@pytest.mark.parametrize("fiscal_period", ["3M YTD", "6M YTD", "9M YTD"])
+def test_q11_cumulative_inputs_stay_fail_closed(fiscal_period: str) -> None:
+    """
+    파생값 비교(Q11)의 누적 입력은 계약이 다루기로 한 범위 밖이다.
+
+    구절 함수가 누적 기간을 적게 됐다고 해서 이 경로가 함께 열리지는 않는다. 열리면 파생값이
+    첫 입력의 구절로 불리고(_calculation_operand는 sources[0]을 쓴다), 기업 축 guard②는
+    회계기간 구분을 보지 않아 그 어긋남을 막을 자리가 없다.
+    """
+    result = q11_result()
+
+    for fact in result.facts:
+        fact.fiscal_period = fiscal_period
+
+    with pytest.raises(UnsupportedResultShapeError, match="누적 기간"):
+        build_answer_response(result)
+
+
+def test_q11_one_cumulative_input_among_annual_ones_stays_fail_closed() -> None:
+    """한 건만 누적이어도 멈춘다. 섞인 쪽이 더 위험하다."""
+    result = q11_result()
+
+    result.facts[0].fiscal_period = "3M YTD"
+
+    with pytest.raises(UnsupportedResultShapeError, match="누적 기간"):
+        build_answer_response(result)
+
+
+def test_q11_annual_answer_is_unchanged_by_the_interim_boundary() -> None:
+    """연간 입력의 Q11 문장은 이 변경 이전과 같다."""
+    result = q11_result()
+
+    for fact in result.facts:
+        fact.fiscal_period = "FY"
+
+    assert build_answer_response(result).answer == (
+        f"{LEFT_COMPANY}의 2025년 연결 기준 영업이익률은 12.50%, "
+        f"{RIGHT_COMPANY}의 2025년 연결 기준 영업이익률은 5.00%입니다. "
+        f"{LEFT_COMPANY} 쪽이 더 큽니다."
+    )
 
 
 def test_q11_comparison_keeps_referencing_the_existing_calculations() -> None:
@@ -3361,6 +3464,45 @@ def test_a_ratio_whose_inputs_span_two_scopes_stops() -> None:
         build_answer_response(result)
 
 
+@pytest.mark.parametrize("fiscal_period", ["3M YTD", "6M YTD", "9M YTD"])
+def test_q07_cumulative_sources_stay_fail_closed(fiscal_period: str) -> None:
+    """
+    기간 비교(Q07)의 누적 입력은 계약이 다루기로 한 범위 밖이다.
+
+    #137/#138이 연 것은 단일 Fact 조회 하나다. 구절 함수를 공유한다는 이유로 이 경로까지
+    열리면, 계약이 정하지 않은 답이 구현 세부의 부작용으로 나가게 된다.
+    """
+    result = temporal_delta_result()
+
+    for fact in result.facts:
+        fact.fiscal_period = fiscal_period
+
+    with pytest.raises(UnsupportedResultShapeError, match="누적 기간"):
+        build_answer_response(result)
+
+
+def test_q07_one_cumulative_source_among_annual_ones_stays_fail_closed() -> None:
+    """연간 값과 누적 값의 차이는 증감이 아니다. guard②가 막는 것을 문장 경계도 막는다."""
+    result = temporal_delta_result()
+    result.facts[0].fiscal_period = "6M YTD"
+
+    with pytest.raises(UnsupportedResultShapeError, match="누적 기간"):
+        build_answer_response(result)
+
+
+def test_q07_annual_answer_is_unchanged_by_the_interim_boundary() -> None:
+    """연간 입력의 Q07 문장은 이 변경 이전과 같다."""
+    result = temporal_delta_result()
+
+    for fact in result.facts:
+        fact.fiscal_period = "FY"
+
+    assert build_answer_response(result).answer == (
+        "테스트반도체(주)의 연결 기준 매출액은 2024년 1,000백만원, 2025년 1,200백만원입니다. "
+        "증감액은 200,000,000원, 증감률은 20.0000%입니다."
+    )
+
+
 def test_a_period_without_a_fiscal_year_does_not_produce_an_answer() -> None:
     """어느 해의 값인지 적지 못하면 '두 해가 어떻게 달라졌나'의 답이 되지 않는다."""
     result = temporal_derived_delta_result()
@@ -3378,6 +3520,40 @@ def test_a_non_annual_source_period_is_not_written_as_a_year() -> None:
 
     with pytest.raises(UnsupportedResultShapeError):
         build_answer_response(result)
+
+
+@pytest.mark.parametrize("fiscal_period", ["3M YTD", "6M YTD", "9M YTD"])
+def test_q08_cumulative_sources_stay_fail_closed(fiscal_period: str) -> None:
+    """파생지표 변화(Q08)의 누적 입력도 범위 밖이다. 표기가 정해진 기간이어도 열리지 않는다."""
+    result = temporal_derived_delta_result()
+
+    for fact in result.facts:
+        fact.fiscal_period = fiscal_period
+
+    with pytest.raises(UnsupportedResultShapeError, match="누적 기간"):
+        build_answer_response(result)
+
+
+def test_q08_one_cumulative_source_among_annual_ones_stays_fail_closed() -> None:
+    """한쪽만 누적인 비율은 어느 기간의 값도 아니다."""
+    result = temporal_derived_delta_result()
+    result.facts[0].fiscal_period = "6M YTD"
+
+    with pytest.raises(UnsupportedResultShapeError, match="누적 기간"):
+        build_answer_response(result)
+
+
+def test_q08_annual_answer_is_unchanged_by_the_interim_boundary() -> None:
+    """연간 입력의 Q08 문장은 이 변경 이전과 같다."""
+    result = temporal_derived_delta_result()
+
+    for fact in result.facts:
+        fact.fiscal_period = "FY"
+
+    assert build_answer_response(result).answer == (
+        "합성반도체(주)의 연결 기준 영업이익률은 2024년 45.6940%, 2025년 43.5923%이며, "
+        "두 연도의 차이는 -2.1017%p입니다."
+    )
 
 
 def test_a_ratio_outside_the_derived_metric_table_stops() -> None:

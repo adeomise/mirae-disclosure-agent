@@ -68,9 +68,14 @@ from disclosure_agent.common.schemas import (
     DocumentSummary,
     EventHistory,
     Fact,
+    FieldChange,
     ResolvedEventState,
     ResolvedFieldValue,
     ResultInputReference,
+)
+from disclosure_agent.event.correction_fields import (
+    CORRECTION_FIELD_ALIASES,
+    HISTORY_CANONICAL_FIELDS,
 )
 from disclosure_agent.periodic.extractor import BASE_CURRENCY_UNIT, FinancialFact
 from disclosure_agent.retrieval.metadata_filter import FilingRef
@@ -479,6 +484,15 @@ SUMMARY_ITEM_TYPE_LABELS: dict[SummaryItemType, str] = {
     SummaryItemType.TABLE: "표",
 }
 
+# 요약 항목을 나열할 때의 구분자.
+#
+# 쉼표를 쓰지 않는다. 항목 이름에는 금액의 천단위 쉼표와 표 머리글의 구분자가 그대로 들어
+# 있어(예: "사업부문 | 매출유형 | 품 목"), 쉼표로 이으면 어디까지가 한 항목인지 갈리지 않는다.
+SUMMARY_ITEM_SEPARATOR = " / "
+
+# 집계 합계 옆에 적는 개별 금액의 구분자.
+AGGREGATE_COMPONENT_SEPARATOR = ", "
+
 # 이벤트 공시 유형의 한글 표기. SECTION_SCOPE_LABELS와 같은 이유로 둔다. enum 값을 그대로
 # 문장에 넣으면 한국어 답변에 facility_investment가 섞인다.
 EVENT_TYPE_LABELS: dict[EventType, str] = {
@@ -502,6 +516,126 @@ EVENT_STATE_FIELD_LABELS: dict[str, str] = {
     "investment_start_date": "투자 시작일",
     "investment_end_date": "투자 종료일",
 }
+
+# 정정 이력이 바꾼 항목의 이름.
+#
+# FieldChange.field_name은 canonical 영문 식별자이고, production에서 raw_field는 항상 비어
+# 있다(event.contract_adapter의 raw_field_name gap). 영문 식별자를 한국어 문장에 그대로 넣을
+# 수는 없으므로 표기가 필요하다.
+#
+# 표기를 여기서 새로 짓지 않는다. 추출 계층이 원문 라벨을 canonical 이름으로 옮길 때 쓰는
+# 어휘(event.correction_fields.CORRECTION_FIELD_ALIASES)가 이미 그 대응을 들고 있고, 각
+# 항목의 첫 별칭이 원문에 적힌 이름이다. 그것을 읽어 만들면 대응표가 한 벌로 남는다. 손으로
+# 다시 적으면 추출이 아는 이름과 답변이 부르는 이름이 갈리고, 한쪽만 고쳐지는 날이 온다.
+#
+# EventHistory가 나를 수 있는 필드(HISTORY_CANONICAL_FIELDS)만 담는다. 그 밖의 필드가 이력에
+# 실려 오면 표기를 지어내지 않고 변경 내역을 문장에서 뺀다(field_change_clause).
+
+# 변경 전/후를 가리키는 표기. 조사 대신 이 표기를 쓴다.
+#
+# "A에서 B로"는 앞말의 받침에 따라 '로'와 '으로'가 갈리고, 날짜·금액·기호가 그대로 오는
+# 자리라 받침을 판정할 수 없는 값이 흔하다(원문이 '-'를 그대로 적는 경우가 있다). 표기를
+# 앞에 두면 값이 무엇이든 문장이 성립하고, 어느 값이 변경 전인지도 값 옆에 남는다.
+CHANGE_BEFORE_LABEL = "변경 전"
+CHANGE_AFTER_LABEL = "변경 후"
+
+CHANGE_ITEM_SEPARATOR = " / "
+
+
+def _readable_correction_alias(alias: str) -> str:
+    """원문 라벨의 계층 구분(' - ')만 공백으로 편다. 이름 자체는 바꾸지 않는다."""
+    return " ".join(alias.replace(" - ", " ").split())
+
+
+def _build_correction_field_labels() -> dict[str, str]:
+    """추출 어휘에서 이력 변경 항목의 표기를 만든다. 이름이 갈리면 멈춘다."""
+    labels: dict[str, str] = {}
+
+    for vocabulary in CORRECTION_FIELD_ALIASES.values():
+        for canonical_field, aliases in vocabulary.items():
+            if canonical_field not in HISTORY_CANONICAL_FIELDS:
+                continue
+
+            label = _readable_correction_alias(aliases[0])
+
+            existing = labels.get(canonical_field)
+
+            if existing is not None and existing != label:
+                raise AnswerBuildError(
+                    f"정정 필드 {canonical_field!r}의 표기가 공시 유형마다 다릅니다: "
+                    f"{existing!r} / {label!r}."
+                )
+
+            labels[canonical_field] = label
+
+    return labels
+
+
+CORRECTION_FIELD_LABELS: dict[str, str] = _build_correction_field_labels()
+
+
+def correction_field_label(field_name: str) -> str:
+    """이력 변경 항목의 표기. 대응표에 없으면 멈춘다."""
+    label = CORRECTION_FIELD_LABELS.get(field_name)
+
+    if label is None:
+        raise UnsupportedResultShapeError(
+            f"표기가 정해지지 않은 정정 변경 항목입니다: {field_name!r}. "
+            "event.correction_fields의 어휘에 없는 필드는 문장으로 옮기지 않습니다."
+        )
+
+    return label
+
+
+def change_value_display(value: str | float | None) -> str | None:
+    """변경 전/후 값의 표기. 값이 없으면 None.
+
+    자릿수도 형식도 바꾸지 않는다. 원문이 적은 문자열이 그대로 답변에 실려야 정정 표의 값과
+    답변의 값이 같은 것으로 대조된다.
+    """
+    if value is None:
+        return None
+
+    text = str(value).strip()
+
+    return text or None
+
+
+def field_change_display(change: FieldChange) -> str | None:
+    """변경 1건의 표기. 표기를 확정하지 못하면 None."""
+    try:
+        label = correction_field_label(change.field_name)
+
+    except UnsupportedResultShapeError:
+        return None
+
+    before = change_value_display(change.before)
+
+    after = change_value_display(change.after)
+
+    if before is None or after is None:
+        return None
+
+    return f"{label} {CHANGE_BEFORE_LABEL} {before}, {CHANGE_AFTER_LABEL} {after}"
+
+
+def field_change_clause(changes: list[FieldChange]) -> str | None:
+    """변경 전부를 한 구절로 옮긴다. 한 건이라도 옮기지 못하면 None.
+
+    일부만 적지 않는다. 적힌 것만 보면 그것이 변경의 전부로 읽히고, 빠진 항목이 있었다는
+    사실은 문장 어디에도 남지 않는다. 옮기지 못하는 값이 섞이면 건수만 말하던 이전 문장으로
+    돌아간다(구조화 결과에는 변경 전부가 그대로 실려 나간다).
+    """
+    if not changes:
+        return None
+
+    rendered = [field_change_display(change) for change in changes]
+
+    if any(item is None for item in rendered):
+        return None
+
+    return CHANGE_ITEM_SEPARATOR.join(item for item in rendered if item is not None)
+
 
 DERIVED_METRIC_LABELS: dict[DerivedMetric, str] = {
     DerivedMetric.OPERATING_MARGIN: "영업이익률",
@@ -536,6 +670,11 @@ EVENT_COUNT_UNIT = "건"
 # 단위가 '건'이 아니라 '회'인 이유도 같다. 앞의 둘은 세는 대상이 있는 셈이고 이쪽은 횟수다.
 CORRECTION_COUNT_UNIT = "회"
 
+# 그 셈의 이름. EVENT_COUNT_LABELS와 나란한 자리이며, 검증 계층이 "이 수가 무엇의 셈인가"를
+# 문장에서 확인할 때 쓴다(verbalizer의 COUNT 축). 이름이 없으면 3회를 공시 건수 옆에 적은
+# 문장과 정정 횟수 옆에 적은 문장이 구별되지 않는다.
+CORRECTION_COUNT_LABEL = "정정"
+
 
 def correction_count_display(count: int) -> str:
     """정정 횟수가 문장에 적히는 표기."""
@@ -556,6 +695,46 @@ def event_count_display(count: int) -> str:
 # _calculation_value가 막으므로, 문장이 다른 단위로 나가는 쪽이 아니라 만들어지지 않는 쪽으로
 # 실패한다. 두 이름이 붙어 있는지는 tests/unit/test_answer_builder.py가 함께 고정한다.
 UNIT_PERCENTAGE_POINT = "percentage_point"
+
+# 변화량의 방향을 한 낱말로 옮긴 표기.
+#
+# 새 판정이 아니다. 방향은 이미 계산 결과의 부호에 들어 있고, 여기서 하는 일은 그 부호를
+# 한국어 낱말로 적는 것뿐이다. 결정론 문장이 부호를 그대로 적는 것과 같은 사실을 말한다.
+#
+# 이 표기가 필요한 이유는 부호 없는 크기 표기(magnitude) 때문이다. "-2.1017%p 감소했습니다"는
+# 부호를 두 번 말하는 문장이고, 그렇다고 부호만 지우면 방향이 사라진다. 크기와 방향을 나눠
+# 두면 "2.1017%p 감소했습니다"가 되고 잃는 것이 없다.
+DELTA_DIRECTION_INCREASE = "증가"
+DELTA_DIRECTION_DECREASE = "감소"
+
+
+def delta_direction_label(value: float | str | None) -> str | None:
+    """변화량의 방향 표기. 0이거나 수로 읽지 못하면 None."""
+    if value is None:
+        return None
+
+    try:
+        amount = Decimal(str(value).strip())
+
+    except (InvalidOperation, ValueError):
+        return None
+
+    if not amount.is_finite() or amount == 0:
+        return None
+
+    return DELTA_DIRECTION_DECREASE if amount < 0 else DELTA_DIRECTION_INCREASE
+
+
+def unsigned_display(display_value: str) -> str | None:
+    """부호를 뗀 표기. 부호가 없으면 None(뗄 것이 없다).
+
+    문자열에서만 뗀다. 값을 다시 읽어 절댓값을 만들면 자릿수 규칙을 지난 표기와 그러지 않은
+    표기가 갈린다. 여기서 하는 일은 이미 확정된 표기의 맨 앞 글자 하나를 보는 것뿐이다.
+    """
+    if not display_value.startswith("-"):
+        return None
+
+    return display_value[1:]
 
 # 계산 결과 단위의 한국어 표기.
 #
@@ -1465,16 +1644,19 @@ def _document_summary_sentence(summaries: list[DocumentSummary]) -> str:
         쓰지 않는다. 이 모듈은 확정된 결과를 표현만 하며, 원문에서 새 서술을 만드는 일은
         이 경계 밖이다.
 
-    항목 이름을 나열하지 않는다:
+    항목을 고르지 않고 전부 원문 순서로 나열한다:
         앞의 몇 건만 적으면 그 몇 건이 나머지보다 중요하다는 뜻이 된다. 항목 순서는 원문
         배치일 뿐 중요도가 아니므로 그 주장은 결과가 보장하지 않는다. Q04의 해당 Section이
-        실제로 그렇다. 앞쪽에 원재료 관련 본문이 오고 투자 내용은 뒤에 있어, 앞 몇 건을
-        내세우면 질문이 묻지 않은 쪽이 답의 머리에 온다.
+        실제로 그렇다. 앞쪽에 원재료 관련 본문이 오고 투자 내용은 뒤에 있다.
 
-        순서를 다시 정해 고르지도 않는다. 그러려면 어떤 항목이 질문에 더 가까운지 판정하는
-        규칙이 필요하고, 그것은 확정된 결과를 표현만 하는 이 모듈의 일이 아니다. 그래서 어느
-        범위를 얼마나 확보했는지만 말한다. 항목 이름은 DocumentSummary.items에, 원문 발췌는
-        Evidence에 그대로 남아 있으므로 나열하지 않아도 사라지는 것이 없다.
+        그래서 고르는 대신 전부 적는다. 전부 적으면 무엇이 더 중요하다는 주장을 하지 않으면서도
+        범위 안에 무엇이 있는지가 답변에 남는다. 어느 항목이 질문에 더 가까운지 판정하는 일은
+        여전히 하지 않으며, 그 판정이 필요한 자리는 질문을 함께 보는 표현 계층이다
+        (agent.verbalizer).
+
+        건수만 적던 이전 문장은 "무슨 사업을 하느냐"에 "본문 6건입니다"로 답했다. 형식은
+        정상이고 근거도 맞지만 질문에 답하지 않는다. 나열할 이름은 DocumentSummary.items가
+        이미 확정해 싣고 있으므로 여기서 만드는 것이 없다.
 
     범위와 내용을 한 문장으로 붙이지 않는다:
         "설비 투자 관련 내용 15건"이라고 적으면 15건 전부가 설비 투자 내용이라는 뜻이 된다.
@@ -1520,7 +1702,12 @@ def _single_document_summary_sentence(summary: DocumentSummary) -> str:
         f"{summary.company} {summary.report_name}의 '{location}'입니다."
     )
 
-    collected = f"이 범위의 내용은 {len(summary.items)}건({counts})입니다."
+    listing = SUMMARY_ITEM_SEPARATOR.join(item.label for item in summary.items)
+
+    collected = (
+        f"이 범위의 내용은 {len(summary.items)}건({counts})이며, "
+        f"확인한 내용은 다음과 같습니다: {listing}"
+    )
 
     return _join(selected, collected)
 
@@ -1691,9 +1878,9 @@ def _delta_amount(calculation: CalculationResult) -> str:
     return rendered
 
 
-def _grouped_amount(calculation: CalculationResult) -> str | None:
+def _grouped_amount(calculation: CalculationResult, *, subject: str = "증감액") -> str | None:
     """
-    금액 증감의 수치 표기. 세 자리마다 쉼표를 넣고 의미 없는 소수점 이하 0을 지운다.
+    금액 계산의 수치 표기. 세 자리마다 쉼표를 넣고 의미 없는 소수점 이하 0을 지운다.
 
     계산 계층의 문자열을 그대로 적지 않는 이유:
         calculator.delta는 저장 자릿수로 quantize한 값을 문자열로 넘긴다. 원 단위 금액에서
@@ -1726,8 +1913,13 @@ def _grouped_amount(calculation: CalculationResult) -> str | None:
         그때 갈리는 쪽은 결정론 문장과 payload가 아니라 이 규칙을 따른 값과 따르지 않은 값이며,
         어느 쪽이 규칙을 지난 것인지 문장만 보고는 알 수 없다.
 
-    다른 계산 결과의 표기는 건드리지 않는다. 파생지표의 비율과 변화량은 백분율 축이라 자릿수
-    구분이 필요 없고, 그쪽 표기는 _calculation_value가 정본이다.
+    같은 축의 다른 금액도 이 규칙을 지난다. 시설투자 집계(Q12)가 그 자리이며, 원 단위 합계를
+    그대로 적으면 758900000000원처럼 자릿수를 셀 수 없는 문자열이 나가고 같은 문장의 원천
+    금액 표기(383,000,000,000원)와도 어긋난다. subject는 읽지 못한 값에서 멈출 때 무엇을
+    읽지 못했는지 남기는 이름이다.
+
+    파생지표의 비율과 변화량은 건드리지 않는다. 백분율 축이라 자릿수 구분이 필요 없고,
+    그쪽 표기는 _calculation_value가 정본이다.
     """
     if calculation.value is None:
         return None
@@ -1742,13 +1934,13 @@ def _grouped_amount(calculation: CalculationResult) -> str | None:
 
     except InvalidOperation as error:
         raise UnsupportedResultShapeError(
-            f"수로 읽지 못한 증감액입니다: {calculation.value!r}. "
+            f"수로 읽지 못한 {subject}입니다: {calculation.value!r}. "
             "표기 규칙을 지나지 않은 값을 문장에 적지 않습니다."
         ) from error
 
     if not amount.is_finite():
         raise UnsupportedResultShapeError(
-            f"유한하지 않은 증감액입니다: {calculation.value!r}."
+            f"유한하지 않은 {subject}입니다: {calculation.value!r}."
         )
 
     # 지수 표기를 거치지 않는다. Decimal.normalize()는 뜻 없는 0을 지우면서 큰 값을
@@ -2438,10 +2630,10 @@ def _facility_investment_aggregate_comparison_sentence(
     right_calculation = _referenced_calculation(
         result, comparison.right.input_id
     )
-    left, left_fact_ids = _facility_investment_aggregate_operand(
+    left, left_fact_ids, left_components = _facility_investment_aggregate_operand(
         result, left_calculation
     )
-    right, right_fact_ids = _facility_investment_aggregate_operand(
+    right, right_fact_ids, right_components = _facility_investment_aggregate_operand(
         result, right_calculation
     )
 
@@ -2466,17 +2658,44 @@ def _facility_investment_aggregate_comparison_sentence(
         )
 
     return _join(
-        f"{left.subject}{_topic_particle(left.subject)} {left.value}이고, "
-        f"{right.subject}{_topic_particle(right.subject)} {right.value}입니다.",
+        f"{left.subject}{_topic_particle(left.subject)} "
+        f"{left.value}{_aggregate_components_phrase(left_components)}이고, "
+        f"{right.subject}{_topic_particle(right.subject)} "
+        f"{right.value}{_aggregate_components_phrase(right_components)}입니다.",
         _relation_clause(comparison.relation, left=left, right=right),
     )
+
+
+def _aggregate_components_phrase(components: tuple[str, ...]) -> str:
+    """합계를 이룬 개별 투자 건의 금액을 괄호로 덧붙인다.
+
+    2건 이상일 때만 적는다. 1건짜리 합계에서는 괄호 안의 값이 합계와 같은 수라, 적으면 같은
+    금액을 두 번 말하면서 무언가 더 있는 것처럼 읽힌다.
+
+    값은 원천 Fact가 적은 그대로다. 여기서 더하지도 다시 세지도 않으며, 합계는 여전히
+    CalculationResult의 값이다. 개별 건을 밝히는 이유는 "다 합치면"이라는 질문이 무엇을 합친
+    것인지까지 묻기 때문이다.
+    """
+    if len(components) < 2:
+        return ""
+
+    return f"({AGGREGATE_COMPONENT_SEPARATOR.join(components)} 합산)"
 
 
 def _facility_investment_aggregate_operand(
     result: AgentExecutionResult,
     calculation: CalculationResult,
-) -> tuple[_ComparisonOperand, set[str]]:
-    """한 aggregate가 직접 참조하는 investment_amount Fact에서 기업명만 해소한다."""
+) -> tuple[_ComparisonOperand, set[str], tuple[str, ...]]:
+    """한 aggregate가 직접 참조하는 investment_amount Fact에서 기업명과 개별 금액을 읽는다.
+
+    개별 금액은 큰 것부터 적는다. 참조 순서를 따르지 않는 이유는 합계의 입력에 순서가 없기
+    때문이다. aggregate는 집합을 더한 값이고, inputs의 배열 순서는 producer가 담은 차례일 뿐
+    결과가 말하는 것이 아니다. 그 순서를 문장에 옮기면 같은 결과가 담긴 차례에 따라 다른
+    문장이 되고, 그 차이는 결과 어디에도 근거가 없다.
+
+    크기 순으로 적는 것은 순위 주장이 아니다. 그 순서는 함께 적히는 수에서 그대로 읽히므로
+    문장이 더 말하는 것이 없고, 같은 결과가 언제나 같은 차례로 적힌다.
+    """
     input_ids: list[str] = []
     sources: list[Fact] = []
 
@@ -2527,23 +2746,37 @@ def _facility_investment_aggregate_operand(
             value=_aggregate_calculation_value(calculation),
         ),
         set(input_ids),
+        _ordered_component_values(sources),
     )
 
 
-def _aggregate_calculation_value(calculation: CalculationResult) -> str:
-    """aggregate의 저장된 값을 산술 없이 사용자 단위 표기로 옮긴다."""
-    if calculation.value is not None:
+def _ordered_component_values(sources: list[Fact]) -> tuple[str, ...]:
+    """합계를 이룬 금액을 큰 것부터 적는다. 수로 읽지 못한 값은 표기 순으로 뒤에 둔다."""
+
+    def sort_key(fact: Fact) -> tuple[int, Decimal, str]:
+        rendered = _fact_value(fact)
+
         try:
-            numeric_value = Decimal(str(calculation.value))
-        except (InvalidOperation, ValueError):
-            numeric_value = None
+            amount = Decimal(str(fact.normalized_value))
 
-        if numeric_value is None or not numeric_value.is_finite():
-            raise UnsupportedResultShapeError(
-                f"시설투자 aggregate {calculation.calculation_id!r}의 value를 수치로 "
-                f"표현할 수 없습니다: {calculation.value!r}."
-            )
+        except (InvalidOperation, ValueError, TypeError):
+            return (1, Decimal(0), rendered)
 
+        if not amount.is_finite():
+            return (1, Decimal(0), rendered)
+
+        return (0, -amount, rendered)
+
+    return tuple(_fact_value(fact) for fact in sorted(sources, key=sort_key))
+
+
+def _aggregate_calculation_value(calculation: CalculationResult) -> str:
+    """aggregate의 저장된 값을 산술 없이 사용자 단위 표기로 옮긴다.
+
+    자릿수 구분은 _grouped_amount가 정한다. 저장 문자열을 그대로 적으면 758900000000원이
+    되어 자릿수를 셀 수 없고, 같은 문장에 나란히 놓이는 원천 금액(383,000,000,000원)과 표기가
+    어긋난다. 값도 단위도 바꾸지 않으며 바뀌는 것은 적는 방법뿐이다.
+    """
     label = (
         FACT_NORMALIZED_UNIT_LABELS.get(calculation.unit)
         if calculation.unit is not None
@@ -2556,7 +2789,9 @@ def _aggregate_calculation_value(calculation: CalculationResult) -> str:
             f"{calculation.unit!r}. FACT_NORMALIZED_UNIT_LABELS에 추가하십시오."
         )
 
-    rendered = _value_with_unit(calculation.value, label)
+    rendered = _value_with_unit(
+        _grouped_amount(calculation, subject="시설투자 합계"), label
+    )
 
     if rendered is None:
         raise MissingAnswerSupportError(
@@ -2856,16 +3091,18 @@ def _event_history_sentence(
         세는 일은 호출부가 한다. 이 함수는 EventLink를 받지 않으며, 받아서 세면 무엇을 셀지를
         정하는 자리가 둘로 갈린다.
 
-    변경 항목의 '이름'은 문장에 넣지 않는다:
-        FieldChange.field_name은 canonical 영문 식별자(contract_amount 등)이고, 한국어 문장에
-        그대로 넣으면 응답에 내부 식별자가 섞인다. 한글 원문 라벨은 event.contract_adapter가
-        raw_field_name gap으로 보내므로 현재 production에서 FieldChange.raw_field는 항상
-        비어 있다.
+    변경 항목의 이름과 변경 전/후 값을 함께 적는다:
+        사용자가 "바뀐 내용 있어?"로 묻는 것은 무엇이 어떻게 바뀌었는가이고, 건수만 적은
+        문장은 그 질문에 답하지 않는다. 값은 FieldChange가 이미 확정해 싣고 있으므로 여기서
+        만드는 것이 없다.
 
-        여기서 영문 이름을 한글로 다시 옮기는 대응표를 만들면 event.extractor가 이미 들고
-        있는 라벨 어휘가 두 벌이 되고, 어느 쪽이 정본인지 알 수 없게 된다. 이름과 변경
-        전/후 값까지 담는 narrative는 P1이며, Contract에 원문 라벨을 실을 자리가 생긴 뒤에
-        붙이는 것이 맞다. 그때까지 구조화 결과(event_histories)에는 전부 실려 나간다.
+        이름은 추출 계층의 어휘에서 읽는다(CORRECTION_FIELD_LABELS). FieldChange.field_name은
+        canonical 영문 식별자(contract_amount 등)이고 production에서 raw_field는 비어 있으므로
+        표기가 필요한데, 그 표기를 여기서 새로 지으면 event.extractor가 이미 들고 있는 라벨
+        어휘가 두 벌이 된다. 그래서 같은 어휘를 읽어 만든 대응표 하나만 쓴다.
+
+        한 건이라도 표기를 확정하지 못하면 변경 내역 전체를 적지 않고 건수만 말한다
+        (field_change_clause). 옮길 수 있는 것만 적으면 적힌 것이 변경의 전부로 읽힌다.
     """
     if len(histories) > 1:
         raise UnsupportedResultShapeError(
@@ -2911,10 +3148,17 @@ def _event_history_sentence(
     change_count = len(history.changes)
 
     if change_count:
-        return (
+        counted = (
             f"{sentence} 확인된 {EVENT_COUNT_LABELS[EVENT_COUNT_CHANGE]}은 "
             f"{event_count_display(change_count)}입니다."
         )
+
+        detail = field_change_clause(history.changes)
+
+        if detail is None:
+            return counted
+
+        return f"{counted} {detail}."
 
     if incomplete:
         return sentence

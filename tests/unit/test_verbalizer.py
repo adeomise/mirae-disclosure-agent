@@ -26,15 +26,21 @@ from disclosure_agent.agent.answer_builder import (
     build_answer_response,
 )
 from disclosure_agent.agent.derived_metrics import OPERATION_RATIO, UNIT_PERCENT
-from disclosure_agent.agent.grounded_payload import GroundedPayload, build_grounded_payload
+from disclosure_agent.agent.grounded_payload import (
+    GroundedPayload,
+    PayloadNotGroundableError,
+    build_grounded_payload,
+)
 from disclosure_agent.agent.hyperclova import (
     HyperClovaResponseError,
     HyperClovaUnavailableError,
 )
+from disclosure_agent.agent.query_vocabulary import OPERATION_CHANGE_COUNT
 from disclosure_agent.agent.verbalizer import (
     MAX_ANSWER_LENGTH,
     SYSTEM_PROMPT,
     AnswerRejectedError,
+    _allowed_numbers,
     _facts_consumed_by_calculations,
     _metric_owners,
     parse_model_answer,
@@ -45,22 +51,30 @@ from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
     ComparisonRelation,
+    EventLinkRelation,
+    EventLinkResolutionStatus,
     EvidenceLocationType,
     ExecutionStatus,
     FactAccountingScope,
     MetricConcept,
     ResultInputType,
+    SectionScope,
+    SummaryItemType,
 )
 from disclosure_agent.common.schemas import (
     AgentExecutionResult,
     CalculationResult,
     ComparisonResult,
+    DocumentSummary,
     EventHistory,
+    EventLink,
     Evidence,
     EvidenceProvenance,
     Fact,
     FieldChange,
+    RawReference,
     ResultInputReference,
+    SummaryItem,
 )
 
 QUESTION = "한미반도체 2025년 연결 기준 매출액이 얼마야?"
@@ -145,6 +159,13 @@ def history_result(*, partial: bool = False) -> AgentExecutionResult:
 
 
 HISTORY_QUESTION = "그 공급계약 나중에 바뀐 내용 있어?"
+
+# 변경 전/후 값은 답에 실려야 한다(_require_every_value_is_stated).
+#
+# 아래 이력 fixture의 변경은 모두 계약금액 100.0 -> 120.0 한 종류이고, 셈이나 완결 여부를
+# 보는 테스트는 그 요구를 따로 시험하지 않는다. 그래서 같은 구절을 문장 끝에 붙여 완결성을
+# 만족시키고, 각 테스트는 자기가 보려는 규칙만 남긴다.
+HISTORY_CHANGE_CLAUSE = " 계약금액 변경 전 100.0, 변경 후 120.0."
 
 
 def history_payload(*, partial: bool = False) -> GroundedPayload:
@@ -234,7 +255,7 @@ def test_code_fenced_response_is_still_read() -> None:
 
 
 def test_event_history_answer_stating_the_document_count_passes() -> None:
-    answer = "관련 공시는 2건이며, 확인된 변경 항목은 1건입니다."
+    answer = "관련 공시는 2건이며, 확인된 변경 항목은 1건입니다." + HISTORY_CHANGE_CLAUSE
 
     client = ScriptedClient(model_reply(answer, used_fact_ids=[], used_evidence_ids=[]))
 
@@ -1693,7 +1714,8 @@ def test_event_counts_swapped_between_kinds_are_rejected() -> None:
     assert (
         verdict(
             payload,
-            "관련 공시 1건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 2건입니다.",
+            "관련 공시 1건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 2건입니다."
+            + HISTORY_CHANGE_CLAUSE,
         )
         == "count_contradiction"
     )
@@ -1703,7 +1725,11 @@ def test_event_count_contradicted_later_is_rejected() -> None:
     """맞는 짝을 먼저 적고 뒤에서 뒤집는 문장도 통과시키지 않는다."""
     payload = counted_history_payload(documents=2, changes=1)
 
-    head = "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 1건입니다. "
+    head = (
+        "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 1건입니다."
+        + HISTORY_CHANGE_CLAUSE
+        + " "
+    )
 
     assert verdict(payload, head.strip()) is None
 
@@ -1722,7 +1748,11 @@ def test_event_count_without_its_kind_is_rejected() -> None:
     payload = counted_history_payload(documents=2, changes=1)
 
     assert (
-        verdict(payload, "관련 이력 2건을 확인했습니다. 확인된 변경 항목은 1건입니다.")
+        verdict(
+            payload,
+            "관련 이력 2건을 확인했습니다. 확인된 변경 항목은 1건입니다."
+            + HISTORY_CHANGE_CLAUSE,
+        )
         == "unverifiable_count"
     )
 
@@ -1736,9 +1766,18 @@ def test_change_count_may_be_omitted() -> None:
     """
     payload = counted_history_payload(documents=2, changes=1)
 
-    assert verdict(payload, "관련 공시 2건으로 이어지는 이력을 확인했습니다.") is None
+    assert (
+        verdict(
+            payload,
+            "관련 공시 2건으로 이어지는 이력을 확인했습니다." + HISTORY_CHANGE_CLAUSE,
+        )
+        is None
+    )
 
-    assert verdict(payload, "확인된 변경 항목은 1건입니다.") == "value_dropped"
+    assert (
+        verdict(payload, "확인된 변경 항목은 1건입니다." + HISTORY_CHANGE_CLAUSE)
+        == "value_dropped"
+    )
 
     # 공시 1건짜리 이력의 결정론 문장은 변경 건수를 적지 않는다.
     single = counted_history_result(documents=1, changes=0)
@@ -1763,7 +1802,8 @@ def test_equal_event_counts_bind_to_both_kinds() -> None:
     assert (
         verdict(
             payload,
-            "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 2건입니다.",
+            "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 2건입니다."
+            + HISTORY_CHANGE_CLAUSE,
         )
         is None
     )
@@ -1781,7 +1821,8 @@ def test_event_count_rendering_carries_its_unit() -> None:
     assert (
         verdict(
             payload,
-            "관련 공시 12건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 2건입니다.",
+            "관련 공시 12건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 2건입니다."
+            + HISTORY_CHANGE_CLAUSE,
         )
         is None
     )
@@ -1789,7 +1830,8 @@ def test_event_count_rendering_carries_its_unit() -> None:
     assert (
         verdict(
             payload,
-            "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 12건입니다.",
+            "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 12건입니다."
+            + HISTORY_CHANGE_CLAUSE,
         )
         == "count_contradiction"
     )
@@ -1817,10 +1859,720 @@ def test_incomplete_chain_counts_are_bound_too() -> None:
     assert (
         verdict(
             payload,
-            "관련 공시 2건까지 확인했습니다. 확인된 변경 항목은 3건입니다.",
+            "관련 공시 2건까지 확인했습니다. 확인된 변경 항목은 3건입니다."
+            + HISTORY_CHANGE_CLAUSE,
         )
         == "count_contradiction"
     )
+
+
+# --------------------------------------------------------------------------
+# 정정 이력의 변경 내용
+#
+# 건수만 보내면 모델이 답할 수 있는 것도 건수뿐이다. "무엇이 어떻게 바뀌었는가"를 물은
+# 질문에 "변경 항목은 6건입니다"로 답하는 문장은 형식이 정상이고 근거도 맞지만 질문에
+# 답하지 않는다.
+# --------------------------------------------------------------------------
+
+
+def q15_change_result() -> AgentExecutionResult:
+    """같은 필드가 두 번 바뀐 이력. 가운데 값은 앞 변경의 '후'이자 뒤 변경의 '전'이다."""
+    history = EventHistory(
+        event_id="evt_facility",
+        document_ids=["doc_original", "doc_fix_1", "doc_fix_2"],
+        changes=[
+            FieldChange(field_name="investment_amount", before="27,850", after="28,178"),
+            FieldChange(field_name="investment_amount", before="28,178", after="28,533"),
+        ],
+        chain_complete=True,
+    )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        event_histories=[history],
+        evidence=[evidence()],
+    )
+
+
+def change_payload() -> GroundedPayload:
+    return build_grounded_payload(q15_change_result(), question=HISTORY_QUESTION)
+
+
+CHAINED_CHANGE_ANSWER = (
+    "관련 공시 3건으로 이어지는 이력을 확인했습니다. "
+    "투자금액 변경 전 27,850, 변경 후 28,178. "
+    "투자금액 변경 전 28,178, 변경 후 28,533."
+)
+
+
+def test_chained_change_answer_stating_every_value_passes() -> None:
+    """가운데 값이 두 자리 모두인 문장도 통과한다. 자리는 이력 전체에서 모아 본다."""
+    assert verdict(change_payload(), CHAINED_CHANGE_ANSWER) is None
+
+
+def test_dropped_change_value_is_rejected() -> None:
+    """변경 값을 빠뜨리면 적힌 것이 변경의 전부로 읽힌다."""
+    answer = "관련 공시 3건으로 이어지는 이력을 확인했습니다. 투자금액 변경 전 27,850."
+
+    assert verdict(change_payload(), answer) == "value_dropped"
+
+
+def test_change_value_under_the_wrong_side_is_rejected() -> None:
+    """변경 전과 변경 후를 맞바꾼 문장. 쓰인 수치는 모두 근거 안에 있고 빠진 값도 없다."""
+    answer = (
+        "관련 공시 3건으로 이어지는 이력을 확인했습니다. "
+        "투자금액 변경 전 28,533, 변경 후 27,850. "
+        "투자금액 변경 전 28,178, 변경 후 28,178."
+    )
+
+    assert verdict(change_payload(), answer) == "change_side_contradiction"
+
+
+def test_change_value_without_the_side_markers_is_not_judged() -> None:
+    """자리를 말하지 않은 문장은 틀렸다고 하지 않는다. 값이 빠지면 완결성이 따로 막는다."""
+    answer = (
+        "관련 공시 3건으로 이어지는 이력을 확인했습니다. "
+        "투자금액이 27,850에서 28,178로, 다시 28,533으로 바뀌었습니다."
+    )
+
+    assert verdict(change_payload(), answer) is None
+
+
+def test_blank_change_value_does_not_become_a_binding_token() -> None:
+    """원문이 값을 지운 자리에 적는 '-'는 날짜 안의 하이픈과 구별되지 않는다.
+
+    그 한 글자를 값으로 다루면 "2029-02-28"의 하이픈이 전부 그 값의 자리가 되고, 검증은
+    확인한 적 없는 짝을 확인했다고 말한다.
+    """
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        event_histories=[
+            EventHistory(
+                event_id="evt_contract",
+                document_ids=["doc_a", "doc_b"],
+                changes=[
+                    FieldChange(
+                        field_name="contract_end_date",
+                        before="2029-02-28",
+                        after="2029-09-30",
+                    ),
+                    FieldChange(field_name="contract_amount", before="66,200", after="-"),
+                ],
+                chain_complete=True,
+            )
+        ],
+        evidence=[evidence()],
+    )
+
+    payload = build_grounded_payload(result, question=HISTORY_QUESTION)
+
+    answer = (
+        "관련 공시 2건으로 이어지는 이력을 확인했습니다. "
+        "계약기간 종료일 변경 전 2029-02-28, 변경 후 2029-09-30. "
+        "계약금액 변경 전 66,200, 변경 후 -."
+    )
+
+    assert verdict(payload, answer) is None
+
+
+# --------------------------------------------------------------------------
+# 변경 항목과 값의 짝
+#
+# 자리 검사(변경 전/변경 후)는 값이 설 수 있는 자리를 이력 전체에서 모아 본다. 항목이
+# 하나뿐인 이력에서는 그것으로 충분하지만, 둘 이상이면 한 항목의 값을 다른 항목의 자리에
+# 옮겨 적어도 통과한다. 네 값이 모두 근거 안에 있고 각자 원래 서 있던 자리에 그대로 적혀
+# 있으므로, 값만 모아 보는 검사에는 어긋난 데가 없다.
+#
+# 어긋난 것은 값과 항목의 짝이다. 그 문장은 계약 금액이 날짜라고 말한다.
+# --------------------------------------------------------------------------
+
+
+BOUND_HEAD = (
+    "관련 공시 2건으로 이어지는 이력을 확인했습니다. 확인된 변경 항목은 2건입니다. "
+)
+
+
+def two_field_history_result(*changes: FieldChange) -> AgentExecutionResult:
+    """항목 2건이 바뀐 이력 하나."""
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        event_histories=[
+            EventHistory(
+                event_id="evt_contract",
+                document_ids=["doc_a", "doc_b"],
+                changes=list(changes),
+                chain_complete=True,
+            )
+        ],
+        evidence=[evidence()],
+    )
+
+
+def amount_and_date_payload() -> GroundedPayload:
+    """금액과 날짜가 각각 한 번씩 바뀐 이력. 두 항목의 값은 서로 종류가 다르다."""
+    return build_grounded_payload(
+        two_field_history_result(
+            FieldChange(field_name="contract_amount", before="100", after="120"),
+            FieldChange(
+                field_name="contract_end_date",
+                before="2029-02-28",
+                after="2029-09-30",
+            ),
+        ),
+        question=HISTORY_QUESTION,
+    )
+
+
+def test_multi_field_changes_under_their_own_names_pass() -> None:
+    """항목마다 자기 값을 적은 문장은 통과한다."""
+    answer = (
+        BOUND_HEAD
+        + "계약금액 변경 전 100, 변경 후 120. "
+        + "계약기간 종료일 변경 전 2029-02-28, 변경 후 2029-09-30."
+    )
+
+    assert verdict(amount_and_date_payload(), answer) is None
+
+
+def test_deterministic_multi_field_sentence_passes() -> None:
+    """결정론 문장은 항목을 슬래시로 이어 한 문장에 적는다. 그 모양이 걸리면 안 된다."""
+    result = two_field_history_result(
+        FieldChange(field_name="contract_amount", before="100", after="120"),
+        FieldChange(
+            field_name="contract_end_date", before="2029-02-28", after="2029-09-30"
+        ),
+    )
+
+    payload = build_grounded_payload(result, question=HISTORY_QUESTION)
+
+    sentence = build_answer_response(result).answer
+
+    # 항목 사이가 마침표가 아니라는 것을 대조로 고정한다. 구절에서 끊어 이름을 찾으면 뒤쪽
+    # 자리가 이름을 잃는다.
+    assert " / " in sentence
+
+    assert verdict(payload, sentence) is None
+
+
+def test_two_fields_exchanging_their_values_are_rejected() -> None:
+    """두 항목이 값을 통째로 맞바꾼 문장.
+
+    쓰인 값은 넷 다 근거 안에 있고, 각자 원래 서 있던 자리에 적혀 있으며, 빠진 값도 없다.
+    자리만 모아 보는 검사는 이것을 통과시킨다.
+    """
+    answer = (
+        BOUND_HEAD
+        + "계약금액 변경 전 2029-02-28, 변경 후 2029-09-30. "
+        + "계약기간 종료일 변경 전 100, 변경 후 120."
+    )
+
+    assert verdict(amount_and_date_payload(), answer) == "change_field_contradiction"
+
+
+def test_grounded_date_written_under_the_wrong_field_is_rejected() -> None:
+    """한 자리만 다른 항목의 값으로 바꿔 적어도 걸린다. 값 자체는 근거 안에 있다."""
+    answer = (
+        BOUND_HEAD
+        + "계약금액 변경 전 2029-02-28, 변경 후 120. "
+        + "계약기간 종료일 변경 전 100, 변경 후 2029-09-30."
+    )
+
+    assert verdict(amount_and_date_payload(), answer) == "change_field_contradiction"
+
+
+def test_wrong_field_binding_on_the_after_side_alone_is_rejected() -> None:
+    """'변경 후'는 결정론 문장에서 쉼표 뒤에 온다. 그 자리도 이름에 걸려 있어야 한다."""
+    answer = (
+        BOUND_HEAD
+        + "계약금액 변경 전 100, 변경 후 2029-09-30. "
+        + "계약기간 종료일 변경 전 2029-02-28, 변경 후 120."
+    )
+
+    assert verdict(amount_and_date_payload(), answer) == "change_field_contradiction"
+
+
+def test_swapped_sides_across_two_fields_are_rejected() -> None:
+    """항목은 맞고 자리만 뒤집은 문장.
+
+    거절 이유는 항목이 아니라 자리다. 어느 항목에서도 '변경 후'였던 적이 없는 값이 그 자리에
+    있으므로, 항목을 따지기 전에 이미 틀렸다.
+    """
+    answer = (
+        BOUND_HEAD
+        + "계약금액 변경 전 120, 변경 후 100. "
+        + "계약기간 종료일 변경 전 2029-09-30, 변경 후 2029-02-28."
+    )
+
+    assert verdict(amount_and_date_payload(), answer) == "change_side_contradiction"
+
+
+def chained_date_payload() -> GroundedPayload:
+    """한 항목의 '변경 후'가 다른 항목의 '변경 전'인 이력.
+
+    2024-06-30은 시작일의 변경 후이자 종료일의 변경 전이다. 그래서 자리만 모아 보면 이 값은
+    두 자리 모두에 설 수 있고, 두 항목이 값을 맞바꾼 문장이 그 검사를 그대로 지나간다.
+    """
+    return build_grounded_payload(
+        two_field_history_result(
+            FieldChange(
+                field_name="contract_start_date",
+                before="2024-01-01",
+                after="2024-06-30",
+            ),
+            FieldChange(
+                field_name="contract_end_date",
+                before="2024-06-30",
+                after="2029-09-30",
+            ),
+        ),
+        question=HISTORY_QUESTION,
+    )
+
+
+def test_chained_dates_under_their_own_fields_pass() -> None:
+    """가운데 값이 두 항목에 걸쳐 두 자리 모두인 이력도 맞게 적으면 통과한다."""
+    answer = (
+        BOUND_HEAD
+        + "계약기간 시작일 변경 전 2024-01-01, 변경 후 2024-06-30. "
+        + "계약기간 종료일 변경 전 2024-06-30, 변경 후 2029-09-30."
+    )
+
+    assert verdict(chained_date_payload(), answer) is None
+
+
+def test_chained_dates_exchanged_between_fields_are_rejected() -> None:
+    """자리 검사만으로는 잡을 수 없는 문장. 네 자리가 모두 모아 본 집합 안에 있다."""
+    answer = (
+        BOUND_HEAD
+        + "계약기간 시작일 변경 전 2024-06-30, 변경 후 2029-09-30. "
+        + "계약기간 종료일 변경 전 2024-01-01, 변경 후 2024-06-30."
+    )
+
+    assert verdict(chained_date_payload(), answer) == "change_field_contradiction"
+
+
+def test_repeated_value_across_corrections_for_one_field_passes() -> None:
+    """같은 항목이 두 번 바뀐 이력. 항목 안에서는 가운데 값이 두 자리 모두다."""
+    assert verdict(change_payload(), CHAINED_CHANGE_ANSWER) is None
+
+
+def shadowed_label_payload() -> GroundedPayload:
+    """이름이 다른 이름의 앞머리인 이력. '계약기간'은 '계약기간 종료일' 안에 있다."""
+    return build_grounded_payload(
+        two_field_history_result(
+            FieldChange(field_name="contract_period", before="36개월", after="48개월"),
+            FieldChange(
+                field_name="contract_end_date",
+                before="2029-02-28",
+                after="2029-09-30",
+            ),
+        ),
+        question=HISTORY_QUESTION,
+    )
+
+
+def test_shorter_field_name_inside_a_longer_one_does_not_capture_the_slot() -> None:
+    """긴 이름을 적은 자리를 짧은 이름이 불린 자리로 세면 맞게 적은 문장이 걸린다."""
+    answer = (
+        BOUND_HEAD
+        + "계약기간 변경 전 36개월, 변경 후 48개월. "
+        + "계약기간 종료일 변경 전 2029-02-28, 변경 후 2029-09-30."
+    )
+
+    assert verdict(shadowed_label_payload(), answer) is None
+
+
+def test_shadowed_field_names_still_reject_an_exchanged_value() -> None:
+    """이름이 겹쳐도 짝은 그대로 본다."""
+    answer = (
+        BOUND_HEAD
+        + "계약기간 변경 전 2029-02-28, 변경 후 2029-09-30. "
+        + "계약기간 종료일 변경 전 36개월, 변경 후 48개월."
+    )
+
+    assert verdict(shadowed_label_payload(), answer) == "change_field_contradiction"
+
+
+def test_change_side_without_a_field_name_is_not_bound() -> None:
+    """이름을 대지 않은 자리는 어느 항목의 자리인지 문장이 말하지 않은 것이다.
+
+    말하지 않은 것을 틀렸다고 하지 않는다. 그 자리도 값-자리 검사는 계속 본다.
+    """
+    answer = (
+        BOUND_HEAD
+        + "변경 전 100, 변경 후 120. "
+        + "계약기간 종료일 변경 전 2029-02-28, 변경 후 2029-09-30."
+    )
+
+    assert verdict(amount_and_date_payload(), answer) is None
+
+
+def test_prefix_change_values_stay_bound_to_their_field() -> None:
+    """실측 Q13의 모양. 짧은 값이 긴 값의 앞머리다('상품공급'과 '상품공급 415')."""
+    result = two_field_history_result(
+        FieldChange(
+            field_name="contract_detail", before="상품공급", after="상품공급 415"
+        ),
+        FieldChange(field_name="contract_amount", before="100", after="120"),
+    )
+
+    payload = build_grounded_payload(result, question=HISTORY_QUESTION)
+
+    assert verdict(payload, build_answer_response(result).answer) is None
+
+
+def test_unknown_change_field_is_not_grounded() -> None:
+    """표기가 정해지지 않은 변경 항목은 지어내지 않고 결정론 경로에 맡긴다."""
+    result = q15_change_result()
+
+    result.event_histories[0].changes[0].field_name = "unmapped_field"
+
+    with pytest.raises(PayloadNotGroundableError, match="정정 변경 항목"):
+        build_grounded_payload(result, question=HISTORY_QUESTION)
+
+
+# --------------------------------------------------------------------------
+# 날짜 동등성
+#
+# payload는 날짜를 ISO로 적고 모델은 한국어 문장에 "2029년 2월 28일"로 옮겨 적는다. 같은
+# 날을 말하는 문장인데 낱개 수(2, 28)가 근거 밖으로 잡혀 거절됐다. 실측 Q13이 세 번의
+# 호출에서 모두 그 자리에서 걸렸다.
+#
+# 되돌리는 조건은 달력 값이 정확히 같은지 하나다. 다른 날·부분 날짜·근사 표현은 그대로
+# 낱개 수로 검사된다.
+# --------------------------------------------------------------------------
+
+
+DATE_BEFORE = "2029-02-28"
+
+DATE_AFTER = "2029-09-30"
+
+
+def dated_history_result() -> AgentExecutionResult:
+    """날짜가 바뀐 이력 1건. 공시 3건이라 2와 28은 payload 어디에도 없다."""
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        event_histories=[
+            EventHistory(
+                event_id="evt_contract",
+                document_ids=["doc_a", "doc_b", "doc_c"],
+                changes=[
+                    FieldChange(
+                        field_name="contract_end_date",
+                        before=DATE_BEFORE,
+                        after=DATE_AFTER,
+                    )
+                ],
+                chain_complete=True,
+            )
+        ],
+        evidence=[evidence()],
+    )
+
+
+def dated_payload() -> GroundedPayload:
+    return build_grounded_payload(dated_history_result(), question=HISTORY_QUESTION)
+
+
+DATED_HEAD = "관련 공시 3건으로 이어지는 이력을 확인했습니다. 계약기간 종료일 "
+
+
+def test_grounded_iso_date_is_not_counted_as_loose_numbers() -> None:
+    """payload가 말한 것은 하루이지 연·월·일의 낱개 수가 아니다.
+
+    화이트리스트에 세 조각을 담지 않으므로, 그 날짜와 아무 관계 없는 자리의 28은 근거 밖이다.
+    """
+    allowed = _allowed_numbers(dated_payload())
+
+    assert "3" in allowed
+    assert "1" in allowed
+    assert not {"2029", "02", "2", "28", "09", "30"} & allowed
+
+
+def test_korean_full_date_matching_a_grounded_date_passes() -> None:
+    """같은 하루를 한국어로 옮겨 적은 문장은 통과한다."""
+    answer = DATED_HEAD + "변경 전 2029년 2월 28일, 변경 후 2029년 9월 30일."
+
+    assert verdict(dated_payload(), answer) is None
+
+
+def test_iso_form_still_passes() -> None:
+    """되돌리기 규칙이 생겨도 ISO 그대로 적은 문장은 지금까지와 같다."""
+    answer = DATED_HEAD + f"변경 전 {DATE_BEFORE}, 변경 후 {DATE_AFTER}."
+
+    assert verdict(dated_payload(), answer) is None
+
+
+def test_mixed_iso_and_korean_dates_pass_together() -> None:
+    """두 표기를 섞어 적어도 각 자리가 같은 하루면 통과한다."""
+    answer = DATED_HEAD + f"변경 전 {DATE_BEFORE}, 변경 후 2029년 9월 30일."
+
+    assert verdict(dated_payload(), answer) is None
+
+
+def test_korean_date_satisfies_the_change_value_completeness() -> None:
+    """같은 날을 한국어로 적었으면 그 값이 빠진 것이 아니다."""
+    answer = DATED_HEAD + "변경 전 2029년 2월 28일, 변경 후 2029년 9월 30일."
+
+    payload = dated_payload()
+
+    # 되돌리기가 없으면 완결성 규칙이 먼저 걸린다는 것을 대조로 고정한다.
+    assert DATE_BEFORE not in answer
+
+    assert verdict(payload, answer) is None
+
+
+def test_korean_date_under_the_wrong_side_is_still_rejected() -> None:
+    """되돌린 뒤에도 자리 검사는 그대로 작동한다. 표기가 바뀌었을 뿐 사실은 같다."""
+    answer = DATED_HEAD + "변경 전 2029년 9월 30일, 변경 후 2029년 2월 28일."
+
+    assert verdict(dated_payload(), answer) == "change_side_contradiction"
+
+
+@pytest.mark.parametrize(
+    ("rewritten", "code"),
+    [
+        # 다른 날. 달력 값이 다르므로 되돌리지 않고 낱개 수로 검사한다.
+        ("변경 전 2029년 3월 1일, 변경 후 2029년 9월 30일.", "ungrounded_number"),
+        # 부분 날짜. 어느 하루를 말하는지 정하지 않는다.
+        ("변경 전 2029년 2월, 변경 후 2029년 9월 30일.", "ungrounded_number"),
+        # 근사 표현.
+        ("변경 전 2029년 말, 변경 후 2029년 9월 30일.", "ungrounded_number"),
+        # 달력에 없는 날.
+        ("변경 전 2029년 2월 31일, 변경 후 2029년 9월 30일.", "ungrounded_number"),
+        # 연도만 다시 쓴 표기.
+        ("변경 전 2029년, 변경 후 2029년 9월 30일.", "ungrounded_number"),
+    ],
+)
+def test_dates_that_are_not_the_same_day_are_rejected(rewritten: str, code: str) -> None:
+    assert verdict(dated_payload(), DATED_HEAD + rewritten) == code
+
+
+@pytest.mark.parametrize("loose", ["2", "28", "2029", "9"])
+def test_date_components_are_not_reusable_as_standalone_numbers(loose: str) -> None:
+    """되돌린 자리 밖에서 그 조각을 다시 쓰면 근거 밖이다."""
+    answer = (
+        DATED_HEAD
+        + "변경 전 2029년 2월 28일, 변경 후 2029년 9월 30일. "
+        + f"관련 문서는 {loose}쪽입니다."
+    )
+
+    assert verdict(dated_payload(), answer) == "ungrounded_number"
+
+
+def test_ungrounded_iso_date_is_still_checked_as_numbers() -> None:
+    """payload가 말하지 않은 ISO 날짜는 자리에서 빠지지 않는다."""
+    answer = DATED_HEAD + "변경 전 2030-01-01, 변경 후 2029년 9월 30일."
+
+    assert verdict(dated_payload(), answer) == "ungrounded_number"
+
+
+def test_correction_dates_are_grounded_dates_too() -> None:
+    """정정 시점도 payload가 말한 날짜다. 같은 하루를 한국어로 적어도 통과한다."""
+    payload = correction_count_payload()
+
+    answer = (
+        "관련 공시 4건으로 이어지는 이력을 확인했으며 이후 3회 정정되었습니다. "
+        "2025년 1월 1일, 2025년 2월 1일, 2025년 3월 1일에 정정되었습니다."
+        + CORRECTION_CHANGE_CLAUSE
+    )
+
+    assert verdict(payload, answer) is None
+
+
+# --------------------------------------------------------------------------
+# 정정 횟수
+#
+# 세 번째 셈이다. 공시 건수도 변경 항목 건수도 아니며, 그 값이 payload에 없던 동안 모델은
+# 갖고 있는 수로 "4번 바뀌었습니다"를 썼다.
+# --------------------------------------------------------------------------
+
+
+def correction_count_payload() -> GroundedPayload:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        event_histories=[
+            EventHistory(
+                event_id="evt_facility",
+                document_ids=["doc_original", "doc_fix_1", "doc_fix_2", "doc_fix_3"],
+                changes=[
+                    FieldChange(
+                        field_name="investment_amount", before="27,850", after="28,178"
+                    )
+                ],
+                chain_complete=True,
+            )
+        ],
+        event_links=[
+            EventLink(
+                link_id=f"link_fix_{index}",
+                source_doc_id=f"doc_fix_{index}",
+                relation=EventLinkRelation.CORRECTION_OF,
+                raw_reference=RawReference(correction_filing_date=f"2025-0{index}-01"),
+                resolved_doc_id="doc_original",
+                resolution_status=EventLinkResolutionStatus.RESOLVED,
+            )
+            for index in (1, 2, 3)
+        ],
+        evidence=[evidence()],
+        operations=[OPERATION_CHANGE_COUNT],
+    )
+
+    return build_grounded_payload(result, question="그동안 계획이 몇 번 바뀌었어?")
+
+
+CORRECTION_CHANGE_CLAUSE = " 투자금액 변경 전 27,850, 변경 후 28,178."
+
+
+def test_correction_count_must_be_stated() -> None:
+    """질문이 물은 셈이 빠지면 그 질문에 답하지 않은 것이다."""
+    answer = "관련 공시 4건으로 이어지는 이력을 확인했습니다." + CORRECTION_CHANGE_CLAUSE
+
+    assert verdict(correction_count_payload(), answer) == "value_dropped"
+
+
+def test_correction_count_stated_with_its_own_unit_passes() -> None:
+    answer = (
+        "관련 공시 4건으로 이어지는 이력을 확인했으며 이후 3회 정정되었습니다."
+        + CORRECTION_CHANGE_CLAUSE
+    )
+
+    assert verdict(correction_count_payload(), answer) is None
+
+
+def test_correction_count_is_not_judged_by_the_count_binding() -> None:
+    """짝 검사는 이 셈을 판정하지 못한다. 한국어에서 그 이름이 값 뒤에 오기 때문이다.
+
+    "이후 3회 정정되었습니다"는 제 이름 옆에 제대로 적은 문장이지만, 값 앞만 보는 규칙에는
+    이름이 잡히지 않는다. 앞의 두 셈은 이름이 먼저 오므로 그 규칙으로 확인된다.
+
+    이 셈을 지키는 것은 다른 규칙들이다. 빠뜨리면 완결성 규칙이, 근거 밖의 수를 쓰면 수치
+    검증이 막는다.
+    """
+    payload = correction_count_payload()
+
+    flowing = (
+        "관련 공시 4건으로 이어지는 이력을 확인했으며 이후 3회 정정되었습니다."
+        + CORRECTION_CHANGE_CLAUSE
+    )
+
+    assert verdict(payload, flowing) is None
+
+    ungrounded = (
+        "관련 공시 4건으로 이어지는 이력을 확인했으며 이후 5회 정정되었습니다."
+        + CORRECTION_CHANGE_CLAUSE
+    )
+
+    assert verdict(payload, ungrounded) == "ungrounded_number"
+
+
+# --------------------------------------------------------------------------
+# 변화량의 방향
+#
+# 부호를 뗀 표기를 허용하면서 함께 들어온 규칙이다. "-2.1017%p"는 부호가 방향을 말하지만
+# "2.1017%p"는 말하지 않는다.
+# --------------------------------------------------------------------------
+
+
+MARGIN_HEAD = "한미반도체의 연결 기준 영업이익률은 2024년 10.0000%, 2025년 9.0000%이며, "
+
+
+def derived_delta_payload() -> GroundedPayload:
+    return build_grounded_payload(derived_delta_result(), question=Q08_QUESTION)
+
+
+def test_negative_delta_may_be_written_without_its_sign() -> None:
+    """부호를 두 번 말하는 문장("-1.0000%p 감소했습니다")을 강요하지 않는다."""
+    answer = MARGIN_HEAD + "두 연도 사이에 1.0000%p 감소했습니다."
+
+    assert verdict(derived_delta_payload(), answer) is None
+
+
+def test_unsigned_delta_without_a_direction_is_rejected() -> None:
+    """크기만 적은 문장에는 방향이 어디에도 없다."""
+    answer = MARGIN_HEAD + "두 연도의 차이는 1.0000%p입니다."
+
+    assert verdict(derived_delta_payload(), answer) == "direction_dropped"
+
+
+def test_reversed_direction_is_rejected() -> None:
+    """값은 맞는데 방향만 뒤집힌 문장은 수치 검증을 그대로 통과한다."""
+    answer = MARGIN_HEAD + "두 연도 사이에 1.0000%p 증가했습니다."
+
+    assert verdict(derived_delta_payload(), answer) == "direction_contradiction"
+
+
+def test_signed_delta_keeps_working_without_a_direction_word() -> None:
+    """부호를 적은 문장에는 방향을 따로 요구하지 않는다. 결정론 문장이 그렇게 적는다."""
+    result = derived_delta_result()
+
+    payload = build_grounded_payload(result, question=Q08_QUESTION)
+
+    assert verdict(payload, build_answer_response(result).answer) is None
+
+
+# --------------------------------------------------------------------------
+# 문서 요약(Pattern B)
+# --------------------------------------------------------------------------
+
+
+def summary_payload() -> GroundedPayload:
+    result = AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        document_summaries=[
+            DocumentSummary(
+                summary_id="sum_1",
+                doc_id="doc_a",
+                company="한미반도체",
+                report_name="사업보고서",
+                section_scope=SectionScope.BUSINESS_OVERVIEW,
+                section_path=["II. 사업의 내용", "1. 사업의 개요"],
+                items=[
+                    SummaryItem(
+                        item_id="item_1",
+                        item_type=SummaryItemType.PARAGRAPH,
+                        label="한미반도체는 1980년 설립후 반도체 제조용 장비를 개발 및 출시해…",
+                        evidence_ids=["ev_revenue"],
+                    )
+                ],
+            )
+        ],
+        evidence=[evidence()],
+    )
+
+    return build_grounded_payload(result, question="한미반도체는 무슨 사업을 해?")
+
+
+def test_summary_answer_using_the_item_content_passes() -> None:
+    """항목에 적힌 말로 답하면 통과한다. 그 내용이 곧 이 질문의 답이다."""
+    answer = "한미반도체는 1980년 설립후 반도체 제조용 장비를 개발 및 출시해 왔습니다."
+
+    assert verdict(summary_payload(), answer) is None
+
+
+def test_summary_answer_inventing_a_number_is_rejected() -> None:
+    """요약 항목에 없는 수치를 지어내면 걸린다. 잘린 표기를 늘려 적는 것도 새 수치다."""
+    answer = "한미반도체는 1990년 설립된 반도체 제조용 장비 회사입니다."
+
+    assert verdict(summary_payload(), answer) == "ungrounded_number"
+
+
+def test_summary_answer_dropping_the_company_is_rejected() -> None:
+    answer = "반도체 제조용 장비를 개발 및 출시하는 사업을 합니다."
+
+    assert verdict(summary_payload(), answer) == "entity_dropped"
+
+
+def test_summary_item_identifiers_never_reach_the_answer() -> None:
+    answer = "한미반도체는 item_1에 적힌 반도체 제조용 장비 사업을 합니다."
+
+    assert verdict(summary_payload(), answer) == "identifier_leak"
 
 
 # --------------------------------------------------------------------------
@@ -1867,9 +2619,32 @@ def test_internal_english_vocabulary_is_rejected() -> None:
     rejected(f"한미반도체의 2025년 연결 기준 revenue는 {VALUE}입니다.")
 
 
-def test_advisory_wording_is_rejected() -> None:
+@pytest.mark.parametrize(
+    "opinion",
+    [
+        "지금 매수 추천합니다.",
+        "지금 투자하세요.",
+        "투자할 만한 종목입니다.",
+        "매도가 유망합니다.",
+    ],
+)
+def test_advisory_wording_is_rejected(opinion: str) -> None:
     """사실 조회로 통과한 질문의 답변에 투자 의견이 덧붙지 않는지 보는 두 번째 자리다."""
-    rejected(f"한미반도체의 2025년 연결 기준 매출액은 {VALUE}입니다. 지금 매수 추천합니다.")
+    rejected(f"한미반도체의 2025년 연결 기준 매출액은 {VALUE}입니다. {opinion}")
+
+
+def test_disclosed_investment_activity_is_not_advisory_wording() -> None:
+    """공시가 서술하는 투자 행위는 의견이 아니다.
+
+    신규시설투자 공시와 사업보고서의 투자현황 Section이 "…을 투자하였습니다"로 적혀 있고,
+    그 문장을 옮긴 답변은 사실 진술이다. 어간 '투자하'를 통째로 막던 동안 Q04의 정상 답변이
+    이 규칙 하나 때문에 거절됐다.
+    """
+    payload = summary_payload()
+
+    answer = "한미반도체는 제2바이오캠퍼스 부지에 5공장을 건설하는 데 투자하였습니다."
+
+    assert verdict(payload, answer) != "advisory_wording"
 
 
 def test_overlong_answer_is_rejected() -> None:
@@ -1894,7 +2669,7 @@ def test_answer_keeping_the_limitation_passes() -> None:
 
     assert payload.limitation is not None
 
-    answer = f"관련 공시는 2건입니다. {payload.limitation}"
+    answer = f"관련 공시는 2건입니다.{HISTORY_CHANGE_CLAUSE} {payload.limitation}"
 
     client = ScriptedClient(model_reply(answer, used_fact_ids=[], used_evidence_ids=[]))
 
@@ -2199,7 +2974,10 @@ def test_claiming_a_complete_chain_when_it_is_not_is_rejected() -> None:
 
     assert payload.limitation is not None
 
-    answer = f"관련 공시 2건으로 전체 이력이 완결되었습니다. {payload.limitation}"
+    answer = (
+        f"관련 공시 2건으로 전체 이력이 완결되었습니다.{HISTORY_CHANGE_CLAUSE} "
+        f"{payload.limitation}"
+    )
 
     assert history_code(answer, payload) == "chain_contradiction"
 
@@ -2207,7 +2985,10 @@ def test_claiming_a_complete_chain_when_it_is_not_is_rejected() -> None:
 def test_claiming_an_incomplete_chain_when_it_is_complete_is_rejected() -> None:
     payload = counted_history_payload(chain_complete=True)
 
-    answer = "관련 공시 2건을 확인했으나 이력이 불완전합니다. 확인된 변경 항목은 1건입니다."
+    answer = (
+        "관련 공시 2건을 확인했으나 이력이 불완전합니다. 확인된 변경 항목은 1건입니다."
+        + HISTORY_CHANGE_CLAUSE
+    )
 
     assert history_code(answer, payload) == "chain_contradiction"
 
@@ -2216,7 +2997,10 @@ def test_non_contradictory_history_wording_passes() -> None:
     """모든 항목을 적으라고 요구하지 않는다. 정면으로 어긋나는 진술만 막는다."""
     payload = counted_history_payload(documents=2, changes=1, chain_complete=True)
 
-    answer = "관련 공시 2건으로 이어지는 이력을 확인했으며, 확인된 변경 항목은 1건입니다."
+    answer = (
+        "관련 공시 2건으로 이어지는 이력을 확인했으며, 확인된 변경 항목은 1건입니다."
+        + HISTORY_CHANGE_CLAUSE
+    )
 
     client = ScriptedClient(model_reply(answer, used_fact_ids=[], used_evidence_ids=[]))
 

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from disclosure_agent.common.config import HyperClovaSettings
 from disclosure_agent.common.enums import (
     AnswerabilityReason,
     AnswerabilityStatus,
+    EventType,
     EvidenceLocationType,
     ExecutionStatus,
     FactAccountingScope,
@@ -34,8 +36,12 @@ from disclosure_agent.common.schemas import (
     AnswerResponse,
     AskRequest,
     DocumentSummary,
+    EventHistory,
     Evidence,
     Fact,
+    FieldChange,
+    ResolvedEventState,
+    ResolvedFieldValue,
     SummaryItem,
 )
 
@@ -104,12 +110,7 @@ def unanswerable_result() -> AgentExecutionResult:
 
 
 def summary_result() -> AgentExecutionResult:
-    """
-    결정론 경로는 답하고 payload 계층은 거부하는 결과(Pattern B).
-
-    두 경로의 지원 범위가 갈리는 유일한 자리라, groundable 하지 않은 결과의 fallback을
-    시험할 대조군이 된다.
-    """
+    """두 경로 모두 답하는 문서 요약 결과(Pattern B)."""
     summary = DocumentSummary(
         summary_id="sum_1",
         doc_id="doc_a",
@@ -131,6 +132,35 @@ def summary_result() -> AgentExecutionResult:
         execution_status=ExecutionStatus.COMPLETED,
         answerability_status=AnswerabilityStatus.ANSWERABLE,
         document_summaries=[summary],
+        evidence=[evidence()],
+    )
+
+
+def event_summary_result() -> AgentExecutionResult:
+    """
+    결정론 경로는 답하고 payload 계층은 거부하는 결과(Q06 이벤트 단건 요약).
+
+    답은 ResolvedEventState의 필드 값들이고 payload에는 그것을 담을 자리가 없다. 두 경로의
+    지원 범위가 갈리는 자리라, groundable 하지 않은 결과의 fallback을 시험할 대조군이 된다.
+    """
+    state = ResolvedEventState(
+        event_id="evt_facility",
+        event_type=EventType.FACILITY_INVESTMENT,
+        company="한미반도체",
+        as_of=date(2025, 4, 29),
+        fields={
+            "investment_target": ResolvedFieldValue(
+                value="파주 AIDC 신규 구축",
+                source_doc_id="doc_a",
+                evidence_ids=["ev_revenue"],
+            )
+        },
+    )
+
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        resolved_event_states=[state],
         evidence=[evidence()],
     )
 
@@ -247,8 +277,8 @@ def test_missing_verbalization_returns_the_deterministic_response(outcome: objec
 
 
 def test_not_groundable_result_never_reaches_the_model() -> None:
-    """Pattern B는 결정론 경로가 답한다. 요약을 뺀 나머지만 모델에 보내지 않는다."""
-    result = summary_result()
+    """이벤트 단건 요약은 결정론 경로가 답한다. 상태를 뺀 나머지만 모델에 보내지 않는다."""
+    result = event_summary_result()
 
     verbalizer = RecordingVerbalize(HCX_ANSWER)
 
@@ -256,7 +286,25 @@ def test_not_groundable_result_never_reaches_the_model() -> None:
 
     assert verbalizer.payloads == []
     assert response == deterministic(result)
-    assert "설비 투자" in response.answer
+    assert "파주 AIDC 신규 구축" in response.answer
+
+
+def test_document_summary_reaches_the_model_with_its_items() -> None:
+    """Pattern B는 이제 표현 단계까지 간다. 요약 항목이 payload에 그대로 실린다.
+
+    실리지 않던 동안 "무슨 사업을 하느냐"의 답은 범위 이름과 건수뿐이었다.
+    """
+    result = summary_result()
+
+    verbalizer = RecordingVerbalize(HCX_ANSWER)
+
+    ask(result, verbalizer)
+
+    [payload] = verbalizer.payloads
+
+    [summary] = payload.document_summaries
+
+    assert [item.content for item in summary.items] == ["설비 투자 개요"]
 
 
 # --------------------------------------------------------------------------
@@ -276,6 +324,87 @@ def test_refusal_answer_is_not_sent_to_the_model() -> None:
     assert response.status is AnswerabilityStatus.UNANSWERABLE
     assert response.reason is AnswerabilityReason.NOT_FOUND
     assert response.answer == deterministic(result).answer
+
+
+# --------------------------------------------------------------------------
+# 새로 열린 모양의 fallback
+#
+# 문서 요약(Pattern B)과 정정 이력(Pattern E)은 이제 표현 단계까지 간다. 그 두 모양에서도
+# 연동이 답을 주지 못했을 때의 응답이 연동을 붙이기 전과 같아야 한다. 열어 놓은 경로가
+# 늘어난 만큼 실패했을 때 무너지는 자리도 늘기 때문이다.
+# --------------------------------------------------------------------------
+
+
+def history_result() -> AgentExecutionResult:
+    """정정 이력 결과. 변경 항목과 그 전후 값을 담는다."""
+    return AgentExecutionResult(
+        execution_status=ExecutionStatus.COMPLETED,
+        answerability_status=AnswerabilityStatus.ANSWERABLE,
+        event_histories=[
+            EventHistory(
+                event_id="evt_contract",
+                document_ids=["doc_a", "doc_b"],
+                changes=[
+                    FieldChange(
+                        field_name="contract_end_date",
+                        before="2029-02-28",
+                        after="2029-09-30",
+                    )
+                ],
+                chain_complete=True,
+            )
+        ],
+        evidence=[evidence()],
+    )
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        None,
+        RuntimeError("transport exploded"),
+        ValueError("malformed response body"),
+    ],
+    ids=["inactive_or_rejected", "transport_error", "malformed_response"],
+)
+@pytest.mark.parametrize(
+    "build",
+    [summary_result, history_result],
+    ids=["document_summary", "event_history"],
+)
+def test_newly_opened_shapes_fall_back_to_the_deterministic_answer(
+    build: object,
+    outcome: object,
+) -> None:
+    """실패의 종류가 무엇이든 응답은 결정론 경로의 것과 완전히 같다."""
+    result = build()  # type: ignore[operator]
+
+    response = ask(result, RecordingVerbalize(outcome))  # type: ignore[arg-type]
+
+    control = deterministic(result)
+
+    assert response == control
+    assert response.status is AnswerabilityStatus.ANSWERABLE
+
+    for carrier in STRUCTURED_CARRIERS:
+        assert getattr(response, carrier) == getattr(control, carrier), carrier
+
+
+@pytest.mark.parametrize(
+    "build",
+    [summary_result, history_result],
+    ids=["document_summary", "event_history"],
+)
+def test_newly_opened_shapes_replace_only_the_sentence(build: object) -> None:
+    """채택된 경우에도 바뀌는 것은 answer 하나뿐이다."""
+    result = build()  # type: ignore[operator]
+
+    control = deterministic(result)
+
+    response = ask(result, RecordingVerbalize(HCX_ANSWER))
+
+    assert response.answer == HCX_ANSWER
+    assert response.model_dump(exclude={"answer"}) == control.model_dump(exclude={"answer"})
 
 
 # --------------------------------------------------------------------------

@@ -159,6 +159,11 @@ def test_exact_q12_runs_through_actual_corpus_http_api() -> None:
         "evidence_exchange_20251205900454_investment_amount"
     ]
     assert evidence_by_id[rainbow.evidence_ids[0]].doc_id == "exchange_20251205900454"
-    assert "LG이노텍의 시설투자 합계는 758900000000원" in actual.answer
-    assert "레인보우로보틱스의 시설투자 합계는 28533520000원" in actual.answer
+    # 합계는 자릿수 구분을 붙여 적고, 합계를 이룬 개별 금액을 큰 것부터 함께 밝힌다.
+    # "다 합치면"이 묻는 것은 무엇을 합친 값인가까지다.
+    assert (
+        "LG이노텍의 시설투자 합계는 758,900,000,000원"
+        "(383,000,000,000원, 375,900,000,000원 합산)" in actual.answer
+    )
+    assert "레인보우로보틱스의 시설투자 합계는 28,533,520,000원" in actual.answer
     assert "LG이노텍 쪽이 더 큽니다" in actual.answer

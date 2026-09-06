@@ -279,7 +279,7 @@ def _is_dart_structural_markup_start(
     if cursor < len(fragment) and fragment[cursor] == "/":
         cursor += 1
 
-    tag_name_match = re.match(r"[A-Za-z][A-Za-z0-9-]*", fragment[cursor:])
+    tag_name_match = XML_ATTRIBUTE_NAME_PATTERN.match(fragment, cursor)
     if tag_name_match is None:
         return False
 

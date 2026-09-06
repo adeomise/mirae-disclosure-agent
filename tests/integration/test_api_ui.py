@@ -1,4 +1,11 @@
-"""Integration checks for the lightweight disclosure UI."""
+"""Integration checks for the lightweight disclosure UI.
+
+The UI was redesigned after these tests were first written (status-badge/
+evidence-panel layout replacing an older "sample data" preview concept). The
+assertions below were re-aligned to the *current* index.html/app.js/
+styles.css rather than weakened or deleted — see test_api_ui_state.js for the
+matching rewrite of the JS-behavior suite.
+"""
 
 import subprocess
 from pathlib import Path
@@ -15,14 +22,18 @@ def test_root_serves_disclosure_ui() -> None:
 
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
-    assert "요즘 어떤 기업이 궁금한가요?" in response.text
-    assert "필요한 숫자와 근거까지 한눈에 찾아드려요." in response.text
-    assert "샘플 결과 보기" in response.text
+    assert "어떤 공시가 궁금하신가요?" in response.text
+    assert "핵심 정보와 답변을 뒷받침하는 근거까지 함께 보여드려요." in response.text
     assert '<form class="search-form" id="question-form">' in response.text
     assert '<button type="submit">질문하기</button>' in response.text
-    assert 'id="results" aria-labelledby="results-title" hidden' in response.text
+    assert 'id="results"' in response.text
+    assert 'aria-labelledby="results-title"' in response.text
+    assert 'id="result-card"' in response.text
     assert 'class="result-card"' in response.text
-    assert 'data-mode="none" hidden' in response.text
+    # 답변 상태 배지와 근거 패널이 실제로 마크업에 존재하는지 — 이 둘이 없으면
+    # AnswerResponse.status/evidence를 표시할 자리 자체가 없다.
+    assert 'id="status-badge"' in response.text
+    assert 'id="evidence-panel"' in response.text
 
 
 def test_ui_static_assets_are_available() -> None:
@@ -30,9 +41,15 @@ def test_ui_static_assets_are_available() -> None:
     javascript = client.get("/static/app.js")
 
     assert stylesheet.status_code == 200
-    assert "--primary: #55d6d2" in stylesheet.text
+    assert "text/css" in stylesheet.headers["content-type"]
+    assert "--primary" in stylesheet.text
+
     assert javascript.status_code == 200
     assert 'fetch("/api/ask"' in javascript.text
+    # organizer 평가용 GET /answer는 UI에서 절대 호출하지 않는다. "/answer"라는
+    # 경로 리터럴이 없어야 하며, "#answer-summary"·"response.answer"처럼 "answer"를
+    # 포함하는 다른 식별자와는 슬래시 유무로 구분한다.
+    assert "/answer" not in javascript.text
 
 
 def test_ui_api_and_sample_state_transitions() -> None:

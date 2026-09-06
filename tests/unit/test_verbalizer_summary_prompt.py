@@ -3,7 +3,6 @@
 여기서 고정하는 것:
     - 요약 지시가 document_summaries 하나에만 걸린다. 다른 결과 모양의 지시문은 그대로다.
     - 요약 답변이 위치·건수 preamble이 아니라 질문의 답으로 시작하도록 지시한다.
-    - 지시문이 겨냥하는 문장 모양이 실제로 검증을 통과한다.
     - 근거 밖으로 나간 요약 문장은 여전히 거절된다.
     - 지원하지 않는 문서 전체 요약의 경계는 움직이지 않는다.
 
@@ -12,8 +11,12 @@
     결정론 경로와 stub 테스트는 그대로 통과하므로(연동 실패는 결정론 문장으로 돌아간다),
     문자열을 보지 않으면 이 변경이 사라진 것을 알아차릴 자리가 없다.
 
-    다만 문자열만 보지 않는다. 지시문이 겨냥하는 문장이 검증을 통과하는지도 함께 본다.
-    통과하지 못하는 모양을 지시하는 지시문은 지켜져도 사용자에게 닿지 않는다.
+검증은 그대로 엄격하다:
+    내용 근거 검증(_require_payload_only_content)은 모든 결과 모양에서 통짜 문자열 대조
+    그대로다. 요약 payload만 낱말 단위로 보던 완화는 되돌렸다. 그래서 지시문이 겨냥하는
+    문장이라도 payload 문자열 밖으로 나가면 거절되고, 그 답변은 결정론 문장으로 돌아간다
+    (verbalize가 AnswerRejectedError를 잡아 None을 돌려준다). 지시문은 모델이 무엇을 고르고
+    어떻게 쓰기를 바라는지만 정할 뿐, 검증의 경계를 넓히지 않는다.
 """
 
 from __future__ import annotations
@@ -22,14 +25,11 @@ import json
 
 import pytest
 
-from disclosure_agent.agent import verbalizer as verbalizer_module
 from disclosure_agent.agent.grounded_payload import (
     GroundedPayload,
     build_grounded_payload,
 )
 from disclosure_agent.agent.verbalizer import (
-    FRAME_VOCABULARY,
-    SUMMARY_FRAME_VOCABULARY,
     SYSTEM_PROMPT,
     AnswerRejectedError,
     parse_model_answer,
@@ -277,112 +277,6 @@ def test_summary_item_identifiers_never_reach_the_answer() -> None:
     answer = f"테스트반도체는 ev_p1에 적힌 대로 {TRUNCATED_ITEM}"
 
     assert verdict(payload, answer) == "identifier_leak"
-
-
-# --------------------------------------------------------------------------
-# C-2. 요약 전용 낱말 단위 판정
-#
-# 통짜 문자열 대조는 요약을 막았다. 항목을 조금이라도 다시 엮으면 대조가 어긋나고, payload에
-# 있는 말인데도 없는 말로 판정됐다. 낱말 단위로 바꾼 뒤에도 "없는 말을 지어냈다"는 판정이
-# 그대로인지 본다.
-# --------------------------------------------------------------------------
-
-
-def test_reworded_summary_using_only_payload_words_passes() -> None:
-    """항목을 그대로 베끼지 않고 다시 엮어도, 쓴 낱말이 payload에서 왔으면 통과한다.
-
-    이것이 이번 완화의 목적이다. 통짜 대조에서는 이 문장이 거절됐다.
-    """
-    payload = summary_payload()
-
-    answer = (
-        "테스트반도체는 제2캠퍼스 부지에 5공장 및 부대시설을 건설하고 있으며, "
-        "주요 원재료 매입 현황도 사업보고서에 기재되어 있습니다."
-    )
-
-    assert verdict(payload, answer) is None
-
-
-def test_word_absent_from_the_payload_is_still_rejected() -> None:
-    """payload 어디에도 없는 낱말은 낱말 단위로 봐도 그대로 걸린다."""
-    payload = summary_payload()
-
-    answer = "테스트반도체는 제2캠퍼스 건설로 세계 최대 생산능력을 확보할 전망입니다."
-
-    assert verdict(payload, answer) == "unsupported_content"
-
-
-def test_completing_a_truncated_item_is_still_rejected() -> None:
-    """잘린 자리를 메운 낱말은 payload에 없으므로 걸린다.
-
-    실측에서 모델이 되풀이한 실패다. '…'로 끝난 항목을 매끄럽게 끝맺으려는 시도가 곧 창작이며,
-    낱말 단위 판정에서도 그 낱말은 payload 어디에도 없다.
-    """
-    payload = summary_payload()
-
-    answer = f"테스트반도체는 {TRUNCATED_ITEM.rstrip('…')}원을 집행해 가동률을 끌어올렸습니다."
-
-    assert verdict(payload, answer) == "unsupported_content"
-
-
-def test_the_relaxation_does_not_apply_to_non_summary_payloads() -> None:
-    """요약이 아닌 payload는 통짜 문자열 대조 그대로다.
-
-    분기가 document_summaries 하나에 걸려 있는지 보는 자리다. 이 조건이 넓어지면 Fact·비교·
-    이력 답변까지 낱말 단위로 느슨해진다.
-    """
-    payload = summary_payload()
-
-    assert payload.document_summaries
-
-    # 요약이 없는 payload는 낱말 단위 경로를 타지 않는다.
-    empty = GroundedPayload(
-        question=QUESTION,
-        answerability_status=AnswerabilityStatus.ANSWERABLE.value,
-        facts=(),
-        calculations=(),
-        comparisons=(),
-        event_histories=(),
-        evidence=(),
-        limitation=None,
-    )
-
-    assert empty.document_summaries == ()
-
-    called: list[str] = []
-
-    original = verbalizer_module._require_payload_only_summary_words
-
-    def spy(text: str, payload_: GroundedPayload) -> None:
-        called.append(text)
-
-        original(text, payload_)
-
-    verbalizer_module._require_payload_only_summary_words = spy
-
-    try:
-        verbalizer_module._require_payload_only_content("테스트반도체", payload)
-
-        assert called, "요약 payload는 낱말 단위 경로를 타야 한다"
-
-        called.clear()
-
-        with pytest.raises(AnswerRejectedError):
-            verbalizer_module._require_payload_only_content("근거 없는 문장입니다", empty)
-
-        assert called == [], "요약이 아닌 payload는 낱말 단위 경로를 타지 않아야 한다"
-    finally:
-        verbalizer_module._require_payload_only_summary_words = original
-
-
-def test_summary_frame_extras_stay_out_of_the_shared_vocabulary() -> None:
-    """요약에만 여는 어미가 공용 목록으로 새지 않았는지 본다.
-
-    FRAME_VOCABULARY는 모든 결과 모양이 함께 읽는다. 여기에 넣으면 Fact·비교·이력 답변의
-    판정까지 함께 느슨해진다.
-    """
-    for extra in SUMMARY_FRAME_VOCABULARY:
-        assert extra not in FRAME_VOCABULARY, extra
 
 
 # --------------------------------------------------------------------------

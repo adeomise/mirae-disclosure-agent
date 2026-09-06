@@ -355,31 +355,6 @@ _FRAME_BY_LENGTH: tuple[str, ...] = tuple(
     )
 )
 
-# 요약 문장에만 더 여는 골격 어미.
-#
-# 있다·되다의 활용형이다. FRAME_VOCABULARY는 종결형("있습니다", "되었습니다")만 담고 있어,
-# 여러 항목을 한 문장으로 엮을 때 쓰는 연결형("있으며", "포함되어")이 빠져 있다. 항목을 하나씩
-# 끊어 적던 동안에는 필요 없던 어미이고, 요약을 문장으로 엮게 되면서 필요해졌다.
-#
-# FRAME_VOCABULARY에 직접 넣지 않는다. 그 목록은 모든 결과 모양이 함께 읽으며, 여기서 넓히면
-# Fact·비교·이력 답변의 판정까지 함께 느슨해진다. 이번 변경은 요약 밖으로 나가지 않는다.
-SUMMARY_FRAME_VOCABULARY: tuple[str, ...] = (
-    # 있다·되다의 연결형
-    "있으며", "있으나", "있으므로", "있는", "있고", "있어", "있던", "있지",
-    "되어", "되기", "되는데",
-    "하여", "하거나", "하지", "이거나",
-    # 항목을 잇는 말. "함께"는 조사 '께'보다 길어 먼저 지워진다.
-    "함께", "아울러", "이와",
-    # 자료를 가리키는 말. FRAME_VOCABULARY의 "제시", "포함"과 같은 자리다.
-    "제공", "제공된", "수록", "수록된",
-    # 생산적인 접미사. 앞말은 payload에서 오고 이것만 덧붙는다(사업부문별, 자산별, 지역별).
-    "별", "가지",
-)
-
-_SUMMARY_FRAME_BY_LENGTH: tuple[str, ...] = tuple(
-    sorted({*_FRAME_BY_LENGTH, *SUMMARY_FRAME_VOCABULARY}, key=len, reverse=True)
-)
-
 # 값 하나가 문장에서 확인 대상이 되기 위한 최소 조건.
 #
 # 정정 표는 값을 지운 자리에 '-'를 그대로 적는다. 그 한 글자를 값으로 다루면 날짜 안의
@@ -2017,28 +1992,9 @@ def _require_payload_only_content(text: str, payload: GroundedPayload) -> None:
         분석기를 붙이면 이 규칙의 판정이 그 분석기의 정확도에 묶이고, 분석이 틀린 자리는
         조용히 통과한다. 지금은 지우지 못한 조각이 곧 거절이라 실패가 드러난다.
 
-    문서 요약은 낱말 단위로 본다:
-        요약은 문장을 옮기는 일이 아니라 줄이는 일이다. 통짜 문자열 대조는 그 일을 막는다.
-        지우는 방식이 residue.replace(전체 항목, " ")이라, 항목을 조금이라도 다시 엮으면
-        대조가 어긋나고 남은 부분이 조각난다("전자기파"에서 긴 항목이 먼저 지워지면 "자기파"가
-        남는다). 그 조각은 payload에 있는 말인데도 없는 말로 판정된다.
-
-        그래서 요약 payload에서는 낱말 단위로 본다(_require_payload_only_summary_words).
-        "payload에 없는 내용어를 쓰지 말라"는 이 규칙의 뜻은 그대로 두고, 어순을 바꾸거나
-        여러 항목을 한 문장으로 엮는 것만 연다. payload 어디에도 없는 낱말은 그대로 걸린다.
-
-        요약 결과에는 Fact도 Calculation도 Comparison도 함께 실리지 않으므로
-        (grounded_payload._resolve_supported_shape), 이 분기는 다른 모양의 판정을 건드리지
-        않는다.
-
     Raises:
         AnswerRejectedError: payload가 뒷받침하지 않는 내용어가 남은 경우.
     """
-    if payload.document_summaries:
-        _require_payload_only_summary_words(text, payload)
-
-        return
-
     residue = _strip_frame_vocabulary(_strip_payload_spans(text, payload))
 
     leftover = HANGUL_RUN_PATTERN.findall(residue)
@@ -2048,82 +2004,6 @@ def _require_payload_only_content(text: str, payload: GroundedPayload) -> None:
             "unsupported_content",
             f"payload가 말하지 않은 내용입니다: {sorted(set(leftover))[:5]}",
         )
-
-
-def _require_payload_only_summary_words(text: str, payload: GroundedPayload) -> None:
-    """요약 문장의 낱말이 전부 payload에서 온 것인지 본다.
-
-    어간만 본다:
-        payload의 낱말과 답변의 낱말은 어미가 다르다. 원문이 "출시해 왔으며"라고 적은 것을
-        답변은 "출시하는"으로 쓴다. 그래서 payload 낱말의 앞부분(길이 2 이상)을 전부 지울 수
-        있는 조각으로 삼고, 남는 어미는 골격 어휘가 맡는다.
-
-        형태소 분석기를 두지 않는 이유는 통짜 대조를 두지 않는 이유와 같다(위 docstring).
-        어간을 앞부분으로 근사하면 느슨해지지만, payload에 없는 낱말은 앞부분도 없으므로
-        "없는 말을 지어냈다"는 이 규칙의 본래 판정은 남는다. "시장으로도…"에서 잘린 자리를
-        "확장"으로 메우면 그 낱말은 payload 어디에도 없어 그대로 걸린다.
-
-    Raises:
-        AnswerRejectedError: payload에 없는 내용어가 남은 경우.
-    """
-    residue = _without_grounded_dates(_with_grounded_dates_in_iso_form(text, payload), payload)
-
-    stems, letters = _summary_word_fragments(payload)
-
-    for stem in stems:
-        residue = residue.replace(stem, " ")
-
-    residue = _strip_frame_vocabulary(residue, fragments=_SUMMARY_FRAME_BY_LENGTH)
-
-    # 한 글자는 골격 어휘를 지운 뒤에 지운다.
-    #
-    # 먼저 지우면 어미 안의 글자까지 지워져 골격 어휘가 조각난다. 요약 항목은 '다.', '라.'
-    # 같은 문서 번호로 시작하는 일이 많아 '다'가 payload의 한 글자 낱말이 되고, 그것을 먼저
-    # 지우면 "있습니다"가 "있습니"로 남아 정상 문장이 거절된다.
-    for letter in letters:
-        residue = residue.replace(letter, " ")
-
-    leftover = HANGUL_RUN_PATTERN.findall(residue)
-
-    if leftover:
-        raise AnswerRejectedError(
-            "unsupported_content",
-            f"payload가 말하지 않은 내용입니다: {sorted(set(leftover))[:5]}",
-        )
-
-
-def _summary_word_fragments(payload: GroundedPayload) -> tuple[list[str], list[str]]:
-    """payload의 한글 낱말에서 지울 조각. (두 글자 이상 앞부분, 한 글자 낱말) 순서다.
-
-    앞부분을 담는 이유:
-        payload의 낱말과 답변의 낱말은 어미가 다르다. 원문의 "출시해"를 답변은 "출시하는"으로
-        쓴다. 앞부분을 지울 수 있는 조각으로 삼으면 남는 어미는 골격 어휘가 맡는다.
-        긴 것부터 지우는 것은 통짜 대조와 같은 이유다. 짧은 앞부분을 먼저 지우면 긴 낱말이
-        조각나 남는다.
-
-    한 글자를 따로 돌려주는 이유:
-        '등'·'월'·'조'는 한국어에서 한 글자로 쓰이는 내용어이고, 담지 않으면 payload에 있는
-        말인데도 없는 말로 판정된다. 반대로 긴 낱말의 앞 한 글자까지 담으면('제품'의 '제')
-        문장 곳곳이 지워진다. 그래서 앞부분으로는 두 글자부터 담고, 한 글자는 payload에
-        그것만으로 적혀 있는 경우에만 담는다.
-
-        두 벌로 나누는 것은 지우는 시점이 다르기 때문이다. 한 글자는 골격 어휘를 지운 뒤에
-        써야 한다(_require_payload_only_summary_words).
-    """
-    stems: set[str] = set()
-    letters: set[str] = set()
-
-    for source in _provenance_sources(payload):
-        for word in HANGUL_RUN_PATTERN.findall(source):
-            if len(word) < MINIMUM_DISTINCTIVE_LENGTH:
-                letters.add(word)
-
-                continue
-
-            for end in range(MINIMUM_DISTINCTIVE_LENGTH, len(word) + 1):
-                stems.add(word[:end])
-
-    return sorted(stems, key=len, reverse=True), sorted(letters)
 
 
 def _strip_payload_spans(text: str, payload: GroundedPayload) -> str:
@@ -2152,15 +2032,8 @@ def _strip_payload_spans(text: str, payload: GroundedPayload) -> str:
     return residue
 
 
-def _strip_frame_vocabulary(
-    text: str,
-    *,
-    fragments: tuple[str, ...] = _FRAME_BY_LENGTH,
-) -> str:
+def _strip_frame_vocabulary(text: str) -> str:
     """골격 어휘를 지운다. 지우지 못한 나머지를 돌려준다.
-
-    fragments를 받는 이유는 요약 문장이 더 넓은 목록을 쓰기 때문이다
-    (SUMMARY_FRAME_VOCABULARY). 기본값은 모든 결과 모양이 함께 읽는 목록이다.
 
     한글 덩어리로 잘라 놓고 지우지 않는다. 우열·방향 표현에는 띄어쓰기가 들어 있어("더
     큽니다") 덩어리로 자르면 두 조각이 되고, 어느 쪽도 목록과 맞지 않는다.
@@ -2175,7 +2048,7 @@ def _strip_frame_vocabulary(
     remaining = text
 
     while remaining:
-        for fragment in fragments:
+        for fragment in _FRAME_BY_LENGTH:
             if fragment in remaining:
                 remaining = remaining.replace(fragment, "")
 

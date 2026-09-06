@@ -209,7 +209,7 @@ curl -X POST http://127.0.0.1:8000/api/ask \
 
 공모전 평가용 API는 일반 서비스 API와 같은 Agent 서비스를 재사용합니다.
 
-- **Endpoint:** `http://실제서버주소/answer` — 실제 서버 주소 확인 전 placeholder입니다.
+- **Endpoint:** `http://49.50.143.186/answer` — 실제 서버 주소 확인 전 placeholder입니다.
 - **요청:** `GET /answer?question_id={id}&question={query}`
 - **Query parameters:** `question_id`는 질문 식별자, `question`은 URL 인코딩한 질문 문자열입니다.
 

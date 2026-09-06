@@ -402,8 +402,74 @@ def test_incomplete_korean_text_matches_valid_equivalent_with_provenance(
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("malformed_text", "expected_text"),
     [
+        (
+            "통계적으로 유의한 차이(p<0.0001)를 보였다.",
+            "통계적으로 유의한 차이(p<0.0001)를 보였다.",
+        ),
+        (
+            "프리미엄(<60k €)부문에 선정되었다.",
+            "프리미엄(<60k €)부문에 선정되었다.",
+        ),
+        (
+            "비율은 <10%이다.",
+            "비율은 <10%이다.",
+        ),
+        (
+            "기준값은 < 202이다.",
+            "기준값은 < 202이다.",
+        ),
+    ],
+)
+def test_numeric_less_than_in_text_is_repaired(
+    tmp_path: Path,
+    malformed_text: str,
+    expected_text: str,
+) -> None:
+    parsed = parse_xml(
+        tmp_path,
+        f"""
+        <SECTION-1>
+          <TITLE>숫자 비교</TITLE>
+          <P>{malformed_text}</P>
+        </SECTION-1>
+        <SECTION-1>
+          <TITLE>후속 절</TITLE>
+          <P>후속 본문</P>
+        </SECTION-1>
+        """,
+    )
+
+    assert parsed["sections"][0]["text"] == expected_text
+    assert parsed["sections"][1]["title"] == "후속 절"
+
+
+def test_numeric_less_than_in_attribute_remains_fail_closed(
+    tmp_path: Path,
+) -> None:
+    malformed = _attribute_comparison_document(
+        attribute_value="<60",
+        cell_text="정상 본문",
+    )
+
+    # text-only repair가 attribute 내부를 직접 고치지 않는지 확인
+    assert _repair_malformed_literal_lt_in_text(malformed) == malformed
+
+    source = tmp_path / "NUMERIC_LT_ATTRIBUTE.xml"
+    source.write_text(malformed, encoding="utf-8")
+
+    # 전체 sanitizer를 거쳐도 유효한 XML로 복구되면 안 됨
+    with pytest.raises(
+        ValueError,
+        match="XML 파싱에 실패했습니다",
+    ):
+        parse_periodic_xml(source)
+
+
+@pytest.mark.parametrize(
+    "body",
+     [
         '<SECTION-1><P ATEST="<가상">본문</P></SECTION-1>',
         "<SECTION-1><P ATEST=<가상</P></SECTION-1>",
         "<SECTION-1><P>미지원 <ASCII_TOKEN</P></SECTION-1>",
@@ -549,7 +615,6 @@ def test_both_malformed_attribute_patterns_are_repaired_together() -> None:
 @pytest.mark.parametrize(
     "body",
     [
-        "<SECTION-1><P>미지원 비교 <10%</P></SECTION-1>",
         "<SECTION-1><P>모호한 비교 < 10 단위</P></SECTION-1>",
         "<SECTION-1><P>닫힘 불일치</SECTION-1>",
         "<SECTION-1><P>잘린 문서",
@@ -653,3 +718,124 @@ def test_closing_quote_repair_preserves_following_sections_and_tables(tmp_path: 
     assert parsed == valid
     assert parsed["tables"][0]["rows"][0][0]["acode"] == "SAMPLE"
     assert parsed["sections"][1]["text"] == "후속 본문"
+
+
+
+@pytest.mark.parametrize(
+    "malformed_text",
+    [
+        "<주요법령 및 감독규정〉",
+        "<주요법령및 감독규정〉",
+    ],
+)
+def test_malformed_regulation_heading_is_repaired(
+    tmp_path: Path,
+    malformed_text: str,
+) -> None:
+    parsed = parse_xml(
+        tmp_path,
+        f"""
+        <SECTION-1>
+          <TITLE>규제 정보</TITLE>
+          <P>{malformed_text}</P>
+        </SECTION-1>
+        <SECTION-1>
+          <TITLE>후속 절</TITLE>
+          <P>후속 본문</P>
+        </SECTION-1>
+        """,
+    )
+
+    assert parsed["sections"][0]["text"] == malformed_text
+    assert parsed["sections"][1]["title"] == "후속 절"
+
+
+def test_other_malformed_korean_angle_text_remains_fail_closed(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="XML 파싱에 실패했습니다",
+    ):
+        parse_xml(
+            tmp_path,
+            """
+            <SECTION-1>
+              <P><다른 문구 및 감독규정〉</P>
+            </SECTION-1>
+            """,
+        )
+
+
+
+@pytest.mark.parametrize(
+    "malformed_text",
+    [
+        "1일< tcf",
+        "1M< tcf",
+        "3M< tcf",
+        "6M< tcf",
+        "9M< tcf",
+        "1Y< tcf",
+        "1.5Y< tcf",
+        "2Y< tcf",
+        "3Y< tcf",
+        "4Y< tcf",
+        "5Y< tcf",
+        "6Y< tcf",
+        "7Y< tcf",
+        "8Y< tcf",
+        "9Y< tcf",
+        "10Y< tcf",
+        "15Y< tcf",
+    ],
+)
+def test_tcf_literal_less_than_in_text_is_repaired(
+    tmp_path: Path,
+    malformed_text: str,
+) -> None:
+    parsed = parse_xml(
+        tmp_path,
+        f"""
+        <SECTION-1>
+          <TITLE>생산 정보</TITLE>
+          <P>{malformed_text}</P>
+        </SECTION-1>
+        <SECTION-1>
+          <TITLE>후속 절</TITLE>
+          <P>후속 본문</P>
+        </SECTION-1>
+        """,
+    )
+
+    assert parsed["sections"][0]["text"] == malformed_text
+    assert parsed["sections"][1]["title"] == "후속 절"
+
+
+
+def test_other_tcf_literal_less_than_remains_fail_closed(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="XML 파싱에 실패했습니다",
+    ):
+        parse_xml(
+            tmp_path,
+            """
+            <SECTION-1>
+              <P>기타< tcf</P>
+            </SECTION-1>
+            """,
+        )
+
+
+def test_pseudo_tag_apostrophe_does_not_poison_literal_lt_scanner() -> None:
+    fragment = (
+        "<P><Moody's 장기 신용등급></P>"
+        "<P><SPAN><</SPAN></P>"
+    )
+
+    repaired = _repair_malformed_literal_lt_in_text(fragment)
+
+    assert "<SPAN>&lt;</SPAN>" in repaired

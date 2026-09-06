@@ -2673,9 +2673,60 @@ def test_cumulative_answer_written_as_a_full_year_figure_is_rejected(
     with pytest.raises(AnswerRejectedError) as caught:
         validate_answer(parse_model_answer(model_reply(answer)), payload)
 
-    assert caught.value.code == "period_dropped"
+    assert caught.value.code == "period_unbound"
 
     rejected(answer, payload)
+
+
+@pytest.mark.parametrize(
+    "trailing",
+    [
+        "반기 누적 기준입니다.",
+        "확인한 기간은 반기 누적입니다.",
+        "이 수치는 반기 누적입니다.",
+    ],
+)
+def test_a_span_stated_outside_the_value_clause_is_rejected(trailing: str) -> None:
+    """
+    필요한 문자열이 문장 어딘가에 있는 것으로는 부족하다.
+
+    값을 적은 구절은 여전히 "2025년 … 매출액"이고, 그 구절만 읽으면 연간 실적이다. 뒤에 붙은
+    문장이 앞 구절의 뜻을 되돌려 주지 않는다. 이 자리를 열어 두면 값-주인 짝 검사를 전부
+    통과하면서 기간만 어긋난 답변이 나간다.
+    """
+    payload = cumulative_payload("6M YTD")
+    answer = f"한미반도체의 2025년 연결 기준 매출액은 {VALUE}입니다. {trailing}"
+
+    with pytest.raises(AnswerRejectedError) as caught:
+        validate_answer(parse_model_answer(model_reply(answer)), payload)
+
+    assert caught.value.code == "period_unbound"
+
+    rejected(answer, payload)
+
+
+def test_a_span_named_before_the_value_in_its_own_clause_passes() -> None:
+    """구절 안에서 값 앞에 기간이 적히면 통과한다. 결정론 문장이 그 형태다."""
+    payload = cumulative_payload("6M YTD")
+    answer = f"한미반도체의 2025년 반기 누적 연결 기준 매출액은 {VALUE}입니다."
+
+    client = ScriptedClient(model_reply(answer))
+
+    assert verbalize(payload, client=client) == answer
+
+
+def test_a_value_restated_without_its_span_is_rejected() -> None:
+    """앞에서 제대로 적었다고 뒤의 어긋남이 지워지지 않는다(_bound_owners와 같은 자리)."""
+    payload = cumulative_payload("6M YTD")
+    answer = (
+        f"한미반도체의 2025년 반기 누적 연결 기준 매출액은 {VALUE}입니다. "
+        f"2025년 매출액은 {VALUE}입니다."
+    )
+
+    with pytest.raises(AnswerRejectedError) as caught:
+        validate_answer(parse_model_answer(model_reply(answer)), payload)
+
+    assert caught.value.code == "period_unbound"
 
 
 def test_a_cumulative_answer_using_another_span_is_rejected() -> None:
@@ -2690,7 +2741,7 @@ def test_a_cumulative_answer_using_another_span_is_rejected() -> None:
     with pytest.raises(AnswerRejectedError) as caught:
         validate_answer(parse_model_answer(model_reply(answer)), payload)
 
-    assert caught.value.code == "period_dropped"
+    assert caught.value.code == "period_unbound"
 
     rejected(answer, payload)
 

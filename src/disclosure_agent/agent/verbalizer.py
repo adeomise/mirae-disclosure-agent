@@ -1296,35 +1296,73 @@ def _require_known_entities(text: str, payload: GroundedPayload) -> None:
 
 def _require_stated_period(text: str, payload: GroundedPayload) -> None:
     """
-    누적 값의 기간 표기가 문장에 그대로 나오는지 본다.
+    누적 값을 적은 구절이 그 값의 기간까지 부르는지 본다.
 
     이것이 빠진 문장은 형식상 완전하다. 기업도 지표도 회계기준도 값도 맞고, 빠진 것은 그 값이
     한 해 전체가 아니라는 사실 하나다. 그리고 그 문장은 "2025년 연결 매출액은 …입니다"로
-    읽혀, 1~6월 누적 값을 연간 실적으로 말한다. payload가 기간을 실어 보내는 것만으로는
-    막히지 않고(모델이 안 적으면 그만이다) 여기서 확인해야 막힌다.
+    읽혀, 1~6월 누적 값을 연간 실적으로 말한다.
 
-    결정론 경로는 같은 것을 문장을 만드는 자리에서 보장한다. 구절이 템플릿에 박혀 있어 빠질
-    자리가 없다(answer_builder._period_phrase). 두 경로가 같은 답을 하려면 이쪽에는 확인이
-    있어야 하고, 그 확인이 이 규칙이다.
+    문장 어딘가에 있는지로는 부족하다:
+        "2025년 연결 기준 매출액은 X입니다. 반기 누적 기준입니다."에는 필요한 문자열이 모두
+        있다. 그런데 X를 적은 구절은 여전히 "2025년 … 매출액"이고, 그 구절만 읽으면 연간
+        실적이다. 뒤에 붙은 문장이 앞 구절의 뜻을 되돌려 주지는 않는다.
+
+        그래서 값이 불린 자리마다 그 앞 구절을 보고, 거기에 기간이 적혀 있는지 확인한다. 값과
+        주인의 짝을 보는 규칙이 쓰는 것과 같은 자름(_binding_clause)이며, 같은 이유로 값 앞만
+        본다. 뒤까지 보면 다음 문장의 기간 진술이 앞 구절로 넘어와 위의 문장이 통과한다.
+
+    "연도 + 누적 구간"을 한 덩어리로 요구한다:
+        연도와 구간이 한 구절 안에 따로 있기만 하면 되게 하면, 연도가 다른 것을 꾸미는 문장이
+        남는다. 붙여 쓴 표기는 결정론 문장이 적는 그대로이고(answer_builder._period_phrase)
+        지시문이 모델에게 요구하는 형태이기도 하다. 그 밖의 어순은 거절하고 결정론 문장으로
+        돌아간다 — 사용자가 받는 답은 그때도 기간을 말한다.
+
+    값이 불린 자리를 하나 찾고 멈추지 않는다. 앞에서 제대로 적고 뒤에서 기간 없이 다시 적은
+    문장이 통과하면, 그 뒤쪽 진술이 연간 실적으로 읽힌다(_bound_owners와 같은 자리).
 
     연간 값은 보지 않는다. period_label이 None이며, 그 값의 기간은 연도 하나로 전부 불린다.
+    누적 값에 회계연도가 없는 payload는 만들어지지 않는다(grounded_payload._fact_fiscal_year).
 
     Raises:
-        AnswerRejectedError: 실린 누적 구간 표기가 문장에 없는 경우.
+        AnswerRejectedError: 누적 값을 적은 구절이 그 값의 기간을 부르지 않는 경우.
     """
-    missing = sorted(
-        {
-            fact.period_label
-            for fact in payload.facts
-            if fact.period_label and fact.period_label not in text
-        }
-    )
+    interim = [fact for fact in payload.facts if fact.period_label]
 
-    if missing:
-        raise AnswerRejectedError(
-            "period_dropped",
-            f"누적 기간이 문장에서 빠졌습니다: {missing}. 연도만 적으면 연간 값으로 읽힙니다",
-        )
+    if not interim:
+        return
+
+    # 값이 불린 자리를 셀 때 쓰는 것과 같은 그림자 규칙. 짧은 표기가 긴 표기 안에 들어 있는
+    # 자리는 그 표기가 나타난 자리가 아니다(_unshadowed).
+    every_rendering = {
+        rendering for item in _valued_items(payload) for rendering in item.renderings
+    }
+
+    for fact in interim:
+        phrase = f"{fact.fiscal_year}년 {fact.period_label}"
+
+        renderings = [fact.display_value]
+
+        if fact.normalized_display:
+            renderings.append(fact.normalized_display)
+
+        stated = False
+
+        for rendering in renderings:
+            for index in _unshadowed(text, rendering, every_rendering):
+                if phrase not in _binding_clause(text, index):
+                    raise AnswerRejectedError(
+                        "period_unbound",
+                        f"{rendering!r}을(를) 적은 구절이 {phrase!r}를 부르지 않습니다. "
+                        "그 구절만 읽으면 연간 값입니다",
+                    )
+
+                stated = True
+
+        if not stated:
+            raise AnswerRejectedError(
+                "period_dropped",
+                f"{phrase!r}로 적힌 값이 문장에 없습니다. 연도만 적으면 연간 값으로 읽힙니다",
+            )
 
 
 def _require_consistent_accounting_scope(text: str, payload: GroundedPayload) -> None:
